@@ -4,8 +4,8 @@ loaded_status: completed
 effect_site_index: 0
 effect_site_fingerprint: 0xdee75e29e7a8d727
 world_port_id: 0
-request_fingerprint: 0xa69ce4e65505793b
-continuation_fingerprint: 0x9caee80759f8d772
+request_fingerprint: 0x7ff1d5e9001c1937
+continuation_fingerprint: 0x5453f70c22906a7d
 generated_result_i32: 7
 loaded_result_i32: 7
 module: artifacts/modules/one-effect.full-module

@@ -898,7 +898,7 @@ fn emitOneEffect(init: std.process.Init, allocator: std.mem.Allocator, output_di
     var loaded_session = try OneEffectTarget.Module.LoadedModule.Session.startExecutable(
         allocator,
         &loaded,
-        OneEffectTarget.Module.LoadedExecutionProfile.portableV1(),
+        OneEffectTarget.Module.LoadedExecutionProfile.portableV2(),
     );
     defer loaded_session.deinit();
     const loaded_request = switch (loaded_session.next()) {

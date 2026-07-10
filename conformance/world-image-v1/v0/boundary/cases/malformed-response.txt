@@ -2,7 +2,7 @@ case_id: malformed-response
 input_kind: wrong-schema-loaded-value
 expected_error: InvalidResume
 state_unchanged: true
-request_fingerprint: 0xa69ce4e65505793b
+request_fingerprint: 0x7ff1d5e9001c1937
 input: artifacts/values/malformed-response.wrong-schema.loaded-value
 prior_state: artifacts/states/one-effect.parked.loaded-session
 next_state: artifacts/states/malformed-response.after-rejection.loaded-session
