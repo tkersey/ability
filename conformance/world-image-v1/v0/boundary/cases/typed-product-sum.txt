@@ -1,0 +1,17 @@
+case_id: typed-product-sum
+generated_status: completed
+loaded_status: completed
+effect_site_index: 0
+effect_site_fingerprint: 0x1e7b47225c4ae664
+request_fingerprint: 0x41c9b4b99494080b
+response_schema: sum
+result_schema: product
+result_items: alpha,beta
+result_score: 42
+malformed_response_error: InvalidResume
+malformed_response_state_unchanged: true
+module: artifacts/modules/typed-product-sum.full-module
+generated_request: artifacts/requests/typed-product-sum.generated-request-envelope
+generated_capsule: artifacts/capsules/typed-product-sum.parked.program-session
+parked_state: artifacts/states/typed-product-sum.parked.loaded-session
+completed_state: artifacts/states/typed-product-sum.completed.loaded-session

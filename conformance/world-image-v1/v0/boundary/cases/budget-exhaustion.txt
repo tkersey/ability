@@ -1,0 +1,9 @@
+case_id: budget-exhaustion
+loaded_status: failed
+failure_kind: execution_budget_exceeded
+diagnostic_summary: loaded executable instruction budget exceeded
+instruction_limit: 2
+advancements: 1
+instructions_consumed: 2
+module: artifacts/modules/scalar-pure.full-module
+state: artifacts/states/budget-exhaustion.failed.loaded-session

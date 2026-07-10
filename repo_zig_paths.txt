@@ -204,3 +204,4 @@ test/evidence_kernel_test.zig
 test/plan_native_contract_matrix_test.zig
 test/program_api_test.zig
 test/public_optional_bound_program_test.zig
+test/world_image_v1_oracle.zig

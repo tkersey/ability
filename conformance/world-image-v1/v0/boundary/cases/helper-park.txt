@@ -1,0 +1,15 @@
+case_id: helper-park
+generated_status: completed
+loaded_status: completed
+effect_site_index: 0
+effect_site_fingerprint: 0x41fe3a5d38d6dff9
+request_fingerprint: 0xf3a5346e368ec11d
+continuation_fingerprint: 0x01e964292a900977
+parked_frame_count: 3
+generated_result_i32: 31
+loaded_result_i32: 31
+module: artifacts/modules/helper-park.full-module
+generated_request: artifacts/requests/helper-park.generated-request-envelope
+generated_capsule: artifacts/capsules/helper-park.parked.program-session
+parked_state: artifacts/states/helper-park.parked.loaded-session
+completed_state: artifacts/states/helper-park.completed.loaded-session

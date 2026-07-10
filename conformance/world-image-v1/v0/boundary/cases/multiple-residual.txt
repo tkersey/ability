@@ -1,0 +1,16 @@
+case_id: multiple-residual
+generated_status: completed
+loaded_status: completed
+request_count: 2
+first_site_index: 0
+first_site_fingerprint: 0x6874803946fd6f45
+first_request_fingerprint: 0x3cf0a6ed338ce507
+second_site_index: 1
+second_site_fingerprint: 0xbbd38f410d2a8548
+second_request_fingerprint: 0x07729a1cce1bf799
+generated_result_i32: 13
+loaded_result_i32: 13
+module: artifacts/modules/multiple-residual.full-module
+first_state: artifacts/states/multiple-residual.first.parked.loaded-session
+second_state: artifacts/states/multiple-residual.second.parked.loaded-session
+completed_state: artifacts/states/multiple-residual.completed.loaded-session

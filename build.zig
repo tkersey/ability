@@ -951,13 +951,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     agent_loop_tests_mod.addImport("boundary", boundary);
-    addTestArtifact(b, test_step, agent_loop_tests_mod, test_args);
+    const agent_loop_tests = b.addTest(.{ .root_module = agent_loop_tests_mod, .filters = test_args.filters });
+    const agent_loop_tests_run = addRunArtifactWithArgs(b, agent_loop_tests, test_args.passthrough);
+    agent_loop_tests_run.setCwd(b.tmpPath());
+    test_step.dependOn(&agent_loop_tests_run.step);
     const agent_loop_parity_args = TestArgs{
         .filters = &.{ "agent root", "agent toolbox" },
         .passthrough = &.{},
     };
     const agent_loop_parity_tests = b.addTest(.{ .root_module = agent_loop_tests_mod, .filters = agent_loop_parity_args.filters });
-    agent_parity_step.dependOn(&addRunArtifactWithArgs(b, agent_loop_parity_tests, agent_loop_parity_args.passthrough).step);
+    const agent_loop_parity_run = addRunArtifactWithArgs(b, agent_loop_parity_tests, agent_loop_parity_args.passthrough);
+    agent_loop_parity_run.setCwd(b.tmpPath());
+    agent_parity_step.dependOn(&agent_loop_parity_run.step);
     const receipt_agent_loop_tests_mod = b.createModule(.{
         .root_source_file = b.path("examples/agent_loop.zig"),
         .target = b.graph.host,
@@ -965,7 +970,9 @@ pub fn build(b: *std.Build) void {
     });
     receipt_agent_loop_tests_mod.addImport("boundary", host_boundary);
     const receipt_loop_tests = b.addTest(.{ .root_module = receipt_agent_loop_tests_mod, .filters = agent_loop_parity_args.filters });
-    receipt_agent_parity_step.dependOn(&addRunArtifactWithArgs(b, receipt_loop_tests, agent_loop_parity_args.passthrough).step);
+    const receipt_loop_tests_run = addRunArtifactWithArgs(b, receipt_loop_tests, agent_loop_parity_args.passthrough);
+    receipt_loop_tests_run.setCwd(b.tmpPath());
+    receipt_agent_parity_step.dependOn(&receipt_loop_tests_run.step);
 
     const program_api_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/program_api_test.zig"),
@@ -1439,6 +1446,100 @@ pub fn build(b: *std.Build) void {
     check_profile.step.dependOn(&emit_boundary_agent_runtime.step);
     check_runtime_step.dependOn(&check_profile.step);
     check_step.dependOn(check_runtime_step);
+
+    const world_image_v1_corpus_dir = "conformance/world-image-v1/v0/boundary";
+    const world_image_v1_oracle_mod = b.createModule(.{
+        .root_source_file = b.path("test/world_image_v1_oracle.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    world_image_v1_oracle_mod.addImport("boundary", host_boundary);
+    world_image_v1_oracle_mod.addImport("agent_loop", boundary_agent_runtime_mod);
+    const world_image_v1_oracle_exe = b.addExecutable(.{
+        .name = "boundary-world-image-v1-oracle",
+        .root_module = world_image_v1_oracle_mod,
+    });
+
+    const oracle_update_run = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_update_run.setCwd(b.tmpPath());
+    oracle_update_run.addArgs(&.{
+        "generate",
+        "--out-dir",
+        b.pathFromRoot(world_image_v1_corpus_dir),
+    });
+    const oracle_update_step = b.step(
+        "update-boundary-world-image-v1-oracle",
+        "Update the checked-in Boundary World Image v1 rewrite oracle.",
+    );
+    oracle_update_step.dependOn(&oracle_update_run.step);
+
+    const oracle_generation_a_root = b.tmpPath();
+    const oracle_generation_b_root = b.tmpPath();
+    const oracle_generation_a_dir = oracle_generation_a_root.path(b, "bundle");
+    const oracle_generation_b_dir = oracle_generation_b_root.path(b, "bundle");
+    const oracle_generation_a = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_generation_a.setName("generate Boundary World Image v1 oracle A");
+    oracle_generation_a.setCwd(oracle_generation_a_root);
+    oracle_generation_a.addArgs(&.{ "generate", "--out-dir" });
+    oracle_generation_a.addDirectoryArg(oracle_generation_a_dir);
+    const oracle_generation_b = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_generation_b.setName("generate Boundary World Image v1 oracle B");
+    oracle_generation_b.setCwd(oracle_generation_b_root);
+    oracle_generation_b.addArgs(&.{ "generate", "--out-dir" });
+    oracle_generation_b.addDirectoryArg(oracle_generation_b_dir);
+
+    const compare_world_image_v1_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
+    compare_world_image_v1_oracle.setName("compare Boundary World Image v1 oracle trees");
+    compare_world_image_v1_oracle.setCwd(b.path("."));
+    compare_world_image_v1_oracle.addArgs(&.{
+        "compare",
+        "--expected-dir",
+    });
+    compare_world_image_v1_oracle.addDirectoryArg(b.path(world_image_v1_corpus_dir));
+    compare_world_image_v1_oracle.addArg("--first-dir");
+    compare_world_image_v1_oracle.addDirectoryArg(oracle_generation_a_dir);
+    compare_world_image_v1_oracle.addArg("--second-dir");
+    compare_world_image_v1_oracle.addDirectoryArg(oracle_generation_b_dir);
+    compare_world_image_v1_oracle.step.dependOn(&oracle_generation_a.step);
+    compare_world_image_v1_oracle.step.dependOn(&oracle_generation_b.step);
+
+    const oracle_check_step = b.step(
+        "check-boundary-world-image-v1-oracle",
+        "Check deterministic exact Boundary World Image v1 rewrite oracle bytes.",
+    );
+    oracle_check_step.dependOn(&compare_world_image_v1_oracle.step);
+    oracle_check_step.dependOn(loaded_parity_required_step);
+    oracle_check_step.dependOn(loaded_response_safety_step);
+    oracle_check_step.dependOn(loaded_malformed_step);
+    oracle_check_step.dependOn(receipt_agent_parity_step);
+    oracle_check_step.dependOn(check_runtime_step);
+    check_step.dependOn(oracle_check_step);
+
+    const oracle_emit_dir = b.getInstallPath(.prefix, "conformance/world-image-v1/v0/boundary");
+    const emit_world_image_v1_oracle_run = b.addRunArtifact(world_image_v1_oracle_exe);
+    emit_world_image_v1_oracle_run.setCwd(b.tmpPath());
+    emit_world_image_v1_oracle_run.addArgs(&.{
+        "generate",
+        "--out-dir",
+        oracle_emit_dir,
+    });
+    emit_world_image_v1_oracle_run.step.dependOn(oracle_check_step);
+    const verify_emitted_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
+    verify_emitted_oracle.setName("verify emitted Boundary World Image v1 oracle bytes");
+    verify_emitted_oracle.setCwd(b.tmpPath());
+    verify_emitted_oracle.addArgs(&.{
+        "verify",
+        "--expected-dir",
+    });
+    verify_emitted_oracle.addDirectoryArg(b.path(world_image_v1_corpus_dir));
+    verify_emitted_oracle.addArg("--actual-dir");
+    verify_emitted_oracle.addDirectoryArg(.{ .cwd_relative = oracle_emit_dir });
+    verify_emitted_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);
+    const oracle_emit_step = b.step(
+        "emit-boundary-world-image-v1-oracle",
+        "Emit the verified Boundary World Image v1 rewrite oracle under zig-out.",
+    );
+    oracle_emit_step.dependOn(&verify_emitted_oracle.step);
 
     const bench_check_step = b.step("bench-check", "Compile retained benchmark programs.");
     test_step.dependOn(bench_check_step);

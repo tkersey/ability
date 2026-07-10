@@ -1,0 +1,23 @@
+{
+  "profile_format_version": 0,
+  "profile_fingerprint_version": 1,
+  "profile_fingerprint": "0xdc1981503eeeb739",
+  "max_iterations": 5,
+  "max_model_calls": 5,
+  "max_tool_calls": 4,
+  "max_observation_bytes": 1024,
+  "max_action_bytes": 256,
+  "max_tool_result_bytes": 1024,
+  "max_trace_entries": 8,
+  "boundary_protocol_manifest_fingerprint": "0xc3f1f221d499a992",
+  "agent_root_module_fingerprint": "0xa663b81aa6df6f3e",
+  "agent_root_full_module_byte_fingerprint": "0x371bf8460c5e9649",
+  "toolbox_module_fingerprint": "0x4a4c934becaf32ae",
+  "toolbox_full_module_byte_fingerprint": "0x8ece9b217aeedb44",
+  "supported_action_variants": [{"tag":"final","value":0}, {"tag":"tool","value":1}, {"tag":"fail","value":2}],
+  "tool_ids": ["actuate", "read_file", "write_file"],
+  "supported_tool_variants": [{"index":0,"label":"actuate"}, {"index":1,"label":"read_file"}, {"index":2,"label":"write_file"}],
+  "value_schema_fingerprints": ["0x97dd2f4479adf7eb", "0x19966cbbe1f09f9e", "0xf310e7383087c8a3", "0x6288da61bf1ab2f4", "0x178c0989d351a520", "0x06522581f185e215", "0x19593bde6dfe12fe", "0xa0c5e7c8a6b29dbd", "0x1473bb162d57c43b", "0xcb644f13c9de31f0", "0xf3d8b9ea5064daf0", "0xbbda2384ae9427d7", "0xf47dac6b2cba3cfe"],
+  "metadata_bytes": "agent-root-module",
+  "metadata": "agent-root-module"
+}

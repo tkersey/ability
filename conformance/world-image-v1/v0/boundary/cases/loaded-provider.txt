@@ -1,0 +1,8 @@
+case_id: loaded-provider
+generated_status: completed
+loaded_status: completed
+actuate_result: actuate
+read_result: rewrite this file through the agent loop
+write_result: write=ok
+module: artifacts/agent/toolbox-provider.full-module
+execution_artifacts: artifacts/agent-execution/provider

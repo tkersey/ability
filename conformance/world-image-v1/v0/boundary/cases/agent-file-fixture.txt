@@ -1,0 +1,10 @@
+case_id: agent-file-fixture
+generated_status: completed
+loaded_status: completed
+final_text: final=fixture updated
+fixture_output: actuate updated the fixture
+model_calls: 3
+tool_calls: 2
+module: artifacts/agent/agent-root.full-module
+provider_module: artifacts/agent/toolbox-provider.full-module
+execution_artifacts: artifacts/agent-execution/root/fixture

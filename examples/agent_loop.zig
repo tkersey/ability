@@ -895,11 +895,89 @@ fn decodeToolboxLoadedString(allocator: std.mem.Allocator, arena: *ToolboxTarget
     return value.bytes;
 }
 
+const RootOracleSink = struct {
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    scenario_name: []const u8,
+    step_index: usize = 0,
+
+    fn request(self: *@This(), loaded_session: anytype, loaded_request: anytype, loaded_response: []const u8) !void {
+        const loaded_state = try loaded_session.freeze(self.allocator);
+        defer self.allocator.free(loaded_state);
+        const state_path = try oracleStepPath(self.allocator, self.scenario_name, self.step_index, "loaded-session");
+        defer self.allocator.free(state_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, state_path, loaded_state);
+        const payload_path = try oracleStepPath(self.allocator, self.scenario_name, self.step_index, "loaded-payload");
+        defer self.allocator.free(payload_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, payload_path, loaded_request.canonical_payload_image);
+        const response_path = try oracleStepPath(self.allocator, self.scenario_name, self.step_index, "loaded-response");
+        defer self.allocator.free(response_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, response_path, loaded_response);
+        self.step_index += 1;
+    }
+
+    fn done(self: *@This(), loaded_session: anytype, loaded_result: []const u8) !void {
+        const result_path = try std.fmt.allocPrint(self.allocator, "root/{s}/result.loaded-value", .{self.scenario_name});
+        defer self.allocator.free(result_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, result_path, loaded_result);
+        const completed_state = try loaded_session.freeze(self.allocator);
+        defer self.allocator.free(completed_state);
+        const state_path = try std.fmt.allocPrint(self.allocator, "root/{s}/completed.loaded-session", .{self.scenario_name});
+        defer self.allocator.free(state_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, state_path, completed_state);
+    }
+};
+
+const ToolboxOracleSink = struct {
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    scenario_name: []const u8,
+
+    fn request(self: *@This(), loaded_session: anytype, loaded_request: anytype, loaded_response: []const u8) !void {
+        const scenario_dir = try std.fmt.allocPrint(self.allocator, "provider/{s}", .{self.scenario_name});
+        defer self.allocator.free(scenario_dir);
+        const state = try loaded_session.freeze(self.allocator);
+        defer self.allocator.free(state);
+        const state_path = try std.fmt.allocPrint(self.allocator, "{s}/parked.loaded-session", .{scenario_dir});
+        defer self.allocator.free(state_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, state_path, state);
+        const payload_path = try std.fmt.allocPrint(self.allocator, "{s}/payload.loaded-value", .{scenario_dir});
+        defer self.allocator.free(payload_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, payload_path, loaded_request.canonical_payload_image);
+        const response_path = try std.fmt.allocPrint(self.allocator, "{s}/response.loaded-value", .{scenario_dir});
+        defer self.allocator.free(response_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, response_path, loaded_response);
+    }
+
+    fn done(self: *@This(), loaded_session: anytype, loaded_result: []const u8) !void {
+        const result_path = try std.fmt.allocPrint(self.allocator, "provider/{s}/result.loaded-value", .{self.scenario_name});
+        defer self.allocator.free(result_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, result_path, loaded_result);
+        const completed_state = try loaded_session.freeze(self.allocator);
+        defer self.allocator.free(completed_state);
+        const state_path = try std.fmt.allocPrint(self.allocator, "provider/{s}/completed.loaded-session", .{self.scenario_name});
+        defer self.allocator.free(state_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, state_path, completed_state);
+    }
+};
+
 fn runToolboxProviderParityScenario(
     allocator: std.mem.Allocator,
     tool_index: usize,
     payload_text: []const u8,
     expected_final: []const u8,
+) ![]u8 {
+    return runToolboxProviderParityScenarioWithSink(allocator, tool_index, payload_text, expected_final, null);
+}
+
+fn runToolboxProviderParityScenarioWithSink(
+    allocator: std.mem.Allocator,
+    tool_index: usize,
+    payload_text: []const u8,
+    expected_final: []const u8,
+    oracle_sink: ?*ToolboxOracleSink,
 ) ![]u8 {
     const full = try ToolboxTarget.Module.fullImage(allocator);
     defer allocator.free(full);
@@ -962,6 +1040,7 @@ fn runToolboxProviderParityScenario(
                     try std.testing.expectEqualStrings(payload_text, path);
                     const loaded_response = try encodeToolboxLoadedString(allocator, read_response_const);
                     defer allocator.free(loaded_response);
+                    if (oracle_sink) |sink| try sink.request(&loaded_session, loaded_request, loaded_response);
                     try generated_session.resumeTyped(typed, read_response_const);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(FileWrite)) {
@@ -971,6 +1050,7 @@ fn runToolboxProviderParityScenario(
                     try std.testing.expectEqualStrings(payload_text, payload);
                     const loaded_response = try encodeToolboxLoadedString(allocator, write_response_const);
                     defer allocator.free(loaded_response);
+                    if (oracle_sink) |sink| try sink.request(&loaded_session, loaded_request, loaded_response);
                     try generated_session.resumeTyped(typed, write_response_const);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else {
@@ -990,6 +1070,7 @@ fn runToolboxProviderParityScenario(
                 const loaded_result = try decodeToolboxLoadedString(allocator, &result_arena, loaded_done.canonical_result_image);
                 try std.testing.expectEqualStrings(generated_done.value, loaded_result);
                 try std.testing.expectEqualStrings(expected_final, loaded_result);
+                if (oracle_sink) |sink| try sink.done(&loaded_session, loaded_done.canonical_result_image);
                 return allocator.dupe(u8, loaded_result);
             },
         }
@@ -1151,6 +1232,14 @@ fn runMalformedLoadedActionImageScenario(allocator: std.mem.Allocator) !void {
 }
 
 fn runLoadedParityScenario(allocator: std.mem.Allocator, scenario: Scenario) ![]u8 {
+    return runLoadedParityScenarioWithSink(allocator, scenario, null);
+}
+
+fn runLoadedParityScenarioWithSink(
+    allocator: std.mem.Allocator,
+    scenario: Scenario,
+    oracle_sink: ?*RootOracleSink,
+) ![]u8 {
     if (scenario == .fixture) try prepareFixtureWorkspace();
 
     const full = try RootTarget.Module.fullImage(allocator);
@@ -1206,6 +1295,7 @@ fn runLoadedParityScenario(allocator: std.mem.Allocator, scenario: Scenario) ![]
                     const action = try decideAction(scenario, observation);
                     const loaded_response = try encodeLoadedAction(allocator, action);
                     defer allocator.free(loaded_response);
+                    if (oracle_sink) |sink| try sink.request(&loaded_session, loaded_request, loaded_response);
                     try generated_session.resumeTyped(typed, action);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(ToolboxCall)) {
@@ -1218,6 +1308,7 @@ fn runLoadedParityScenario(allocator: std.mem.Allocator, scenario: Scenario) ![]
                     const text = try callTool(allocator, scenario, request);
                     const loaded_response = try encodeLoadedString(allocator, text);
                     defer allocator.free(loaded_response);
+                    if (oracle_sink) |sink| try sink.request(&loaded_session, loaded_request, loaded_response);
                     try generated_session.resumeTyped(typed, text);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else {
@@ -1236,6 +1327,7 @@ fn runLoadedParityScenario(allocator: std.mem.Allocator, scenario: Scenario) ![]
                 defer result_arena.deinit();
                 const loaded_result = try decodeLoadedString(allocator, &result_arena, loaded_done.canonical_result_image);
                 try std.testing.expectEqualStrings(generated_done.value, loaded_result);
+                if (oracle_sink) |sink| try sink.done(&loaded_session, loaded_done.canonical_result_image);
                 return allocator.dupe(u8, loaded_result);
             },
         }
@@ -1484,6 +1576,167 @@ fn exportAgentRuntimeArtifacts(init: std.process.Init, allocator: std.mem.Alloca
     try writeJoined(io, allocator, output_dir, "toolbox-provider.full-module", toolbox.bytes);
     try writeJoined(io, allocator, output_dir, "boundary-protocol-manifest.bin", protocol_manifest);
     try writeJoined(io, allocator, output_dir, "agent-profile.json", profile_json);
+}
+
+const WorldImageV1OracleTranscripts = struct {
+    allocator: std.mem.Allocator,
+    skeleton: []u8,
+    fixture: []u8,
+    loaded_provider: []u8,
+
+    pub fn deinit(self: *@This()) void {
+        self.allocator.free(self.skeleton);
+        self.allocator.free(self.fixture);
+        self.allocator.free(self.loaded_provider);
+        self.skeleton = &.{};
+        self.fixture = &.{};
+        self.loaded_provider = &.{};
+    }
+};
+
+/// Execute the retained Agent root and loaded toolbox-provider parity fixtures
+/// and return deterministic, path-free semantic transcripts for the v0 oracle.
+fn worldImageV1OracleTranscripts(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    execution_dir: []const u8,
+) !WorldImageV1OracleTranscripts {
+    var skeleton_sink = RootOracleSink{
+        .init = init,
+        .allocator = allocator,
+        .output_dir = execution_dir,
+        .scenario_name = "skeleton",
+    };
+    const skeleton_result = try runLoadedParityScenarioWithSink(allocator, .skeleton, &skeleton_sink);
+    defer allocator.free(skeleton_result);
+
+    var fixture_sink = RootOracleSink{
+        .init = init,
+        .allocator = allocator,
+        .output_dir = execution_dir,
+        .scenario_name = "fixture",
+    };
+    const fixture_result = try runLoadedParityScenarioWithSink(allocator, .fixture, &fixture_sink);
+    defer allocator.free(fixture_result);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const fixture_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture_output_path, allocator, .limited(1024));
+    defer allocator.free(fixture_bytes);
+
+    var actuate_sink = ToolboxOracleSink{
+        .init = init,
+        .allocator = allocator,
+        .output_dir = execution_dir,
+        .scenario_name = "actuate",
+    };
+    const actuate_result = try runToolboxProviderParityScenarioWithSink(allocator, 0, "", "actuate", &actuate_sink);
+    defer allocator.free(actuate_result);
+    var read_sink = ToolboxOracleSink{
+        .init = init,
+        .allocator = allocator,
+        .output_dir = execution_dir,
+        .scenario_name = "read-file",
+    };
+    const read_result = try runToolboxProviderParityScenarioWithSink(allocator, 1, fixture_input_path, fixture_observation, &read_sink);
+    defer allocator.free(read_result);
+    var write_sink = ToolboxOracleSink{
+        .init = init,
+        .allocator = allocator,
+        .output_dir = execution_dir,
+        .scenario_name = "write-file",
+    };
+    const write_result = try runToolboxProviderParityScenarioWithSink(allocator, 2, fixture_write_payload, "write=ok", &write_sink);
+    defer allocator.free(write_result);
+
+    const skeleton = try std.fmt.allocPrint(allocator,
+        \\case_id: agent-skeleton
+        \\generated_status: completed
+        \\loaded_status: completed
+        \\final_text: {s}
+        \\model_calls: 2
+        \\tool_calls: 1
+        \\module: artifacts/agent/agent-root.full-module
+        \\provider_module: artifacts/agent/toolbox-provider.full-module
+        \\execution_artifacts: artifacts/agent-execution/root/skeleton
+        \\
+    , .{skeleton_result});
+    errdefer allocator.free(skeleton);
+
+    const fixture = try std.fmt.allocPrint(allocator,
+        \\case_id: agent-file-fixture
+        \\generated_status: completed
+        \\loaded_status: completed
+        \\final_text: {s}
+        \\fixture_output: {s}
+        \\model_calls: 3
+        \\tool_calls: 2
+        \\module: artifacts/agent/agent-root.full-module
+        \\provider_module: artifacts/agent/toolbox-provider.full-module
+        \\execution_artifacts: artifacts/agent-execution/root/fixture
+        \\
+    , .{ fixture_result, fixture_bytes });
+    errdefer allocator.free(fixture);
+
+    const loaded_provider = try std.fmt.allocPrint(allocator,
+        \\case_id: loaded-provider
+        \\generated_status: completed
+        \\loaded_status: completed
+        \\actuate_result: {s}
+        \\read_result: {s}
+        \\write_result: {s}
+        \\module: artifacts/agent/toolbox-provider.full-module
+        \\execution_artifacts: artifacts/agent-execution/provider
+        \\
+    , .{ actuate_result, read_result, write_result });
+
+    return .{
+        .allocator = allocator,
+        .skeleton = skeleton,
+        .fixture = fixture,
+        .loaded_provider = loaded_provider,
+    };
+}
+
+fn writeOracleExecutionArtifact(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    relative_path: []const u8,
+    bytes: []const u8,
+) !void {
+    const path = try std.Io.Dir.path.join(allocator, &.{ output_dir, relative_path });
+    defer allocator.free(path);
+    if (std.Io.Dir.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+}
+
+fn oracleStepPath(
+    allocator: std.mem.Allocator,
+    scenario_name: []const u8,
+    step_index: usize,
+    suffix: []const u8,
+) ![]u8 {
+    return std.fmt.allocPrint(allocator, "root/{s}/step-{d:0>2}.{s}", .{ scenario_name, step_index, suffix });
+}
+
+/// Export the retained Agent module, execution, and transcript oracle bytes.
+pub fn exportWorldImageV1Oracle(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+) !void {
+    const agent_dir = try std.Io.Dir.path.join(allocator, &.{ output_dir, "artifacts/agent" });
+    defer allocator.free(agent_dir);
+    try exportAgentRuntimeArtifacts(init, allocator, agent_dir);
+
+    const execution_dir = try std.Io.Dir.path.join(allocator, &.{ output_dir, "artifacts/agent-execution" });
+    defer allocator.free(execution_dir);
+    try std.Io.Dir.cwd().createDirPath(init.io, execution_dir);
+
+    var transcripts = try worldImageV1OracleTranscripts(init, allocator, execution_dir);
+    defer transcripts.deinit();
+    try writeOracleExecutionArtifact(init.io, allocator, output_dir, "cases/agent-skeleton.txt", transcripts.skeleton);
+    try writeOracleExecutionArtifact(init.io, allocator, output_dir, "cases/agent-file-fixture.txt", transcripts.fixture);
+    try writeOracleExecutionArtifact(init.io, allocator, output_dir, "cases/loaded-provider.txt", transcripts.loaded_provider);
 }
 
 fn writeJoined(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, file: []const u8, bytes: []const u8) !void {

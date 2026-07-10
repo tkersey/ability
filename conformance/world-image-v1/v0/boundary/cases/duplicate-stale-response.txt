@@ -1,0 +1,15 @@
+case_id: duplicate-stale-response
+generated_duplicate_error: ProgramContractViolation
+duplicate_error: InvalidResume
+generated_stale_error: ProgramContractViolation
+stale_error: InvalidResume
+generated_state_unchanged_after_duplicate: true
+loaded_state_unchanged_after_duplicate: true
+generated_state_unchanged_after_stale: true
+second_state_unchanged_after_stale: true
+first_request_fingerprint: 0x3cf0a6ed338ce507
+second_request_fingerprint: 0x07729a1cce1bf799
+prior_state: artifacts/states/multiple-residual.second.parked.loaded-session
+next_state: artifacts/states/multiple-residual.after-stale.loaded-session
+generated_prior_state: artifacts/capsules/multiple-residual.second.program-session
+generated_next_state: artifacts/capsules/multiple-residual.after-stale.program-session

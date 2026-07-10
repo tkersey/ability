@@ -1,0 +1,11 @@
+case_id: scalar-pure
+generated_status: completed
+loaded_status: completed
+generated_result_i32: 41
+loaded_result_i32: 41
+module_fingerprint: 0x97db9a8b88b5ec84
+session_fingerprint: 0xf778a10ee911d7ff
+result_fingerprint: 0x155acb3a873af768
+module: artifacts/modules/scalar-pure.full-module
+state: artifacts/states/scalar-pure.completed.loaded-session
+result: artifacts/values/scalar-pure.result.loaded-value

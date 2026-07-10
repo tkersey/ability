@@ -1,0 +1,10 @@
+case_id: helper-call
+generated_status: completed
+loaded_status: completed
+generated_result_i32: 42
+loaded_result_i32: 42
+module_fingerprint: 0xace8ded7342cfc16
+result_fingerprint: 0xf54acf5389dc2d1b
+module: artifacts/modules/helper-call.full-module
+state: artifacts/states/helper-call.completed.loaded-session
+result: artifacts/values/helper-call.result.loaded-value
