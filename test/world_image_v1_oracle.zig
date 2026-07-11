@@ -1917,7 +1917,17 @@ fn isOracleMetadataPath(path: []const u8) bool {
     return std.mem.eql(u8, path, "manifest.json") or std.mem.eql(u8, path, "checksums.sha256");
 }
 
-fn validateManifest(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+const OracleManifestPolicy = enum {
+    integrity,
+    current,
+};
+
+fn validateManifest(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    policy: OracleManifestPolicy,
+) !void {
     const manifest_bytes = try readRelative(init.io, allocator, output_dir, "manifest.json");
     defer allocator.free(manifest_bytes);
     const parsed = std.json.parseFromSlice(OracleManifest, allocator, manifest_bytes, .{
@@ -1926,28 +1936,30 @@ fn validateManifest(init: std.process.Init, allocator: std.mem.Allocator, output
     defer parsed.deinit();
     const manifest = parsed.value;
     if (!std.mem.eql(u8, manifest.format, "boundary-world-image-v1-rewrite-oracle-v0") or
-        manifest.format_version != 1 or manifest.case_count != cases.len or
-        manifest.cases.len != cases.len)
+        manifest.format_version != 1 or manifest.case_count != manifest.cases.len)
     {
         return error.InvalidOracleManifest;
     }
-    const source = manifest.semantic_source;
-    if (!std.mem.eql(u8, source.package, oracle_semantic_source.package) or
-        !std.mem.eql(u8, source.package_version, oracle_semantic_source.package_version) or
-        !std.mem.eql(u8, source.baseline_commit, oracle_semantic_source.baseline_commit) or
-        !std.mem.eql(u8, source.baseline_tree, oracle_semantic_source.baseline_tree) or
-        !std.mem.eql(u8, source.module_magic, oracle_semantic_source.module_magic) or
-        source.loaded_execution_profile != oracle_semantic_source.loaded_execution_profile or
-        source.loaded_session_image != oracle_semantic_source.loaded_session_image or
-        !std.mem.eql(u8, source.zig_version, oracle_semantic_source.zig_version))
-    {
-        return error.InvalidOracleManifest;
-    }
-    for (cases, manifest.cases) |expected, actual| {
-        if (!std.mem.eql(u8, expected.case_id, actual.id) or
-            !std.mem.eql(u8, expected.transcript, actual.transcript))
+    if (policy == .current) {
+        if (manifest.case_count != cases.len) return error.InvalidOracleManifest;
+        const source = manifest.semantic_source;
+        if (!std.mem.eql(u8, source.package, oracle_semantic_source.package) or
+            !std.mem.eql(u8, source.package_version, oracle_semantic_source.package_version) or
+            !std.mem.eql(u8, source.baseline_commit, oracle_semantic_source.baseline_commit) or
+            !std.mem.eql(u8, source.baseline_tree, oracle_semantic_source.baseline_tree) or
+            !std.mem.eql(u8, source.module_magic, oracle_semantic_source.module_magic) or
+            source.loaded_execution_profile != oracle_semantic_source.loaded_execution_profile or
+            source.loaded_session_image != oracle_semantic_source.loaded_session_image or
+            !std.mem.eql(u8, source.zig_version, oracle_semantic_source.zig_version))
         {
             return error.InvalidOracleManifest;
+        }
+        for (cases, manifest.cases) |expected, actual| {
+            if (!std.mem.eql(u8, expected.case_id, actual.id) or
+                !std.mem.eql(u8, expected.transcript, actual.transcript))
+            {
+                return error.InvalidOracleManifest;
+            }
         }
     }
 
@@ -1989,6 +2001,23 @@ fn validateManifest(init: std.process.Init, allocator: std.mem.Allocator, output
     if (!std.mem.eql(u8, manifest.artifact_set_sha256, &artifact_set_hex)) {
         return error.InvalidOracleManifest;
     }
+
+    for (manifest.cases) |case| {
+        if (isOracleMetadataPath(case.transcript)) return error.InvalidOracleManifest;
+        var retained = false;
+        for (paths.items) |path| {
+            if (std.mem.eql(u8, case.transcript, path)) {
+                retained = true;
+                break;
+            }
+        }
+        if (!retained) return error.InvalidOracleManifest;
+        const transcript = try readRelative(init.io, allocator, output_dir, case.transcript);
+        defer allocator.free(transcript);
+        const expected_prefix = try std.fmt.allocPrint(allocator, "case_id: {s}\n", .{case.id});
+        defer allocator.free(expected_prefix);
+        if (!std.mem.startsWith(u8, transcript, expected_prefix)) return error.InvalidOracleManifest;
+    }
 }
 
 fn validateChecksums(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
@@ -2002,7 +2031,13 @@ fn validateChecksums(init: std.process.Init, allocator: std.mem.Allocator, outpu
 fn validateOracleTree(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
     try requireDirectory(init.io, output_dir);
     try validateRequiredCases(init, allocator, output_dir);
-    try validateManifest(init, allocator, output_dir);
+    try validateManifest(init, allocator, output_dir, .current);
+    try validateChecksums(init, allocator, output_dir);
+}
+
+fn validateOracleTreeIntegrity(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    try requireDirectory(init.io, output_dir);
+    try validateManifest(init, allocator, output_dir, .integrity);
     try validateChecksums(init, allocator, output_dir);
 }
 
@@ -2070,16 +2105,18 @@ fn recoverPublication(
     if (backup_kind) |kind| {
         if (kind != .directory) return error.UnsafeOraclePath;
         if (target_kind == null) {
+            try validateOracleTreeIntegrity(init, allocator, paths.backup);
             try renameDirectoryToMissing(init.io, paths.backup, paths.target);
         } else {
             if (target_kind.? != .directory) return error.UnsafeOraclePath;
             var target_valid = true;
-            validateOracleTree(init, allocator, paths.target) catch {
+            validateOracleTreeIntegrity(init, allocator, paths.target) catch {
                 target_valid = false;
             };
             if (target_valid) {
                 try deleteDirectoryIfPresent(init.io, paths.backup);
             } else {
+                try validateOracleTreeIntegrity(init, allocator, paths.backup);
                 try deleteDirectoryIfPresent(init.io, paths.target);
                 try renameDirectoryToMissing(init.io, paths.backup, paths.target);
             }
@@ -2104,7 +2141,7 @@ fn publishOracleTree(
 ) !void {
     try recoverPublication(init, allocator, paths);
     try validateOracleTree(init, allocator, candidate_dir);
-    try requireDirectory(init.io, paths.target);
+    try validateOracleTreeIntegrity(init, allocator, paths.target);
     try copyOracleTree(init, allocator, candidate_dir, paths.stage);
     errdefer deleteDirectoryIfPresent(init.io, paths.stage) catch {};
     try validateOracleTree(init, allocator, paths.stage);
@@ -2170,6 +2207,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const backup = root ++ "/backup";
     const invalid_candidate = root ++ "/invalid-candidate";
     const stale_provenance_candidate = root ++ "/stale-provenance-candidate";
+    const escaping_reference_candidate = root ++ "/escaping-reference-candidate";
     const existing_output = root ++ "/existing-output";
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
@@ -2249,25 +2287,50 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
         return error.OraclePublicationResidue;
     }
 
-    const stale_prior = "stale-prior-oracle\n";
-    try writeArtifact(init.io, allocator, target, "cases/scalar-pure.txt", stale_prior);
+    try copyOracleTree(init, allocator, candidate, escaping_reference_candidate);
+    const escaping_manifest = try readRelative(init.io, allocator, escaping_reference_candidate, "manifest.json");
+    defer allocator.free(escaping_manifest);
+    const current_case_binding = "{\"id\":\"scalar-pure\",\"transcript\":\"cases/scalar-pure.txt\"}";
+    if (std.mem.find(u8, escaping_manifest, current_case_binding) == null) return error.InvalidOracleManifest;
+    const escaping_case_binding = "{\"id\":\"scalar-pure\",\"transcript\":\"../outside.txt\"}";
+    const manifest_with_escape = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        escaping_manifest,
+        current_case_binding,
+        escaping_case_binding,
+    );
+    defer allocator.free(manifest_with_escape);
+    try writeArtifact(init.io, allocator, escaping_reference_candidate, "manifest.json", manifest_with_escape);
+    try writeChecksums(init, allocator, escaping_reference_candidate);
+    try writeArtifact(init.io, allocator, root, "outside.txt", "case_id: scalar-pure\n");
+    var escaping_reference_error: ?anyerror = null;
+    validateOracleTreeIntegrity(init, allocator, escaping_reference_candidate) catch |err| {
+        escaping_reference_error = err;
+    };
+    try expectPublicationError(error.InvalidOracleManifest, escaping_reference_error);
+
+    try deleteDirectoryIfPresent(init.io, target);
+    try copyOracleTree(init, allocator, stale_provenance_candidate, target);
     var stale_prior_fault: ?anyerror = null;
     publishOracleTree(init, allocator, candidate, paths, .after_backup) catch |err| {
         stale_prior_fault = err;
     };
     try expectPublicationError(error.InjectedOraclePublicationFailure, stale_prior_fault);
-    const restored_stale_prior = try readRelative(init.io, allocator, target, "cases/scalar-pure.txt");
-    defer allocator.free(restored_stale_prior);
-    try expectEqualBytes(stale_prior, restored_stale_prior);
+    try compareTrees(init, allocator, stale_provenance_candidate, target);
     if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
         return error.OraclePublicationResidue;
     }
 
     try renameDirectoryToMissing(init.io, target, backup);
     try recoverPublication(init, allocator, paths);
-    const recovered_stale_prior = try readRelative(init.io, allocator, target, "cases/scalar-pure.txt");
-    defer allocator.free(recovered_stale_prior);
-    try expectEqualBytes(stale_prior, recovered_stale_prior);
+    try compareTrees(init, allocator, stale_provenance_candidate, target);
+
+    try copyOracleTree(init, allocator, candidate, backup);
+    try writeArtifact(init.io, allocator, backup, "cases/scalar-pure.txt", "partial-backup\n");
+    try recoverPublication(init, allocator, paths);
+    try compareTrees(init, allocator, stale_provenance_candidate, target);
+    if (try pathKindNoFollow(init.io, backup) != null) return error.OraclePublicationResidue;
 
     try publishOracleTree(init, allocator, candidate, paths, .none);
     try compareTrees(init, allocator, candidate, target);
