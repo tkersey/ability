@@ -2070,7 +2070,6 @@ fn recoverPublication(
     if (backup_kind) |kind| {
         if (kind != .directory) return error.UnsafeOraclePath;
         if (target_kind == null) {
-            try validateOracleTree(init, allocator, paths.backup);
             try renameDirectoryToMissing(init.io, paths.backup, paths.target);
         } else {
             if (target_kind.? != .directory) return error.UnsafeOraclePath;
@@ -2081,7 +2080,6 @@ fn recoverPublication(
             if (target_valid) {
                 try deleteDirectoryIfPresent(init.io, paths.backup);
             } else {
-                try validateOracleTree(init, allocator, paths.backup);
                 try deleteDirectoryIfPresent(init.io, paths.target);
                 try renameDirectoryToMissing(init.io, paths.backup, paths.target);
             }
@@ -2106,7 +2104,7 @@ fn publishOracleTree(
 ) !void {
     try recoverPublication(init, allocator, paths);
     try validateOracleTree(init, allocator, candidate_dir);
-    try validateOracleTree(init, allocator, paths.target);
+    try requireDirectory(init.io, paths.target);
     try copyOracleTree(init, allocator, candidate_dir, paths.stage);
     errdefer deleteDirectoryIfPresent(init.io, paths.stage) catch {};
     try validateOracleTree(init, allocator, paths.stage);
@@ -2250,6 +2248,29 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
         return error.OraclePublicationResidue;
     }
+
+    const stale_prior = "stale-prior-oracle\n";
+    try writeArtifact(init.io, allocator, target, "cases/scalar-pure.txt", stale_prior);
+    var stale_prior_fault: ?anyerror = null;
+    publishOracleTree(init, allocator, candidate, paths, .after_backup) catch |err| {
+        stale_prior_fault = err;
+    };
+    try expectPublicationError(error.InjectedOraclePublicationFailure, stale_prior_fault);
+    const restored_stale_prior = try readRelative(init.io, allocator, target, "cases/scalar-pure.txt");
+    defer allocator.free(restored_stale_prior);
+    try expectEqualBytes(stale_prior, restored_stale_prior);
+    if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
+        return error.OraclePublicationResidue;
+    }
+
+    try renameDirectoryToMissing(init.io, target, backup);
+    try recoverPublication(init, allocator, paths);
+    const recovered_stale_prior = try readRelative(init.io, allocator, target, "cases/scalar-pure.txt");
+    defer allocator.free(recovered_stale_prior);
+    try expectEqualBytes(stale_prior, recovered_stale_prior);
+
+    try publishOracleTree(init, allocator, candidate, paths, .none);
+    try compareTrees(init, allocator, candidate, target);
 
     var injected_error: ?anyerror = null;
     publishOracleTree(init, allocator, candidate, paths, .after_backup) catch |err| {
