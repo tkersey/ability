@@ -1666,6 +1666,24 @@ fn pathLessThan(_: void, lhs: []u8, rhs: []u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
+fn canonicalOracleRelativePath(
+    allocator: std.mem.Allocator,
+    walked_path: []const u8,
+    walk_separator: u8,
+) ![]u8 {
+    std.debug.assert(walk_separator == '/' or walk_separator == '\\');
+    const canonical = try allocator.dupe(u8, walked_path);
+    errdefer allocator.free(canonical);
+    for (canonical) |*byte| {
+        if (byte.* == walk_separator) {
+            byte.* = '/';
+        } else if (byte.* == '\\') {
+            return error.NonPortableOraclePath;
+        }
+    }
+    return canonical;
+}
+
 fn listFiles(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !OwnedPaths {
     var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
@@ -1678,7 +1696,10 @@ fn listFiles(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !OwnedP
     }
     while (try walker.next(io)) |entry| {
         switch (entry.kind) {
-            .file => try items.append(allocator, try allocator.dupe(u8, entry.path)),
+            .file => try items.append(
+                allocator,
+                try canonicalOracleRelativePath(allocator, entry.path, std.Io.Dir.path.sep),
+            ),
             .directory => {},
             .block_device,
             .character_device,
@@ -2084,6 +2105,26 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const existing_output = root ++ "/existing-output";
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
+
+    const windows_path = try canonicalOracleRelativePath(
+        allocator,
+        "artifacts\\states\\one-effect.parked.loaded-session",
+        '\\',
+    );
+    defer allocator.free(windows_path);
+    try expectEqualBytes("artifacts/states/one-effect.parked.loaded-session", windows_path);
+
+    var nonportable_error: ?anyerror = null;
+    const nonportable_path: ?[]u8 = canonicalOracleRelativePath(
+        allocator,
+        "artifacts/states/literal\\backslash.bin",
+        '/',
+    ) catch |err| failed: {
+        nonportable_error = err;
+        break :failed null;
+    };
+    if (nonportable_path) |path| allocator.free(path);
+    try expectPublicationError(error.NonPortableOraclePath, nonportable_error);
 
     try createFreshDirectory(init.io, root);
     defer deleteDirectoryIfPresent(init.io, root) catch {};
