@@ -1778,7 +1778,7 @@ const oracle_semantic_source = OracleManifestSemanticSource{
     .package_version = "0.6.2",
     .baseline_commit = "6a416951f8d22d0854616f094f23b2d44ab021a2",
     .baseline_tree = "950838431ef965f21926b4ea14361f69bc16c2dd",
-    .module_magic = "BCBMOD1",
+    .module_magic = ScalarProgram.Evidence.BoundaryTargetModule.magic,
     .loaded_execution_profile = 2,
     .loaded_session_image = 2,
     .zig_version = "0.16.0",
@@ -1816,7 +1816,7 @@ fn writeManifest(init: std.process.Init, allocator: std.mem.Allocator, output_di
         \\    "package_version": "0.6.2",
         \\    "baseline_commit": "6a416951f8d22d0854616f094f23b2d44ab021a2",
         \\    "baseline_tree": "950838431ef965f21926b4ea14361f69bc16c2dd",
-        \\    "module_magic": "BCBMOD1",
+        \\    "module_magic": "BCBMOD1\u0000",
         \\    "loaded_execution_profile": 2,
         \\    "loaded_session_image": 2,
         \\    "zig_version": "0.16.0"
