@@ -1762,6 +1762,28 @@ fn appendFmt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt
     try out.appendSlice(allocator, bytes);
 }
 
+const OracleManifestSemanticSource = struct {
+    package: []const u8,
+    package_version: []const u8,
+    baseline_commit: []const u8,
+    baseline_tree: []const u8,
+    module_magic: []const u8,
+    loaded_execution_profile: u16,
+    loaded_session_image: u16,
+    zig_version: []const u8,
+};
+
+const oracle_semantic_source = OracleManifestSemanticSource{
+    .package = "boundary",
+    .package_version = "0.6.2",
+    .baseline_commit = "6a416951f8d22d0854616f094f23b2d44ab021a2",
+    .baseline_tree = "950838431ef965f21926b4ea14361f69bc16c2dd",
+    .module_magic = "BCBMOD1",
+    .loaded_execution_profile = 2,
+    .loaded_session_image = 2,
+    .zig_version = "0.16.0",
+};
+
 fn writeManifest(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
     var paths = try listFiles(init.io, allocator, output_dir);
     defer paths.deinit();
@@ -1883,6 +1905,7 @@ const OracleManifestArtifact = struct {
 const OracleManifest = struct {
     format: []const u8,
     format_version: u16,
+    semantic_source: OracleManifestSemanticSource,
     case_count: usize,
     cases: []const OracleManifestCase,
     artifact_set_sha256: []const u8,
@@ -1905,6 +1928,18 @@ fn validateManifest(init: std.process.Init, allocator: std.mem.Allocator, output
     if (!std.mem.eql(u8, manifest.format, "boundary-world-image-v1-rewrite-oracle-v0") or
         manifest.format_version != 1 or manifest.case_count != cases.len or
         manifest.cases.len != cases.len)
+    {
+        return error.InvalidOracleManifest;
+    }
+    const source = manifest.semantic_source;
+    if (!std.mem.eql(u8, source.package, oracle_semantic_source.package) or
+        !std.mem.eql(u8, source.package_version, oracle_semantic_source.package_version) or
+        !std.mem.eql(u8, source.baseline_commit, oracle_semantic_source.baseline_commit) or
+        !std.mem.eql(u8, source.baseline_tree, oracle_semantic_source.baseline_tree) or
+        !std.mem.eql(u8, source.module_magic, oracle_semantic_source.module_magic) or
+        source.loaded_execution_profile != oracle_semantic_source.loaded_execution_profile or
+        source.loaded_session_image != oracle_semantic_source.loaded_session_image or
+        !std.mem.eql(u8, source.zig_version, oracle_semantic_source.zig_version))
     {
         return error.InvalidOracleManifest;
     }
@@ -2136,6 +2171,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const stage = root ++ "/stage";
     const backup = root ++ "/backup";
     const invalid_candidate = root ++ "/invalid-candidate";
+    const stale_provenance_candidate = root ++ "/stale-provenance-candidate";
     const existing_output = root ++ "/existing-output";
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
@@ -2184,6 +2220,32 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
         invalid_error = err;
     };
     if (invalid_error == null) return error.InvalidOracleCandidatePublished;
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
+        return error.OraclePublicationResidue;
+    }
+
+    try copyOracleTree(init, allocator, candidate, stale_provenance_candidate);
+    const current_manifest = try readRelative(init.io, allocator, stale_provenance_candidate, "manifest.json");
+    defer allocator.free(current_manifest);
+    if (std.mem.indexOf(u8, current_manifest, oracle_semantic_source.baseline_commit) == null) {
+        return error.InvalidOracleManifest;
+    }
+    const stale_manifest = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        current_manifest,
+        oracle_semantic_source.baseline_commit,
+        "0000000000000000000000000000000000000000",
+    );
+    defer allocator.free(stale_manifest);
+    try writeArtifact(init.io, allocator, stale_provenance_candidate, "manifest.json", stale_manifest);
+    try writeChecksums(init, allocator, stale_provenance_candidate);
+    var stale_provenance_error: ?anyerror = null;
+    publishOracleTree(init, allocator, stale_provenance_candidate, paths, .none) catch |err| {
+        stale_provenance_error = err;
+    };
+    try expectPublicationError(error.InvalidOracleManifest, stale_provenance_error);
     try compareTrees(init, allocator, candidate, target);
     if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
         return error.OraclePublicationResidue;
