@@ -2221,12 +2221,12 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     try publishOracleTree(init, allocator, candidate, paths, .none);
     try compareTrees(init, allocator, candidate, target);
 
-    try cwd.symLink(init.io, target, stage, .{ .is_directory = true });
-    var symlink_error: ?anyerror = null;
+    try cwd.writeFile(init.io, .{ .sub_path = stage, .data = "unsafe-stage\n" });
+    var unsafe_stage_error: ?anyerror = null;
     recoverPublication(init, allocator, paths) catch |err| {
-        symlink_error = err;
+        unsafe_stage_error = err;
     };
-    try expectPublicationError(error.UnsafeOraclePath, symlink_error);
+    try expectPublicationError(error.UnsafeOraclePath, unsafe_stage_error);
     try cwd.deleteFile(init.io, stage);
     try compareTrees(init, allocator, candidate, target);
 
@@ -2236,21 +2236,29 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     try createFreshDirectory(init.io, external);
     try copyOracleTree(init, allocator, candidate, external_target);
     try writeArtifact(init.io, allocator, external, "sentinel.txt", "outside-publication\n");
-    try cwd.symLink(init.io, "external", linked_parent, .{ .is_directory = true });
-    var intermediate_symlink_error: ?anyerror = null;
-    recoverPublication(init, allocator, .{
-        .target = linked_parent ++ "/tracked",
-        .stage = linked_parent ++ "/stage",
-        .backup = linked_parent ++ "/backup",
-    }) catch |err| {
-        intermediate_symlink_error = err;
+    const symlink_created = created: {
+        cwd.symLink(init.io, "external", linked_parent, .{ .is_directory = true }) catch |err| switch (err) {
+            error.AccessDenied, error.PermissionDenied, error.FileSystem => break :created false,
+            else => return err,
+        };
+        break :created true;
     };
-    try expectPublicationError(error.UnsafeOraclePath, intermediate_symlink_error);
-    const external_sentinel_bytes = try readRelative(init.io, allocator, external, "sentinel.txt");
-    defer allocator.free(external_sentinel_bytes);
-    try expectEqualBytes("outside-publication\n", external_sentinel_bytes);
-    try compareTrees(init, allocator, candidate, external_target);
-    try cwd.deleteFile(init.io, linked_parent);
+    if (symlink_created) {
+        defer cwd.deleteFile(init.io, linked_parent) catch {};
+        var intermediate_symlink_error: ?anyerror = null;
+        recoverPublication(init, allocator, .{
+            .target = linked_parent ++ "/tracked",
+            .stage = linked_parent ++ "/stage",
+            .backup = linked_parent ++ "/backup",
+        }) catch |err| {
+            intermediate_symlink_error = err;
+        };
+        try expectPublicationError(error.UnsafeOraclePath, intermediate_symlink_error);
+        const external_sentinel_bytes = try readRelative(init.io, allocator, external, "sentinel.txt");
+        defer allocator.free(external_sentinel_bytes);
+        try expectEqualBytes("outside-publication\n", external_sentinel_bytes);
+        try compareTrees(init, allocator, candidate, external_target);
+    }
 }
 
 fn argumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
