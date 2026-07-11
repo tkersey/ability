@@ -1,10 +1,14 @@
-// zlinter-disable declaration_naming field_ordering no_inferred_error_unions no_swallow_error require_doc_comment require_errdefer_dealloc
+// zlinter-disable declaration_naming field_naming field_ordering no_inferred_error_unions no_swallow_error require_doc_comment require_errdefer_dealloc
+// The manifest decoder mirrors external JSON field names, including the schema key `id`.
 const agent_loop = @import("agent_loop");
 const boundary = @import("boundary");
 const std = @import("std");
 
 const corpus_path = "conformance/world-image-v1/v0/boundary";
 const checksum_prefix = corpus_path ++ "/";
+const generated_bundle_path = "bundle";
+const tracked_publication_stage_path = "conformance/world-image-v1/v0/.boundary-oracle-stage";
+const tracked_publication_backup_path = "conformance/world-image-v1/v0/.boundary-oracle-backup";
 
 const semantic = boundary.ir.builder.semantic;
 const EmptyHandlers = struct {};
@@ -639,9 +643,36 @@ fn joinPath(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     return std.Io.Dir.path.join(allocator, parts);
 }
 
-fn resetDirectory(io: std.Io, path: []const u8) !void {
+fn pathKindNoFollow(io: std.Io, path: []const u8) !?std.Io.File.Kind {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    return stat.kind;
+}
+
+fn requireDirectory(io: std.Io, path: []const u8) !void {
+    const kind = try pathKindNoFollow(io, path) orelse return error.OracleDirectoryMissing;
+    if (kind != .directory) return error.UnsafeOraclePath;
+}
+
+fn createFreshDirectory(io: std.Io, path: []const u8) !void {
+    if (try pathKindNoFollow(io, path) != null) return error.OracleOutputExists;
+    if (std.Io.Dir.path.dirname(path)) |parent| try requireDirectory(io, parent);
+    try std.Io.Dir.cwd().createDir(io, path, .default_dir);
+}
+
+fn deleteDirectoryIfPresent(io: std.Io, path: []const u8) !void {
+    const kind = try pathKindNoFollow(io, path) orelse return;
+    if (kind != .directory) return error.UnsafeOraclePath;
     try std.Io.Dir.cwd().deleteTree(io, path);
-    try std.Io.Dir.cwd().createDirPath(io, path);
+}
+
+fn renameDirectoryToMissing(io: std.Io, source: []const u8, target: []const u8) !void {
+    try requireDirectory(io, source);
+    if (try pathKindNoFollow(io, target) != null) return error.OraclePublicationConflict;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.rename(source, cwd, target, io);
 }
 
 fn writeArtifact(
@@ -1636,7 +1667,7 @@ fn pathLessThan(_: void, lhs: []u8, rhs: []u8) bool {
 }
 
 fn listFiles(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !OwnedPaths {
-    var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
+    var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
     var walker = try dir.walk(allocator);
     defer walker.deinit();
@@ -1769,11 +1800,11 @@ fn writeManifest(init: std.process.Init, allocator: std.mem.Allocator, output_di
     try writeArtifact(init.io, allocator, output_dir, "manifest.json", manifest.items);
 }
 
-fn writeChecksums(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+fn checksumsBytes(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) ![]u8 {
     var paths = try listFiles(init.io, allocator, output_dir);
     defer paths.deinit();
     var checksums: std.ArrayList(u8) = .empty;
-    defer checksums.deinit(allocator);
+    errdefer checksums.deinit(allocator);
     for (paths.items) |relative_path| {
         if (std.mem.eql(u8, relative_path, "checksums.sha256")) continue;
         const bytes = try readRelative(init.io, allocator, output_dir, relative_path);
@@ -1781,7 +1812,13 @@ fn writeChecksums(init: std.process.Init, allocator: std.mem.Allocator, output_d
         const hex = digestHex(sha256(bytes));
         try appendFmt(&checksums, allocator, "{s}  {s}{s}\n", .{ &hex, checksum_prefix, relative_path });
     }
-    try writeArtifact(init.io, allocator, output_dir, "checksums.sha256", checksums.items);
+    return checksums.toOwnedSlice(allocator);
+}
+
+fn writeChecksums(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    const checksums = try checksumsBytes(init, allocator, output_dir);
+    defer allocator.free(checksums);
+    try writeArtifact(init.io, allocator, output_dir, "checksums.sha256", checksums);
 }
 
 fn validateRequiredCases(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
@@ -1794,8 +1831,111 @@ fn validateRequiredCases(init: std.process.Init, allocator: std.mem.Allocator, o
     }
 }
 
-fn generate(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
-    try resetDirectory(init.io, output_dir);
+const OracleManifestCase = struct {
+    id: []const u8,
+    transcript: []const u8,
+};
+
+const OracleManifestArtifact = struct {
+    path: []const u8,
+    length: usize,
+    sha256: []const u8,
+};
+
+const OracleManifest = struct {
+    format: []const u8,
+    format_version: u16,
+    case_count: usize,
+    cases: []const OracleManifestCase,
+    artifact_set_sha256: []const u8,
+    artifact_count: usize,
+    artifacts: []const OracleManifestArtifact,
+};
+
+fn isOracleMetadataPath(path: []const u8) bool {
+    return std.mem.eql(u8, path, "manifest.json") or std.mem.eql(u8, path, "checksums.sha256");
+}
+
+fn validateManifest(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    const manifest_bytes = try readRelative(init.io, allocator, output_dir, "manifest.json");
+    defer allocator.free(manifest_bytes);
+    const parsed = std.json.parseFromSlice(OracleManifest, allocator, manifest_bytes, .{
+        .ignore_unknown_fields = true,
+    }) catch return error.InvalidOracleManifest;
+    defer parsed.deinit();
+    const manifest = parsed.value;
+    if (!std.mem.eql(u8, manifest.format, "boundary-world-image-v1-rewrite-oracle-v0") or
+        manifest.format_version != 1 or manifest.case_count != cases.len or
+        manifest.cases.len != cases.len)
+    {
+        return error.InvalidOracleManifest;
+    }
+    for (cases, manifest.cases) |expected, actual| {
+        if (!std.mem.eql(u8, expected.case_id, actual.id) or
+            !std.mem.eql(u8, expected.transcript, actual.transcript))
+        {
+            return error.InvalidOracleManifest;
+        }
+    }
+
+    var paths = try listFiles(init.io, allocator, output_dir);
+    defer paths.deinit();
+    var payload_count: usize = 0;
+    for (paths.items) |path| if (!isOracleMetadataPath(path)) {
+        payload_count += 1;
+    };
+    if (manifest.artifact_count != payload_count or manifest.artifacts.len != payload_count) {
+        return error.InvalidOracleManifest;
+    }
+
+    var artifact_set_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var artifact_index: usize = 0;
+    for (paths.items) |relative_path| {
+        if (isOracleMetadataPath(relative_path)) continue;
+        const bytes = try readRelative(init.io, allocator, output_dir, relative_path);
+        defer allocator.free(bytes);
+        const digest = sha256(bytes);
+        const hex = digestHex(digest);
+        const artifact = manifest.artifacts[artifact_index];
+        if (!std.mem.eql(u8, artifact.path, relative_path) or artifact.length != bytes.len or
+            !std.mem.eql(u8, artifact.sha256, &hex))
+        {
+            return error.InvalidOracleManifest;
+        }
+        var length_bytes = [_]u8{0} ** 8;
+        std.mem.writeInt(u64, &length_bytes, @intCast(bytes.len), .little);
+        artifact_set_hasher.update(relative_path);
+        artifact_set_hasher.update(&.{0});
+        artifact_set_hasher.update(&length_bytes);
+        artifact_set_hasher.update(&digest);
+        artifact_index += 1;
+    }
+    var artifact_set_digest = [_]u8{0} ** 32;
+    artifact_set_hasher.final(&artifact_set_digest);
+    const artifact_set_hex = digestHex(artifact_set_digest);
+    if (!std.mem.eql(u8, manifest.artifact_set_sha256, &artifact_set_hex)) {
+        return error.InvalidOracleManifest;
+    }
+}
+
+fn validateChecksums(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    const actual = try readRelative(init.io, allocator, output_dir, "checksums.sha256");
+    defer allocator.free(actual);
+    const expected = try checksumsBytes(init, allocator, output_dir);
+    defer allocator.free(expected);
+    if (!std.mem.eql(u8, expected, actual)) return error.InvalidOracleChecksums;
+}
+
+fn validateOracleTree(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    try requireDirectory(init.io, output_dir);
+    try validateRequiredCases(init, allocator, output_dir);
+    try validateManifest(init, allocator, output_dir);
+    try validateChecksums(init, allocator, output_dir);
+}
+
+fn generateFresh(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    try createFreshDirectory(init.io, output_dir);
+    errdefer deleteDirectoryIfPresent(init.io, output_dir) catch {};
     try emitScalarAndBudget(init, allocator, output_dir);
     try emitHelperCall(init, allocator, output_dir);
     try emitOneEffect(init, allocator, output_dir);
@@ -1806,6 +1946,106 @@ fn generate(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []
     try validateRequiredCases(init, allocator, output_dir);
     try writeManifest(init, allocator, output_dir);
     try writeChecksums(init, allocator, output_dir);
+    try validateOracleTree(init, allocator, output_dir);
+}
+
+fn copyOracleTree(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    source_dir: []const u8,
+    target_dir: []const u8,
+) !void {
+    try requireDirectory(init.io, source_dir);
+    try createFreshDirectory(init.io, target_dir);
+    errdefer deleteDirectoryIfPresent(init.io, target_dir) catch {};
+    var paths = try listFiles(init.io, allocator, source_dir);
+    defer paths.deinit();
+    for (paths.items) |relative_path| {
+        const bytes = try readRelative(init.io, allocator, source_dir, relative_path);
+        defer allocator.free(bytes);
+        try writeArtifact(init.io, allocator, target_dir, relative_path, bytes);
+    }
+}
+
+const PublicationPaths = struct {
+    target: []const u8,
+    stage: []const u8,
+    backup: []const u8,
+};
+
+const PublicationFault = enum {
+    none,
+    after_backup,
+};
+
+fn recoverPublication(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    paths: PublicationPaths,
+) !void {
+    const backup_kind = try pathKindNoFollow(init.io, paths.backup);
+    const target_kind = try pathKindNoFollow(init.io, paths.target);
+    if (backup_kind) |kind| {
+        if (kind != .directory) return error.UnsafeOraclePath;
+        try validateOracleTree(init, allocator, paths.backup);
+        if (target_kind == null) {
+            try renameDirectoryToMissing(init.io, paths.backup, paths.target);
+        } else {
+            if (target_kind.? != .directory) return error.UnsafeOraclePath;
+            validateOracleTree(init, allocator, paths.target) catch {
+                try deleteDirectoryIfPresent(init.io, paths.target);
+                try renameDirectoryToMissing(init.io, paths.backup, paths.target);
+            };
+            if (try pathKindNoFollow(init.io, paths.backup) != null) {
+                try deleteDirectoryIfPresent(init.io, paths.backup);
+            }
+        }
+    } else if (target_kind) |kind| {
+        if (kind != .directory) return error.UnsafeOraclePath;
+    }
+
+    const stage_kind = try pathKindNoFollow(init.io, paths.stage);
+    if (stage_kind) |kind| {
+        if (kind != .directory) return error.UnsafeOraclePath;
+        try deleteDirectoryIfPresent(init.io, paths.stage);
+    }
+}
+
+fn publishOracleTree(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    candidate_dir: []const u8,
+    paths: PublicationPaths,
+    fault: PublicationFault,
+) !void {
+    try recoverPublication(init, allocator, paths);
+    try validateOracleTree(init, allocator, candidate_dir);
+    try validateOracleTree(init, allocator, paths.target);
+    try copyOracleTree(init, allocator, candidate_dir, paths.stage);
+    errdefer deleteDirectoryIfPresent(init.io, paths.stage) catch {};
+    try validateOracleTree(init, allocator, paths.stage);
+
+    try renameDirectoryToMissing(init.io, paths.target, paths.backup);
+    var backup_active = true;
+    var target_promoted = false;
+    errdefer if (backup_active) {
+        if (target_promoted) deleteDirectoryIfPresent(init.io, paths.target) catch {};
+        renameDirectoryToMissing(init.io, paths.backup, paths.target) catch {};
+    };
+    if (fault == .after_backup) return error.InjectedOraclePublicationFailure;
+    try renameDirectoryToMissing(init.io, paths.stage, paths.target);
+    target_promoted = true;
+    try validateOracleTree(init, allocator, paths.target);
+    try deleteDirectoryIfPresent(init.io, paths.backup);
+    backup_active = false;
+}
+
+fn publishTrackedOracle(init: std.process.Init, allocator: std.mem.Allocator, candidate_dir: []const u8) !void {
+    return publishOracleTree(init, allocator, candidate_dir, .{
+        .target = corpus_path,
+        .stage = tracked_publication_stage_path,
+        .backup = tracked_publication_backup_path,
+    }, .none);
 }
 
 fn compareTrees(
@@ -1829,6 +2069,82 @@ fn compareTrees(
     }
 }
 
+fn expectPublicationError(expected: anyerror, actual: ?anyerror) !void {
+    const received = actual orelse return error.ExpectedOraclePublicationFailure;
+    if (received != expected) return received;
+}
+
+fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
+    const root = "publication-sandbox";
+    const candidate = root ++ "/candidate";
+    const target = root ++ "/tracked";
+    const stage = root ++ "/stage";
+    const backup = root ++ "/backup";
+    const invalid_candidate = root ++ "/invalid-candidate";
+    const existing_output = root ++ "/existing-output";
+    const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
+    const cwd = std.Io.Dir.cwd();
+
+    try createFreshDirectory(init.io, root);
+    defer deleteDirectoryIfPresent(init.io, root) catch {};
+    try generateFresh(init, allocator, candidate);
+    try copyOracleTree(init, allocator, candidate, target);
+    try compareTrees(init, allocator, candidate, target);
+
+    try createFreshDirectory(init.io, existing_output);
+    try writeArtifact(init.io, allocator, existing_output, "sentinel.txt", "preserve-me\n");
+    var existing_error: ?anyerror = null;
+    generateFresh(init, allocator, existing_output) catch |err| {
+        existing_error = err;
+    };
+    try expectPublicationError(error.OracleOutputExists, existing_error);
+    const sentinel = try readRelative(init.io, allocator, existing_output, "sentinel.txt");
+    defer allocator.free(sentinel);
+    try expectEqualBytes("preserve-me\n", sentinel);
+
+    try copyOracleTree(init, allocator, candidate, invalid_candidate);
+    try writeArtifact(init.io, allocator, invalid_candidate, "cases/scalar-pure.txt", "corrupt\n");
+    var invalid_error: ?anyerror = null;
+    publishOracleTree(init, allocator, invalid_candidate, paths, .none) catch |err| {
+        invalid_error = err;
+    };
+    if (invalid_error == null) return error.InvalidOracleCandidatePublished;
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
+        return error.OraclePublicationResidue;
+    }
+
+    var injected_error: ?anyerror = null;
+    publishOracleTree(init, allocator, candidate, paths, .after_backup) catch |err| {
+        injected_error = err;
+    };
+    try expectPublicationError(error.InjectedOraclePublicationFailure, injected_error);
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
+        return error.OraclePublicationResidue;
+    }
+
+    try renameDirectoryToMissing(init.io, target, backup);
+    try copyOracleTree(init, allocator, candidate, stage);
+    try recoverPublication(init, allocator, paths);
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
+        return error.OraclePublicationRecoveryFailed;
+    }
+
+    try publishOracleTree(init, allocator, candidate, paths, .none);
+    try compareTrees(init, allocator, candidate, target);
+
+    try cwd.symLink(init.io, target, stage, .{ .is_directory = true });
+    var symlink_error: ?anyerror = null;
+    recoverPublication(init, allocator, paths) catch |err| {
+        symlink_error = err;
+    };
+    try expectPublicationError(error.UnsafeOraclePath, symlink_error);
+    try cwd.deleteFile(init.io, stage);
+    try compareTrees(init, allocator, candidate, target);
+}
+
 fn argumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -1839,6 +2155,13 @@ fn argumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
         }
     }
     return error.InvalidArguments;
+}
+
+fn exactArgumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
+    if (args.len != 2 or !std.mem.eql(u8, args[0], flag) or args[1].len == 0) {
+        return error.InvalidArguments;
+    }
+    return args[1];
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -1853,10 +2176,19 @@ pub fn main(init: std.process.Init) !void {
     while (iterator.next()) |arg| try argv.append(allocator, arg);
 
     if (std.mem.eql(u8, command, "generate")) {
-        const output_dir = try argumentValue(argv.items, "--out-dir");
-        return generate(init, allocator, output_dir);
+        if (argv.items.len != 0) return error.InvalidArguments;
+        return generateFresh(init, allocator, generated_bundle_path);
+    }
+    if (std.mem.eql(u8, command, "publish-tracked")) {
+        const candidate_dir = try exactArgumentValue(argv.items, "--candidate-dir");
+        return publishTrackedOracle(init, allocator, candidate_dir);
+    }
+    if (std.mem.eql(u8, command, "test-publication")) {
+        if (argv.items.len != 0) return error.InvalidArguments;
+        return testPublication(init, allocator);
     }
     if (std.mem.eql(u8, command, "compare")) {
+        if (argv.items.len != 6) return error.InvalidArguments;
         const expected_dir = try argumentValue(argv.items, "--expected-dir");
         const first_dir = try argumentValue(argv.items, "--first-dir");
         const second_dir = try argumentValue(argv.items, "--second-dir");
@@ -1865,6 +2197,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, command, "verify")) {
+        if (argv.items.len != 4) return error.InvalidArguments;
         const expected_dir = try argumentValue(argv.items, "--expected-dir");
         const actual_dir = try argumentValue(argv.items, "--actual-dir");
         return compareTrees(init, allocator, expected_dir, actual_dir);

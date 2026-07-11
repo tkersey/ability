@@ -1460,13 +1460,18 @@ pub fn build(b: *std.Build) void {
         .root_module = world_image_v1_oracle_mod,
     });
 
+    const oracle_update_candidate_root = b.tmpPath();
+    const oracle_update_candidate_dir = oracle_update_candidate_root.path(b, "bundle");
+    const oracle_update_generate = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_update_generate.setName("generate Boundary World Image v1 tracked-update candidate");
+    oracle_update_generate.setCwd(oracle_update_candidate_root);
+    oracle_update_generate.addArg("generate");
     const oracle_update_run = b.addRunArtifact(world_image_v1_oracle_exe);
-    oracle_update_run.setCwd(b.tmpPath());
-    oracle_update_run.addArgs(&.{
-        "generate",
-        "--out-dir",
-        b.pathFromRoot(world_image_v1_corpus_dir),
-    });
+    oracle_update_run.setName("publish Boundary World Image v1 tracked oracle");
+    oracle_update_run.setCwd(b.path("."));
+    oracle_update_run.addArgs(&.{ "publish-tracked", "--candidate-dir" });
+    oracle_update_run.addDirectoryArg(oracle_update_candidate_dir);
+    oracle_update_run.step.dependOn(&oracle_update_generate.step);
     const oracle_update_step = b.step(
         "update-boundary-world-image-v1-oracle",
         "Update the checked-in Boundary World Image v1 rewrite oracle.",
@@ -1480,13 +1485,22 @@ pub fn build(b: *std.Build) void {
     const oracle_generation_a = b.addRunArtifact(world_image_v1_oracle_exe);
     oracle_generation_a.setName("generate Boundary World Image v1 oracle A");
     oracle_generation_a.setCwd(oracle_generation_a_root);
-    oracle_generation_a.addArgs(&.{ "generate", "--out-dir" });
-    oracle_generation_a.addDirectoryArg(oracle_generation_a_dir);
+    oracle_generation_a.addArg("generate");
     const oracle_generation_b = b.addRunArtifact(world_image_v1_oracle_exe);
     oracle_generation_b.setName("generate Boundary World Image v1 oracle B");
     oracle_generation_b.setCwd(oracle_generation_b_root);
-    oracle_generation_b.addArgs(&.{ "generate", "--out-dir" });
-    oracle_generation_b.addDirectoryArg(oracle_generation_b_dir);
+    oracle_generation_b.addArg("generate");
+
+    const oracle_publication_test_root = b.tmpPath();
+    const oracle_publication_test = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_publication_test.setName("check Boundary World Image v1 oracle publication safety");
+    oracle_publication_test.setCwd(oracle_publication_test_root);
+    oracle_publication_test.addArg("test-publication");
+    const oracle_publication_check_step = b.step(
+        "check-boundary-world-image-v1-oracle-publication",
+        "Check fixed output admission and recoverable tracked-oracle publication.",
+    );
+    oracle_publication_check_step.dependOn(&oracle_publication_test.step);
 
     const compare_world_image_v1_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
     compare_world_image_v1_oracle.setName("compare Boundary World Image v1 oracle trees");
@@ -1513,17 +1527,22 @@ pub fn build(b: *std.Build) void {
     oracle_check_step.dependOn(loaded_malformed_step);
     oracle_check_step.dependOn(receipt_agent_parity_step);
     oracle_check_step.dependOn(check_runtime_step);
+    oracle_check_step.dependOn(oracle_publication_check_step);
     check_step.dependOn(oracle_check_step);
 
     const oracle_emit_dir = b.getInstallPath(.prefix, "conformance/world-image-v1/v0/boundary");
+    const oracle_emit_candidate_root = b.tmpPath();
+    const oracle_emit_candidate_dir = oracle_emit_candidate_root.path(b, "bundle");
     const emit_world_image_v1_oracle_run = b.addRunArtifact(world_image_v1_oracle_exe);
-    emit_world_image_v1_oracle_run.setCwd(b.tmpPath());
-    emit_world_image_v1_oracle_run.addArgs(&.{
-        "generate",
-        "--out-dir",
-        oracle_emit_dir,
-    });
+    emit_world_image_v1_oracle_run.setCwd(oracle_emit_candidate_root);
+    emit_world_image_v1_oracle_run.addArg("generate");
     emit_world_image_v1_oracle_run.step.dependOn(oracle_check_step);
+    const install_world_image_v1_oracle = b.addInstallDirectory(.{
+        .source_dir = oracle_emit_candidate_dir,
+        .install_dir = .prefix,
+        .install_subdir = "conformance/world-image-v1/v0/boundary",
+    });
+    install_world_image_v1_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);
     const verify_emitted_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
     verify_emitted_oracle.setName("verify emitted Boundary World Image v1 oracle bytes");
     verify_emitted_oracle.setCwd(b.tmpPath());
@@ -1534,7 +1553,7 @@ pub fn build(b: *std.Build) void {
     verify_emitted_oracle.addDirectoryArg(b.path(world_image_v1_corpus_dir));
     verify_emitted_oracle.addArg("--actual-dir");
     verify_emitted_oracle.addDirectoryArg(.{ .cwd_relative = oracle_emit_dir });
-    verify_emitted_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);
+    verify_emitted_oracle.step.dependOn(&install_world_image_v1_oracle.step);
     const oracle_emit_step = b.step(
         "emit-boundary-world-image-v1-oracle",
         "Emit the verified Boundary World Image v1 rewrite oracle under zig-out.",
