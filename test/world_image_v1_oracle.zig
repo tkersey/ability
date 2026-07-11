@@ -656,6 +656,23 @@ fn requireDirectory(io: std.Io, path: []const u8) !void {
     if (kind != .directory) return error.UnsafeOraclePath;
 }
 
+fn requireDirectoryTreeNoSymlinks(io: std.Io, path: []const u8) !void {
+    if (path.len == 0 or std.Io.Dir.path.isAbsolute(path)) return error.UnsafeOraclePath;
+    var component_end: usize = 0;
+    while (component_end < path.len) {
+        while (component_end < path.len and !std.Io.Dir.path.isSep(path[component_end])) {
+            component_end += 1;
+        }
+        if (component_end == 0) return error.UnsafeOraclePath;
+        try requireDirectory(io, path[0..component_end]);
+        if (component_end == path.len) break;
+        component_end += 1;
+        if (component_end == path.len or std.Io.Dir.path.isSep(path[component_end])) {
+            return error.UnsafeOraclePath;
+        }
+    }
+}
+
 fn createFreshDirectory(io: std.Io, path: []const u8) !void {
     if (try pathKindNoFollow(io, path) != null) return error.OracleOutputExists;
     if (std.Io.Dir.path.dirname(path)) |parent| try requireDirectory(io, parent);
@@ -1997,28 +2014,41 @@ const PublicationPaths = struct {
 const PublicationFault = enum {
     none,
     after_backup,
+    during_backup_cleanup,
 };
+
+fn requirePublicationParents(io: std.Io, paths: PublicationPaths) !void {
+    inline for (.{ paths.target, paths.stage, paths.backup }) |path| {
+        const parent = std.Io.Dir.path.dirname(path) orelse return error.UnsafeOraclePath;
+        try requireDirectoryTreeNoSymlinks(io, parent);
+    }
+}
 
 fn recoverPublication(
     init: std.process.Init,
     allocator: std.mem.Allocator,
     paths: PublicationPaths,
 ) !void {
+    try requirePublicationParents(init.io, paths);
     const backup_kind = try pathKindNoFollow(init.io, paths.backup);
     const target_kind = try pathKindNoFollow(init.io, paths.target);
     if (backup_kind) |kind| {
         if (kind != .directory) return error.UnsafeOraclePath;
-        try validateOracleTree(init, allocator, paths.backup);
         if (target_kind == null) {
+            try validateOracleTree(init, allocator, paths.backup);
             try renameDirectoryToMissing(init.io, paths.backup, paths.target);
         } else {
             if (target_kind.? != .directory) return error.UnsafeOraclePath;
+            var target_valid = true;
             validateOracleTree(init, allocator, paths.target) catch {
+                target_valid = false;
+            };
+            if (target_valid) {
+                try deleteDirectoryIfPresent(init.io, paths.backup);
+            } else {
+                try validateOracleTree(init, allocator, paths.backup);
                 try deleteDirectoryIfPresent(init.io, paths.target);
                 try renameDirectoryToMissing(init.io, paths.backup, paths.target);
-            };
-            if (try pathKindNoFollow(init.io, paths.backup) != null) {
-                try deleteDirectoryIfPresent(init.io, paths.backup);
             }
         }
     } else if (target_kind) |kind| {
@@ -2047,9 +2077,9 @@ fn publishOracleTree(
     try validateOracleTree(init, allocator, paths.stage);
 
     try renameDirectoryToMissing(init.io, paths.target, paths.backup);
-    var backup_active = true;
+    var rollback_required = true;
     var target_promoted = false;
-    errdefer if (backup_active) {
+    errdefer if (rollback_required) {
         if (target_promoted) deleteDirectoryIfPresent(init.io, paths.target) catch {};
         renameDirectoryToMissing(init.io, paths.backup, paths.target) catch {};
     };
@@ -2057,8 +2087,12 @@ fn publishOracleTree(
     try renameDirectoryToMissing(init.io, paths.stage, paths.target);
     target_promoted = true;
     try validateOracleTree(init, allocator, paths.target);
+    rollback_required = false;
+    if (fault == .during_backup_cleanup) {
+        try writeArtifact(init.io, allocator, paths.backup, "cases/scalar-pure.txt", "partial-backup\n");
+        return error.InjectedOracleBackupCleanupFailure;
+    }
     try deleteDirectoryIfPresent(init.io, paths.backup);
-    backup_active = false;
 }
 
 fn publishTrackedOracle(init: std.process.Init, allocator: std.mem.Allocator, candidate_dir: []const u8) !void {
@@ -2173,6 +2207,17 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
         return error.OraclePublicationRecoveryFailed;
     }
 
+    var cleanup_error: ?anyerror = null;
+    publishOracleTree(init, allocator, candidate, paths, .during_backup_cleanup) catch |err| {
+        cleanup_error = err;
+    };
+    try expectPublicationError(error.InjectedOracleBackupCleanupFailure, cleanup_error);
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, backup) == null) return error.ExpectedOraclePublicationResidue;
+    try recoverPublication(init, allocator, paths);
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, backup) != null) return error.OraclePublicationResidue;
+
     try publishOracleTree(init, allocator, candidate, paths, .none);
     try compareTrees(init, allocator, candidate, target);
 
@@ -2184,6 +2229,28 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     try expectPublicationError(error.UnsafeOraclePath, symlink_error);
     try cwd.deleteFile(init.io, stage);
     try compareTrees(init, allocator, candidate, target);
+
+    const external = root ++ "/external";
+    const linked_parent = root ++ "/linked-parent";
+    const external_target = external ++ "/tracked";
+    try createFreshDirectory(init.io, external);
+    try copyOracleTree(init, allocator, candidate, external_target);
+    try writeArtifact(init.io, allocator, external, "sentinel.txt", "outside-publication\n");
+    try cwd.symLink(init.io, "external", linked_parent, .{ .is_directory = true });
+    var intermediate_symlink_error: ?anyerror = null;
+    recoverPublication(init, allocator, .{
+        .target = linked_parent ++ "/tracked",
+        .stage = linked_parent ++ "/stage",
+        .backup = linked_parent ++ "/backup",
+    }) catch |err| {
+        intermediate_symlink_error = err;
+    };
+    try expectPublicationError(error.UnsafeOraclePath, intermediate_symlink_error);
+    const external_sentinel_bytes = try readRelative(init.io, allocator, external, "sentinel.txt");
+    defer allocator.free(external_sentinel_bytes);
+    try expectEqualBytes("outside-publication\n", external_sentinel_bytes);
+    try compareTrees(init, allocator, candidate, external_target);
+    try cwd.deleteFile(init.io, linked_parent);
 }
 
 fn argumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
