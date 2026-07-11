@@ -2228,7 +2228,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     try copyOracleTree(init, allocator, candidate, stale_provenance_candidate);
     const current_manifest = try readRelative(init.io, allocator, stale_provenance_candidate, "manifest.json");
     defer allocator.free(current_manifest);
-    if (std.mem.indexOf(u8, current_manifest, oracle_semantic_source.baseline_commit) == null) {
+    if (std.mem.find(u8, current_manifest, oracle_semantic_source.baseline_commit) == null) {
         return error.InvalidOracleManifest;
     }
     const stale_manifest = try std.mem.replaceOwned(

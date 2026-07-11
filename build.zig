@@ -39,7 +39,8 @@ const ExactInstallTreeStep = struct {
             std.debug.assert(component.len > 0);
             for (component) |byte| std.debug.assert(!std.Io.Dir.path.isSep(byte));
         }
-        const exact_tree = b.allocator.create(@This()) catch @panic("OOM");
+        const exact_tree = b.allocator.create(@This()) catch |err|
+            std.process.fatal("unable to allocate exact install-tree step: {s}", .{@errorName(err)});
         exact_tree.* = .{
             .step = std.Build.Step.init(.{
                 .id = .custom,
@@ -1620,18 +1621,18 @@ pub fn build(b: *std.Build) void {
     emit_world_image_v1_oracle_run.setCwd(oracle_emit_candidate_root);
     emit_world_image_v1_oracle_run.addArg("generate");
     emit_world_image_v1_oracle_run.step.dependOn(oracle_check_step);
-    const replace_emitted_world_image_v1_oracle = ExactInstallTreeStep.create(
+    const replace_emitted_oracle = ExactInstallTreeStep.create(
         b,
         b.getInstallPath(.prefix, ""),
         &.{ "conformance", "world-image-v1", "v0", "boundary" },
     );
-    replace_emitted_world_image_v1_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);
+    replace_emitted_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);
     const install_world_image_v1_oracle = b.addInstallDirectory(.{
         .source_dir = oracle_emit_candidate_dir,
         .install_dir = .prefix,
         .install_subdir = "conformance/world-image-v1/v0/boundary",
     });
-    install_world_image_v1_oracle.step.dependOn(&replace_emitted_world_image_v1_oracle.step);
+    install_world_image_v1_oracle.step.dependOn(&replace_emitted_oracle.step);
     const verify_emitted_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
     verify_emitted_oracle.setName("verify emitted Boundary World Image v1 oracle bytes");
     verify_emitted_oracle.setCwd(b.tmpPath());
