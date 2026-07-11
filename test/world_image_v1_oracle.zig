@@ -1807,6 +1807,12 @@ fn writeManifest(init: std.process.Init, allocator: std.mem.Allocator, output_di
 
     var manifest: std.ArrayList(u8) = .empty;
     defer manifest.deinit(allocator);
+    const module_magic_json = try std.json.Stringify.valueAlloc(
+        allocator,
+        oracle_semantic_source.module_magic,
+        .{},
+    );
+    defer allocator.free(module_magic_json);
     try manifest.appendSlice(allocator,
         \\{
         \\  "format": "boundary-world-image-v1-rewrite-oracle-v0",
@@ -1816,16 +1822,22 @@ fn writeManifest(init: std.process.Init, allocator: std.mem.Allocator, output_di
         \\    "package_version": "0.6.2",
         \\    "baseline_commit": "6a416951f8d22d0854616f094f23b2d44ab021a2",
         \\    "baseline_tree": "950838431ef965f21926b4ea14361f69bc16c2dd",
-        \\    "module_magic": "BCBMOD1\u0000",
-        \\    "loaded_execution_profile": 2,
-        \\    "loaded_session_image": 2,
-        \\    "zig_version": "0.16.0"
-        \\  },
-        \\  "generator": "zig build update-boundary-world-image-v1-oracle",
-        \\  "normal_check": "zig build check-boundary-world-image-v1-oracle --summary all",
-        \\  "case_count": 12,
-        \\  "cases": [
+        \\    "module_magic":
     );
+    try manifest.append(allocator, ' ');
+    try manifest.appendSlice(allocator, module_magic_json);
+    try manifest.appendSlice(
+        allocator,
+        ",\n" ++
+            "    \"loaded_execution_profile\": 2,\n" ++
+            "    \"loaded_session_image\": 2,\n" ++
+            "    \"zig_version\": \"0.16.0\"\n" ++
+            "  },\n" ++
+            "  \"generator\": \"zig build update-boundary-world-image-v1-oracle\",\n" ++
+            "  \"normal_check\": \"zig build check-boundary-world-image-v1-oracle --summary all\",\n",
+    );
+    try appendFmt(&manifest, allocator, "  \"case_count\": {d},\n", .{cases.len});
+    try manifest.appendSlice(allocator, "  \"cases\": [");
     for (cases, 0..) |case, index| {
         try appendFmt(
             &manifest,
