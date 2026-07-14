@@ -1,1 +1,1 @@
-conformance/world-image-v1/v0/boundary/** -text -filter
+conformance/world-image-v1/v0/boundary/** -text -filter -working-tree-encoding

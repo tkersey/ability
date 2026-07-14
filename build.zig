@@ -70,6 +70,36 @@ const ExactInstallTreeStep = struct {
             );
         }
 
+        const protected_real_path = std.Io.Dir.cwd().realPathFileAlloc(
+            io,
+            exact_tree.protected_path,
+            options.gpa,
+        ) catch |err| return step.fail(
+            "unable to resolve protected Boundary oracle corpus '{s}': {s}",
+            .{ exact_tree.protected_path, @errorName(err) },
+        );
+        defer options.gpa.free(protected_real_path);
+        const destination_real_path = std.Io.Dir.cwd().realPathFileAlloc(
+            io,
+            exact_tree.destination_path,
+            options.gpa,
+        ) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return step.fail(
+                "unable to resolve Boundary oracle emit destination '{s}': {s}",
+                .{ exact_tree.destination_path, @errorName(err) },
+            ),
+        };
+        if (destination_real_path) |real_path| {
+            defer options.gpa.free(real_path);
+            if (std.mem.eql(u8, real_path, protected_real_path)) {
+                return step.fail(
+                    "refusing to emit the Boundary oracle over filesystem alias '{s}' of tracked corpus '{s}'",
+                    .{ exact_tree.destination_path, exact_tree.protected_path },
+                );
+            }
+        }
+
         var opened: std.ArrayList(std.Io.Dir) = .empty;
         defer {
             var index = opened.items.len;
@@ -1555,6 +1585,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(check_runtime_step);
 
     const world_image_v1_corpus_dir = "conformance/world-image-v1/v0/boundary";
+    const world_image_v1_receiver_pin = "conformance/world-image-v1/v0/boundary.receiver-pin.sha256";
     const world_image_v1_oracle_mod = b.createModule(.{
         .root_source_file = b.path("test/world_image_v1_oracle.zig"),
         .target = b.graph.host,
@@ -1593,6 +1624,8 @@ pub fn build(b: *std.Build) void {
     oracle_update_run.setCwd(b.path("."));
     oracle_update_run.addArgs(&.{ "publish-tracked", "--candidate-dir" });
     oracle_update_run.addDirectoryArg(oracle_update_candidate_a_dir);
+    oracle_update_run.addArg("--receiver-pin");
+    oracle_update_run.addFileArg(b.path(world_image_v1_receiver_pin));
     oracle_update_run.step.dependOn(&oracle_update_compare.step);
     const oracle_update_step = b.step(
         "update-boundary-world-image-v1-oracle",
@@ -1618,6 +1651,8 @@ pub fn build(b: *std.Build) void {
     oracle_publication_test.setName("check Boundary World Image v1 oracle publication safety");
     oracle_publication_test.setCwd(oracle_publication_test_root);
     oracle_publication_test.addArg("test-publication");
+    oracle_publication_test.addArg("--receiver-pin");
+    oracle_publication_test.addFileArg(b.path(world_image_v1_receiver_pin));
     const oracle_publication_check_step = b.step(
         "check-boundary-world-image-v1-oracle-publication",
         "Check fixed output admission and recoverable tracked-oracle publication.",

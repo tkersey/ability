@@ -943,6 +943,12 @@ const ToolboxOracleSink = struct {
     output_dir: []const u8,
     scenario_name: []const u8,
 
+    fn initial(self: *@This(), loaded_state: []const u8) !void {
+        const state_path = try std.fmt.allocPrint(self.allocator, "provider/{s}/initial.loaded-session", .{self.scenario_name});
+        defer self.allocator.free(state_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, state_path, loaded_state);
+    }
+
     fn request(self: *@This(), loaded_session: anytype, loaded_request: anytype, loaded_response: []const u8) !void {
         const scenario_dir = try std.fmt.allocPrint(self.allocator, "provider/{s}", .{self.scenario_name});
         defer self.allocator.free(scenario_dir);
@@ -1011,6 +1017,24 @@ fn runToolboxProviderParityScenarioWithSink(
         entry_args[0..],
     );
     defer loaded_session.deinit();
+
+    if (oracle_sink) |sink| {
+        const initial_state = try loaded_session.freeze(allocator);
+        defer allocator.free(initial_state);
+        var initial_image = try ToolboxTarget.Module.LoadedSessionImage.decode(allocator, initial_state);
+        defer initial_image.deinit(allocator);
+        try std.testing.expectEqual(ToolboxTarget.Module.LoadedSessionStatus.initial, initial_image.status);
+        try std.testing.expectEqual(entry_args.len, initial_image.entry_argument_images.len);
+        try sink.initial(initial_state);
+        const restored_session = try ToolboxTarget.Module.LoadedModule.Session.thaw(
+            allocator,
+            &loaded,
+            initial_state,
+            ToolboxTarget.Module.LoadedExecutionProfile.portableV2(),
+        );
+        loaded_session.deinit();
+        loaded_session = restored_session;
+    }
 
     const read_response_text = try allocator.dupe(u8, fixture_observation);
     defer allocator.free(read_response_text);
@@ -1283,6 +1307,14 @@ fn runLoadedParityScenarioWithSink(
         try std.testing.expectEqual(RootTarget.Module.LoadedSessionStatus.initial, initial_image.status);
         try std.testing.expectEqual(entry_args.len, initial_image.entry_argument_images.len);
         try sink.initial(initial_state);
+        const restored_session = try RootTarget.Module.LoadedModule.Session.thaw(
+            allocator,
+            &loaded,
+            initial_state,
+            RootTarget.Module.LoadedExecutionProfile.portableV2(),
+        );
+        loaded_session.deinit();
+        loaded_session = restored_session;
     }
 
     while (true) {
