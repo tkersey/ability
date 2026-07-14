@@ -25,6 +25,50 @@ const TestArgs = struct {
     passthrough: []const []const u8,
 };
 
+fn resolveExistingAbsolutePrefix(b: *std.Build, absolute_path: []const u8) []const u8 {
+    std.debug.assert(std.Io.Dir.path.isAbsolute(absolute_path));
+    var missing_components: std.ArrayList([]const u8) = .empty;
+    defer missing_components.deinit(b.allocator);
+
+    var existing_path = absolute_path;
+    while (true) {
+        const resolved = std.Io.Dir.realPathFileAbsoluteAlloc(
+            b.graph.io,
+            existing_path,
+            b.allocator,
+        ) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {
+                const component = std.Io.Dir.path.basename(existing_path);
+                const parent = std.Io.Dir.path.dirname(existing_path) orelse
+                    std.process.fatal("unable to resolve existing ancestor of '{s}'", .{absolute_path});
+                if (component.len == 0) {
+                    std.process.fatal("unable to resolve existing ancestor component of '{s}'", .{absolute_path});
+                }
+                missing_components.append(b.allocator, component) catch |append_err|
+                    std.process.fatal("unable to retain unresolved path component: {s}", .{@errorName(append_err)});
+                existing_path = parent;
+                continue;
+            },
+            else => std.process.fatal(
+                "unable to resolve existing ancestor of '{s}': {s}",
+                .{ absolute_path, @errorName(err) },
+            ),
+        };
+
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer parts.deinit(b.allocator);
+        parts.append(b.allocator, resolved) catch |err|
+            std.process.fatal("unable to retain resolved path prefix: {s}", .{@errorName(err)});
+        var index = missing_components.items.len;
+        while (index > 0) {
+            index -= 1;
+            parts.append(b.allocator, missing_components.items[index]) catch |err|
+                std.process.fatal("unable to retain resolved path suffix: {s}", .{@errorName(err)});
+        }
+        return b.pathResolve(parts.items);
+    }
+}
+
 const ExactInstallTreeStep = struct {
     step: std.Build.Step,
     source_dir: std.Build.LazyPath,
@@ -173,23 +217,67 @@ const ExactInstallTreeStep = struct {
         };
     }
 
-    fn openOrCreateDirNoFollow(parent: std.Io.Dir, io: std.Io, name: []const u8) !std.Io.Dir {
-        return parent.openDir(io, name, .{
+    const ResolvedDestinationDir = struct {
+        dir: std.Io.Dir,
+        followed_link: bool,
+    };
+
+    fn openDestinationDir(parent: std.Io.Dir, io: std.Io, name: []const u8) !ResolvedDestinationDir {
+        const dir = parent.openDir(io, name, .{
             .iterate = false,
             .follow_symlinks = false,
         }) catch |open_err| switch (open_err) {
-            error.FileNotFound => {
+            error.NotDir, error.SymLinkLoop => return .{
+                .dir = try parent.openDir(io, name, .{
+                    .iterate = false,
+                    .follow_symlinks = true,
+                }),
+                .followed_link = true,
+            },
+            else => return open_err,
+        };
+        return .{ .dir = dir, .followed_link = false };
+    }
+
+    fn openOrCreateDestinationDir(parent: std.Io.Dir, io: std.Io, name: []const u8) !ResolvedDestinationDir {
+        return openDestinationDir(parent, io, name) catch |open_err| switch (open_err) {
+            error.FileNotFound => create: {
                 parent.createDir(io, name, .default_dir) catch |create_err| switch (create_err) {
                     error.PathAlreadyExists => {},
                     else => return create_err,
                 };
-                return parent.openDir(io, name, .{
-                    .iterate = false,
-                    .follow_symlinks = false,
-                });
+                break :create try openDestinationDir(parent, io, name);
             },
             else => return open_err,
         };
+    }
+
+    fn directoryIsWithinIdentity(
+        dir: std.Io.Dir,
+        io: std.Io,
+        ancestor_identity: FileIdentity,
+    ) !bool {
+        var cursor = try dir.openDir(io, ".", .{ .follow_symlinks = false });
+        defer cursor.close(io);
+
+        var depth: usize = 0;
+        while (depth < 4096) : (depth += 1) {
+            const cursor_identity = try directoryIdentity(cursor);
+            if (std.meta.eql(cursor_identity, ancestor_identity)) return true;
+
+            const parent = try cursor.openDir(io, "..", .{ .follow_symlinks = false });
+            const parent_identity = directoryIdentity(parent) catch |err| {
+                parent.close(io);
+                return err;
+            };
+            if (std.meta.eql(parent_identity, cursor_identity)) {
+                parent.close(io);
+                return false;
+            }
+            cursor.close(io);
+            cursor = parent;
+        }
+        return error.OraclePathDepthExceeded;
     }
 
     fn copyFileNoFollow(source: std.Io.Dir, destination: std.Io.Dir, io: std.Io, name: []const u8) !void {
@@ -455,6 +543,54 @@ const ExactInstallTreeStep = struct {
         }
         const protected_identity = protected_identities.items[protected_identities.items.len - 1];
 
+        const source_path = try exact_tree.source_dir.getPath4(step.owner, step);
+        var source_opened: std.ArrayList(std.Io.Dir) = .empty;
+        defer {
+            var index = source_opened.items.len;
+            while (index > 0) {
+                index -= 1;
+                source_opened.items[index].close(io);
+            }
+            source_opened.deinit(options.gpa);
+        }
+        var source_dir = source_path.root_dir.handle;
+        if (source_path.sub_path.len == 0) {
+            const source_root = source_dir.openDir(io, ".", .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |err| return step.fail(
+                "unable to open exact oracle source root '{f}' without following links: {s}",
+                .{ source_path, @errorName(err) },
+            );
+            source_opened.append(options.gpa, source_root) catch |err| {
+                source_root.close(io);
+                return err;
+            };
+            source_dir = source_root;
+        } else {
+            var source_components = std.Io.Dir.path.componentIterator(source_path.sub_path);
+            if (source_components.root() != null) {
+                return step.fail("exact oracle source path is not root-relative: '{f}'", .{source_path});
+            }
+            while (source_components.next()) |component| {
+                if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
+                    return step.fail("unsafe exact oracle source component '{s}'", .{component.name});
+                }
+                const child = source_dir.openDir(io, component.name, .{
+                    .iterate = source_components.peekNext() == null,
+                    .follow_symlinks = false,
+                }) catch |err| return step.fail(
+                    "unable to open exact oracle source component '{s}' without following links: {s}",
+                    .{ component.name, @errorName(err) },
+                );
+                source_opened.append(options.gpa, child) catch |err| {
+                    child.close(io);
+                    return err;
+                };
+                source_dir = child;
+            }
+        }
+
         var opened: std.ArrayList(std.Io.Dir) = .empty;
         defer {
             var index = opened.items.len;
@@ -495,19 +631,22 @@ const ExactInstallTreeStep = struct {
             return step.fail("refusing protected Boundary oracle destination ancestor '{s}'", .{root_path});
         }
 
+        var destination_used_link = false;
         while (destination_components.next()) |component| {
             if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
                 return step.fail("unsafe oracle destination component '{s}'", .{component.name});
             }
-            const child = openOrCreateDirNoFollow(current, io, component.name) catch |err| return step.fail(
-                "unable to open or create oracle destination component '{s}' without following links: {s}",
+            const resolved_child = openOrCreateDestinationDir(current, io, component.name) catch |err| return step.fail(
+                "unable to resolve or create oracle destination component '{s}': {s}",
                 .{ component.name, @errorName(err) },
             );
+            const child = resolved_child.dir;
             opened.append(options.gpa, child) catch |err| {
                 child.close(io);
                 return err;
             };
             current = child;
+            destination_used_link = destination_used_link or resolved_child.followed_link;
             const child_identity = directoryIdentity(child) catch |err| return step.fail(
                 "unable to identify oracle destination component '{s}': {s}",
                 .{ component.name, @errorName(err) },
@@ -515,6 +654,21 @@ const ExactInstallTreeStep = struct {
             if (std.meta.eql(child_identity, protected_identity)) {
                 return step.fail(
                     "refusing filesystem alias of protected Boundary oracle corpus at destination component '{s}'",
+                    .{component.name},
+                );
+            }
+            const resolved_inside_protected = if (destination_used_link)
+                directoryIsWithinIdentity(child, io, protected_identity) catch |err| {
+                    return step.fail(
+                        "unable to prove resolved oracle destination component '{s}' stays outside protected corpus: {s}",
+                        .{ component.name, @errorName(err) },
+                    );
+                }
+            else
+                false;
+            if (resolved_inside_protected) {
+                return step.fail(
+                    "refusing resolved oracle destination component '{s}' inside protected Boundary oracle corpus",
                     .{component.name},
                 );
             }
@@ -544,16 +698,6 @@ const ExactInstallTreeStep = struct {
             }
             validated_destination_identity = destination_identity;
         }
-
-        const source_path = try exact_tree.source_dir.getPath4(step.owner, step);
-        var source_dir = source_path.root_dir.handle.openDir(io, source_path.subPathOrDot(), .{
-            .iterate = true,
-            .follow_symlinks = false,
-        }) catch |err| return step.fail(
-            "unable to open exact oracle source directory '{f}' without following links: {s}",
-            .{ source_path, @errorName(err) },
-        );
-        defer source_dir.close(io);
 
         const private_dir_permissions: std.Io.Dir.Permissions = if (std.Io.Dir.Permissions.has_executable_bit)
             .fromMode(0o700)
@@ -642,7 +786,7 @@ const ExactInstallTreeStep = struct {
             }
         }
 
-        staging_container.createDir(io, container_tree_name, private_dir_permissions) catch |err| return step.fail(
+        staging_container.createDir(io, container_tree_name, .default_dir) catch |err| return step.fail(
             "unable to create staged oracle tree inside private container '{s}': {s}",
             .{ staging_name, @errorName(err) },
         );
@@ -2319,6 +2463,17 @@ pub fn build(b: *std.Build) void {
         "Check fixed output admission and recoverable tracked-oracle publication.",
     );
     oracle_publication_check_step.dependOn(&oracle_publication_test.step);
+    const independent_oracle_gates = [_]*std.Build.Step{
+        loaded_parity_required_step,
+        loaded_response_safety_step,
+        loaded_malformed_step,
+        receipt_agent_parity_step,
+        check_runtime_step,
+        oracle_publication_check_step,
+    };
+    for (&independent_oracle_gates) |independent_oracle_gate| {
+        oracle_update_run.step.dependOn(independent_oracle_gate);
+    }
 
     const compare_world_image_v1_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
     compare_world_image_v1_oracle.setName("compare Boundary World Image v1 oracle trees");
@@ -2340,12 +2495,9 @@ pub fn build(b: *std.Build) void {
         "Check deterministic exact Boundary World Image v1 rewrite oracle bytes.",
     );
     oracle_check_step.dependOn(&compare_world_image_v1_oracle.step);
-    oracle_check_step.dependOn(loaded_parity_required_step);
-    oracle_check_step.dependOn(loaded_response_safety_step);
-    oracle_check_step.dependOn(loaded_malformed_step);
-    oracle_check_step.dependOn(receipt_agent_parity_step);
-    oracle_check_step.dependOn(check_runtime_step);
-    oracle_check_step.dependOn(oracle_publication_check_step);
+    for (&independent_oracle_gates) |independent_oracle_gate| {
+        oracle_check_step.dependOn(independent_oracle_gate);
+    }
     check_step.dependOn(oracle_check_step);
 
     const oracle_emit_dir = b.pathResolve(&.{
@@ -2365,16 +2517,20 @@ pub fn build(b: *std.Build) void {
         b.pathFromRoot(world_image_v1_corpus_dir),
     );
     replace_emitted_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);
+    const oracle_emit_parent_dir = std.Io.Dir.path.dirname(oracle_emit_dir) orelse
+        std.process.fatal("emitted Boundary oracle path has no parent: '{s}'", .{oracle_emit_dir});
+    const resolved_emit_parent = resolveExistingAbsolutePrefix(b, oracle_emit_parent_dir);
+    const oracle_emit_leaf = std.Io.Dir.path.basename(oracle_emit_dir);
     const verify_emitted_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
     verify_emitted_oracle.setName("verify emitted Boundary World Image v1 oracle bytes");
-    verify_emitted_oracle.setCwd(b.tmpPath());
+    verify_emitted_oracle.setCwd(.{ .cwd_relative = resolved_emit_parent });
     verify_emitted_oracle.addArgs(&.{
         "verify",
         "--expected-dir",
     });
     verify_emitted_oracle.addDirectoryArg(b.path(world_image_v1_corpus_dir));
     verify_emitted_oracle.addArg("--actual-dir");
-    verify_emitted_oracle.addDirectoryArg(.{ .cwd_relative = oracle_emit_dir });
+    verify_emitted_oracle.addArg(oracle_emit_leaf);
     verify_emitted_oracle.step.dependOn(&replace_emitted_oracle.step);
     const oracle_emit_step = b.step(
         "emit-boundary-world-image-v1-oracle",

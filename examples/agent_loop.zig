@@ -750,6 +750,92 @@ fn toolboxLoadedSchemaSet() ToolboxTarget.Module.LoadedValueSchemaSet {
     };
 }
 
+fn expectRetainedEntryArgumentParity(
+    comptime Target: type,
+    allocator: std.mem.Allocator,
+    loaded_module: anytype,
+    source_arguments: []const Target.Module.LoadedValue,
+    retained_arguments: anytype,
+) !void {
+    const expected_refs = loaded_module.argumentValueRefs();
+    if (source_arguments.len != expected_refs.len or retained_arguments.len != expected_refs.len) {
+        return error.OracleSemanticMismatch;
+    }
+
+    const schema_set = Target.Module.LoadedValueSchemaSet{
+        .schemas = Target.Program.compiled_plan.value_schemas,
+        .fields = Target.Program.compiled_plan.value_fields,
+        .variants = Target.Program.compiled_plan.value_variants,
+    };
+    for (source_arguments, retained_arguments, expected_refs, 0..) |source_argument, retained_argument, expected_ref, index| {
+        const retained_boundary_ref = Target.Program.Evidence.BoundaryValueRef.fromValueRef(retained_argument.value_ref);
+        if (retained_argument.local_index != @as(u16, @intCast(index)) or !retained_boundary_ref.eql(expected_ref)) {
+            return error.OracleSemanticMismatch;
+        }
+        var arena = Target.Module.LoadedValueArena.init(allocator);
+        defer arena.deinit();
+        const decoded_argument = Target.Module.LoadedExecution.decodeLoadedValueImage(
+            allocator,
+            &arena,
+            schema_set,
+            retained_argument.value_ref,
+            retained_argument.value_image_bytes,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OracleSemanticMismatch,
+        };
+        const source_image = Target.Module.LoadedExecution.encodeLoadedValueImageBytes(
+            allocator,
+            schema_set,
+            retained_argument.value_ref,
+            source_argument,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OracleSemanticMismatch,
+        };
+        defer allocator.free(source_image);
+        const decoded_image = Target.Module.LoadedExecution.encodeLoadedValueImageBytes(
+            allocator,
+            schema_set,
+            retained_argument.value_ref,
+            decoded_argument,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OracleSemanticMismatch,
+        };
+        defer allocator.free(decoded_image);
+        if (!std.mem.eql(u8, source_image, decoded_image)) return error.OracleSemanticMismatch;
+    }
+}
+
+fn expectLoadedRequestSiteParity(
+    comptime ProgramType: type,
+    comptime Target: type,
+    comptime Site: type,
+    generated_request: anytype,
+    loaded_request: anytype,
+) !void {
+    if (!generated_request.matches(Site) or
+        Target.WorldDispatchTable.lookup(generated_request.operation_site_index) != loaded_request.world_port_id or
+        generated_request.operation_site_index != loaded_request.residual_site_index or
+        generated_request.operation_site_fingerprint != loaded_request.residual_site_fingerprint or
+        loaded_request.response_kind != .@"resume")
+    {
+        return error.OracleSemanticMismatch;
+    }
+
+    const expected_payload_ref = ProgramType.Evidence.BoundaryValueRef.fromValueRef(Site.payload_ref);
+    const expected_response_ref = ProgramType.Evidence.BoundaryValueRef.fromValueRef(Site.resume_ref);
+    if (!loaded_request.payload_ref.eql(expected_payload_ref) or
+        !loaded_request.expected_response_ref.eql(expected_response_ref))
+    {
+        return error.OracleSemanticMismatch;
+    }
+}
+
 fn encodeLoadedString(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return RootTarget.Module.LoadedExecution.encodeLoadedValueImageBytes(
         allocator,
@@ -1024,7 +1110,13 @@ fn runToolboxProviderParityScenarioWithSink(
         var initial_image = try ToolboxTarget.Module.LoadedSessionImage.decode(allocator, initial_state);
         defer initial_image.deinit(allocator);
         try std.testing.expectEqual(ToolboxTarget.Module.LoadedSessionStatus.initial, initial_image.status);
-        try std.testing.expectEqual(entry_args.len, initial_image.entry_argument_images.len);
+        try expectRetainedEntryArgumentParity(
+            ToolboxTarget,
+            allocator,
+            loaded,
+            entry_args[0..],
+            initial_image.entry_argument_images,
+        );
         try sink.initial(initial_state);
         const restored_session = try ToolboxTarget.Module.LoadedModule.Session.thaw(
             allocator,
@@ -1066,6 +1158,7 @@ fn runToolboxProviderParityScenarioWithSink(
                 const loaded_payload = try decodeToolboxLoadedString(allocator, &payload_arena, loaded_request.canonical_payload_image);
 
                 if (generated_request.matches(FileRead)) {
+                    try expectLoadedRequestSiteParity(ToolboxProgram, ToolboxTarget, FileRead, generated_request, loaded_request);
                     const typed = try generated_request.as(FileRead);
                     const path: FileRead.Payload = try typed.payload();
                     try std.testing.expectEqualStrings(path, loaded_payload);
@@ -1076,6 +1169,7 @@ fn runToolboxProviderParityScenarioWithSink(
                     try generated_session.resumeTyped(typed, read_response_const);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(FileWrite)) {
+                    try expectLoadedRequestSiteParity(ToolboxProgram, ToolboxTarget, FileWrite, generated_request, loaded_request);
                     const typed = try generated_request.as(FileWrite);
                     const payload: FileWrite.Payload = try typed.payload();
                     try std.testing.expectEqualStrings(payload, loaded_payload);
@@ -1172,6 +1266,7 @@ fn runLoadedFailureParityScenario(
                 try std.testing.expectEqual(generated_request.operation_site_fingerprint, loaded_request.residual_site_fingerprint);
 
                 if (generated_request.matches(AgentDecision)) {
+                    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
                     const loaded_payload = try decodeLoadedString(allocator, &payload_arena, loaded_request.canonical_payload_image);
@@ -1184,6 +1279,7 @@ fn runLoadedFailureParityScenario(
                     try generated_session.resumeTyped(typed, action);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(ToolboxCall)) {
+                    try expectLoadedRequestSiteParity(Program, RootTarget, ToolboxCall, generated_request, loaded_request);
                     var capsule = try generated_session.capture(allocator);
                     defer capsule.deinit();
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
@@ -1244,6 +1340,7 @@ fn runMalformedLoadedActionImageScenario(allocator: std.mem.Allocator) !void {
     };
 
     try std.testing.expect(generated_request.matches(AgentDecision));
+    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
     try std.testing.expectEqual(
         RootTarget.WorldDispatchTable.lookup(generated_request.operation_site_index).?,
         loaded_request.world_port_id,
@@ -1305,7 +1402,13 @@ fn runLoadedParityScenarioWithSink(
         var initial_image = try RootTarget.Module.LoadedSessionImage.decode(allocator, initial_state);
         defer initial_image.deinit(allocator);
         try std.testing.expectEqual(RootTarget.Module.LoadedSessionStatus.initial, initial_image.status);
-        try std.testing.expectEqual(entry_args.len, initial_image.entry_argument_images.len);
+        try expectRetainedEntryArgumentParity(
+            RootTarget,
+            allocator,
+            loaded,
+            entry_args[0..],
+            initial_image.entry_argument_images,
+        );
         try sink.initial(initial_state);
         const restored_session = try RootTarget.Module.LoadedModule.Session.thaw(
             allocator,
@@ -1336,6 +1439,7 @@ fn runLoadedParityScenarioWithSink(
                 try std.testing.expectEqual(generated_request.operation_site_fingerprint, loaded_request.residual_site_fingerprint);
 
                 if (generated_request.matches(AgentDecision)) {
+                    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
                     if (oracle_sink) |sink| sink.model_calls += 1;
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
@@ -1350,6 +1454,7 @@ fn runLoadedParityScenarioWithSink(
                     try generated_session.resumeTyped(typed, action);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(ToolboxCall)) {
+                    try expectLoadedRequestSiteParity(Program, RootTarget, ToolboxCall, generated_request, loaded_request);
                     if (oracle_sink) |sink| sink.tool_calls += 1;
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
@@ -1947,6 +2052,146 @@ test "agent toolbox module full image binds file residual ports" {
     try std.testing.expectEqual(@as(usize, 2), loaded.imports().len);
     try std.testing.expectEqual(@as(u32, 0), loaded.worldPortForSite(FileRead.index).?);
     try std.testing.expectEqual(@as(u32, 1), loaded.worldPortForSite(FileWrite.index).?);
+}
+
+test "agent root retained initial arguments reject one-field semantic drift" {
+    const allocator = std.testing.allocator;
+    const full = try RootTarget.Module.fullImage(allocator);
+    defer allocator.free(full);
+    var loaded = try RootTarget.Module.decode(allocator, full);
+    defer loaded.deinit();
+
+    var entry_args = [_]RootTarget.Module.LoadedValue{
+        .{ .word_u64 = 3 },
+        .{ .bytes = initialObservation(.skeleton) },
+    };
+    var loaded_session = try RootTarget.Module.LoadedModule.Session.startExecutableWithArgs(
+        allocator,
+        &loaded,
+        RootTarget.Module.LoadedExecutionProfile.portableV2(),
+        entry_args[0..],
+    );
+    defer loaded_session.deinit();
+    const initial_state = try loaded_session.freeze(allocator);
+    defer allocator.free(initial_state);
+    var initial_image = try RootTarget.Module.LoadedSessionImage.decode(allocator, initial_state);
+    defer initial_image.deinit(allocator);
+
+    try expectRetainedEntryArgumentParity(
+        RootTarget,
+        allocator,
+        loaded,
+        entry_args[0..],
+        initial_image.entry_argument_images,
+    );
+    var drifted_entry_args = entry_args;
+    drifted_entry_args[0] = .{ .word_u64 = 4 };
+    try std.testing.expectError(error.OracleSemanticMismatch, expectRetainedEntryArgumentParity(
+        RootTarget,
+        allocator,
+        loaded,
+        drifted_entry_args[0..],
+        initial_image.entry_argument_images,
+    ));
+}
+
+test "agent toolbox retained initial arguments reject unused payload drift" {
+    const allocator = std.testing.allocator;
+    const full = try ToolboxTarget.Module.fullImage(allocator);
+    defer allocator.free(full);
+    var loaded = try ToolboxTarget.Module.decode(allocator, full);
+    defer loaded.deinit();
+
+    var entry_args = [_]ToolboxTarget.Module.LoadedValue{
+        .{ .word_u64 = 0 },
+        .{ .bytes = "" },
+    };
+    var loaded_session = try ToolboxTarget.Module.LoadedModule.Session.startExecutableWithArgs(
+        allocator,
+        &loaded,
+        ToolboxTarget.Module.LoadedExecutionProfile.portableV2(),
+        entry_args[0..],
+    );
+    defer loaded_session.deinit();
+    const initial_state = try loaded_session.freeze(allocator);
+    defer allocator.free(initial_state);
+    var initial_image = try ToolboxTarget.Module.LoadedSessionImage.decode(allocator, initial_state);
+    defer initial_image.deinit(allocator);
+
+    try expectRetainedEntryArgumentParity(
+        ToolboxTarget,
+        allocator,
+        loaded,
+        entry_args[0..],
+        initial_image.entry_argument_images,
+    );
+    var drifted_entry_args = entry_args;
+    drifted_entry_args[1] = .{ .bytes = "unused-but-different" };
+    try std.testing.expectError(error.OracleSemanticMismatch, expectRetainedEntryArgumentParity(
+        ToolboxTarget,
+        allocator,
+        loaded,
+        drifted_entry_args[0..],
+        initial_image.entry_argument_images,
+    ));
+}
+
+test "agent root request boundary parity rejects metadata drift" {
+    const allocator = std.testing.allocator;
+    const full = try RootTarget.Module.fullImage(allocator);
+    defer allocator.free(full);
+    var loaded = try RootTarget.Module.decode(allocator, full);
+    defer loaded.deinit();
+
+    var runtime = boundary.Runtime.init(allocator);
+    defer runtime.deinit();
+    var generated_session = try Program.Session.start(&runtime, .{
+        .initial_remaining = 3,
+        .initial_observation = initialObservation(.skeleton),
+    });
+    defer generated_session.deinit();
+    const generated_request = switch (try generated_session.next()) {
+        .request => |request| request,
+        .after => return error.UnexpectedAfter,
+        .done => return error.UnexpectedGeneratedDone,
+    };
+
+    var entry_args = [_]RootTarget.Module.LoadedValue{
+        .{ .word_u64 = 3 },
+        .{ .bytes = initialObservation(.skeleton) },
+    };
+    var loaded_session = try RootTarget.Module.LoadedModule.Session.startExecutableWithArgs(
+        allocator,
+        &loaded,
+        RootTarget.Module.LoadedExecutionProfile.portableV2(),
+        entry_args[0..],
+    );
+    defer loaded_session.deinit();
+    const loaded_request = switch (loaded_session.next()) {
+        .request => |request| request,
+        .done => return error.UnexpectedLoadedDone,
+        .failed => return error.UnexpectedLoadedFailure,
+    };
+
+    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
+    var drifted_request = loaded_request;
+    drifted_request.payload_ref = .{ .codec = "unit" };
+    try std.testing.expectError(
+        error.OracleSemanticMismatch,
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+    );
+    drifted_request = loaded_request;
+    drifted_request.expected_response_ref = .{ .codec = "unit" };
+    try std.testing.expectError(
+        error.OracleSemanticMismatch,
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+    );
+    drifted_request = loaded_request;
+    drifted_request.response_kind = .return_now;
+    try std.testing.expectError(
+        error.OracleSemanticMismatch,
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+    );
 }
 
 test "agent root generated-loaded parity skeleton one-tool flow" {
