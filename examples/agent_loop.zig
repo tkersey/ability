@@ -1146,13 +1146,6 @@ fn runToolboxProviderParityScenarioWithSink(
                     .done => return error.UnexpectedLoadedDone,
                     .failed => return error.UnexpectedLoadedFailure,
                 };
-                try std.testing.expectEqual(
-                    ToolboxTarget.WorldDispatchTable.lookup(generated_request.operation_site_index).?,
-                    loaded_request.world_port_id,
-                );
-                try std.testing.expectEqual(generated_request.operation_site_index, loaded_request.residual_site_index);
-                try std.testing.expectEqual(generated_request.operation_site_fingerprint, loaded_request.residual_site_fingerprint);
-
                 var payload_arena = ToolboxTarget.Module.LoadedValueArena.init(allocator);
                 defer payload_arena.deinit();
                 const loaded_payload = try decodeToolboxLoadedString(allocator, &payload_arena, loaded_request.canonical_payload_image);
@@ -1258,13 +1251,6 @@ fn runLoadedFailureParityScenario(
                     .done => return error.UnexpectedLoadedDone,
                     .failed => return error.UnexpectedLoadedFailure,
                 };
-                try std.testing.expectEqual(
-                    RootTarget.WorldDispatchTable.lookup(generated_request.operation_site_index).?,
-                    loaded_request.world_port_id,
-                );
-                try std.testing.expectEqual(generated_request.operation_site_index, loaded_request.residual_site_index);
-                try std.testing.expectEqual(generated_request.operation_site_fingerprint, loaded_request.residual_site_fingerprint);
-
                 if (generated_request.matches(AgentDecision)) {
                     try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
@@ -1341,12 +1327,6 @@ fn runMalformedLoadedActionImageScenario(allocator: std.mem.Allocator) !void {
 
     try std.testing.expect(generated_request.matches(AgentDecision));
     try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
-    try std.testing.expectEqual(
-        RootTarget.WorldDispatchTable.lookup(generated_request.operation_site_index).?,
-        loaded_request.world_port_id,
-    );
-    try std.testing.expectEqual(generated_request.operation_site_index, loaded_request.residual_site_index);
-    try std.testing.expectEqual(generated_request.operation_site_fingerprint, loaded_request.residual_site_fingerprint);
 
     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
     defer payload_arena.deinit();
@@ -1431,13 +1411,6 @@ fn runLoadedParityScenarioWithSink(
                     .done => return error.UnexpectedLoadedDone,
                     .failed => return error.UnexpectedLoadedFailure,
                 };
-                try std.testing.expectEqual(
-                    RootTarget.WorldDispatchTable.lookup(generated_request.operation_site_index).?,
-                    loaded_request.world_port_id,
-                );
-                try std.testing.expectEqual(generated_request.operation_site_index, loaded_request.residual_site_index);
-                try std.testing.expectEqual(generated_request.operation_site_fingerprint, loaded_request.residual_site_fingerprint);
-
                 if (generated_request.matches(AgentDecision)) {
                     try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
                     if (oracle_sink) |sink| sink.model_calls += 1;

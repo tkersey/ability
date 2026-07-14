@@ -69,6 +69,16 @@ fn resolveExistingAbsolutePrefix(b: *std.Build, absolute_path: []const u8) []con
     }
 }
 
+fn canonicalizeBuildOwnedCacheRoot(b: *std.Build) void {
+    const cache_path = b.cache_root.path orelse return;
+    if (!std.Io.Dir.path.isAbsolute(cache_path)) return;
+
+    // Generated LazyPaths carry this spelling into no-follow oracle readers.
+    // Canonicalize only the build-owned cache carrier; receiver-supplied paths
+    // retain their original admission semantics.
+    b.cache_root.path = resolveExistingAbsolutePrefix(b, cache_path);
+}
+
 const ExactInstallTreeStep = struct {
     step: std.Build.Step,
     source_dir: std.Build.LazyPath,
@@ -207,16 +217,21 @@ const ExactInstallTreeStep = struct {
             linux.STATX.BASIC_STATS,
             &statx,
         ))) {
-            .SUCCESS => return .{
-                .device = (@as(u128, statx.dev_major) << 32) | statx.dev_minor,
-                .inode = statx.ino,
-            },
+            .SUCCESS => return linuxStatxIdentity(statx),
             .INTR => continue,
             // Zig 0.16 intentionally omits Linux stat/fstat types. Without a
             // supported same-representation fallback, publication fails
             // closed when statx is unavailable or denied.
             .NOSYS, .PERM, .ACCES => return error.OracleFileIdentityUnavailable,
             else => return error.OracleFileIdentityUnavailable,
+        };
+    }
+
+    fn linuxStatxIdentity(statx: std.os.linux.Statx) !FileIdentity {
+        if (!statx.mask.INO) return error.OracleFileIdentityUnavailable;
+        return .{
+            .device = (@as(u128, statx.dev_major) << 32) | statx.dev_minor,
+            .inode = statx.ino,
         };
     }
 
@@ -247,6 +262,7 @@ const ExactInstallTreeStep = struct {
     const ResolvedDestinationDir = struct {
         dir: std.Io.Dir,
         followed_link: bool,
+        created: bool,
     };
 
     fn openDestinationDir(parent: std.Io.Dir, io: std.Io, name: []const u8) !ResolvedDestinationDir {
@@ -260,10 +276,11 @@ const ExactInstallTreeStep = struct {
                     .follow_symlinks = true,
                 }),
                 .followed_link = true,
+                .created = false,
             },
             else => return open_err,
         };
-        return .{ .dir = dir, .followed_link = false };
+        return .{ .dir = dir, .followed_link = false, .created = false };
     }
 
     fn openOrCreateDestinationDir(parent: std.Io.Dir, io: std.Io, name: []const u8) !ResolvedDestinationDir {
@@ -273,7 +290,9 @@ const ExactInstallTreeStep = struct {
                     error.PathAlreadyExists => {},
                     else => return create_err,
                 };
-                break :create try openDestinationDir(parent, io, name);
+                var created = try openDestinationDir(parent, io, name);
+                created.created = true;
+                break :create created;
             },
             else => return open_err,
         };
@@ -700,6 +719,20 @@ const ExactInstallTreeStep = struct {
                     .{component.name},
                 );
             }
+            if (resolved_child.created and std.Io.Dir.Permissions.has_executable_bit) {
+                var permissions_dir = child.openDir(io, ".", .{
+                    .iterate = true,
+                    .follow_symlinks = false,
+                }) catch |err| return step.fail(
+                    "unable to reopen newly created public oracle destination component '{s}' for mode normalization: {s}",
+                    .{ component.name, @errorName(err) },
+                );
+                defer permissions_dir.close(io);
+                permissions_dir.setPermissions(io, public_dir_permissions) catch |err| return step.fail(
+                    "unable to set public permissions on newly created oracle destination component '{s}': {s}",
+                    .{ component.name, @errorName(err) },
+                );
+            }
             const resolved_inside_protected = if (destination_used_link)
                 directoryIsWithinIdentity(child, io, protected_identity) catch |err| {
                     return step.fail(
@@ -1027,6 +1060,20 @@ test "exact oracle Linux identity observes the retained directory with statx" {
     try ExactInstallTreeStep.testLinuxStatxIdentityObservation();
 }
 
+test "exact oracle Linux statx identity rejects an unattested inode" {
+    var statx = std.mem.zeroes(std.os.linux.Statx);
+    statx.ino = 17;
+    try std.testing.expectError(
+        error.OracleFileIdentityUnavailable,
+        ExactInstallTreeStep.linuxStatxIdentity(statx),
+    );
+    statx.mask.INO = true;
+    try std.testing.expectEqual(
+        ExactInstallTreeStep.FileIdentity{ .device = 0, .inode = 17 },
+        try ExactInstallTreeStep.linuxStatxIdentity(statx),
+    );
+}
+
 fn parseTestArgs(b: *std.Build) TestArgs {
     const args = b.args orelse return .{
         .filters = &.{},
@@ -1308,6 +1355,7 @@ fn wireBoundaryImports(mod: *std.Build.Module, core: CoreModules) void {
 }
 
 pub fn build(b: *std.Build) void {
+    canonicalizeBuildOwnedCacheRoot(b);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
@@ -1376,6 +1424,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the boundary test suite.");
     const check_step = b.step("check", "Run the full Boundary validation suite.");
     check_step.dependOn(test_step);
+    const build_script_tests_mod = b.createModule(.{
+        .root_source_file = b.path("build.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    build_script_tests_mod.addImport("zlinter", b.dependency("zlinter", .{}).module("zlinter"));
+    addTestArtifact(b, test_step, build_script_tests_mod, test_args);
     addTestArtifact(b, test_step, boundary, test_args);
     addTestArtifact(b, test_step, boundary_shared, test_args);
     addTestArtifact(b, test_step, core.effect_ir, test_args);
