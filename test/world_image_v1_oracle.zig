@@ -5,10 +5,12 @@ const boundary = @import("boundary");
 const std = @import("std");
 
 const corpus_path = "conformance/world-image-v1/v0/boundary";
-const checksum_prefix = corpus_path ++ "/";
 const generated_bundle_path = "bundle";
 const tracked_publication_stage_path = "conformance/world-image-v1/v0/.boundary-oracle-stage";
 const tracked_publication_backup_path = "conformance/world-image-v1/v0/.boundary-oracle-backup";
+const oracle_generator_command = "zig build update-boundary-world-image-v1-oracle";
+const oracle_normal_check_command = "zig build check-boundary-world-image-v1-oracle --summary all";
+const expected_current_artifact_set_sha256 = "71835bc1016af51ec192cd3fe874819a561436fbc979b85da34d0aa419ce3916";
 
 const semantic = boundary.ir.builder.semantic;
 const EmptyHandlers = struct {};
@@ -135,6 +137,63 @@ fn helperPlan() boundary.ir.ProgramPlan {
 
 const HelperProgram = boundary.program("world-image-v1-oracle-helper-call", EmptyHandlers, struct {
     pub const compiled_plan = helperPlan();
+});
+
+fn portableWordPlan() boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .usize,
+        .result_codec = .usize,
+        .parameter_count = 0,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 3,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 2,
+        .first_instruction = 0,
+        .instruction_count = 4,
+    }};
+    const locals = [_]boundary.ir.plan.Local{
+        .{ .codec = .usize },
+        .{ .codec = .usize },
+        .{ .codec = .bool },
+    };
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 3, .terminator_index = 0 },
+        .{ .first_instruction = 3, .instruction_count = 1, .terminator_index = 1 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .jump, .primary = 1 },
+        .{ .kind = .return_value },
+    };
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .const_usize, .dst = 0, .string_literal = "18446744073709551615" },
+        .{ .kind = .compare_eq_zero, .dst = 2, .operand = 0 },
+        .{ .kind = .sub_one, .dst = 1, .operand = 0 },
+        boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 1)) catch unreachable,
+    };
+    return boundary.ir.builder.finish(.{
+        .label = "world-image-v1-oracle-portable-word",
+        .ir_hash = 0xB001_0007,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &locals,
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
+const PortableWordProgram = boundary.program("world-image-v1-oracle-portable-word", EmptyHandlers, struct {
+    pub const compiled_plan = portableWordPlan();
 });
 
 const ApprovalProtocol = boundary.ir.schema.Protocol(.{
@@ -604,6 +663,7 @@ fn DualTarget(comptime target_label: []const u8) type {
 
 const ScalarTarget = ClosedTarget(ScalarProgram, "world-image-v1-oracle-scalar-target", "world-image-v1-oracle-scalar-graph");
 const HelperTarget = ClosedTarget(HelperProgram, "world-image-v1-oracle-helper-target", "world-image-v1-oracle-helper-graph");
+const PortableWordTarget = ClosedTarget(PortableWordProgram, "world-image-v1-oracle-portable-word-target", "world-image-v1-oracle-portable-word-graph");
 const OneEffectTarget = SinglePortTarget(
     OneEffectProgram,
     OneEffectSite,
@@ -703,6 +763,12 @@ fn writeArtifact(
     defer allocator.free(path);
     if (std.Io.Dir.path.dirname(path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+}
+
+fn deleteArtifact(io: std.Io, allocator: std.mem.Allocator, output_dir: []const u8, relative_path: []const u8) !void {
+    const path = try joinPath(allocator, &.{ output_dir, relative_path });
+    defer allocator.free(path);
+    try std.Io.Dir.cwd().deleteFile(io, path);
 }
 
 fn expectEqualBytes(expected: []const u8, actual: []const u8) !void {
@@ -909,6 +975,75 @@ fn emitHelperCall(init: std.process.Init, allocator: std.mem.Allocator, output_d
     , .{ generated_done.value, result.i32, loaded.moduleFingerprint(), loaded_done.result_fingerprint });
     defer allocator.free(transcript);
     try writeArtifact(io, allocator, output_dir, "cases/helper-call.txt", transcript);
+}
+
+fn emitPortableWord(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    const io = init.io;
+    const module_bytes = try emitModule(
+        PortableWordTarget,
+        io,
+        allocator,
+        output_dir,
+        "artifacts/modules/portable-word.full-module",
+    );
+    defer allocator.free(module_bytes);
+
+    var runtime = boundary.Runtime.init(allocator);
+    defer runtime.deinit();
+    var generated = try PortableWordProgram.Session.start(&runtime, .{});
+    defer generated.deinit();
+    var generated_done = switch (try generated.next()) {
+        .done => |done| done,
+        .request => return error.UnexpectedGeneratedRequest,
+        .after => return error.UnexpectedGeneratedAfter,
+    };
+    defer generated_done.deinit();
+
+    var loaded = try PortableWordTarget.Module.decode(allocator, module_bytes);
+    defer loaded.deinit();
+    var loaded_session = try PortableWordTarget.Module.LoadedModule.Session.startExecutable(
+        allocator,
+        &loaded,
+        PortableWordTarget.Module.LoadedExecutionProfile.portableV2(),
+    );
+    defer loaded_session.deinit();
+    const loaded_done = switch (loaded_session.next()) {
+        .done => |done| done,
+        .request => return error.UnexpectedLoadedRequest,
+        .failed => return error.UnexpectedLoadedFailure,
+    };
+    var result_arena = PortableWordTarget.Module.LoadedValueArena.init(allocator);
+    defer result_arena.deinit();
+    const loaded_result = try PortableWordTarget.Module.LoadedExecution.decodeLoadedValueImage(
+        allocator,
+        &result_arena,
+        .{},
+        .{ .codec = .usize },
+        loaded_done.canonical_result_image,
+        .{},
+    );
+    const generated_result: u64 = @intCast(generated_done.value);
+    if (generated_result != std.math.maxInt(u64) - 1 or loaded_result.word_u64 != generated_result) {
+        return error.OracleSemanticMismatch;
+    }
+    try writeArtifact(io, allocator, output_dir, "artifacts/values/portable-word.result.loaded-value", loaded_done.canonical_result_image);
+    const completed_state = try loaded_session.freeze(allocator);
+    defer allocator.free(completed_state);
+    try writeArtifact(io, allocator, output_dir, "artifacts/states/portable-word.completed.loaded-session", completed_state);
+    const transcript = try std.fmt.allocPrint(allocator,
+        \\case_id: portable-word
+        \\generated_status: completed
+        \\loaded_status: completed
+        \\literal_u64: {d}
+        \\generated_result_u64: {d}
+        \\loaded_result_u64: {d}
+        \\module: artifacts/modules/portable-word.full-module
+        \\state: artifacts/states/portable-word.completed.loaded-session
+        \\result: artifacts/values/portable-word.result.loaded-value
+        \\
+    , .{ std.math.maxInt(u64), generated_result, loaded_result.word_u64 });
+    defer allocator.free(transcript);
+    try writeArtifact(io, allocator, output_dir, "cases/portable-word.txt", transcript);
 }
 
 fn emitOneEffect(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
@@ -1658,6 +1793,7 @@ const cases = [_]Case{
     .{ .case_id = "one-effect", .transcript = "cases/one-effect.txt" },
     .{ .case_id = "typed-product-sum", .transcript = "cases/typed-product-sum.txt" },
     .{ .case_id = "helper-call", .transcript = "cases/helper-call.txt" },
+    .{ .case_id = "portable-word", .transcript = "cases/portable-word.txt" },
     .{ .case_id = "helper-park", .transcript = "cases/helper-park.txt" },
     .{ .case_id = "multiple-residual", .transcript = "cases/multiple-residual.txt" },
     .{ .case_id = "budget-exhaustion", .transcript = "cases/budget-exhaustion.txt" },
@@ -1683,6 +1819,54 @@ fn pathLessThan(_: void, lhs: []u8, rhs: []u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
+fn isWindowsReservedOracleComponent(component: []const u8) bool {
+    const stem_end = std.mem.findScalar(u8, component, '.') orelse component.len;
+    const stem = component[0..stem_end];
+    if (std.ascii.eqlIgnoreCase(stem, "CON") or
+        std.ascii.eqlIgnoreCase(stem, "PRN") or
+        std.ascii.eqlIgnoreCase(stem, "AUX") or
+        std.ascii.eqlIgnoreCase(stem, "NUL"))
+    {
+        return true;
+    }
+    if (stem.len == 4 and
+        (std.ascii.eqlIgnoreCase(stem[0..3], "COM") or std.ascii.eqlIgnoreCase(stem[0..3], "LPT")) and
+        stem[3] >= '1' and stem[3] <= '9')
+    {
+        return true;
+    }
+    return false;
+}
+
+fn validateCanonicalOracleRelativePath(path: []const u8) !void {
+    if (path.len == 0 or path[0] == '/' or path[path.len - 1] == '/') return error.NonPortableOraclePath;
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or
+            std.mem.eql(u8, component, ".") or
+            std.mem.eql(u8, component, "..") or
+            component[component.len - 1] == '.' or
+            component[component.len - 1] == ' ' or
+            isWindowsReservedOracleComponent(component))
+        {
+            return error.NonPortableOraclePath;
+        }
+        for (component) |byte| {
+            if (byte < 0x20 or std.mem.findScalar(u8, "<>:\"|?*", byte) != null) {
+                return error.NonPortableOraclePath;
+            }
+        }
+    }
+}
+
+fn oraclePathsEqualFolded(lhs: []const u8, rhs: []const u8) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (std.ascii.toLower(left) != std.ascii.toLower(right)) return false;
+    }
+    return true;
+}
+
 fn canonicalOracleRelativePath(
     allocator: std.mem.Allocator,
     walked_path: []const u8,
@@ -1698,6 +1882,7 @@ fn canonicalOracleRelativePath(
             return error.NonPortableOraclePath;
         }
     }
+    try validateCanonicalOracleRelativePath(canonical);
     return canonical;
 }
 
@@ -1731,7 +1916,16 @@ fn listFiles(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !OwnedP
         }
     }
     const owned = try items.toOwnedSlice(allocator);
+    errdefer {
+        for (owned) |item| allocator.free(item);
+        allocator.free(owned);
+    }
     std.mem.sort([]u8, owned, {}, pathLessThan);
+    for (owned, 0..) |path, index| {
+        for (owned[index + 1 ..]) |other| {
+            if (oraclePathsEqualFolded(path, other)) return error.NonPortableOraclePathCollision;
+        }
+    }
     return .{ .allocator = allocator, .items = owned };
 }
 
@@ -1776,8 +1970,8 @@ const OracleManifestSemanticSource = struct {
 const oracle_semantic_source = OracleManifestSemanticSource{
     .package = "boundary",
     .package_version = "0.6.2",
-    .baseline_commit = "6a416951f8d22d0854616f094f23b2d44ab021a2",
-    .baseline_tree = "950838431ef965f21926b4ea14361f69bc16c2dd",
+    .baseline_commit = "ecc25c768a7e10d8e0f00c97049edb9ff8e4fb68",
+    .baseline_tree = "05b044299624ed13e8ab2b23b7e3c3ab0304e11c",
     .module_magic = ScalarProgram.Evidence.BoundaryTargetModule.magic,
     .loaded_execution_profile = 2,
     .loaded_session_image = 2,
@@ -1807,35 +2001,29 @@ fn writeManifest(init: std.process.Init, allocator: std.mem.Allocator, output_di
 
     var manifest: std.ArrayList(u8) = .empty;
     defer manifest.deinit(allocator);
-    const module_magic_json = try std.json.Stringify.valueAlloc(
+    const semantic_source_json = try std.json.Stringify.valueAlloc(
         allocator,
-        oracle_semantic_source.module_magic,
+        oracle_semantic_source,
         .{},
     );
-    defer allocator.free(module_magic_json);
+    defer allocator.free(semantic_source_json);
+    const generator_json = try std.json.Stringify.valueAlloc(allocator, oracle_generator_command, .{});
+    defer allocator.free(generator_json);
+    const normal_check_json = try std.json.Stringify.valueAlloc(allocator, oracle_normal_check_command, .{});
+    defer allocator.free(normal_check_json);
     try manifest.appendSlice(allocator,
         \\{
         \\  "format": "boundary-world-image-v1-rewrite-oracle-v0",
         \\  "format_version": 1,
-        \\  "semantic_source": {
-        \\    "package": "boundary",
-        \\    "package_version": "0.6.2",
-        \\    "baseline_commit": "6a416951f8d22d0854616f094f23b2d44ab021a2",
-        \\    "baseline_tree": "950838431ef965f21926b4ea14361f69bc16c2dd",
-        \\    "module_magic":
+        \\  "semantic_source":
     );
     try manifest.append(allocator, ' ');
-    try manifest.appendSlice(allocator, module_magic_json);
-    try manifest.appendSlice(
-        allocator,
-        ",\n" ++
-            "    \"loaded_execution_profile\": 2,\n" ++
-            "    \"loaded_session_image\": 2,\n" ++
-            "    \"zig_version\": \"0.16.0\"\n" ++
-            "  },\n" ++
-            "  \"generator\": \"zig build update-boundary-world-image-v1-oracle\",\n" ++
-            "  \"normal_check\": \"zig build check-boundary-world-image-v1-oracle --summary all\",\n",
-    );
+    try manifest.appendSlice(allocator, semantic_source_json);
+    try manifest.appendSlice(allocator, ",\n  \"generator\": ");
+    try manifest.appendSlice(allocator, generator_json);
+    try manifest.appendSlice(allocator, ",\n  \"normal_check\": ");
+    try manifest.appendSlice(allocator, normal_check_json);
+    try manifest.appendSlice(allocator, ",\n");
     try appendFmt(&manifest, allocator, "  \"case_count\": {d},\n", .{cases.len});
     try manifest.appendSlice(allocator, "  \"cases\": [");
     for (cases, 0..) |case, index| {
@@ -1872,7 +2060,12 @@ fn writeManifest(init: std.process.Init, allocator: std.mem.Allocator, output_di
     try writeArtifact(init.io, allocator, output_dir, "manifest.json", manifest.items);
 }
 
-fn checksumsBytes(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) ![]u8 {
+fn checksumsBytesWithPrefix(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    path_prefix: []const u8,
+) ![]u8 {
     var paths = try listFiles(init.io, allocator, output_dir);
     defer paths.deinit();
     var checksums: std.ArrayList(u8) = .empty;
@@ -1882,15 +2075,28 @@ fn checksumsBytes(init: std.process.Init, allocator: std.mem.Allocator, output_d
         const bytes = try readRelative(init.io, allocator, output_dir, relative_path);
         defer allocator.free(bytes);
         const hex = digestHex(sha256(bytes));
-        try appendFmt(&checksums, allocator, "{s}  {s}{s}\n", .{ &hex, checksum_prefix, relative_path });
+        try appendFmt(&checksums, allocator, "{s}  {s}{s}\n", .{ &hex, path_prefix, relative_path });
     }
     return checksums.toOwnedSlice(allocator);
+}
+
+fn checksumsBytes(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) ![]u8 {
+    return checksumsBytesWithPrefix(init, allocator, output_dir, "");
 }
 
 fn writeChecksums(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
     const checksums = try checksumsBytes(init, allocator, output_dir);
     defer allocator.free(checksums);
     try writeArtifact(init.io, allocator, output_dir, "checksums.sha256", checksums);
+}
+
+fn rewriteOracleMetadata(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+    try deleteArtifact(init.io, allocator, output_dir, "manifest.json");
+    try deleteArtifact(init.io, allocator, output_dir, "checksums.sha256");
+    try writeManifest(init, allocator, output_dir);
+    try writeChecksums(init, allocator, output_dir);
+    try validateManifest(init, allocator, output_dir, .generated);
+    try validateChecksums(init, allocator, output_dir, .current);
 }
 
 fn validateRequiredCases(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
@@ -1918,6 +2124,8 @@ const OracleManifest = struct {
     format: []const u8,
     format_version: u16,
     semantic_source: OracleManifestSemanticSource,
+    generator: []const u8,
+    normal_check: []const u8,
     case_count: usize,
     cases: []const OracleManifestCase,
     artifact_set_sha256: []const u8,
@@ -1931,6 +2139,7 @@ fn isOracleMetadataPath(path: []const u8) bool {
 
 const OracleManifestPolicy = enum {
     integrity,
+    generated,
     current,
 };
 
@@ -1944,7 +2153,10 @@ fn validateManifest(
     defer allocator.free(manifest_bytes);
     const parsed = std.json.parseFromSlice(OracleManifest, allocator, manifest_bytes, .{
         .ignore_unknown_fields = true,
-    }) catch return error.InvalidOracleManifest;
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidOracleManifest,
+    };
     defer parsed.deinit();
     const manifest = parsed.value;
     if (!std.mem.eql(u8, manifest.format, "boundary-world-image-v1-rewrite-oracle-v0") or
@@ -1952,7 +2164,7 @@ fn validateManifest(
     {
         return error.InvalidOracleManifest;
     }
-    if (policy == .current) {
+    if (policy != .integrity) {
         if (manifest.case_count != cases.len) return error.InvalidOracleManifest;
         const source = manifest.semantic_source;
         if (!std.mem.eql(u8, source.package, oracle_semantic_source.package) or
@@ -1962,7 +2174,9 @@ fn validateManifest(
             !std.mem.eql(u8, source.module_magic, oracle_semantic_source.module_magic) or
             source.loaded_execution_profile != oracle_semantic_source.loaded_execution_profile or
             source.loaded_session_image != oracle_semantic_source.loaded_session_image or
-            !std.mem.eql(u8, source.zig_version, oracle_semantic_source.zig_version))
+            !std.mem.eql(u8, source.zig_version, oracle_semantic_source.zig_version) or
+            !std.mem.eql(u8, manifest.generator, oracle_generator_command) or
+            !std.mem.eql(u8, manifest.normal_check, oracle_normal_check_command))
         {
             return error.InvalidOracleManifest;
         }
@@ -2013,8 +2227,12 @@ fn validateManifest(
     if (!std.mem.eql(u8, manifest.artifact_set_sha256, &artifact_set_hex)) {
         return error.InvalidOracleManifest;
     }
+    if (policy == .current and !std.mem.eql(u8, manifest.artifact_set_sha256, expected_current_artifact_set_sha256)) {
+        return error.InvalidOracleManifest;
+    }
 
     for (manifest.cases) |case| {
+        try validateCanonicalOracleRelativePath(case.transcript);
         if (isOracleMetadataPath(case.transcript)) return error.InvalidOracleManifest;
         var retained = false;
         for (paths.items) |path| {
@@ -2032,25 +2250,41 @@ fn validateManifest(
     }
 }
 
-fn validateChecksums(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
+const OracleChecksumPolicy = enum {
+    integrity,
+    current,
+};
+
+fn validateChecksums(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    policy: OracleChecksumPolicy,
+) !void {
     const actual = try readRelative(init.io, allocator, output_dir, "checksums.sha256");
     defer allocator.free(actual);
     const expected = try checksumsBytes(init, allocator, output_dir);
     defer allocator.free(expected);
-    if (!std.mem.eql(u8, expected, actual)) return error.InvalidOracleChecksums;
+    if (std.mem.eql(u8, expected, actual)) return;
+    if (policy == .integrity) {
+        const legacy = try checksumsBytesWithPrefix(init, allocator, output_dir, corpus_path ++ "/");
+        defer allocator.free(legacy);
+        if (std.mem.eql(u8, legacy, actual)) return;
+    }
+    return error.InvalidOracleChecksums;
 }
 
 fn validateOracleTree(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
     try requireDirectory(init.io, output_dir);
     try validateRequiredCases(init, allocator, output_dir);
     try validateManifest(init, allocator, output_dir, .current);
-    try validateChecksums(init, allocator, output_dir);
+    try validateChecksums(init, allocator, output_dir, .current);
 }
 
 fn validateOracleTreeIntegrity(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
     try requireDirectory(init.io, output_dir);
     try validateManifest(init, allocator, output_dir, .integrity);
-    try validateChecksums(init, allocator, output_dir);
+    try validateChecksums(init, allocator, output_dir, .integrity);
 }
 
 fn generateFresh(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
@@ -2058,6 +2292,7 @@ fn generateFresh(init: std.process.Init, allocator: std.mem.Allocator, output_di
     errdefer deleteDirectoryIfPresent(init.io, output_dir) catch {};
     try emitScalarAndBudget(init, allocator, output_dir);
     try emitHelperCall(init, allocator, output_dir);
+    try emitPortableWord(init, allocator, output_dir);
     try emitOneEffect(init, allocator, output_dir);
     try emitStructured(init, allocator, output_dir);
     try emitHelperPark(init, allocator, output_dir);
@@ -2066,7 +2301,10 @@ fn generateFresh(init: std.process.Init, allocator: std.mem.Allocator, output_di
     try validateRequiredCases(init, allocator, output_dir);
     try writeManifest(init, allocator, output_dir);
     try writeChecksums(init, allocator, output_dir);
-    try validateOracleTree(init, allocator, output_dir);
+    try requireDirectory(init.io, output_dir);
+    try validateRequiredCases(init, allocator, output_dir);
+    try validateManifest(init, allocator, output_dir, .generated);
+    try validateChecksums(init, allocator, output_dir, .current);
 }
 
 fn copyOracleTree(
@@ -2106,6 +2344,27 @@ fn requirePublicationParents(io: std.Io, paths: PublicationPaths) !void {
     }
 }
 
+fn isOracleIntegrityFailure(err: anyerror) bool {
+    return switch (err) {
+        error.InvalidOracleManifest,
+        error.InvalidOracleChecksums,
+        error.OracleDirectoryMissing,
+        error.UnsafeOraclePath,
+        error.UnsupportedOracleTreeEntry,
+        error.NonPortableOraclePath,
+        error.NonPortableOraclePathCollision,
+        error.FileNotFound,
+        error.IsDir,
+        error.NotDir,
+        error.StreamTooLong,
+        error.SymLinkLoop,
+        error.BadPathName,
+        error.NameTooLong,
+        => true,
+        else => false,
+    };
+}
+
 fn recoverPublication(
     init: std.process.Init,
     allocator: std.mem.Allocator,
@@ -2122,7 +2381,8 @@ fn recoverPublication(
         } else {
             if (target_kind.? != .directory) return error.UnsafeOraclePath;
             var target_valid = true;
-            validateOracleTreeIntegrity(init, allocator, paths.target) catch {
+            validateOracleTreeIntegrity(init, allocator, paths.target) catch |err| {
+                if (!isOracleIntegrityFailure(err)) return err;
                 target_valid = false;
             };
             if (target_valid) {
@@ -2211,6 +2471,25 @@ fn expectPublicationError(expected: anyerror, actual: ?anyerror) !void {
     if (received != expected) return received;
 }
 
+fn expectSelfConsistentCandidateRejected(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    candidate: []const u8,
+    expected_target: []const u8,
+    paths: PublicationPaths,
+) !void {
+    try rewriteOracleMetadata(init, allocator, candidate);
+    var candidate_error: ?anyerror = null;
+    publishOracleTree(init, allocator, candidate, paths, .none) catch |err| {
+        candidate_error = err;
+    };
+    try expectPublicationError(error.InvalidOracleManifest, candidate_error);
+    try compareTrees(init, allocator, expected_target, paths.target);
+    if (try pathKindNoFollow(init.io, paths.stage) != null or try pathKindNoFollow(init.io, paths.backup) != null) {
+        return error.OraclePublicationResidue;
+    }
+}
+
 fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const root = "publication-sandbox";
     const candidate = root ++ "/candidate";
@@ -2218,6 +2497,10 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const stage = root ++ "/stage";
     const backup = root ++ "/backup";
     const invalid_candidate = root ++ "/invalid-candidate";
+    const partial_candidate = root ++ "/partial-candidate";
+    const rehashed_module_candidate = root ++ "/rehashed-module-candidate";
+    const rehashed_session_candidate = root ++ "/rehashed-session-candidate";
+    const truncated_transcript_candidate = root ++ "/truncated-transcript-candidate";
     const stale_provenance_candidate = root ++ "/stale-provenance-candidate";
     const escaping_reference_candidate = root ++ "/escaping-reference-candidate";
     const existing_output = root ++ "/existing-output";
@@ -2243,6 +2526,30 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     };
     if (nonportable_path) |path| allocator.free(path);
     try expectPublicationError(error.NonPortableOraclePath, nonportable_error);
+
+    inline for (.{ "CON", "aux.txt", "COM1.bin", "lpt9", "trailing." }) |reserved_path| {
+        const candidate_path = try std.fmt.allocPrint(allocator, "artifacts/{s}", .{reserved_path});
+        defer allocator.free(candidate_path);
+        var reserved_error: ?anyerror = null;
+        const canonical_reserved: ?[]u8 = canonicalOracleRelativePath(allocator, candidate_path, '/') catch |err| failed: {
+            reserved_error = err;
+            break :failed null;
+        };
+        if (canonical_reserved) |path| allocator.free(path);
+        try expectPublicationError(error.NonPortableOraclePath, reserved_error);
+    }
+    if (!oraclePathsEqualFolded("cases/agent-skeleton.txt", "CASES/AGENT-SKELETON.TXT")) {
+        return error.NonPortableOraclePathCollisionNotDetected;
+    }
+    if (oraclePathsEqualFolded("cases/agent-skeleton.txt", "cases/agent-fixture.txt")) {
+        return error.DistinctOraclePathsCollided;
+    }
+    if (isOracleIntegrityFailure(error.AccessDenied) or isOracleIntegrityFailure(error.OutOfMemory)) {
+        return error.OperationalOracleFailureMisclassified;
+    }
+    if (!isOracleIntegrityFailure(error.InvalidOracleManifest) or !isOracleIntegrityFailure(error.FileNotFound)) {
+        return error.OracleIntegrityFailureMisclassified;
+    }
 
     try createFreshDirectory(init.io, root);
     defer deleteDirectoryIfPresent(init.io, root) catch {};
@@ -2272,6 +2579,28 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
         return error.OraclePublicationResidue;
     }
+
+    try copyOracleTree(init, allocator, candidate, partial_candidate);
+    try deleteArtifact(init.io, allocator, partial_candidate, "artifacts/values/scalar-pure.result.loaded-value");
+    try expectSelfConsistentCandidateRejected(init, allocator, partial_candidate, candidate, paths);
+
+    try copyOracleTree(init, allocator, candidate, rehashed_module_candidate);
+    const module_bytes = try readRelative(init.io, allocator, rehashed_module_candidate, "artifacts/modules/scalar-pure.full-module");
+    defer allocator.free(module_bytes);
+    module_bytes[0] = 'X';
+    try writeArtifact(init.io, allocator, rehashed_module_candidate, "artifacts/modules/scalar-pure.full-module", module_bytes);
+    try expectSelfConsistentCandidateRejected(init, allocator, rehashed_module_candidate, candidate, paths);
+
+    try copyOracleTree(init, allocator, candidate, rehashed_session_candidate);
+    const session_bytes = try readRelative(init.io, allocator, rehashed_session_candidate, "artifacts/states/scalar-pure.completed.loaded-session");
+    defer allocator.free(session_bytes);
+    session_bytes[session_bytes.len / 2] ^= 0x01;
+    try writeArtifact(init.io, allocator, rehashed_session_candidate, "artifacts/states/scalar-pure.completed.loaded-session", session_bytes);
+    try expectSelfConsistentCandidateRejected(init, allocator, rehashed_session_candidate, candidate, paths);
+
+    try copyOracleTree(init, allocator, candidate, truncated_transcript_candidate);
+    try writeArtifact(init.io, allocator, truncated_transcript_candidate, "cases/scalar-pure.txt", "case_id: scalar-pure\n");
+    try expectSelfConsistentCandidateRejected(init, allocator, truncated_transcript_candidate, candidate, paths);
 
     try copyOracleTree(init, allocator, candidate, stale_provenance_candidate);
     const current_manifest = try readRelative(init.io, allocator, stale_provenance_candidate, "manifest.json");
@@ -2320,7 +2649,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator) !void {
     validateOracleTreeIntegrity(init, allocator, escaping_reference_candidate) catch |err| {
         escaping_reference_error = err;
     };
-    try expectPublicationError(error.InvalidOracleManifest, escaping_reference_error);
+    try expectPublicationError(error.NonPortableOraclePath, escaping_reference_error);
 
     try deleteDirectoryIfPresent(init.io, target);
     try copyOracleTree(init, allocator, stale_provenance_candidate, target);

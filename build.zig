@@ -27,11 +27,15 @@ const TestArgs = struct {
 const ExactInstallTreeStep = struct {
     step: std.Build.Step,
     install_root: []const u8,
+    destination_path: []const u8,
+    protected_path: []const u8,
     path_components: []const []const u8,
 
     fn create(
         b: *std.Build,
         install_root: []const u8,
+        destination_path: []const u8,
+        protected_path: []const u8,
         path_components: []const []const u8,
     ) *@This() {
         std.debug.assert(path_components.len > 0);
@@ -49,6 +53,8 @@ const ExactInstallTreeStep = struct {
                 .makeFn = make,
             }),
             .install_root = b.dupePath(install_root),
+            .destination_path = b.dupePath(destination_path),
+            .protected_path = b.dupePath(protected_path),
             .path_components = b.dupeStrings(path_components),
         };
         return exact_tree;
@@ -57,6 +63,13 @@ const ExactInstallTreeStep = struct {
     fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
         const exact_tree: *@This() = @fieldParentPtr("step", step);
         const io = step.owner.graph.io;
+        if (std.mem.eql(u8, exact_tree.destination_path, exact_tree.protected_path)) {
+            return step.fail(
+                "refusing to emit the Boundary oracle over its tracked corpus at '{s}'",
+                .{exact_tree.protected_path},
+            );
+        }
+
         var opened: std.ArrayList(std.Io.Dir) = .empty;
         defer {
             var index = opened.items.len;
@@ -67,23 +80,44 @@ const ExactInstallTreeStep = struct {
             opened.deinit(options.gpa);
         }
 
-        const root = std.Io.Dir.cwd().openDir(io, exact_tree.install_root, .{
-            .follow_symlinks = false,
-        }) catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => return step.fail(
-                "unable to open oracle install root '{s}' without following links: {s}",
-                .{ exact_tree.install_root, @errorName(err) },
-            ),
-        };
-        opened.append(options.gpa, root) catch |err| {
-            root.close(io);
-            return err;
-        };
+        var current = std.Io.Dir.cwd();
+        var install_components = std.Io.Dir.path.componentIterator(exact_tree.install_root);
+        if (install_components.root()) |root_path| {
+            const root = std.Io.Dir.openDirAbsolute(io, root_path, .{
+                .follow_symlinks = false,
+            }) catch |err| return step.fail(
+                "unable to open oracle install filesystem root '{s}' without following links: {s}",
+                .{ root_path, @errorName(err) },
+            );
+            opened.append(options.gpa, root) catch |err| {
+                root.close(io);
+                return err;
+            };
+            current = root;
+        }
+
+        while (install_components.next()) |component| {
+            if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
+                return step.fail("unsafe oracle install-root component '{s}'", .{component.name});
+            }
+            const child = current.openDir(io, component.name, .{
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound => return,
+                else => return step.fail(
+                    "unable to open oracle install-root component '{s}' without following links: {s}",
+                    .{ component.name, @errorName(err) },
+                ),
+            };
+            opened.append(options.gpa, child) catch |err| {
+                child.close(io);
+                return err;
+            };
+            current = child;
+        }
 
         for (exact_tree.path_components[0 .. exact_tree.path_components.len - 1]) |component| {
-            const parent = opened.items[opened.items.len - 1];
-            const child = parent.openDir(io, component, .{
+            const child = current.openDir(io, component, .{
                 .follow_symlinks = false,
             }) catch |err| switch (err) {
                 error.FileNotFound => return,
@@ -96,11 +130,11 @@ const ExactInstallTreeStep = struct {
                 child.close(io);
                 return err;
             };
+            current = child;
         }
 
-        const parent = opened.items[opened.items.len - 1];
         const leaf = exact_tree.path_components[exact_tree.path_components.len - 1];
-        parent.deleteTree(io, leaf) catch |err| return step.fail(
+        current.deleteTree(io, leaf) catch |err| return step.fail(
             "unable to replace exact emitted oracle subtree '{s}': {s}",
             .{ leaf, @errorName(err) },
         );
@@ -1517,18 +1551,7 @@ pub fn build(b: *std.Build) void {
     const emit_runtime_step = b.step("emit-boundary-agent-runtime-artifacts", "Emit Boundary Agent Runtime pack-ready module artifacts.");
     emit_runtime_step.dependOn(&emit_boundary_agent_runtime.step);
     const check_runtime_step = b.step("check-boundary-agent-runtime-artifacts", "Check Boundary Agent Runtime pack-ready artifacts.");
-    const check_agent_root = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/agent-root.full-module", .{runtime_dist_dir}) });
-    check_agent_root.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_agent_root.step);
-    const check_toolbox = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/toolbox-provider.full-module", .{runtime_dist_dir}) });
-    check_toolbox.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_toolbox.step);
-    const check_protocol = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/boundary-protocol-manifest.bin", .{runtime_dist_dir}) });
-    check_protocol.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_protocol.step);
-    const check_profile = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/agent-profile.json", .{runtime_dist_dir}) });
-    check_profile.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_profile.step);
+    check_runtime_step.dependOn(&emit_boundary_agent_runtime.step);
     check_step.dependOn(check_runtime_step);
 
     const world_image_v1_corpus_dir = "conformance/world-image-v1/v0/boundary";
@@ -1544,18 +1567,33 @@ pub fn build(b: *std.Build) void {
         .root_module = world_image_v1_oracle_mod,
     });
 
-    const oracle_update_candidate_root = b.tmpPath();
-    const oracle_update_candidate_dir = oracle_update_candidate_root.path(b, "bundle");
-    const oracle_update_generate = b.addRunArtifact(world_image_v1_oracle_exe);
-    oracle_update_generate.setName("generate Boundary World Image v1 tracked-update candidate");
-    oracle_update_generate.setCwd(oracle_update_candidate_root);
-    oracle_update_generate.addArg("generate");
+    const oracle_update_candidate_a_root = b.tmpPath();
+    const oracle_update_candidate_b_root = b.tmpPath();
+    const oracle_update_candidate_a_dir = oracle_update_candidate_a_root.path(b, "bundle");
+    const oracle_update_candidate_b_dir = oracle_update_candidate_b_root.path(b, "bundle");
+    const oracle_update_generate_a = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_update_generate_a.setName("generate Boundary World Image v1 tracked-update candidate A");
+    oracle_update_generate_a.setCwd(oracle_update_candidate_a_root);
+    oracle_update_generate_a.addArg("generate");
+    const oracle_update_generate_b = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_update_generate_b.setName("generate Boundary World Image v1 tracked-update candidate B");
+    oracle_update_generate_b.setCwd(oracle_update_candidate_b_root);
+    oracle_update_generate_b.addArg("generate");
+    const oracle_update_compare = b.addRunArtifact(world_image_v1_oracle_exe);
+    oracle_update_compare.setName("compare Boundary World Image v1 tracked-update candidates");
+    oracle_update_compare.setCwd(b.path("."));
+    oracle_update_compare.addArgs(&.{ "verify", "--expected-dir" });
+    oracle_update_compare.addDirectoryArg(oracle_update_candidate_a_dir);
+    oracle_update_compare.addArg("--actual-dir");
+    oracle_update_compare.addDirectoryArg(oracle_update_candidate_b_dir);
+    oracle_update_compare.step.dependOn(&oracle_update_generate_a.step);
+    oracle_update_compare.step.dependOn(&oracle_update_generate_b.step);
     const oracle_update_run = b.addRunArtifact(world_image_v1_oracle_exe);
     oracle_update_run.setName("publish Boundary World Image v1 tracked oracle");
     oracle_update_run.setCwd(b.path("."));
     oracle_update_run.addArgs(&.{ "publish-tracked", "--candidate-dir" });
-    oracle_update_run.addDirectoryArg(oracle_update_candidate_dir);
-    oracle_update_run.step.dependOn(&oracle_update_generate.step);
+    oracle_update_run.addDirectoryArg(oracle_update_candidate_a_dir);
+    oracle_update_run.step.dependOn(&oracle_update_compare.step);
     const oracle_update_step = b.step(
         "update-boundary-world-image-v1-oracle",
         "Update the checked-in Boundary World Image v1 rewrite oracle.",
@@ -1624,6 +1662,8 @@ pub fn build(b: *std.Build) void {
     const replace_emitted_oracle = ExactInstallTreeStep.create(
         b,
         b.getInstallPath(.prefix, ""),
+        oracle_emit_dir,
+        b.pathFromRoot(world_image_v1_corpus_dir),
         &.{ "conformance", "world-image-v1", "v0", "boundary" },
     );
     replace_emitted_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);

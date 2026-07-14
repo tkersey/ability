@@ -1,0 +1,9 @@
+case_id: portable-word
+generated_status: completed
+loaded_status: completed
+literal_u64: 18446744073709551615
+generated_result_u64: 18446744073709551614
+loaded_result_u64: 18446744073709551614
+module: artifacts/modules/portable-word.full-module
+state: artifacts/states/portable-word.completed.loaded-session
+result: artifacts/values/portable-word.result.loaded-value

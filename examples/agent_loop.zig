@@ -901,6 +901,14 @@ const RootOracleSink = struct {
     output_dir: []const u8,
     scenario_name: []const u8,
     step_index: usize = 0,
+    model_calls: usize = 0,
+    tool_calls: usize = 0,
+
+    fn initial(self: *@This(), loaded_state: []const u8) !void {
+        const state_path = try std.fmt.allocPrint(self.allocator, "root/{s}/initial.loaded-session", .{self.scenario_name});
+        defer self.allocator.free(state_path);
+        try writeOracleExecutionArtifact(self.init.io, self.allocator, self.output_dir, state_path, loaded_state);
+    }
 
     fn request(self: *@This(), loaded_session: anytype, loaded_request: anytype, loaded_response: []const u8) !void {
         const loaded_state = try loaded_session.freeze(self.allocator);
@@ -1267,6 +1275,16 @@ fn runLoadedParityScenarioWithSink(
     );
     defer loaded_session.deinit();
 
+    if (oracle_sink) |sink| {
+        const initial_state = try loaded_session.freeze(allocator);
+        defer allocator.free(initial_state);
+        var initial_image = try RootTarget.Module.LoadedSessionImage.decode(allocator, initial_state);
+        defer initial_image.deinit(allocator);
+        try std.testing.expectEqual(RootTarget.Module.LoadedSessionStatus.initial, initial_image.status);
+        try std.testing.expectEqual(entry_args.len, initial_image.entry_argument_images.len);
+        try sink.initial(initial_state);
+    }
+
     while (true) {
         const generated_next = try generated_session.next();
         const loaded_next = loaded_session.next();
@@ -1286,6 +1304,7 @@ fn runLoadedParityScenarioWithSink(
                 try std.testing.expectEqual(generated_request.operation_site_fingerprint, loaded_request.residual_site_fingerprint);
 
                 if (generated_request.matches(AgentDecision)) {
+                    if (oracle_sink) |sink| sink.model_calls += 1;
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
                     const loaded_payload = try decodeLoadedString(allocator, &payload_arena, loaded_request.canonical_payload_image);
@@ -1299,6 +1318,7 @@ fn runLoadedParityScenarioWithSink(
                     try generated_session.resumeTyped(typed, action);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(ToolboxCall)) {
+                    if (oracle_sink) |sink| sink.tool_calls += 1;
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
                     const typed = try generated_request.as(ToolboxCall);
@@ -1652,13 +1672,13 @@ fn worldImageV1OracleTranscripts(
         \\generated_status: completed
         \\loaded_status: completed
         \\final_text: {s}
-        \\model_calls: 2
-        \\tool_calls: 1
+        \\model_calls: {d}
+        \\tool_calls: {d}
         \\module: artifacts/agent/agent-root.full-module
         \\provider_module: artifacts/agent/toolbox-provider.full-module
         \\execution_artifacts: artifacts/agent-execution/root/skeleton
         \\
-    , .{skeleton_result});
+    , .{ skeleton_result, skeleton_sink.model_calls, skeleton_sink.tool_calls });
     errdefer allocator.free(skeleton);
 
     const fixture = try std.fmt.allocPrint(allocator,
@@ -1667,13 +1687,13 @@ fn worldImageV1OracleTranscripts(
         \\loaded_status: completed
         \\final_text: {s}
         \\fixture_output: {s}
-        \\model_calls: 3
-        \\tool_calls: 2
+        \\model_calls: {d}
+        \\tool_calls: {d}
         \\module: artifacts/agent/agent-root.full-module
         \\provider_module: artifacts/agent/toolbox-provider.full-module
         \\execution_artifacts: artifacts/agent-execution/root/fixture
         \\
-    , .{ fixture_result, fixture_bytes });
+    , .{ fixture_result, fixture_bytes, fixture_sink.model_calls, fixture_sink.tool_calls });
     errdefer allocator.free(fixture);
 
     const loaded_provider = try std.fmt.allocPrint(allocator,
