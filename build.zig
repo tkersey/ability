@@ -80,6 +80,16 @@ const ExactInstallTreeStep = struct {
         inode: u128,
     };
 
+    const public_dir_permissions: std.Io.Dir.Permissions = if (std.Io.Dir.Permissions.has_executable_bit)
+        .fromMode(0o755)
+    else
+        .default_dir;
+
+    const public_file_permissions: std.Io.File.Permissions = if (std.Io.File.Permissions.has_executable_bit)
+        .fromMode(0o644)
+    else
+        .default_file;
+
     fn create(
         b: *std.Build,
         source_dir: std.Build.LazyPath,
@@ -142,6 +152,19 @@ const ExactInstallTreeStep = struct {
         return false;
     }
 
+    fn testFileIdentityComparison() !void {
+        const identity = FileIdentity{ .device = 7, .inode = 11 };
+        try std.testing.expect(std.meta.eql(identity, identity));
+        try std.testing.expect(!std.meta.eql(identity, .{ .device = 7, .inode = 12 }));
+    }
+
+    fn testLinuxStatxIdentityObservation() !void {
+        const cwd = std.Io.Dir.cwd();
+        const first = try linuxDirectoryIdentity(cwd);
+        const second = try linuxDirectoryIdentity(cwd);
+        try std.testing.expect(std.meta.eql(first, second));
+    }
+
     fn windowsDirectoryIdentity(dir: std.Io.Dir) !FileIdentity {
         const windows = std.os.windows;
         var io_status = std.mem.zeroes(windows.IO_STATUS_BLOCK);
@@ -189,7 +212,10 @@ const ExactInstallTreeStep = struct {
                 .inode = statx.ino,
             },
             .INTR => continue,
-            .NOSYS, .PERM, .ACCES => return posixDirectoryIdentity(dir),
+            // Zig 0.16 intentionally omits Linux stat/fstat types. Without a
+            // supported same-representation fallback, publication fails
+            // closed when statx is unavailable or denied.
+            .NOSYS, .PERM, .ACCES => return error.OracleFileIdentityUnavailable,
             else => return error.OracleFileIdentityUnavailable,
         };
     }
@@ -293,7 +319,7 @@ const ExactInstallTreeStep = struct {
         source_reader.size = stat.size;
 
         var atomic_file = try destination.createFileAtomic(io, name, .{
-            .permissions = stat.permissions,
+            .permissions = public_file_permissions,
             .replace = false,
         });
         defer atomic_file.deinit(io);
@@ -304,6 +330,9 @@ const ExactInstallTreeStep = struct {
             error.WriteFailed => return destination_writer.err.?,
         };
         try destination_writer.flush();
+        if (std.Io.File.Permissions.has_executable_bit) {
+            try atomic_file.file.setPermissions(io, public_file_permissions);
+        }
         try atomic_file.link(io);
     }
 
@@ -320,16 +349,20 @@ const ExactInstallTreeStep = struct {
             switch (entry.kind) {
                 .file => try copyFileNoFollow(source, destination, io, entry.name),
                 .directory => {
-                    try destination.createDir(io, entry.name, .default_dir);
+                    try destination.createDir(io, entry.name, public_dir_permissions);
                     var source_child = try source.openDir(io, entry.name, .{
                         .iterate = true,
                         .follow_symlinks = false,
                     });
                     defer source_child.close(io);
                     var destination_child = try destination.openDir(io, entry.name, .{
+                        .iterate = true,
                         .follow_symlinks = false,
                     });
                     defer destination_child.close(io);
+                    if (std.Io.Dir.Permissions.has_executable_bit) {
+                        try destination_child.setPermissions(io, public_dir_permissions);
+                    }
                     try copyTreeNoFollow(source_child, destination_child, io);
                 },
                 .block_device,
@@ -555,7 +588,21 @@ const ExactInstallTreeStep = struct {
             source_opened.deinit(options.gpa);
         }
         var source_dir = source_path.root_dir.handle;
-        if (source_path.sub_path.len == 0) {
+        var source_components = std.Io.Dir.path.componentIterator(source_path.sub_path);
+        if (source_components.root()) |root_path| {
+            const source_root = std.Io.Dir.openDirAbsolute(io, root_path, .{
+                .iterate = source_components.peekNext() == null,
+                .follow_symlinks = false,
+            }) catch |err| return step.fail(
+                "unable to open exact oracle source filesystem root '{s}' without following links: {s}",
+                .{ root_path, @errorName(err) },
+            );
+            source_opened.append(options.gpa, source_root) catch |err| {
+                source_root.close(io);
+                return err;
+            };
+            source_dir = source_root;
+        } else if (source_path.sub_path.len == 0) {
             const source_root = source_dir.openDir(io, ".", .{
                 .iterate = true,
                 .follow_symlinks = false,
@@ -568,28 +615,23 @@ const ExactInstallTreeStep = struct {
                 return err;
             };
             source_dir = source_root;
-        } else {
-            var source_components = std.Io.Dir.path.componentIterator(source_path.sub_path);
-            if (source_components.root() != null) {
-                return step.fail("exact oracle source path is not root-relative: '{f}'", .{source_path});
+        }
+        while (source_components.next()) |component| {
+            if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
+                return step.fail("unsafe exact oracle source component '{s}'", .{component.name});
             }
-            while (source_components.next()) |component| {
-                if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
-                    return step.fail("unsafe exact oracle source component '{s}'", .{component.name});
-                }
-                const child = source_dir.openDir(io, component.name, .{
-                    .iterate = source_components.peekNext() == null,
-                    .follow_symlinks = false,
-                }) catch |err| return step.fail(
-                    "unable to open exact oracle source component '{s}' without following links: {s}",
-                    .{ component.name, @errorName(err) },
-                );
-                source_opened.append(options.gpa, child) catch |err| {
-                    child.close(io);
-                    return err;
-                };
-                source_dir = child;
-            }
+            const child = source_dir.openDir(io, component.name, .{
+                .iterate = source_components.peekNext() == null,
+                .follow_symlinks = false,
+            }) catch |err| return step.fail(
+                "unable to open exact oracle source component '{s}' without following links: {s}",
+                .{ component.name, @errorName(err) },
+            );
+            source_opened.append(options.gpa, child) catch |err| {
+                child.close(io);
+                return err;
+            };
+            source_dir = child;
         }
 
         var opened: std.ArrayList(std.Io.Dir) = .empty;
@@ -787,7 +829,7 @@ const ExactInstallTreeStep = struct {
             }
         }
 
-        staging_container.createDir(io, container_tree_name, .default_dir) catch |err| return step.fail(
+        staging_container.createDir(io, container_tree_name, public_dir_permissions) catch |err| return step.fail(
             "unable to create staged oracle tree inside private container '{s}': {s}",
             .{ staging_name, @errorName(err) },
         );
@@ -807,6 +849,12 @@ const ExactInstallTreeStep = struct {
             );
         };
         staging_tree_open = true;
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            staging_tree.setPermissions(io, public_dir_permissions) catch |err| return step.fail(
+                "unable to set public permissions on staged oracle tree in private container '{s}': {s}",
+                .{ staging_name, @errorName(err) },
+            );
+        }
         staging_tree_identity = directoryIdentity(staging_tree) catch |err| return step.fail(
             "unable to identify staged oracle tree in private container '{s}': {s}",
             .{ staging_name, @errorName(err) },
@@ -969,6 +1017,15 @@ const ExactInstallTreeStep = struct {
         step.result_cached = false;
     }
 };
+
+test "exact oracle identities compare canonically" {
+    try ExactInstallTreeStep.testFileIdentityComparison();
+}
+
+test "exact oracle Linux identity observes the retained directory with statx" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try ExactInstallTreeStep.testLinuxStatxIdentityObservation();
+}
 
 fn parseTestArgs(b: *std.Build) TestArgs {
     const args = b.args orelse return .{
@@ -2532,6 +2589,7 @@ pub fn build(b: *std.Build) void {
     verify_emitted_oracle.addDirectoryArg(b.path(world_image_v1_corpus_dir));
     verify_emitted_oracle.addArg("--actual-dir");
     verify_emitted_oracle.addArg(oracle_emit_leaf);
+    verify_emitted_oracle.addArg("--require-public-modes");
     verify_emitted_oracle.step.dependOn(&replace_emitted_oracle.step);
     const oracle_emit_step = b.step(
         "emit-boundary-world-image-v1-oracle",

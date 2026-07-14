@@ -2925,7 +2925,7 @@ fn publishTrackedOracle(
         if (err == error.OracleReceiverPinMismatch) {
             const candidate_pin = try oracleReceiverPin(init, allocator, candidate_dir);
             std.debug.print(
-                "oracle receiver pin mismatch: expected {s}, candidate {s}, candidate tree {s}\n",
+                "oracle receiver pin mismatch: expected {s}, producer candidate {s}, candidate tree {s}; candidate identity is diagnostic only; do not replace the receiver pin without independent receiver-owner approval\n",
                 .{ receiver_pin, &candidate_pin, candidate_dir },
             );
         }
@@ -2958,6 +2958,39 @@ fn compareTrees(
         const actual = try readRelative(init.io, allocator, actual_dir, actual_path);
         defer allocator.free(actual);
         if (!std.mem.eql(u8, expected, actual)) return error.OracleByteDrift;
+    }
+}
+
+fn requirePublicOracleModes(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+) !void {
+    if (!std.Io.File.Permissions.has_executable_bit) return;
+
+    var root = try openOracleRootNoFollow(init.io, root_path);
+    defer root.close(init.io);
+    const root_stat = try root.statFile(init.io, ".", .{ .follow_symlinks = false });
+    if (root_stat.permissions.toMode() & 0o777 != 0o755) {
+        return error.NonPublicOracleDirectoryMode;
+    }
+
+    var walker = try root.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(init.io)) |entry| {
+        const stat = try root.statFile(init.io, entry.path, .{ .follow_symlinks = false });
+        const expected_mode: std.posix.mode_t = switch (entry.kind) {
+            .directory => 0o755,
+            .file => 0o644,
+            else => return error.UnsupportedOracleTreeEntry,
+        };
+        if (stat.permissions.toMode() & 0o777 != expected_mode) {
+            return switch (entry.kind) {
+                .directory => error.NonPublicOracleDirectoryMode,
+                .file => error.NonPublicOracleFileMode,
+                else => unreachable,
+            };
+        }
     }
 }
 
@@ -3676,10 +3709,14 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, command, "verify")) {
-        if (argv.items.len != 4) return error.InvalidArguments;
+        const require_public_modes = argv.items.len == 5 and
+            std.mem.eql(u8, argv.items[4], "--require-public-modes");
+        if (argv.items.len != 4 and !require_public_modes) return error.InvalidArguments;
         const expected_dir = try argumentValue(argv.items, "--expected-dir");
         const actual_dir = try argumentValue(argv.items, "--actual-dir");
-        return compareTrees(init, allocator, expected_dir, actual_dir);
+        try compareTrees(init, allocator, expected_dir, actual_dir);
+        if (require_public_modes) try requirePublicOracleModes(init, allocator, actual_dir);
+        return;
     }
     return error.InvalidArguments;
 }
