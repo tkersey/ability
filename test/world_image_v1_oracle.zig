@@ -1857,7 +1857,9 @@ fn isWindowsReservedOracleComponent(component: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(stem, "CON") or
         std.ascii.eqlIgnoreCase(stem, "PRN") or
         std.ascii.eqlIgnoreCase(stem, "AUX") or
-        std.ascii.eqlIgnoreCase(stem, "NUL"))
+        std.ascii.eqlIgnoreCase(stem, "NUL") or
+        std.ascii.eqlIgnoreCase(stem, "CONIN$") or
+        std.ascii.eqlIgnoreCase(stem, "CONOUT$"))
     {
         return true;
     }
@@ -3103,7 +3105,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     if (nonportable_path) |path| allocator.free(path);
     try expectPublicationError(error.NonPortableOraclePath, nonportable_error);
 
-    inline for (.{ "CON", "aux.txt", "COM1.bin", "lpt9", "COM\xc2\xb9.bin", "lpt\xc2\xb3", "trailing." }) |reserved_path| {
+    inline for (.{ "CON", "aux.txt", "COM1.bin", "lpt9", "CONIN$", "conout$", "COM\xc2\xb9.bin", "lpt\xc2\xb3", "trailing." }) |reserved_path| {
         const candidate_path = try std.fmt.allocPrint(allocator, "artifacts/{s}", .{reserved_path});
         defer allocator.free(candidate_path);
         var reserved_error: ?anyerror = null;

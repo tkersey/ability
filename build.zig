@@ -189,6 +189,7 @@ const ExactInstallTreeStep = struct {
                 .inode = statx.ino,
             },
             .INTR => continue,
+            .NOSYS, .PERM, .ACCES => return posixDirectoryIdentity(dir),
             else => return error.OracleFileIdentityUnavailable,
         };
     }
