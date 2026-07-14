@@ -1,4 +1,5 @@
 // zlinter-disable require_doc_comment
+const builtin = @import("builtin");
 const package = @import("build.zig.zon");
 const std = @import("std");
 const zlinter = @import("zlinter");
@@ -26,23 +27,23 @@ const TestArgs = struct {
 
 const ExactInstallTreeStep = struct {
     step: std.Build.Step,
-    install_root: []const u8,
+    source_dir: std.Build.LazyPath,
     destination_path: []const u8,
     protected_path: []const u8,
-    path_components: []const []const u8,
+
+    const FileIdentity = struct {
+        device: u128,
+        inode: u128,
+    };
 
     fn create(
         b: *std.Build,
-        install_root: []const u8,
+        source_dir: std.Build.LazyPath,
         destination_path: []const u8,
         protected_path: []const u8,
-        path_components: []const []const u8,
     ) *@This() {
-        std.debug.assert(path_components.len > 0);
-        for (path_components) |component| {
-            std.debug.assert(component.len > 0);
-            for (component) |byte| std.debug.assert(!std.Io.Dir.path.isSep(byte));
-        }
+        std.debug.assert(std.Io.Dir.path.isAbsolute(destination_path));
+        std.debug.assert(std.Io.Dir.path.isAbsolute(protected_path));
         const exact_tree = b.allocator.create(@This()) catch |err|
             std.process.fatal("unable to allocate exact install-tree step: {s}", .{@errorName(err)});
         exact_tree.* = .{
@@ -52,53 +53,407 @@ const ExactInstallTreeStep = struct {
                 .owner = b,
                 .makeFn = make,
             }),
-            .install_root = b.dupePath(install_root),
+            .source_dir = source_dir.dupe(b),
             .destination_path = b.dupePath(destination_path),
             .protected_path = b.dupePath(protected_path),
-            .path_components = b.dupeStrings(path_components),
         };
+        source_dir.addStepDependencies(&exact_tree.step);
         return exact_tree;
+    }
+
+    fn pathComponentEql(lhs: []const u8, rhs: []const u8) bool {
+        return if (builtin.os.tag == .windows)
+            std.ascii.eqlIgnoreCase(lhs, rhs)
+        else
+            std.mem.eql(u8, lhs, rhs);
+    }
+
+    fn pathContainsOrEquals(ancestor: []const u8, descendant: []const u8) bool {
+        var ancestor_components = std.Io.Dir.path.componentIterator(ancestor);
+        var descendant_components = std.Io.Dir.path.componentIterator(descendant);
+        const ancestor_root = ancestor_components.root() orelse return false;
+        const descendant_root = descendant_components.root() orelse return false;
+        if (!pathComponentEql(ancestor_root, descendant_root)) return false;
+
+        while (ancestor_components.next()) |ancestor_component| {
+            const descendant_component = descendant_components.next() orelse return false;
+            if (!pathComponentEql(ancestor_component.name, descendant_component.name)) return false;
+        }
+        return true;
+    }
+
+    fn directoryIdentity(dir: std.Io.Dir) !FileIdentity {
+        return switch (builtin.os.tag) {
+            .windows => windowsDirectoryIdentity(dir),
+            .linux => linuxDirectoryIdentity(dir),
+            .wasi => wasiDirectoryIdentity(dir),
+            else => posixDirectoryIdentity(dir),
+        };
+    }
+
+    fn identityMatchesAny(identity: FileIdentity, identities: []const FileIdentity) bool {
+        for (identities) |candidate| {
+            if (std.meta.eql(identity, candidate)) return true;
+        }
+        return false;
+    }
+
+    fn windowsDirectoryIdentity(dir: std.Io.Dir) !FileIdentity {
+        const windows = std.os.windows;
+        var io_status = std.mem.zeroes(windows.IO_STATUS_BLOCK);
+        var volume_info = std.mem.zeroes(windows.FILE.FS_VOLUME_INFORMATION);
+        switch (windows.ntdll.NtQueryVolumeInformationFile(
+            dir.handle,
+            &io_status,
+            &volume_info,
+            @sizeOf(windows.FILE.FS_VOLUME_INFORMATION),
+            .Volume,
+        )) {
+            .SUCCESS, .BUFFER_OVERFLOW => {},
+            else => return error.OracleFileIdentityUnavailable,
+        }
+
+        var internal_info = std.mem.zeroes(windows.FILE.INTERNAL_INFORMATION);
+        switch (windows.ntdll.NtQueryInformationFile(
+            dir.handle,
+            &io_status,
+            &internal_info,
+            @sizeOf(windows.FILE.INTERNAL_INFORMATION),
+            .Internal,
+        )) {
+            .SUCCESS => {},
+            else => return error.OracleFileIdentityUnavailable,
+        }
+        return .{
+            .device = volume_info.VolumeSerialNumber,
+            .inode = @as(u64, @bitCast(internal_info.IndexNumber)),
+        };
+    }
+
+    fn linuxDirectoryIdentity(dir: std.Io.Dir) !FileIdentity {
+        const linux = std.os.linux;
+        var statx = std.mem.zeroes(linux.Statx);
+        while (true) switch (linux.errno(linux.statx(
+            dir.handle,
+            "",
+            linux.AT.EMPTY_PATH,
+            linux.STATX.BASIC_STATS,
+            &statx,
+        ))) {
+            .SUCCESS => return .{
+                .device = (@as(u128, statx.dev_major) << 32) | statx.dev_minor,
+                .inode = statx.ino,
+            },
+            .INTR => continue,
+            else => return error.OracleFileIdentityUnavailable,
+        };
+    }
+
+    fn wasiDirectoryIdentity(dir: std.Io.Dir) !FileIdentity {
+        const wasi = std.os.wasi;
+        var stat = std.mem.zeroes(wasi.filestat_t);
+        if (wasi.fd_filestat_get(dir.handle, &stat) != .SUCCESS) {
+            return error.OracleFileIdentityUnavailable;
+        }
+        return .{
+            .device = stat.dev,
+            .inode = stat.ino,
+        };
+    }
+
+    fn posixDirectoryIdentity(dir: std.Io.Dir) !FileIdentity {
+        var stat = std.mem.zeroes(std.c.Stat);
+        while (true) switch (std.c.errno(std.c.fstat(dir.handle, &stat))) {
+            .SUCCESS => return .{
+                .device = @intCast(stat.dev),
+                .inode = @intCast(stat.ino),
+            },
+            .INTR => continue,
+            else => return error.OracleFileIdentityUnavailable,
+        };
+    }
+
+    fn openOrCreateDirNoFollow(parent: std.Io.Dir, io: std.Io, name: []const u8) !std.Io.Dir {
+        return parent.openDir(io, name, .{
+            .iterate = false,
+            .follow_symlinks = false,
+        }) catch |open_err| switch (open_err) {
+            error.FileNotFound => {
+                parent.createDir(io, name, .default_dir) catch |create_err| switch (create_err) {
+                    error.PathAlreadyExists => {},
+                    else => return create_err,
+                };
+                return parent.openDir(io, name, .{
+                    .iterate = false,
+                    .follow_symlinks = false,
+                });
+            },
+            else => return open_err,
+        };
+    }
+
+    fn copyFileNoFollow(source: std.Io.Dir, destination: std.Io.Dir, io: std.Io, name: []const u8) !void {
+        const source_file = try source.openFile(io, name, .{
+            .allow_directory = false,
+            .follow_symlinks = false,
+        });
+        var source_reader: std.Io.File.Reader = .init(source_file, io, &.{});
+        defer source_reader.file.close(io);
+        const stat = try source_reader.file.stat(io);
+        if (stat.kind != .file) return error.UnsupportedOracleTreeEntry;
+        source_reader.size = stat.size;
+
+        var atomic_file = try destination.createFileAtomic(io, name, .{
+            .permissions = stat.permissions,
+            .replace = false,
+        });
+        defer atomic_file.deinit(io);
+        var buffer: [1024]u8 = undefined;
+        var destination_writer = atomic_file.file.writer(io, &buffer);
+        _ = destination_writer.interface.sendFileAll(&source_reader, .unlimited) catch |err| switch (err) {
+            error.ReadFailed => return source_reader.err.?,
+            error.WriteFailed => return destination_writer.err.?,
+        };
+        try destination_writer.flush();
+        try atomic_file.link(io);
+    }
+
+    fn copyTreeNoFollow(source: std.Io.Dir, destination: std.Io.Dir, io: std.Io) !void {
+        var iterator = source.iterateAssumeFirstIteration();
+        while (try iterator.next(io)) |entry| {
+            if (entry.name.len == 0 or
+                std.mem.eql(u8, entry.name, ".") or
+                std.mem.eql(u8, entry.name, "..") or
+                std.mem.findAny(u8, entry.name, "/\\") != null)
+            {
+                return error.UnsupportedOracleTreeEntry;
+            }
+            switch (entry.kind) {
+                .file => try copyFileNoFollow(source, destination, io, entry.name),
+                .directory => {
+                    try destination.createDir(io, entry.name, .default_dir);
+                    var source_child = try source.openDir(io, entry.name, .{
+                        .iterate = true,
+                        .follow_symlinks = false,
+                    });
+                    defer source_child.close(io);
+                    var destination_child = try destination.openDir(io, entry.name, .{
+                        .follow_symlinks = false,
+                    });
+                    defer destination_child.close(io);
+                    try copyTreeNoFollow(source_child, destination_child, io);
+                },
+                .block_device,
+                .character_device,
+                .named_pipe,
+                .sym_link,
+                .unix_domain_socket,
+                .whiteout,
+                .door,
+                .event_port,
+                .unknown,
+                => return error.UnsupportedOracleTreeEntry,
+            }
+        }
+    }
+
+    fn deleteNonDirectoryNoFollow(parent: std.Io.Dir, io: std.Io, name: []const u8) !void {
+        parent.deleteFile(io, name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            error.IsDir => return error.OracleCleanupRace,
+            else => return err,
+        };
+    }
+
+    fn clearDirectoryNoFollow(
+        dir: std.Io.Dir,
+        io: std.Io,
+        protected_identities: []const FileIdentity,
+    ) !void {
+        var iterator = dir.iterate();
+        while (try iterator.next(io)) |entry| {
+            if (entry.name.len == 0 or
+                std.mem.eql(u8, entry.name, ".") or
+                std.mem.eql(u8, entry.name, "..") or
+                std.mem.findAny(u8, entry.name, "/\\") != null)
+            {
+                return error.UnsupportedOracleTreeEntry;
+            }
+            if (entry.kind != .directory) {
+                try deleteNonDirectoryNoFollow(dir, io, entry.name);
+                continue;
+            }
+
+            var child = dir.openDir(io, entry.name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                error.NotDir, error.SymLinkLoop => {
+                    try deleteNonDirectoryNoFollow(dir, io, entry.name);
+                    continue;
+                },
+                else => return err,
+            };
+            const child_identity = directoryIdentity(child) catch |err| {
+                child.close(io);
+                return err;
+            };
+            if (identityMatchesAny(child_identity, protected_identities)) {
+                child.close(io);
+                return error.ProtectedOracleCleanupAlias;
+            }
+            clearDirectoryNoFollow(child, io, protected_identities) catch |err| {
+                child.close(io);
+                return err;
+            };
+            child.close(io);
+            dir.deleteDir(io, entry.name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                error.NotDir, error.DirNotEmpty, error.FileBusy => return error.OracleCleanupRace,
+                else => return err,
+            };
+        }
+    }
+
+    fn cleanupQuarantinedLeaf(
+        parent: std.Io.Dir,
+        io: std.Io,
+        name: []const u8,
+        expected_directory_identity: ?FileIdentity,
+        protected_identities: []const FileIdentity,
+    ) !void {
+        var dir = parent.openDir(io, name, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            error.NotDir, error.SymLinkLoop => return deleteNonDirectoryNoFollow(parent, io, name),
+            else => return err,
+        };
+        const identity = directoryIdentity(dir) catch |err| {
+            dir.close(io);
+            return err;
+        };
+        if (identityMatchesAny(identity, protected_identities)) {
+            dir.close(io);
+            return error.ProtectedOracleCleanupAlias;
+        }
+        if (expected_directory_identity == null or
+            !std.meta.eql(identity, expected_directory_identity.?))
+        {
+            dir.close(io);
+            return error.OracleQuarantineIdentityChanged;
+        }
+        clearDirectoryNoFollow(dir, io, protected_identities) catch |err| {
+            dir.close(io);
+            return err;
+        };
+        dir.close(io);
+        parent.deleteDir(io, name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            error.NotDir, error.DirNotEmpty, error.FileBusy => return error.OracleCleanupRace,
+            else => return err,
+        };
+    }
+
+    fn cleanupEmptyContainerName(
+        parent: std.Io.Dir,
+        io: std.Io,
+        name: []const u8,
+        expected_identity: FileIdentity,
+    ) !void {
+        var dir = parent.openDir(io, name, .{
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            error.NotDir, error.SymLinkLoop => return error.OracleContainerIdentityChanged,
+            else => return err,
+        };
+        const identity = directoryIdentity(dir) catch |err| {
+            dir.close(io);
+            return err;
+        };
+        dir.close(io);
+        if (!std.meta.eql(identity, expected_identity)) {
+            return error.OracleContainerIdentityChanged;
+        }
+        parent.deleteDir(io, name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            error.NotDir, error.DirNotEmpty, error.FileBusy => return error.OracleCleanupRace,
+            else => return err,
+        };
     }
 
     fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
         const exact_tree: *@This() = @fieldParentPtr("step", step);
         const io = step.owner.graph.io;
-        if (std.mem.eql(u8, exact_tree.destination_path, exact_tree.protected_path)) {
+        if (pathContainsOrEquals(exact_tree.protected_path, exact_tree.destination_path) or
+            pathContainsOrEquals(exact_tree.destination_path, exact_tree.protected_path))
+        {
             return step.fail(
-                "refusing to emit the Boundary oracle over its tracked corpus at '{s}'",
-                .{exact_tree.protected_path},
+                "refusing to emit the Boundary oracle across protected corpus boundary '{s}' using destination '{s}'",
+                .{ exact_tree.protected_path, exact_tree.destination_path },
             );
         }
 
-        const protected_real_path = std.Io.Dir.cwd().realPathFileAlloc(
-            io,
-            exact_tree.protected_path,
-            options.gpa,
-        ) catch |err| return step.fail(
-            "unable to resolve protected Boundary oracle corpus '{s}': {s}",
-            .{ exact_tree.protected_path, @errorName(err) },
-        );
-        defer options.gpa.free(protected_real_path);
-        const destination_real_path = std.Io.Dir.cwd().realPathFileAlloc(
-            io,
-            exact_tree.destination_path,
-            options.gpa,
-        ) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return step.fail(
-                "unable to resolve Boundary oracle emit destination '{s}': {s}",
-                .{ exact_tree.destination_path, @errorName(err) },
-            ),
-        };
-        if (destination_real_path) |real_path| {
-            defer options.gpa.free(real_path);
-            if (std.mem.eql(u8, real_path, protected_real_path)) {
-                return step.fail(
-                    "refusing to emit the Boundary oracle over filesystem alias '{s}' of tracked corpus '{s}'",
-                    .{ exact_tree.destination_path, exact_tree.protected_path },
-                );
+        var protected_opened: std.ArrayList(std.Io.Dir) = .empty;
+        defer {
+            var index = protected_opened.items.len;
+            while (index > 0) {
+                index -= 1;
+                protected_opened.items[index].close(io);
             }
+            protected_opened.deinit(options.gpa);
         }
+        var protected_identities: std.ArrayList(FileIdentity) = .empty;
+        defer protected_identities.deinit(options.gpa);
+
+        var protected_components = std.Io.Dir.path.componentIterator(exact_tree.protected_path);
+        const protected_root_path = protected_components.root() orelse
+            return step.fail("protected Boundary oracle corpus path is not absolute: '{s}'", .{exact_tree.protected_path});
+        const protected_root = std.Io.Dir.openDirAbsolute(io, protected_root_path, .{
+            .follow_symlinks = false,
+        }) catch |err| return step.fail(
+            "unable to open protected Boundary oracle filesystem root '{s}' without following links: {s}",
+            .{ protected_root_path, @errorName(err) },
+        );
+        protected_opened.append(options.gpa, protected_root) catch |err| {
+            protected_root.close(io);
+            return err;
+        };
+        protected_identities.append(
+            options.gpa,
+            directoryIdentity(protected_root) catch |err| return step.fail(
+                "unable to identify protected Boundary oracle filesystem root '{s}': {s}",
+                .{ protected_root_path, @errorName(err) },
+            ),
+        ) catch |err| return err;
+        var protected_current = protected_root;
+        while (protected_components.next()) |component| {
+            if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
+                return step.fail("unsafe protected Boundary oracle component '{s}'", .{component.name});
+            }
+            const child = protected_current.openDir(io, component.name, .{
+                .follow_symlinks = false,
+            }) catch |err| return step.fail(
+                "unable to open protected Boundary oracle component '{s}' without following links: {s}",
+                .{ component.name, @errorName(err) },
+            );
+            protected_opened.append(options.gpa, child) catch |err| {
+                child.close(io);
+                return err;
+            };
+            protected_identities.append(
+                options.gpa,
+                directoryIdentity(child) catch |err| return step.fail(
+                    "unable to identify protected Boundary oracle component '{s}': {s}",
+                    .{ component.name, @errorName(err) },
+                ),
+            ) catch |err| return err;
+            protected_current = child;
+        }
+        const protected_identity = protected_identities.items[protected_identities.items.len - 1];
 
         var opened: std.ArrayList(std.Io.Dir) = .empty;
         defer {
@@ -110,64 +465,362 @@ const ExactInstallTreeStep = struct {
             opened.deinit(options.gpa);
         }
 
+        const destination_parent_path = std.Io.Dir.path.dirname(exact_tree.destination_path) orelse
+            return step.fail("oracle emit destination has no parent: '{s}'", .{exact_tree.destination_path});
+        const destination_leaf = std.Io.Dir.path.basename(exact_tree.destination_path);
+        if (destination_leaf.len == 0) {
+            return step.fail("oracle emit destination has no leaf: '{s}'", .{exact_tree.destination_path});
+        }
+
         var current = std.Io.Dir.cwd();
-        var install_components = std.Io.Dir.path.componentIterator(exact_tree.install_root);
-        if (install_components.root()) |root_path| {
-            const root = std.Io.Dir.openDirAbsolute(io, root_path, .{
-                .follow_symlinks = false,
-            }) catch |err| return step.fail(
-                "unable to open oracle install filesystem root '{s}' without following links: {s}",
-                .{ root_path, @errorName(err) },
-            );
-            opened.append(options.gpa, root) catch |err| {
-                root.close(io);
-                return err;
-            };
-            current = root;
-        }
-
-        while (install_components.next()) |component| {
-            if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
-                return step.fail("unsafe oracle install-root component '{s}'", .{component.name});
-            }
-            const child = current.openDir(io, component.name, .{
-                .follow_symlinks = false,
-            }) catch |err| switch (err) {
-                error.FileNotFound => return,
-                else => return step.fail(
-                    "unable to open oracle install-root component '{s}' without following links: {s}",
-                    .{ component.name, @errorName(err) },
-                ),
-            };
-            opened.append(options.gpa, child) catch |err| {
-                child.close(io);
-                return err;
-            };
-            current = child;
-        }
-
-        for (exact_tree.path_components[0 .. exact_tree.path_components.len - 1]) |component| {
-            const child = current.openDir(io, component, .{
-                .follow_symlinks = false,
-            }) catch |err| switch (err) {
-                error.FileNotFound => return,
-                else => return step.fail(
-                    "unable to open fixed oracle output component '{s}' without following links: {s}",
-                    .{ component, @errorName(err) },
-                ),
-            };
-            opened.append(options.gpa, child) catch |err| {
-                child.close(io);
-                return err;
-            };
-            current = child;
-        }
-
-        const leaf = exact_tree.path_components[exact_tree.path_components.len - 1];
-        current.deleteTree(io, leaf) catch |err| return step.fail(
-            "unable to replace exact emitted oracle subtree '{s}': {s}",
-            .{ leaf, @errorName(err) },
+        var destination_components = std.Io.Dir.path.componentIterator(destination_parent_path);
+        const root_path = destination_components.root() orelse
+            return step.fail("oracle emit destination is not absolute: '{s}'", .{exact_tree.destination_path});
+        const root = std.Io.Dir.openDirAbsolute(io, root_path, .{
+            .follow_symlinks = false,
+        }) catch |err| return step.fail(
+            "unable to open oracle destination filesystem root '{s}' without following links: {s}",
+            .{ root_path, @errorName(err) },
         );
+        opened.append(options.gpa, root) catch |err| {
+            root.close(io);
+            return err;
+        };
+        current = root;
+        const root_identity = directoryIdentity(root) catch |err| return step.fail(
+            "unable to identify oracle destination filesystem root '{s}': {s}",
+            .{ root_path, @errorName(err) },
+        );
+        if (std.meta.eql(root_identity, protected_identity)) {
+            return step.fail("refusing protected Boundary oracle destination ancestor '{s}'", .{root_path});
+        }
+
+        while (destination_components.next()) |component| {
+            if (std.mem.eql(u8, component.name, ".") or std.mem.eql(u8, component.name, "..")) {
+                return step.fail("unsafe oracle destination component '{s}'", .{component.name});
+            }
+            const child = openOrCreateDirNoFollow(current, io, component.name) catch |err| return step.fail(
+                "unable to open or create oracle destination component '{s}' without following links: {s}",
+                .{ component.name, @errorName(err) },
+            );
+            opened.append(options.gpa, child) catch |err| {
+                child.close(io);
+                return err;
+            };
+            current = child;
+            const child_identity = directoryIdentity(child) catch |err| return step.fail(
+                "unable to identify oracle destination component '{s}': {s}",
+                .{ component.name, @errorName(err) },
+            );
+            if (std.meta.eql(child_identity, protected_identity)) {
+                return step.fail(
+                    "refusing filesystem alias of protected Boundary oracle corpus at destination component '{s}'",
+                    .{component.name},
+                );
+            }
+        }
+
+        var validated_destination_identity: ?FileIdentity = null;
+        const existing_destination = current.openDir(io, destination_leaf, .{
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.SymLinkLoop => null,
+            else => return step.fail(
+                "unable to inspect oracle destination leaf '{s}' without following links: {s}",
+                .{ destination_leaf, @errorName(err) },
+            ),
+        };
+        if (existing_destination) |existing| {
+            defer existing.close(io);
+            const destination_identity = directoryIdentity(existing) catch |err| return step.fail(
+                "unable to identify oracle destination leaf '{s}': {s}",
+                .{ destination_leaf, @errorName(err) },
+            );
+            if (identityMatchesAny(destination_identity, protected_identities.items)) {
+                return step.fail(
+                    "refusing filesystem alias '{s}' of protected Boundary oracle corpus or ancestor '{s}'",
+                    .{ exact_tree.destination_path, exact_tree.protected_path },
+                );
+            }
+            validated_destination_identity = destination_identity;
+        }
+
+        const source_path = try exact_tree.source_dir.getPath4(step.owner, step);
+        var source_dir = source_path.root_dir.handle.openDir(io, source_path.subPathOrDot(), .{
+            .iterate = true,
+            .follow_symlinks = false,
+        }) catch |err| return step.fail(
+            "unable to open exact oracle source directory '{f}' without following links: {s}",
+            .{ source_path, @errorName(err) },
+        );
+        defer source_dir.close(io);
+
+        const private_dir_permissions: std.Io.Dir.Permissions = if (std.Io.Dir.Permissions.has_executable_bit)
+            .fromMode(0o700)
+        else
+            .default_dir;
+        const container_tree_name = "tree";
+
+        var staging_name_buffer: [80]u8 = undefined;
+        var staging_name: []const u8 = "";
+        var staging_container = std.Io.Dir.cwd();
+        var staging_container_identity: FileIdentity = .{ .device = 0, .inode = 0 };
+        var attempt: usize = 0;
+        while (attempt < 16) : (attempt += 1) {
+            var random_integer: u64 = 0;
+            io.random(@ptrCast(&random_integer));
+            staging_name = std.fmt.bufPrint(
+                &staging_name_buffer,
+                ".boundary-oracle-stage-{x}",
+                .{random_integer},
+            ) catch |err| return step.fail("unable to encode private staged oracle container name: {s}", .{@errorName(err)});
+            current.createDir(io, staging_name, private_dir_permissions) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => return step.fail(
+                    "unable to create private staged oracle container '{s}': {s}",
+                    .{ staging_name, @errorName(err) },
+                ),
+            };
+            staging_container = current.openDir(io, staging_name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |err| {
+                current.deleteDir(io, staging_name) catch |cleanup_err| return step.fail(
+                    "unable to open private staged oracle container '{s}' without following links: {s}; non-recursive cleanup also failed: {s}",
+                    .{ staging_name, @errorName(err), @errorName(cleanup_err) },
+                );
+                return step.fail(
+                    "unable to open private staged oracle container '{s}' without following links: {s}",
+                    .{ staging_name, @errorName(err) },
+                );
+            };
+            staging_container_identity = directoryIdentity(staging_container) catch |err| {
+                staging_container.close(io);
+                current.deleteDir(io, staging_name) catch |cleanup_err| return step.fail(
+                    "unable to identify private staged oracle container '{s}': {s}; non-recursive cleanup also failed: {s}",
+                    .{ staging_name, @errorName(err), @errorName(cleanup_err) },
+                );
+                return step.fail(
+                    "unable to identify private staged oracle container '{s}': {s}",
+                    .{ staging_name, @errorName(err) },
+                );
+            };
+            break;
+        } else return step.fail("unable to allocate a unique private staged oracle container", .{});
+
+        var staging_container_open = true;
+        var staging_container_created = true;
+        var staging_tree = std.Io.Dir.cwd();
+        var staging_tree_identity: ?FileIdentity = null;
+        var staging_tree_open = false;
+        var staging_tree_present = false;
+        defer {
+            if (staging_tree_open) staging_tree.close(io);
+            if (staging_tree_present) {
+                cleanupQuarantinedLeaf(
+                    staging_container,
+                    io,
+                    container_tree_name,
+                    staging_tree_identity,
+                    protected_identities.items,
+                ) catch |cleanup_err| std.log.err(
+                    "unable to clean unpublished staged oracle tree in private container '{s}': {s}",
+                    .{ staging_name, @errorName(cleanup_err) },
+                );
+            }
+            if (staging_container_open) staging_container.close(io);
+            if (staging_container_created) {
+                cleanupEmptyContainerName(
+                    current,
+                    io,
+                    staging_name,
+                    staging_container_identity,
+                ) catch |cleanup_err| std.log.err(
+                    "unable to clean private staged oracle container '{s}': {s}",
+                    .{ staging_name, @errorName(cleanup_err) },
+                );
+            }
+        }
+
+        staging_container.createDir(io, container_tree_name, private_dir_permissions) catch |err| return step.fail(
+            "unable to create staged oracle tree inside private container '{s}': {s}",
+            .{ staging_name, @errorName(err) },
+        );
+        staging_tree_present = true;
+        staging_tree = staging_container.openDir(io, container_tree_name, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        }) catch |err| {
+            staging_container.deleteDir(io, container_tree_name) catch |cleanup_err| return step.fail(
+                "unable to open staged oracle tree in private container '{s}': {s}; non-recursive cleanup also failed: {s}",
+                .{ staging_name, @errorName(err), @errorName(cleanup_err) },
+            );
+            staging_tree_present = false;
+            return step.fail(
+                "unable to open staged oracle tree in private container '{s}': {s}",
+                .{ staging_name, @errorName(err) },
+            );
+        };
+        staging_tree_open = true;
+        staging_tree_identity = directoryIdentity(staging_tree) catch |err| return step.fail(
+            "unable to identify staged oracle tree in private container '{s}': {s}",
+            .{ staging_name, @errorName(err) },
+        );
+
+        copyTreeNoFollow(source_dir, staging_tree, io) catch |err| return step.fail(
+            "unable to copy exact oracle candidate into private staged tree '{s}/{s}': {s}",
+            .{ staging_name, container_tree_name, @errorName(err) },
+        );
+
+        var quarantine_name_buffer: [80]u8 = undefined;
+        var quarantine_name: []const u8 = "";
+        var quarantine_container = std.Io.Dir.cwd();
+        var quarantine_container_identity: FileIdentity = .{ .device = 0, .inode = 0 };
+        attempt = 0;
+        while (attempt < 16) : (attempt += 1) {
+            var random_integer: u64 = 0;
+            io.random(@ptrCast(&random_integer));
+            quarantine_name = std.fmt.bufPrint(
+                &quarantine_name_buffer,
+                ".boundary-oracle-old-{x}",
+                .{random_integer},
+            ) catch |err| return step.fail("unable to encode private quarantine container name: {s}", .{@errorName(err)});
+            current.createDir(io, quarantine_name, private_dir_permissions) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => return step.fail(
+                    "unable to create private prior-oracle quarantine container '{s}': {s}",
+                    .{ quarantine_name, @errorName(err) },
+                ),
+            };
+            quarantine_container = current.openDir(io, quarantine_name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |err| {
+                current.deleteDir(io, quarantine_name) catch |cleanup_err| return step.fail(
+                    "unable to open private prior-oracle quarantine container '{s}': {s}; non-recursive cleanup also failed: {s}",
+                    .{ quarantine_name, @errorName(err), @errorName(cleanup_err) },
+                );
+                return step.fail(
+                    "unable to open private prior-oracle quarantine container '{s}': {s}",
+                    .{ quarantine_name, @errorName(err) },
+                );
+            };
+            quarantine_container_identity = directoryIdentity(quarantine_container) catch |err| {
+                quarantine_container.close(io);
+                current.deleteDir(io, quarantine_name) catch |cleanup_err| return step.fail(
+                    "unable to identify private prior-oracle quarantine container '{s}': {s}; non-recursive cleanup also failed: {s}",
+                    .{ quarantine_name, @errorName(err), @errorName(cleanup_err) },
+                );
+                return step.fail(
+                    "unable to identify private prior-oracle quarantine container '{s}': {s}",
+                    .{ quarantine_name, @errorName(err) },
+                );
+            };
+            break;
+        } else return step.fail("unable to allocate a unique private prior-oracle quarantine container", .{});
+
+        var quarantine_container_open = true;
+        var quarantine_container_created = true;
+        var quarantine_tree_present = false;
+        defer {
+            if (quarantine_container_open) quarantine_container.close(io);
+            if (quarantine_container_created and !quarantine_tree_present) {
+                cleanupEmptyContainerName(
+                    current,
+                    io,
+                    quarantine_name,
+                    quarantine_container_identity,
+                ) catch |cleanup_err| std.log.err(
+                    "unable to clean private prior-oracle quarantine container '{s}': {s}",
+                    .{ quarantine_name, @errorName(cleanup_err) },
+                );
+            }
+        }
+
+        var destination_moved = true;
+        current.rename(destination_leaf, quarantine_container, container_tree_name, io) catch |err| switch (err) {
+            error.FileNotFound => destination_moved = false,
+            else => return step.fail(
+                "unable to quarantine prior oracle destination '{s}' through private container '{s}': {s}",
+                .{ destination_leaf, quarantine_name, @errorName(err) },
+            ),
+        };
+        quarantine_tree_present = destination_moved;
+
+        staging_container.rename(container_tree_name, current, destination_leaf, io) catch |publish_err| {
+            if (quarantine_tree_present) {
+                quarantine_container.rename(container_tree_name, current, destination_leaf, io) catch |rollback_err| {
+                    return step.fail(
+                        "unable to publish staged oracle tree from private container '{s}' as '{s}': {s}; prior tree remains in quarantine '{s}/{s}' because rollback failed: {s}",
+                        .{
+                            staging_name,
+                            destination_leaf,
+                            @errorName(publish_err),
+                            quarantine_name,
+                            container_tree_name,
+                            @errorName(rollback_err),
+                        },
+                    );
+                };
+                quarantine_tree_present = false;
+                return step.fail(
+                    "unable to publish staged oracle tree from private container '{s}' as '{s}': {s}; prior destination was restored",
+                    .{ staging_name, destination_leaf, @errorName(publish_err) },
+                );
+            }
+            return step.fail(
+                "unable to publish staged oracle tree from private container '{s}' as '{s}': {s}; no prior destination was moved",
+                .{ staging_name, destination_leaf, @errorName(publish_err) },
+            );
+        };
+        staging_tree_present = false;
+        staging_tree.close(io);
+        staging_tree_open = false;
+        staging_container.close(io);
+        staging_container_open = false;
+        var stage_cleanup_error: ?anyerror = null;
+        cleanupEmptyContainerName(
+            current,
+            io,
+            staging_name,
+            staging_container_identity,
+        ) catch |cleanup_err| {
+            stage_cleanup_error = cleanup_err;
+        };
+        if (stage_cleanup_error == null) staging_container_created = false;
+
+        if (quarantine_tree_present) {
+            cleanupQuarantinedLeaf(
+                quarantine_container,
+                io,
+                container_tree_name,
+                validated_destination_identity,
+                protected_identities.items,
+            ) catch |cleanup_err| return step.fail(
+                "published exact oracle destination '{s}', but prior tree remains in private quarantine '{s}/{s}' after handle-relative cleanup failed: {s}",
+                .{ destination_leaf, quarantine_name, container_tree_name, @errorName(cleanup_err) },
+            );
+            quarantine_tree_present = false;
+        }
+        quarantine_container.close(io);
+        quarantine_container_open = false;
+        cleanupEmptyContainerName(
+            current,
+            io,
+            quarantine_name,
+            quarantine_container_identity,
+        ) catch |cleanup_err| return step.fail(
+            "published exact oracle destination '{s}', but empty private quarantine container '{s}' remains: {s}",
+            .{ destination_leaf, quarantine_name, @errorName(cleanup_err) },
+        );
+        quarantine_container_created = false;
+
+        if (stage_cleanup_error) |cleanup_err| {
+            return step.fail(
+                "published exact oracle destination '{s}', but empty private staging container '{s}' remains: {s}",
+                .{ destination_leaf, staging_name, @errorName(cleanup_err) },
+            );
+        }
         step.result_cached = false;
     }
 };
@@ -1580,8 +2233,16 @@ pub fn build(b: *std.Build) void {
     emit_boundary_agent_runtime.step.dependOn(receipt_agent_parity_step);
     const emit_runtime_step = b.step("emit-boundary-agent-runtime-artifacts", "Emit Boundary Agent Runtime pack-ready module artifacts.");
     emit_runtime_step.dependOn(&emit_boundary_agent_runtime.step);
+
+    const check_runtime_root = b.tmpPath();
+    const check_boundary_agent_runtime = b.addRunArtifact(boundary_agent_runtime_exe);
+    check_boundary_agent_runtime.setName("check Boundary Agent Runtime pack-ready artifacts");
+    check_boundary_agent_runtime.setCwd(check_runtime_root);
+    check_boundary_agent_runtime.addArgs(&.{ "export-agent-runtime", "bundle" });
+    check_boundary_agent_runtime.step.dependOn(receipt_agent_modules_step);
+    check_boundary_agent_runtime.step.dependOn(receipt_agent_parity_step);
     const check_runtime_step = b.step("check-boundary-agent-runtime-artifacts", "Check Boundary Agent Runtime pack-ready artifacts.");
-    check_runtime_step.dependOn(&emit_boundary_agent_runtime.step);
+    check_runtime_step.dependOn(&check_boundary_agent_runtime.step);
     check_step.dependOn(check_runtime_step);
 
     const world_image_v1_corpus_dir = "conformance/world-image-v1/v0/boundary";
@@ -1687,7 +2348,10 @@ pub fn build(b: *std.Build) void {
     oracle_check_step.dependOn(oracle_publication_check_step);
     check_step.dependOn(oracle_check_step);
 
-    const oracle_emit_dir = b.getInstallPath(.prefix, "conformance/world-image-v1/v0/boundary");
+    const oracle_emit_dir = b.pathResolve(&.{
+        b.graph.cache.cwd,
+        b.getInstallPath(.prefix, "conformance/world-image-v1/v0/boundary"),
+    });
     const oracle_emit_candidate_root = b.tmpPath();
     const oracle_emit_candidate_dir = oracle_emit_candidate_root.path(b, "bundle");
     const emit_world_image_v1_oracle_run = b.addRunArtifact(world_image_v1_oracle_exe);
@@ -1696,18 +2360,11 @@ pub fn build(b: *std.Build) void {
     emit_world_image_v1_oracle_run.step.dependOn(oracle_check_step);
     const replace_emitted_oracle = ExactInstallTreeStep.create(
         b,
-        b.getInstallPath(.prefix, ""),
+        oracle_emit_candidate_dir,
         oracle_emit_dir,
         b.pathFromRoot(world_image_v1_corpus_dir),
-        &.{ "conformance", "world-image-v1", "v0", "boundary" },
     );
     replace_emitted_oracle.step.dependOn(&emit_world_image_v1_oracle_run.step);
-    const install_world_image_v1_oracle = b.addInstallDirectory(.{
-        .source_dir = oracle_emit_candidate_dir,
-        .install_dir = .prefix,
-        .install_subdir = "conformance/world-image-v1/v0/boundary",
-    });
-    install_world_image_v1_oracle.step.dependOn(&replace_emitted_oracle.step);
     const verify_emitted_oracle = b.addRunArtifact(world_image_v1_oracle_exe);
     verify_emitted_oracle.setName("verify emitted Boundary World Image v1 oracle bytes");
     verify_emitted_oracle.setCwd(b.tmpPath());
@@ -1718,7 +2375,7 @@ pub fn build(b: *std.Build) void {
     verify_emitted_oracle.addDirectoryArg(b.path(world_image_v1_corpus_dir));
     verify_emitted_oracle.addArg("--actual-dir");
     verify_emitted_oracle.addDirectoryArg(.{ .cwd_relative = oracle_emit_dir });
-    verify_emitted_oracle.step.dependOn(&install_world_image_v1_oracle.step);
+    verify_emitted_oracle.step.dependOn(&replace_emitted_oracle.step);
     const oracle_emit_step = b.step(
         "emit-boundary-world-image-v1-oracle",
         "Emit the verified Boundary World Image v1 rewrite oracle under zig-out.",

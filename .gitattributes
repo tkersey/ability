@@ -1,1 +1,2 @@
 conformance/world-image-v1/v0/boundary/** -text -filter -working-tree-encoding
+conformance/world-image-v1/v0/boundary.receiver-pin.sha256 -text -filter -working-tree-encoding
