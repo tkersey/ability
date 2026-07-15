@@ -1,4 +1,3 @@
-// zlinter-disable declaration_naming field_naming field_ordering no_inferred_error_unions no_swallow_error require_doc_comment require_errdefer_dealloc
 // The manifest decoder mirrors external JSON field names, including the schema key `id`.
 const agent_loop = @import("agent_loop");
 const boundary = @import("boundary");
@@ -8,12 +7,12 @@ const std = @import("std");
 const corpus_path = "conformance/world-image-v1/v0/boundary";
 const generated_bundle_path = "bundle";
 const tracked_publication_stage_path = "conformance/world-image-v1/v0/.boundary-oracle-stage";
-const tracked_publication_backup_path = "conformance/world-image-v1/v0/.boundary-oracle-backup";
+const tracked_backup_path = "conformance/world-image-v1/v0/.boundary-oracle-backup";
 const oracle_generator_command = "zig build update-boundary-world-image-v1-oracle";
 const oracle_normal_check_command = "zig build check-boundary-world-image-v1-oracle --summary all";
 
 const semantic = boundary.ir.builder.semantic;
-const EmptyHandlers = struct {};
+const empty_handlers = struct {};
 
 const scalar_compiled = semantic.finish(.{
     .label = "world-image-v1-oracle-scalar-pure",
@@ -55,11 +54,12 @@ const scalar_compiled = semantic.finish(.{
     }},
 }) catch |err| @compileError("invalid scalar oracle fixture: " ++ @errorName(err));
 
-const ScalarProgram = boundary.program("world-image-v1-oracle-scalar-pure", EmptyHandlers, struct {
+const ScalarProgram = boundary.program("world-image-v1-oracle-scalar-pure", empty_handlers, struct {
+    /// Provides the compiled plan for this oracle fixture.
     pub const compiled_plan = scalar_compiled.plan;
 });
 
-fn helperPlan() boundary.ir.ProgramPlan {
+fn helperPlan() !boundary.ir.ProgramPlan {
     const helper = boundary.ir.builder.function(0);
     const root = boundary.ir.builder.function(1);
     const functions = [_]boundary.ir.plan.Function{
@@ -113,13 +113,13 @@ fn helperPlan() boundary.ir.ProgramPlan {
     };
     const instructions = [_]boundary.ir.plan.Instruction{
         .{ .kind = .add_i32, .dst = 2, .operand = 0, .aux = 1 },
-        boundary.ir.builder.returnValue(helper, boundary.ir.builder.local(helper, 2)) catch unreachable,
+        try boundary.ir.builder.returnValue(helper, boundary.ir.builder.local(helper, 2)),
         .{ .kind = .const_i32, .dst = 0, .operand = 12 },
         .{ .kind = .const_i32, .dst = 1, .operand = 30 },
-        boundary.ir.builder.callHelper(root, boundary.ir.builder.local(root, 2), helper, 0) catch unreachable,
-        boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 2)) catch unreachable,
+        try boundary.ir.builder.callHelper(root, boundary.ir.builder.local(root, 2), helper, 0),
+        try boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 2)),
     };
-    return boundary.ir.builder.finish(.{
+    return try boundary.ir.builder.finish(.{
         .label = "world-image-v1-oracle-helper-call",
         .ir_hash = 0xB001_0002,
         .entry = root,
@@ -132,14 +132,16 @@ fn helperPlan() boundary.ir.ProgramPlan {
         .blocks = &blocks,
         .terminators = &terminators,
         .instructions = &instructions,
-    }) catch unreachable;
+    });
 }
 
-const HelperProgram = boundary.program("world-image-v1-oracle-helper-call", EmptyHandlers, struct {
-    pub const compiled_plan = helperPlan();
+const HelperProgram = boundary.program("world-image-v1-oracle-helper-call", empty_handlers, struct {
+    /// Provides the compiled plan for this oracle fixture.
+    pub const compiled_plan = helperPlan() catch |err|
+        @compileError("invalid helper-call oracle fixture: " ++ @errorName(err));
 });
 
-fn portableWordPlan() boundary.ir.ProgramPlan {
+fn portableWordPlan() !boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const functions = [_]boundary.ir.plan.Function{.{
         .symbol_name = "run",
@@ -175,9 +177,9 @@ fn portableWordPlan() boundary.ir.ProgramPlan {
         .{ .kind = .const_usize, .dst = 0, .string_literal = "18446744073709551615" },
         .{ .kind = .compare_eq_zero, .dst = 2, .operand = 0 },
         .{ .kind = .sub_one, .dst = 1, .operand = 0 },
-        boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 1)) catch unreachable,
+        try boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 1)),
     };
-    return boundary.ir.builder.finish(.{
+    return try boundary.ir.builder.finish(.{
         .label = "world-image-v1-oracle-portable-word",
         .ir_hash = 0xB001_0007,
         .entry = root,
@@ -189,18 +191,20 @@ fn portableWordPlan() boundary.ir.ProgramPlan {
         .blocks = &blocks,
         .terminators = &terminators,
         .instructions = &instructions,
-    }) catch unreachable;
+    });
 }
 
-const PortableWordProgram = boundary.program("world-image-v1-oracle-portable-word", EmptyHandlers, struct {
-    pub const compiled_plan = portableWordPlan();
+const PortableWordProgram = boundary.program("world-image-v1-oracle-portable-word", empty_handlers, struct {
+    /// Provides the compiled plan for this oracle fixture.
+    pub const compiled_plan = portableWordPlan() catch |err|
+        @compileError("invalid portable-word oracle fixture: " ++ @errorName(err));
 });
 
 const ApprovalProtocol = boundary.ir.schema.Protocol(.{
     .label = "approval",
     .ops = .{boundary.ir.schema.transform("request", []const u8, i32)},
 });
-const ApprovalRows = ApprovalProtocol.Rows(EmptyHandlers, .{ .requirement_index = 0, .first_op = 0 });
+const ApprovalRows = ApprovalProtocol.Rows(empty_handlers, .{ .requirement_index = 0, .first_op = 0 });
 const ApprovalOp = ApprovalRows.op("request");
 
 const one_effect_compiled = semantic.finish(.{
@@ -229,8 +233,10 @@ const one_effect_compiled = semantic.finish(.{
     }},
 }) catch |err| @compileError("invalid one-effect oracle fixture: " ++ @errorName(err));
 
-const OneEffectProgram = boundary.program("world-image-v1-oracle-one-effect", EmptyHandlers, struct {
+const OneEffectProgram = boundary.program("world-image-v1-oracle-one-effect", empty_handlers, struct {
+    /// Provides the effect-site metadata for this oracle fixture.
     pub const site_metadata = one_effect_compiled.site_metadata;
+    /// Provides the compiled plan for this oracle fixture.
     pub const compiled_plan = one_effect_compiled.plan;
 });
 const OneEffectSite = OneEffectProgram.protocol.operationSite("approval", "request", 0);
@@ -242,7 +248,7 @@ const DualProtocol = boundary.ir.schema.Protocol(.{
         boundary.ir.schema.transform("second", []const u8, i32),
     },
 });
-const DualRows = DualProtocol.Rows(EmptyHandlers, .{ .requirement_index = 0, .first_op = 0 });
+const DualRows = DualProtocol.Rows(empty_handlers, .{ .requirement_index = 0, .first_op = 0 });
 const DualFirstOp = DualRows.op("first");
 const DualSecondOp = DualRows.op("second");
 
@@ -274,14 +280,16 @@ const dual_compiled = semantic.finish(.{
     }},
 }) catch |err| @compileError("invalid multi-residual oracle fixture: " ++ @errorName(err));
 
-const DualProgram = boundary.program("world-image-v1-oracle-multiple-residual", EmptyHandlers, struct {
+const DualProgram = boundary.program("world-image-v1-oracle-multiple-residual", empty_handlers, struct {
+    /// Provides the effect-site metadata for this oracle fixture.
     pub const site_metadata = dual_compiled.site_metadata;
+    /// Provides the compiled plan for this oracle fixture.
     pub const compiled_plan = dual_compiled.plan;
 });
 const DualFirstSite = DualProgram.protocol.operationSite("approval-dual", "first", 0);
 const DualSecondSite = DualProgram.protocol.operationSite("approval-dual", "second", 0);
 
-fn nestedHelperPlan() boundary.ir.ProgramPlan {
+fn nestedHelperPlan() !boundary.ir.ProgramPlan {
     const inner = boundary.ir.builder.function(0);
     const outer = boundary.ir.builder.function(1);
     const root = boundary.ir.builder.function(2);
@@ -359,14 +367,14 @@ fn nestedHelperPlan() boundary.ir.ProgramPlan {
     };
     const instructions = [_]boundary.ir.plan.Instruction{
         .{ .kind = .const_string, .dst = 0, .string_literal = "nested-helper" },
-        boundary.ir.builder.callOp(inner, boundary.ir.builder.local(inner, 1), boundary.ir.builder.op(inner, 0), boundary.ir.builder.local(inner, 0)) catch unreachable,
-        boundary.ir.builder.returnValue(inner, boundary.ir.builder.local(inner, 1)) catch unreachable,
-        boundary.ir.builder.callHelper(outer, boundary.ir.builder.local(outer, 0), inner, null) catch unreachable,
-        boundary.ir.builder.returnValue(outer, boundary.ir.builder.local(outer, 0)) catch unreachable,
-        boundary.ir.builder.callHelper(root, boundary.ir.builder.local(root, 0), outer, null) catch unreachable,
-        boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 0)) catch unreachable,
+        try boundary.ir.builder.callOp(inner, boundary.ir.builder.local(inner, 1), boundary.ir.builder.op(inner, 0), boundary.ir.builder.local(inner, 0)),
+        try boundary.ir.builder.returnValue(inner, boundary.ir.builder.local(inner, 1)),
+        try boundary.ir.builder.callHelper(outer, boundary.ir.builder.local(outer, 0), inner, null),
+        try boundary.ir.builder.returnValue(outer, boundary.ir.builder.local(outer, 0)),
+        try boundary.ir.builder.callHelper(root, boundary.ir.builder.local(root, 0), outer, null),
+        try boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 0)),
     };
-    return boundary.ir.builder.finish(.{
+    return try boundary.ir.builder.finish(.{
         .label = "world-image-v1-oracle-helper-park",
         .ir_hash = 0xB001_0005,
         .entry = root,
@@ -378,15 +386,18 @@ fn nestedHelperPlan() boundary.ir.ProgramPlan {
         .blocks = &blocks,
         .terminators = &terminators,
         .instructions = &instructions,
-    }) catch unreachable;
+    });
 }
 
-const NestedHelperProgram = boundary.program("world-image-v1-oracle-helper-park", EmptyHandlers, struct {
+const NestedHelperProgram = boundary.program("world-image-v1-oracle-helper-park", empty_handlers, struct {
+    /// Provides the effect-site metadata for this oracle fixture.
     pub const site_metadata = [_]boundary.ir.builder.semantic.SiteMetadata{.{
         .instruction_index = 1,
         .label = "approval.request.nested-helper",
     }};
-    pub const compiled_plan = nestedHelperPlan();
+    /// Provides the compiled plan for this oracle fixture.
+    pub const compiled_plan = nestedHelperPlan() catch |err|
+        @compileError("invalid helper-park oracle fixture: " ++ @errorName(err));
 });
 const NestedHelperSite = NestedHelperProgram.protocol.operationSite("approval", "request", 0);
 
@@ -400,18 +411,18 @@ const StructuredAction = union(enum) {
 };
 const StructuredRegistry = boundary.ir.schema.Registry(.{ StructuredDecision, StructuredAction });
 
-fn structuredPlan() boundary.ir.ProgramPlan {
+fn structuredPlan() !boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const decision_ref = StructuredRegistry.valueRef(StructuredDecision).?;
     const action_ref = StructuredRegistry.valueRef(StructuredAction).?;
     const instructions = [_]boundary.ir.plan.Instruction{
         .{ .kind = .const_string, .dst = 0, .string_literal = "structured" },
-        boundary.ir.builder.callOp(root, boundary.ir.builder.local(root, 1), boundary.ir.builder.op(root, 0), boundary.ir.builder.local(root, 0)) catch unreachable,
+        try boundary.ir.builder.callOp(root, boundary.ir.builder.local(root, 1), boundary.ir.builder.op(root, 0), boundary.ir.builder.local(root, 0)),
         .{ .kind = .sum_variant_is, .dst = 2, .operand = 1, .aux = 1 },
         .{ .kind = .sum_extract_payload, .dst = 3, .operand = 1, .aux = 1 },
-        boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 3)) catch unreachable,
+        try boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 3)),
         .{ .kind = .sum_extract_payload, .dst = 3, .operand = 1, .aux = 1 },
-        boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 3)) catch unreachable,
+        try boundary.ir.builder.returnValue(root, boundary.ir.builder.local(root, 3)),
     };
     const functions = [_]boundary.ir.plan.Function{.{
         .symbol_name = "run",
@@ -457,7 +468,7 @@ fn structuredPlan() boundary.ir.ProgramPlan {
         .{ .kind = .return_value },
         .{ .kind = .return_value },
     };
-    return boundary.ir.builder.finish(.{
+    return try boundary.ir.builder.finish(.{
         .label = "world-image-v1-oracle-typed-product-sum",
         .ir_hash = 0xB001_0006,
         .entry = root,
@@ -472,16 +483,20 @@ fn structuredPlan() boundary.ir.ProgramPlan {
         .blocks = &blocks,
         .terminators = &terminators,
         .instructions = &instructions,
-    }) catch unreachable;
+    });
 }
 
-const StructuredProgram = boundary.program("world-image-v1-oracle-typed-product-sum", EmptyHandlers, struct {
+const StructuredProgram = boundary.program("world-image-v1-oracle-typed-product-sum", empty_handlers, struct {
+    /// Provides the value-schema types for this oracle fixture.
     pub const value_schema_types = StructuredRegistry.value_schema_types;
+    /// Provides the effect-site metadata for this oracle fixture.
     pub const site_metadata = [_]boundary.ir.builder.semantic.SiteMetadata{.{
         .instruction_index = 1,
         .label = "approval-structured.request",
     }};
-    pub const compiled_plan = structuredPlan();
+    /// Provides the compiled plan for this oracle fixture.
+    pub const compiled_plan = structuredPlan() catch |err|
+        @compileError("invalid structured oracle fixture: " ++ @errorName(err));
 });
 const StructuredSite = StructuredProgram.protocol.operationSite("approval-structured", "request", 0);
 
@@ -805,6 +820,10 @@ fn deleteDirectoryIfPresent(io: std.Io, path: []const u8) !void {
     const kind = try pathKindNoFollow(io, path) orelse return;
     if (kind != .directory) return error.UnsafeOraclePath;
     try std.Io.Dir.cwd().deleteTree(io, path);
+}
+
+fn reportCleanupFailure(path: []const u8, cleanup_error: anyerror) void {
+    std.debug.print("oracle cleanup failed for {s}: {s}\n", .{ path, @errorName(cleanup_error) });
 }
 
 const darwin_rename = struct {
@@ -1715,7 +1734,7 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
     if (expected_world_port_ref.eql(alternate_world_port_ref)) return error.OracleSemanticMismatch;
     drifted_first = loaded_first;
     drifted_first.world_port_ref = alternate_world_port_ref;
-    const count_before_alternate_ref_probe = observed_request_count;
+    const count_before_alt_ref_probe = observed_request_count;
     var alternate_world_port_ref_error: ?anyerror = null;
     observeLoadedStringRequestParity(
         DualProgram,
@@ -1729,7 +1748,7 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         alternate_world_port_ref_error = err;
     };
     try expectPublicationError(error.OracleSemanticMismatch, alternate_world_port_ref_error);
-    if (observed_request_count != count_before_alternate_ref_probe) {
+    if (observed_request_count != count_before_alt_ref_probe) {
         return error.FailedRequestParityCounted;
     }
     try writeArtifact(io, allocator, output_dir, "artifacts/values/multiple-residual.first.payload.loaded-value", loaded_first.canonical_payload_image);
@@ -2242,11 +2261,11 @@ const OracleValidationWorkLimits = struct {
     }
 };
 
-const default_oracle_inventory_limits: OracleInventoryLimits = .{};
-const default_oracle_validation_work_limits: OracleValidationWorkLimits = .{};
+const default_inventory_limits: OracleInventoryLimits = .{};
+const default_validation_work_limits: OracleValidationWorkLimits = .{};
 
 fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !OwnedPaths {
-    return listFilesFromDirWithLimits(io, allocator, dir, default_oracle_inventory_limits);
+    return listFilesFromDirWithLimits(io, allocator, dir, default_inventory_limits);
 }
 
 fn listFilesFromDirWithLimits(
@@ -2260,7 +2279,7 @@ fn listFilesFromDirWithLimits(
         allocator,
         dir,
         limits,
-        default_oracle_validation_work_limits,
+        default_validation_work_limits,
     );
 }
 
@@ -2715,8 +2734,53 @@ fn validateRequiredCasesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: s
 }
 
 const OracleManifestCase = struct {
-    id: []const u8,
+    case_id: []const u8,
     transcript: []const u8,
+
+    /// Decodes the external manifest case shape without leaking its short `id` key into internal naming.
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) std.json.ParseError(@TypeOf(source.*))!@This() {
+        const value = try std.json.innerParse(std.json.Value, allocator, source, options);
+        const object = switch (value) {
+            .object => |object| object,
+            else => return error.UnexpectedToken,
+        };
+        if (!options.ignore_unknown_fields) {
+            var fields = object.iterator();
+            while (fields.next()) |field| {
+                if (!std.mem.eql(u8, field.key_ptr.*, "id") and
+                    !std.mem.eql(u8, field.key_ptr.*, "transcript"))
+                {
+                    return error.UnknownField;
+                }
+            }
+        }
+        const case_id_value = object.get("id") orelse return error.MissingField;
+        const transcript_value = object.get("transcript") orelse return error.MissingField;
+        return .{
+            .case_id = switch (case_id_value) {
+                .string => |string| string,
+                else => return error.UnexpectedToken,
+            },
+            .transcript = switch (transcript_value) {
+                .string => |string| string,
+                else => return error.UnexpectedToken,
+            },
+        };
+    }
+
+    /// Encodes the stable external `id` key while retaining the internal `case_id` name.
+    pub fn jsonStringify(self: @This(), writer: anytype) std.json.Stringify.Error!void {
+        try writer.beginObject();
+        try writer.objectField("id");
+        try writer.write(self.case_id);
+        try writer.objectField("transcript");
+        try writer.write(self.transcript);
+        try writer.endObject();
+    }
 };
 
 const OracleManifestArtifact = struct {
@@ -2743,9 +2807,9 @@ fn isOracleMetadataPath(path: []const u8) bool {
 }
 
 const OracleManifestPolicy = enum {
-    integrity,
-    generated,
     current,
+    generated,
+    integrity,
 };
 
 fn validateManifest(
@@ -2771,7 +2835,7 @@ fn validateManifestFromDir(
         allocator,
         dir,
         policy,
-        default_oracle_validation_work_limits,
+        default_validation_work_limits,
     );
 }
 
@@ -2788,7 +2852,7 @@ fn validateManifestBounded(
         io,
         allocator,
         dir,
-        default_oracle_inventory_limits,
+        default_inventory_limits,
         work_limits,
     );
     defer paths.deinit();
@@ -2831,7 +2895,7 @@ fn validateManifestBounded(
             return error.InvalidOracleManifest;
         }
         for (cases, manifest.cases) |expected, actual| {
-            if (!std.mem.eql(u8, expected.case_id, actual.id) or
+            if (!std.mem.eql(u8, expected.case_id, actual.case_id) or
                 !std.mem.eql(u8, expected.transcript, actual.transcript))
             {
                 return error.InvalidOracleManifest;
@@ -2888,7 +2952,7 @@ fn validateManifestBounded(
         if (!retained) return error.InvalidOracleManifest;
         const transcript = try readRelativeFromDir(io, allocator, dir, case.transcript);
         defer allocator.free(transcript);
-        const expected_prefix = try std.fmt.allocPrint(allocator, "case_id: {s}\n", .{case.id});
+        const expected_prefix = try std.fmt.allocPrint(allocator, "case_id: {s}\n", .{case.case_id});
         defer allocator.free(expected_prefix);
         if (!std.mem.startsWith(u8, transcript, expected_prefix)) return error.InvalidOracleManifest;
     }
@@ -2917,8 +2981,8 @@ fn validateOracleReceiverPinFromDir(
 }
 
 const OracleChecksumPolicy = enum {
-    integrity,
     current,
+    integrity,
 };
 
 fn validateChecksums(
@@ -2997,7 +3061,8 @@ fn validateOracleTreeIntegrityFromDir(io: std.Io, allocator: std.mem.Allocator, 
 
 fn generateFresh(init: std.process.Init, allocator: std.mem.Allocator, output_dir: []const u8) !void {
     try createFreshDirectory(init.io, output_dir);
-    errdefer deleteDirectoryIfPresent(init.io, output_dir) catch {};
+    errdefer deleteDirectoryIfPresent(init.io, output_dir) catch |cleanup_error|
+        reportCleanupFailure(output_dir, cleanup_error);
     try emitScalarAndBudget(init, allocator, output_dir);
     try emitHelperCall(init, allocator, output_dir);
     try emitPortableWord(init, allocator, output_dir);
@@ -3023,7 +3088,8 @@ fn copyOracleTree(
 ) !void {
     try requireDirectory(init.io, source_dir);
     try createFreshDirectory(init.io, target_dir);
-    errdefer deleteDirectoryIfPresent(init.io, target_dir) catch {};
+    errdefer deleteDirectoryIfPresent(init.io, target_dir) catch |cleanup_error|
+        reportCleanupFailure(target_dir, cleanup_error);
     var paths = try listFiles(init.io, allocator, source_dir);
     defer paths.deinit();
     for (paths.items) |relative_path| {
@@ -3286,17 +3352,17 @@ const PublicationPostMoveFault = enum {
 };
 
 const PublicationStagePrimaryFault = enum {
-    none,
-    after_create_before_open,
     after_copy_before_return,
     after_copy_transfer,
+    after_create_before_open,
+    none,
 };
 
 const PublicationStageRollbackFault = enum {
     none,
-    unretained_delete,
     retained_before_clear,
     retained_before_delete,
+    unretained_delete,
 };
 
 const PublicationStageFaults = struct {
@@ -3310,10 +3376,10 @@ const PublicationStageFailurePhase = enum {
     post_copy,
 };
 
-const RetainedPublicationCleanupFault = enum {
-    none,
+const RetainedCleanupFault = enum {
     before_clear,
     before_leaf_delete,
+    none,
 };
 
 const RetainedTreeMoveRequest = struct {
@@ -3442,7 +3508,7 @@ fn cleanupRetainedPublicationTreeWithFault(
     io: std.Io,
     leaf: []const u8,
     retained: RetainedPublicationTree,
-    fault: RetainedPublicationCleanupFault,
+    fault: RetainedCleanupFault,
 ) !void {
     root.requireMutationAuthority();
     if (fault == .before_clear) return error.InjectedOracleStageRollbackFailure;
@@ -3485,7 +3551,7 @@ fn rollbackRetainedStage(
     retained: RetainedPublicationTree,
     fault: PublicationStageRollbackFault,
 ) !void {
-    const cleanup_fault: RetainedPublicationCleanupFault = switch (fault) {
+    const cleanup_fault: RetainedCleanupFault = switch (fault) {
         .none => .none,
         .retained_before_clear => .before_clear,
         .retained_before_delete => .before_leaf_delete,
@@ -3568,19 +3634,19 @@ fn copyOracleTreeIntoRetainedStage(
 }
 
 const PublicationFault = enum {
-    none,
     after_backup,
-    replace_target_before_backup,
-    rollback_conflict,
     during_backup_cleanup,
+    none,
     post_move_observation_failure,
     replace_promoted_target,
+    replace_target_before_backup,
+    rollback_conflict,
 };
 
 const RetainedStageLocation = enum {
     at_stage,
-    move_unproved,
     at_target,
+    move_unproved,
 };
 
 const PublicationOutcome = union(enum) {
@@ -3880,7 +3946,7 @@ fn publishTrackedOracle(
         .paths = .{
             .target = corpus_path,
             .stage = tracked_publication_stage_path,
-            .backup = tracked_publication_backup_path,
+            .backup = tracked_backup_path,
         },
         .fault = .none,
         .authority = authority,
@@ -4160,7 +4226,7 @@ fn expectOracleInventoryFinishError(
         try items.append(allocator, owned);
     }
 
-    var work_limits = default_oracle_validation_work_limits;
+    var work_limits = default_validation_work_limits;
     work_limits.maximum_portable_pair_bytes = maximum_portable_pair_bytes;
     var finish_error: ?anyerror = null;
     const unexpected_paths: ?OwnedPaths = finishOracleInventory(
@@ -4187,7 +4253,7 @@ fn testOracleValidationWorkLimits(
     const portable_paths = [_][]const u8{ "a.txt", "b.txt", "child/c.txt" };
     const exact_pair_bytes = (portable_paths.len - 1) *
         (portable_paths[0].len + portable_paths[1].len + portable_paths[2].len);
-    var bounded_paths = default_oracle_validation_work_limits;
+    var bounded_paths = default_validation_work_limits;
     bounded_paths.maximum_portable_pair_bytes = exact_pair_bytes - 1;
     var pair_work_error: ?anyerror = null;
     bounded_paths.validatePortablePaths(&portable_paths) catch |err| {
@@ -4220,7 +4286,7 @@ fn testOracleValidationWorkLimits(
     {
         var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
         defer manifest_dir.close(init.io);
-        var strict_limits = default_oracle_validation_work_limits;
+        var strict_limits = default_validation_work_limits;
         strict_limits.maximum_integrity_cases = 0;
         inline for (.{ OracleManifestPolicy.current, .generated }) |policy| {
             try validateManifestBounded(
@@ -4247,7 +4313,7 @@ fn testOracleValidationWorkLimits(
                 allocator,
                 manifest_dir,
                 policy,
-                default_oracle_validation_work_limits,
+                default_validation_work_limits,
             ) catch |err| {
                 strict_error = err;
             };
@@ -4411,7 +4477,8 @@ fn testNoFollowInventory(
         break :created true;
     };
     if (!symlink_created) return;
-    defer cwd.deleteFile(init.io, linked) catch {};
+    defer cwd.deleteFile(init.io, linked) catch |cleanup_error|
+        reportCleanupFailure(linked, cleanup_error);
 
     var inventory_error: ?anyerror = null;
     const unexpected_paths: ?OwnedPaths = listFiles(init.io, allocator, source) catch |err| failed: {
@@ -4463,7 +4530,8 @@ fn testOracleInventoryLimits(
     defer allocator.free(child);
 
     try createFreshDirectory(init.io, source);
-    errdefer deleteDirectoryIfPresent(init.io, source) catch {};
+    errdefer deleteDirectoryIfPresent(init.io, source) catch |cleanup_error|
+        reportCleanupFailure(source, cleanup_error);
     try createFreshDirectory(init.io, child);
     try writeArtifact(init.io, allocator, source, "a.txt", "a\n");
     try writeArtifact(init.io, allocator, source, "b.txt", "b\n");
@@ -4519,14 +4587,14 @@ fn testOracleInventoryLimits(
         const portable_paths = [_][]const u8{ "a.txt", "b.txt", "child/c.txt" };
         const exact_pair_bytes = (portable_paths.len - 1) *
             (portable_paths[0].len + portable_paths[1].len + portable_paths[2].len);
-        var work_limits = default_oracle_validation_work_limits;
+        var work_limits = default_validation_work_limits;
         work_limits.maximum_portable_pair_bytes = exact_pair_bytes - 1;
         var work_error: ?anyerror = null;
         const unexpected_paths: ?OwnedPaths = listFilesFromDirBounded(
             init.io,
             allocator,
             source_dir,
-            default_oracle_inventory_limits,
+            default_inventory_limits,
             work_limits,
         ) catch |err| failed: {
             work_error = err;
@@ -4543,7 +4611,7 @@ fn testOracleInventoryLimits(
             init.io,
             allocator,
             source_dir,
-            default_oracle_inventory_limits,
+            default_inventory_limits,
             work_limits,
         );
         defer paths.deinit();
@@ -4622,8 +4690,8 @@ fn testPublishTrackedArgumentGrammar() !void {
 
 const StageFailureResidue = enum {
     absent,
-    empty,
     copied_candidate,
+    empty,
 };
 
 const StageFailureTestCase = struct {
@@ -4864,7 +4932,8 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     }
 
     try createFreshDirectory(init.io, root);
-    defer deleteDirectoryIfPresent(init.io, root) catch {};
+    defer deleteDirectoryIfPresent(init.io, root) catch |cleanup_error|
+        reportCleanupFailure(root, cleanup_error);
 
     inline for (.{ target, stage, backup }) |publication_path| {
         if (try pathKindNoFollow(init.io, publication_path) != null) {
@@ -5107,16 +5176,16 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try copyOracleTree(init, allocator, candidate, alternate_provenance_candidate);
     const strict_manifest = try readRelative(init.io, allocator, alternate_provenance_candidate, "manifest.json");
     defer allocator.free(strict_manifest);
-    const manifest_with_alternate_provenance = try std.mem.replaceOwned(
+    const alternate_provenance_manifest = try std.mem.replaceOwned(
         u8,
         allocator,
         strict_manifest,
         "  \"generator\": ",
         "  \"alternate_provenance\": {\"source\":\"untrusted\"},\n  \"generator\": ",
     );
-    defer allocator.free(manifest_with_alternate_provenance);
-    if (manifest_with_alternate_provenance.len == strict_manifest.len) return error.InvalidOracleManifest;
-    try writeArtifact(init.io, allocator, alternate_provenance_candidate, "manifest.json", manifest_with_alternate_provenance);
+    defer allocator.free(alternate_provenance_manifest);
+    if (alternate_provenance_manifest.len == strict_manifest.len) return error.InvalidOracleManifest;
+    try writeArtifact(init.io, allocator, alternate_provenance_candidate, "manifest.json", alternate_provenance_manifest);
     try writeChecksums(init, allocator, alternate_provenance_candidate);
     var alternate_provenance_error: ?anyerror = null;
     _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
@@ -5263,16 +5332,16 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try recoverExclusivePublication(init, allocator, paths);
     try compareTrees(init, allocator, stale_provenance_candidate, target);
 
-    var replaced_after_validation_error: ?anyerror = null;
+    var replacement_race_error: ?anyerror = null;
     _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
         candidate,
         receiver_pin,
         paths,
         .replace_target_before_backup,
     )) catch |err| {
-        replaced_after_validation_error = err;
+        replacement_race_error = err;
     };
-    try expectPublicationError(error.OraclePublicationConflict, replaced_after_validation_error);
+    try expectPublicationError(error.OraclePublicationConflict, replacement_race_error);
     const raced_receiver_marker = try readRelative(
         init.io,
         allocator,
@@ -5439,7 +5508,8 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         break :created true;
     };
     if (symlink_created) {
-        defer cwd.deleteFile(init.io, linked_parent) catch {};
+        defer cwd.deleteFile(init.io, linked_parent) catch |cleanup_error|
+            reportCleanupFailure(linked_parent, cleanup_error);
         var linked_candidate_error: ?anyerror = null;
         validateOracleTree(init, allocator, linked_parent ++ "/tracked", receiver_pin) catch |err| {
             linked_candidate_error = err;
@@ -5632,7 +5702,8 @@ fn argumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
     return error.InvalidArguments;
 }
 
-pub fn main(init: std.process.Init) !void {
+/// Runs oracle generation, verification, publication, or publication-safety checks.
+pub fn main(init: std.process.Init) anyerror!void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
@@ -5641,6 +5712,7 @@ pub fn main(init: std.process.Init) !void {
     _ = iterator.next();
     const command = iterator.next() orelse return error.InvalidArguments;
     var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
     while (iterator.next()) |arg| try argv.append(allocator, arg);
 
     if (std.mem.eql(u8, command, "generate")) {

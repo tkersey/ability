@@ -71,12 +71,15 @@ fn resolveExistingAbsolutePrefix(b: *std.Build, absolute_path: []const u8) []con
 
 fn canonicalizeBuildOwnedCacheRoot(b: *std.Build) void {
     const cache_path = b.cache_root.path orelse return;
-    if (!std.Io.Dir.path.isAbsolute(cache_path)) return;
+    const absolute_cache_path = if (std.Io.Dir.path.isAbsolute(cache_path))
+        cache_path
+    else
+        b.pathResolve(&.{ b.graph.cache.cwd, cache_path });
 
     // Generated LazyPaths carry this spelling into no-follow oracle readers.
     // Canonicalize only the build-owned cache carrier; receiver-supplied paths
     // retain their original admission semantics.
-    b.cache_root.path = resolveExistingAbsolutePrefix(b, cache_path);
+    b.cache_root.path = resolveExistingAbsolutePrefix(b, absolute_cache_path);
 }
 
 const ExactInstallTreeStep = struct {
@@ -2282,7 +2285,7 @@ fn addCompileFailArtifact(
     compile_fail_step.dependOn(&tests.step);
 }
 
-fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
+fn addZigPathCoverageGuard(b: *std.Build) *std.Build.Step {
     const guard = b.addSystemCommand(&.{
         "sh",
         "-c",
@@ -2293,7 +2296,7 @@ fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
         \\grep -E '^(src|examples|test|bench)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
-    lint_step.dependOn(&guard.step);
+    return &guard.step;
 }
 
 fn addCoreModules(
@@ -3791,7 +3794,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const lint_step = b.step("lint", "Lint source code.");
-    addZigPathCoverageGuard(b, lint_step);
+    const zig_path_coverage_guard = addZigPathCoverageGuard(b);
+    lint_step.dependOn(zig_path_coverage_guard);
     var builder = zlinter.builder(b, .{});
     builder.addPaths(.{
         .include = &.{
@@ -3814,8 +3818,16 @@ pub fn build(b: *std.Build) void {
         }
     }
     defer b.graph.global_cache_root.path = saved_global_cache_path;
-    lint_step.dependOn(builder.build());
-    oracle_check_step.dependOn(lint_step);
+    const interactive_lint = builder.build();
+    lint_step.dependOn(interactive_lint);
+    const strict_oracle_lint = strict: {
+        const saved_args = b.args;
+        defer b.args = saved_args;
+        b.args = &.{ "--max-warnings", "0" };
+        break :strict builder.build();
+    };
+    oracle_check_step.dependOn(strict_oracle_lint);
+    oracle_check_step.dependOn(zig_path_coverage_guard);
 
     for (&[_]*std.Build.Step{
         protocol_manifest_step,
@@ -3850,7 +3862,6 @@ pub fn build(b: *std.Build) void {
         loaded_malformed_step,
         loaded_payload_result_step,
         loaded_fuzz_step,
-        lint_step,
     }) |validation_step| {
         check_step.dependOn(validation_step);
     }
