@@ -363,6 +363,30 @@ const ExactInstallTreeStep = struct {
         };
     }
 
+    fn isDestinationCollisionError(err: anyerror) bool {
+        return switch (err) {
+            error.PathAlreadyExists, error.DirNotEmpty => true,
+            else => false,
+        };
+    }
+
+    fn renameEntryNoReplace(
+        old_dir: std.Io.Dir,
+        old_name: []const u8,
+        new_dir: std.Io.Dir,
+        new_name: []const u8,
+        io: std.Io,
+    ) !void {
+        renameDirectoryPreserve(old_dir, old_name, new_dir, new_name, io) catch |err| switch (err) {
+            error.PathAlreadyExists, error.DirNotEmpty => return error.OraclePublicationConflict,
+            error.AccessDenied, error.IsDir, error.NotDir => {
+                _ = new_dir.statFile(io, new_name, .{ .follow_symlinks = false }) catch return err;
+                return error.OraclePublicationConflict;
+            },
+            else => return err,
+        };
+    }
+
     const PreparedDestinationDir = struct {
         name: []const u8,
         identity: FileIdentity,
@@ -375,8 +399,8 @@ const ExactInstallTreeStep = struct {
         name: []const u8,
         prepared: PreparedDestinationDir,
     ) !ResolvedDestinationDir {
-        renameDirectoryPreserve(parent, prepared.name, parent, name, io) catch |rename_err| switch (rename_err) {
-            error.PathAlreadyExists => {
+        renameDirectoryPreserve(parent, prepared.name, parent, name, io) catch |rename_err| {
+            if (isDestinationCollisionError(rename_err)) {
                 const receiver_dir = openDestinationDir(parent, io, name) catch |open_err| {
                     try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
                     return open_err;
@@ -386,30 +410,32 @@ const ExactInstallTreeStep = struct {
                     return cleanup_err;
                 };
                 return receiver_dir;
-            },
-            error.AccessDenied => {
-                if (builtin.os.tag != .windows) {
+            }
+            switch (rename_err) {
+                error.AccessDenied => {
+                    if (builtin.os.tag != .windows) {
+                        try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                        return rename_err;
+                    }
+                    _ = parent.statFile(io, name, .{ .follow_symlinks = false }) catch {
+                        try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                        return rename_err;
+                    };
+                    const receiver_dir = openDestinationDir(parent, io, name) catch {
+                        try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                        return rename_err;
+                    };
+                    discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir) catch |cleanup_err| {
+                        receiver_dir.dir.close(io);
+                        return cleanup_err;
+                    };
+                    return receiver_dir;
+                },
+                else => {
                     try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
                     return rename_err;
-                }
-                _ = parent.statFile(io, name, .{ .follow_symlinks = false }) catch {
-                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                    return rename_err;
-                };
-                const receiver_dir = openDestinationDir(parent, io, name) catch {
-                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                    return rename_err;
-                };
-                discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir) catch |cleanup_err| {
-                    receiver_dir.dir.close(io);
-                    return cleanup_err;
-                };
-                return receiver_dir;
-            },
-            else => {
-                try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                return rename_err;
-            },
+                },
+            }
         };
         return .{ .dir = prepared.dir, .followed_link = false };
     }
@@ -624,8 +650,39 @@ const ExactInstallTreeStep = struct {
             .door,
             .event_port,
             .unknown,
-            => null,
+            => error.OracleDestinationOccupied,
         };
+    }
+
+    fn observedDestinationIdentity(
+        parent: std.Io.Dir,
+        io: std.Io,
+        name: []const u8,
+    ) !?FileIdentity {
+        const destination = try openExistingDestinationLeafNoFollow(parent, io, name);
+        if (destination) |dir| {
+            defer dir.close(io);
+            return try directoryIdentity(dir);
+        }
+        return null;
+    }
+
+    fn destinationObservationMatches(
+        expected: ?FileIdentity,
+        observed: ?FileIdentity,
+    ) bool {
+        if (expected == null or observed == null) return expected == null and observed == null;
+        return std.meta.eql(expected.?, observed.?);
+    }
+
+    fn restoreQuarantinedEntry(
+        quarantine: std.Io.Dir,
+        current: std.Io.Dir,
+        io: std.Io,
+        quarantine_name: []const u8,
+        destination_name: []const u8,
+    ) !void {
+        try renameEntryNoReplace(quarantine, quarantine_name, current, destination_name, io);
     }
 
     fn deleteNonDirectoryNoFollow(parent: std.Io.Dir, io: std.Io, name: []const u8) !void {
@@ -835,6 +892,64 @@ const ExactInstallTreeStep = struct {
             const receiver_stat = try resolved.dir.stat(io);
             try std.testing.expectEqual(@as(std.posix.mode_t, 0o710), receiver_stat.permissions.toMode() & 0o777);
         }
+    }
+
+    fn testDestinationCollisionClassification() !void {
+        try std.testing.expect(isDestinationCollisionError(error.PathAlreadyExists));
+        try std.testing.expect(isDestinationCollisionError(error.DirNotEmpty));
+        try std.testing.expect(!isDestinationCollisionError(error.AccessDenied));
+    }
+
+    fn testNoReplacePromotionPreservesReceiverDirectory() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "staged", public_dir_permissions);
+        var staged = try tmp.dir.openDir(io, "staged", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer staged.close(io);
+        const staged_identity = try directoryIdentity(staged);
+
+        try tmp.dir.createDir(io, "receiver", private_dir_permissions);
+        var receiver = try tmp.dir.openDir(io, "receiver", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            try receiver.setPermissions(io, .fromMode(0o710));
+        }
+        const receiver_identity = try directoryIdentity(receiver);
+        receiver.close(io);
+
+        try std.testing.expectError(
+            error.OraclePublicationConflict,
+            renameEntryNoReplace(tmp.dir, "staged", tmp.dir, "receiver", io),
+        );
+        var retained_staged = try tmp.dir.openDir(io, "staged", .{ .follow_symlinks = false });
+        defer retained_staged.close(io);
+        try std.testing.expect(std.meta.eql(staged_identity, try directoryIdentity(retained_staged)));
+        var retained_receiver = try tmp.dir.openDir(io, "receiver", .{ .follow_symlinks = false });
+        defer retained_receiver.close(io);
+        try std.testing.expect(std.meta.eql(receiver_identity, try directoryIdentity(retained_receiver)));
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            const receiver_stat = try retained_receiver.stat(io);
+            try std.testing.expectEqual(@as(std.posix.mode_t, 0o710), receiver_stat.permissions.toMode() & 0o777);
+        }
+
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "file-receiver",
+            .data = "receiver-owned\n",
+        });
+        try std.testing.expectError(
+            error.OraclePublicationConflict,
+            renameEntryNoReplace(tmp.dir, "staged", tmp.dir, "file-receiver", io),
+        );
+        const marker = try tmp.dir.readFileAlloc(io, "file-receiver", std.testing.allocator, .limited(64));
+        defer std.testing.allocator.free(marker);
+        try std.testing.expectEqualStrings("receiver-owned\n", marker);
     }
 
     fn testProtectedDescendantIdentityCollection() !void {
@@ -1116,7 +1231,7 @@ const ExactInstallTreeStep = struct {
         }
 
         var validated_destination_identity: ?FileIdentity = null;
-        const existing_destination = openExistingDestinationLeafNoFollow(
+        const retained_destination = openExistingDestinationLeafNoFollow(
             current,
             io,
             destination_leaf,
@@ -1130,8 +1245,9 @@ const ExactInstallTreeStep = struct {
                 .{ destination_leaf, @errorName(err) },
             ),
         };
-        if (existing_destination) |existing| {
-            defer existing.close(io);
+        var retained_destination_open = retained_destination != null;
+        defer if (retained_destination_open) retained_destination.?.close(io);
+        if (retained_destination) |existing| {
             const destination_identity = directoryIdentity(existing) catch |err| return step.fail(
                 "unable to identify oracle destination leaf '{s}': {s}",
                 .{ destination_leaf, @errorName(err) },
@@ -1329,19 +1445,71 @@ const ExactInstallTreeStep = struct {
             }
         }
 
-        var destination_moved = true;
-        current.rename(destination_leaf, quarantine_container, container_tree_name, io) catch |err| switch (err) {
-            error.FileNotFound => destination_moved = false,
-            else => return step.fail(
-                "unable to quarantine prior oracle destination '{s}' through private container '{s}': {s}",
-                .{ destination_leaf, quarantine_name, @errorName(err) },
-            ),
-        };
-        quarantine_tree_present = destination_moved;
+        const current_destination_identity = observedDestinationIdentity(
+            current,
+            io,
+            destination_leaf,
+        ) catch |err| return step.fail(
+            "unable to revalidate oracle destination leaf '{s}' before publication: {s}",
+            .{ destination_leaf, @errorName(err) },
+        );
+        if (!destinationObservationMatches(validated_destination_identity, current_destination_identity)) {
+            return step.fail(
+                "oracle destination leaf '{s}' changed after admission; receiver was not quarantined or replaced",
+                .{destination_leaf},
+            );
+        }
 
-        staging_container.rename(container_tree_name, current, destination_leaf, io) catch |publish_err| {
+        if (validated_destination_identity != null) {
+            current.rename(destination_leaf, quarantine_container, container_tree_name, io) catch |err| {
+                return step.fail(
+                    "unable to quarantine the admitted oracle destination '{s}' through private container '{s}': {s}",
+                    .{ destination_leaf, quarantine_name, @errorName(err) },
+                );
+            };
+            quarantine_tree_present = true;
+
+            const quarantined_identity = observedDestinationIdentity(
+                quarantine_container,
+                io,
+                container_tree_name,
+            ) catch null;
+            if (!destinationObservationMatches(validated_destination_identity, quarantined_identity)) {
+                restoreQuarantinedEntry(
+                    quarantine_container,
+                    current,
+                    io,
+                    container_tree_name,
+                    destination_leaf,
+                ) catch |restore_err| return step.fail(
+                    "oracle destination '{s}' changed during quarantine; the receiver remains preserved in '{s}/{s}' because no-replace restoration failed: {s}",
+                    .{ destination_leaf, quarantine_name, container_tree_name, @errorName(restore_err) },
+                );
+                quarantine_tree_present = false;
+                return step.fail(
+                    "oracle destination '{s}' changed during quarantine; the receiver was restored and publication was not attempted",
+                    .{destination_leaf},
+                );
+            }
+            retained_destination.?.close(io);
+            retained_destination_open = false;
+        }
+
+        renameEntryNoReplace(
+            staging_container,
+            container_tree_name,
+            current,
+            destination_leaf,
+            io,
+        ) catch |publish_err| {
             if (quarantine_tree_present) {
-                quarantine_container.rename(container_tree_name, current, destination_leaf, io) catch |rollback_err| {
+                restoreQuarantinedEntry(
+                    quarantine_container,
+                    current,
+                    io,
+                    container_tree_name,
+                    destination_leaf,
+                ) catch |rollback_err| {
                     return step.fail(
                         "unable to publish staged oracle tree from private container '{s}' as '{s}': {s}; prior tree remains in quarantine '{s}/{s}' because rollback failed: {s}",
                         .{
@@ -1423,6 +1591,14 @@ test "exact oracle identities compare canonically" {
 
 test "exact oracle destination collision preserves the receiver directory" {
     try ExactInstallTreeStep.testDestinationCollisionPreservesReceiverDirectory();
+}
+
+test "exact oracle destination collision classifier includes DirNotEmpty" {
+    try ExactInstallTreeStep.testDestinationCollisionClassification();
+}
+
+test "exact oracle final promotion preserves an empty receiver directory" {
+    try ExactInstallTreeStep.testNoReplacePromotionPreservesReceiverDirectory();
 }
 
 test "exact oracle protection includes descendant directory identities" {
