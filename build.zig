@@ -300,6 +300,18 @@ const ExactInstallTreeStep = struct {
         try cleanupEmptyContainerName(parent, io, private_name, private_identity);
     }
 
+    fn preserveDestinationSetupPrimaryError(
+        private_name: []const u8,
+        primary_error: anyerror,
+        cleanup_result: anyerror!void,
+    ) anyerror {
+        cleanup_result catch |cleanup_error| std.debug.print(
+            "exact oracle destination setup failed with {s}; cleanup of private directory '{s}' also failed with {s} and residue may remain\n",
+            .{ @errorName(primary_error), private_name, @errorName(cleanup_error) },
+        );
+        return primary_error;
+    }
+
     const darwin_rename = struct {
         extern "c" fn renameatx_np(
             old_dir: std.posix.fd_t,
@@ -405,8 +417,11 @@ const ExactInstallTreeStep = struct {
         renameDirectoryPreserve(parent, prepared.name, parent, name, io) catch |rename_err| {
             if (isDestinationCollisionError(rename_err)) {
                 const receiver_dir = openDestinationDir(parent, io, name) catch |open_err| {
-                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                    return open_err;
+                    return preserveDestinationSetupPrimaryError(
+                        prepared.name,
+                        open_err,
+                        discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir),
+                    );
                 };
                 discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir) catch |cleanup_err| {
                     receiver_dir.dir.close(io);
@@ -417,16 +432,25 @@ const ExactInstallTreeStep = struct {
             switch (rename_err) {
                 error.AccessDenied => {
                     if (builtin.os.tag != .windows) {
-                        try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                        return rename_err;
+                        return preserveDestinationSetupPrimaryError(
+                            prepared.name,
+                            rename_err,
+                            discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir),
+                        );
                     }
                     _ = parent.statFile(io, name, .{ .follow_symlinks = false }) catch {
-                        try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                        return rename_err;
+                        return preserveDestinationSetupPrimaryError(
+                            prepared.name,
+                            rename_err,
+                            discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir),
+                        );
                     };
                     const receiver_dir = openDestinationDir(parent, io, name) catch {
-                        try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                        return rename_err;
+                        return preserveDestinationSetupPrimaryError(
+                            prepared.name,
+                            rename_err,
+                            discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir),
+                        );
                     };
                     discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir) catch |cleanup_err| {
                         receiver_dir.dir.close(io);
@@ -435,8 +459,11 @@ const ExactInstallTreeStep = struct {
                     return receiver_dir;
                 },
                 else => {
-                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
-                    return rename_err;
+                    return preserveDestinationSetupPrimaryError(
+                        prepared.name,
+                        rename_err,
+                        discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir),
+                    );
                 },
             }
         };
@@ -462,18 +489,27 @@ const ExactInstallTreeStep = struct {
                 .iterate = true,
                 .follow_symlinks = false,
             }) catch |open_err| {
-                parent.deleteDir(io, private_name) catch |cleanup_err| return cleanup_err;
-                return open_err;
+                return preserveDestinationSetupPrimaryError(
+                    private_name,
+                    open_err,
+                    parent.deleteDir(io, private_name),
+                );
             };
             const private_identity = directoryIdentity(private_dir) catch |identity_err| {
                 private_dir.close(io);
-                parent.deleteDir(io, private_name) catch |cleanup_err| return cleanup_err;
-                return identity_err;
+                return preserveDestinationSetupPrimaryError(
+                    private_name,
+                    identity_err,
+                    parent.deleteDir(io, private_name),
+                );
             };
             if (std.Io.Dir.Permissions.has_executable_bit) {
                 private_dir.setPermissions(io, public_dir_permissions) catch |permissions_err| {
-                    try discardPreparedDestinationDir(parent, io, private_name, private_identity, private_dir);
-                    return permissions_err;
+                    return preserveDestinationSetupPrimaryError(
+                        private_name,
+                        permissions_err,
+                        discardPreparedDestinationDir(parent, io, private_name, private_identity, private_dir),
+                    );
                 };
             }
             return installPreparedDestinationDir(
@@ -1000,6 +1036,77 @@ const ExactInstallTreeStep = struct {
         try std.testing.expect(isDestinationCollisionError(error.PathAlreadyExists));
         try std.testing.expect(isDestinationCollisionError(error.DirNotEmpty));
         try std.testing.expect(!isDestinationCollisionError(error.AccessDenied));
+    }
+
+    fn testDestinationSetupPrimaryErrorPrecedence() !void {
+        try std.testing.expectEqual(
+            error.NotDir,
+            preserveDestinationSetupPrimaryError(
+                "prepared",
+                error.NotDir,
+                error.OracleCleanupRace,
+            ),
+        );
+    }
+
+    fn testDestinationCollisionPreservesPrimaryErrorWhenCleanupFails() !void {
+        if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "receiver-file",
+            .data = "receiver-owned\n",
+        });
+        try tmp.dir.createDir(io, "prepared", private_dir_permissions);
+        const prepared = try tmp.dir.openDir(io, "prepared", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        const prepared_identity = try directoryIdentity(prepared);
+        try prepared.writeFile(io, .{
+            .sub_path = "cleanup-blocker.txt",
+            .data = "prepared-residue\n",
+        });
+
+        try std.testing.expectError(
+            error.NotDir,
+            installPreparedDestinationDir(
+                tmp.dir,
+                io,
+                "receiver-file",
+                .{
+                    .name = "prepared",
+                    .identity = prepared_identity,
+                    .dir = prepared,
+                },
+            ),
+        );
+
+        const receiver_marker = try tmp.dir.readFileAlloc(
+            io,
+            "receiver-file",
+            std.testing.allocator,
+            .limited(64),
+        );
+        defer std.testing.allocator.free(receiver_marker);
+        try std.testing.expectEqualStrings("receiver-owned\n", receiver_marker);
+
+        var retained_prepared = try tmp.dir.openDir(io, "prepared", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer retained_prepared.close(io);
+        const residue_marker = try retained_prepared.readFileAlloc(
+            io,
+            "cleanup-blocker.txt",
+            std.testing.allocator,
+            .limited(64),
+        );
+        defer std.testing.allocator.free(residue_marker);
+        try std.testing.expectEqualStrings("prepared-residue\n", residue_marker);
     }
 
     fn testNoReplacePromotionPreservesReceiverDirectory() !void {
@@ -2105,6 +2212,14 @@ test "exact oracle destination collision preserves the receiver directory" {
 
 test "exact oracle destination collision classifier includes DirNotEmpty" {
     try ExactInstallTreeStep.testDestinationCollisionClassification();
+}
+
+test "exact oracle destination setup preserves its primary error" {
+    try ExactInstallTreeStep.testDestinationSetupPrimaryErrorPrecedence();
+}
+
+test "exact oracle destination collision preserves its primary error when cleanup fails" {
+    try ExactInstallTreeStep.testDestinationCollisionPreservesPrimaryErrorWhenCleanupFails();
 }
 
 test "exact oracle final promotion preserves an empty receiver directory" {

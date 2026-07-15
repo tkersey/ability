@@ -3933,32 +3933,31 @@ fn promoteOracleTree(
     return if (target_matches) .moved else .post_move_terminal;
 }
 
-fn publishTrackedOracle(
+fn publishTrackedOracleRequest(
     init: std.process.Init,
     allocator: std.mem.Allocator,
-    candidate_dir: []const u8,
-    receiver_pin: []const u8,
-    authority: TrackedPublicationAuthority,
+    request: PublicationRequest,
+    comptime read_candidate_pin_for_diagnostic: anytype,
 ) !void {
-    const outcome = publishOracleTree(init, allocator, .{
-        .candidate_dir = candidate_dir,
-        .receiver_pin = receiver_pin,
-        .paths = .{
-            .target = corpus_path,
-            .stage = tracked_publication_stage_path,
-            .backup = tracked_backup_path,
-        },
-        .fault = .none,
-        .authority = authority,
-    }) catch |err| {
-        if (err == error.OracleReceiverPinMismatch) {
-            const candidate_pin = try oracleReceiverPin(init, allocator, candidate_dir);
+    const outcome = publishOracleTree(init, allocator, request) catch |primary_error| {
+        if (primary_error == error.OracleReceiverPinMismatch) {
+            const candidate_pin = read_candidate_pin_for_diagnostic(
+                init,
+                allocator,
+                request.candidate_dir,
+            ) catch |diagnostic_error| {
+                std.debug.print(
+                    "oracle receiver pin mismatch: expected {s}, producer candidate diagnostic unavailable after {s}, candidate tree {s}; candidate identity is diagnostic only; do not replace the receiver pin without independent receiver-owner approval\n",
+                    .{ request.receiver_pin, @errorName(diagnostic_error), request.candidate_dir },
+                );
+                return primary_error;
+            };
             std.debug.print(
                 "oracle receiver pin mismatch: expected {s}, producer candidate {s}, candidate tree {s}; candidate identity is diagnostic only; do not replace the receiver pin without independent receiver-owner approval\n",
-                .{ receiver_pin, &candidate_pin, candidate_dir },
+                .{ request.receiver_pin, &candidate_pin, request.candidate_dir },
             );
         }
-        return err;
+        return primary_error;
     };
     switch (outcome) {
         .committed => {},
@@ -3967,6 +3966,31 @@ fn publishTrackedOracle(
             .{@errorName(cleanup_error)},
         ),
     }
+}
+
+fn publishTrackedOracle(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    candidate_dir: []const u8,
+    receiver_pin: []const u8,
+    authority: TrackedPublicationAuthority,
+) !void {
+    return publishTrackedOracleRequest(
+        init,
+        allocator,
+        .{
+            .candidate_dir = candidate_dir,
+            .receiver_pin = receiver_pin,
+            .paths = .{
+                .target = corpus_path,
+                .stage = tracked_publication_stage_path,
+                .backup = tracked_backup_path,
+            },
+            .fault = .none,
+            .authority = authority,
+        },
+        oracleReceiverPin,
+    );
 }
 
 fn compareTrees(
@@ -5220,6 +5244,35 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         metadata_variant_error = err;
     };
     try expectPublicationError(error.OracleReceiverPinMismatch, metadata_variant_error);
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
+        return error.OraclePublicationResidue;
+    }
+
+    const failing_pin_diagnostic = struct {
+        fn read(
+            _: std.process.Init,
+            _: std.mem.Allocator,
+            _: []const u8,
+        ) ![64]u8 {
+            return error.InjectedOracleReceiverPinDiagnosticFailure;
+        }
+    };
+    var diagnostic_failure_error: ?anyerror = null;
+    publishTrackedOracleRequest(
+        init,
+        allocator,
+        exclusivePublicationRequest(
+            metadata_variant_candidate,
+            receiver_pin,
+            paths,
+            .none,
+        ),
+        failing_pin_diagnostic.read,
+    ) catch |err| {
+        diagnostic_failure_error = err;
+    };
+    try expectPublicationError(error.OracleReceiverPinMismatch, diagnostic_failure_error);
     try compareTrees(init, allocator, candidate, target);
     if (try pathKindNoFollow(init.io, stage) != null or try pathKindNoFollow(init.io, backup) != null) {
         return error.OraclePublicationResidue;
