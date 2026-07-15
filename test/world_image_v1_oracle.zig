@@ -771,11 +771,93 @@ fn deleteDirectoryIfPresent(io: std.Io, path: []const u8) !void {
     try std.Io.Dir.cwd().deleteTree(io, path);
 }
 
+const darwin_rename = struct {
+    extern "c" fn renameatx_np(
+        old_dir: std.posix.fd_t,
+        old_path: [*:0]const u8,
+        new_dir: std.posix.fd_t,
+        new_path: [*:0]const u8,
+        flags: c_uint,
+    ) c_int;
+};
+
+fn darwinRenameDirectoryPreserve(
+    old_dir: std.Io.Dir,
+    old_name: []const u8,
+    new_dir: std.Io.Dir,
+    new_name: []const u8,
+) std.Io.Dir.RenamePreserveError!void {
+    const old_path = try std.posix.toPosixPath(old_name);
+    const new_path = try std.posix.toPosixPath(new_name);
+    while (true) switch (std.c.errno(darwin_rename.renameatx_np(
+        old_dir.handle,
+        &old_path,
+        new_dir.handle,
+        &new_path,
+        0x00000004, // RENAME_EXCL
+    ))) {
+        .SUCCESS => return,
+        .INTR => continue,
+        .ACCES => return error.AccessDenied,
+        .PERM => return error.PermissionDenied,
+        .BUSY => return error.FileBusy,
+        .DQUOT => return error.DiskQuota,
+        .ISDIR => return error.IsDir,
+        .IO => return error.HardwareFailure,
+        .LOOP => return error.SymLinkLoop,
+        .MLINK => return error.LinkQuotaExceeded,
+        .NAMETOOLONG => return error.NameTooLong,
+        .NOENT => return error.FileNotFound,
+        .NOTDIR => return error.NotDir,
+        .NOMEM => return error.SystemResources,
+        .NOSPC => return error.NoSpaceLeft,
+        .EXIST, .NOTEMPTY => return error.PathAlreadyExists,
+        .ROFS => return error.ReadOnlyFileSystem,
+        .XDEV => return error.CrossDevice,
+        .NODEV => return error.NoDevice,
+        .OPNOTSUPP => return error.OperationUnsupported,
+        .ILSEQ => return error.BadPathName,
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+}
+
+fn renameDirectoryPreserve(
+    old_dir: std.Io.Dir,
+    old_name: []const u8,
+    new_dir: std.Io.Dir,
+    new_name: []const u8,
+    io: std.Io,
+) std.Io.Dir.RenamePreserveError!void {
+    if (comptime builtin.os.tag.isDarwin()) {
+        return darwinRenameDirectoryPreserve(old_dir, old_name, new_dir, new_name);
+    }
+    return switch (builtin.os.tag) {
+        .linux, .windows => old_dir.renamePreserve(old_name, new_dir, new_name, io),
+        else => error.OperationUnsupported,
+    };
+}
+
+fn renameDirectoryNoReplace(
+    old_dir: std.Io.Dir,
+    old_name: []const u8,
+    new_dir: std.Io.Dir,
+    new_name: []const u8,
+    io: std.Io,
+) !void {
+    renameDirectoryPreserve(old_dir, old_name, new_dir, new_name, io) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.OraclePublicationConflict,
+        error.AccessDenied, error.DirNotEmpty, error.IsDir, error.NotDir => {
+            _ = new_dir.statFile(io, new_name, .{ .follow_symlinks = false }) catch return err;
+            return error.OraclePublicationConflict;
+        },
+        else => return err,
+    };
+}
+
 fn renameDirectoryToMissing(io: std.Io, source: []const u8, target: []const u8) !void {
     try requireDirectory(io, source);
-    if (try pathKindNoFollow(io, target) != null) return error.OraclePublicationConflict;
     const cwd = std.Io.Dir.cwd();
-    try cwd.rename(source, cwd, target, io);
+    try renameDirectoryNoReplace(cwd, source, cwd, target, io);
 }
 
 fn writeArtifact(
@@ -2686,8 +2768,7 @@ const PublicationRoot = struct {
         target: []const u8,
     ) !void {
         try root.requireDirectory(io, source);
-        if (try root.pathKind(io, target) != null) return error.OraclePublicationConflict;
-        try root.dir.rename(source, root.dir, target, io);
+        try renameDirectoryNoReplace(root.dir, source, root.dir, target, io);
     }
 };
 
@@ -3133,6 +3214,9 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     const special_entry_candidate = root ++ "/special-entry-candidate";
     const escaping_reference_candidate = root ++ "/escaping-reference-candidate";
     const existing_output = root ++ "/existing-output";
+    const collision_source = root ++ "/collision-source";
+    const collision_receiver = root ++ "/collision-receiver";
+    const collision_backup = root ++ "/collision-backup";
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
 
@@ -3206,6 +3290,57 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     try createFreshDirectory(init.io, root);
     defer deleteDirectoryIfPresent(init.io, root) catch {};
+
+    try createFreshDirectory(init.io, collision_source);
+    try writeArtifact(init.io, allocator, collision_source, "source.txt", "source-remains\n");
+    try createFreshDirectory(init.io, collision_receiver);
+    if (std.Io.Dir.Permissions.has_executable_bit) {
+        var receiver_dir = try cwd.openDir(init.io, collision_receiver, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer receiver_dir.close(init.io);
+        try receiver_dir.setPermissions(init.io, .fromMode(0o710));
+    }
+    const receiver_before = try cwd.statFile(init.io, collision_receiver, .{ .follow_symlinks = false });
+    const collision_root = try PublicationRoot.open(init.io, .{
+        .target = collision_receiver,
+        .stage = collision_source,
+        .backup = collision_backup,
+    });
+    defer collision_root.close(init.io);
+    var collision_error: ?anyerror = null;
+    collision_root.renameDirectoryToMissing(
+        init.io,
+        collision_root.stage,
+        collision_root.target,
+    ) catch |err| {
+        collision_error = err;
+    };
+    try expectPublicationError(error.OraclePublicationConflict, collision_error);
+    const receiver_after = try cwd.statFile(init.io, collision_receiver, .{ .follow_symlinks = false });
+    if (receiver_after.inode != receiver_before.inode) return error.OraclePublicationReceiverReplaced;
+    if (std.Io.Dir.Permissions.has_executable_bit and
+        receiver_after.permissions.toMode() & 0o777 != receiver_before.permissions.toMode() & 0o777)
+    {
+        return error.OraclePublicationReceiverModeChanged;
+    }
+    var retained_receiver = try cwd.openDir(init.io, collision_receiver, .{
+        .iterate = true,
+        .follow_symlinks = false,
+    });
+    defer retained_receiver.close(init.io);
+    var retained_receiver_iterator = retained_receiver.iterate();
+    if (try retained_receiver_iterator.next(init.io) != null) {
+        return error.OraclePublicationReceiverContentsChanged;
+    }
+    if (try pathKindNoFollow(init.io, collision_source) != .directory) {
+        return error.OraclePublicationSourceDisappeared;
+    }
+    const collision_source_marker = try readRelative(init.io, allocator, collision_source, "source.txt");
+    defer allocator.free(collision_source_marker);
+    try expectEqualBytes("source-remains\n", collision_source_marker);
+
     try generateFresh(init, allocator, candidate);
     try validateOracleTree(init, allocator, candidate, receiver_pin);
     try copyOracleTree(init, allocator, candidate, target);

@@ -962,7 +962,8 @@ const ExactInstallTreeStep = struct {
             ) catch |err| return err;
             protected_current = child;
         }
-        const protected_identity = protected_identities.items[protected_identities.items.len - 1];
+        const protected_subtree_start = protected_identities.items.len - 1;
+        const protected_identity = protected_identities.items[protected_subtree_start];
         collectProtectedDescendantIdentities(
             protected_current,
             io,
@@ -972,6 +973,7 @@ const ExactInstallTreeStep = struct {
             "unable to identify every protected Boundary oracle descendant: {s}",
             .{@errorName(err)},
         );
+        const protected_subtree_identities = protected_identities.items[protected_subtree_start..];
 
         const source_path = try exact_tree.source_dir.getPath4(step.owner, step);
         var source_opened: std.ArrayList(std.Io.Dir) = .empty;
@@ -1066,7 +1068,7 @@ const ExactInstallTreeStep = struct {
             "unable to identify oracle destination filesystem root '{s}': {s}",
             .{ root_path, @errorName(err) },
         );
-        if (std.meta.eql(root_identity, protected_identity)) {
+        if (identityMatchesAny(root_identity, protected_subtree_identities)) {
             return step.fail("refusing protected Boundary oracle destination ancestor '{s}'", .{root_path});
         }
 
@@ -1090,9 +1092,9 @@ const ExactInstallTreeStep = struct {
                 "unable to identify oracle destination component '{s}': {s}",
                 .{ component.name, @errorName(err) },
             );
-            if (std.meta.eql(child_identity, protected_identity)) {
+            if (identityMatchesAny(child_identity, protected_subtree_identities)) {
                 return step.fail(
-                    "refusing filesystem alias of protected Boundary oracle corpus at destination component '{s}'",
+                    "refusing filesystem alias of protected Boundary oracle corpus or descendant at destination component '{s}'",
                     .{component.name},
                 );
             }
