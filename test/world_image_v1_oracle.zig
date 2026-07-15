@@ -2904,9 +2904,14 @@ fn validateManifestBounded(
     }
 
     var payload_count: usize = 0;
-    for (paths.items) |path| if (!isOracleMetadataPath(path)) {
+    var retained_transcript_count: usize = 0;
+    for (paths.items) |path| {
+        if (isOracleMetadataPath(path)) continue;
         payload_count += 1;
-    };
+        if (std.mem.startsWith(u8, path, "cases/") and std.mem.endsWith(u8, path, ".txt")) {
+            retained_transcript_count += 1;
+        }
+    }
     if (manifest.artifact_count != payload_count or manifest.artifacts.len != payload_count) {
         return error.InvalidOracleManifest;
     }
@@ -2955,6 +2960,9 @@ fn validateManifestBounded(
         const expected_prefix = try std.fmt.allocPrint(allocator, "case_id: {s}\n", .{case.case_id});
         defer allocator.free(expected_prefix);
         if (!std.mem.startsWith(u8, transcript, expected_prefix)) return error.InvalidOracleManifest;
+    }
+    if (policy != .integrity and retained_transcript_count != manifest.case_count) {
+        return error.InvalidOracleManifest;
     }
 }
 
@@ -4871,6 +4879,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     const rehashed_module_candidate = root ++ "/rehashed-module-candidate";
     const rehashed_session_candidate = root ++ "/rehashed-session-candidate";
     const truncated_transcript_candidate = root ++ "/truncated-transcript-candidate";
+    const unlisted_transcript_candidate = root ++ "/unlisted-transcript-candidate";
     const stale_provenance_candidate = root ++ "/stale-provenance-candidate";
     const alternate_provenance_candidate = root ++ "/alternate-provenance-candidate";
     const metadata_variant_candidate = root ++ "/metadata-variant-candidate";
@@ -5042,6 +5051,28 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try generateFresh(init, allocator, candidate);
     try validateOracleTree(init, allocator, candidate, receiver_pin);
     try testOracleValidationWorkLimits(init, allocator, root, candidate);
+
+    try copyOracleTree(init, allocator, candidate, unlisted_transcript_candidate);
+    try writeArtifact(
+        init.io,
+        allocator,
+        unlisted_transcript_candidate,
+        "cases/unlisted.txt",
+        "case_id: unlisted\n",
+    );
+    try deleteArtifact(init.io, allocator, unlisted_transcript_candidate, "manifest.json");
+    try deleteArtifact(init.io, allocator, unlisted_transcript_candidate, "checksums.sha256");
+    try writeManifest(init, allocator, unlisted_transcript_candidate);
+    try writeChecksums(init, allocator, unlisted_transcript_candidate);
+    try validateManifest(init, allocator, unlisted_transcript_candidate, .integrity);
+    inline for ([_]OracleManifestPolicy{ .current, .generated }) |policy| {
+        var unlisted_transcript_error: ?anyerror = null;
+        validateManifest(init, allocator, unlisted_transcript_candidate, policy) catch |err| {
+            unlisted_transcript_error = err;
+        };
+        try expectPublicationError(error.InvalidOracleManifest, unlisted_transcript_error);
+    }
+
     try copyOracleTree(init, allocator, candidate, target);
     try compareTrees(init, allocator, candidate, target);
     try testMissingPublicationAuthority(init, allocator, candidate, receiver_pin, paths);
