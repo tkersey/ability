@@ -617,6 +617,49 @@ const ExactInstallTreeStep = struct {
         }
     }
 
+    const ProtectedDescendantCollectionContext = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        protected_identities: *std.ArrayList(FileIdentity),
+    };
+
+    fn collectProtectedDescendantEntryNoFollow(
+        dir: std.Io.Dir,
+        context: ProtectedDescendantCollectionContext,
+        name: []const u8,
+        reported_kind: std.Io.File.Kind,
+    ) anyerror!void {
+        switch (try sourceEntryKindNoFollow(dir, context.io, name, reported_kind)) {
+            .file => return,
+            .directory => {},
+            .block_device,
+            .character_device,
+            .named_pipe,
+            .sym_link,
+            .unix_domain_socket,
+            .whiteout,
+            .door,
+            .event_port,
+            .unknown,
+            => return error.UnsupportedOracleTreeEntry,
+        }
+
+        var child = try dir.openDir(context.io, name, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer child.close(context.io);
+        const child_identity = try directoryIdentity(child);
+        if (identityMatchesAny(child_identity, context.protected_identities.items)) return;
+        try context.protected_identities.append(context.allocator, child_identity);
+        try collectProtectedDescendantIdentities(
+            child,
+            context.io,
+            context.allocator,
+            context.protected_identities,
+        );
+    }
+
     fn collectProtectedDescendantIdentities(
         dir: std.Io.Dir,
         io: std.Io,
@@ -632,20 +675,11 @@ const ExactInstallTreeStep = struct {
             {
                 return error.UnsupportedOracleTreeEntry;
             }
-            if (entry.kind != .directory and entry.kind != .unknown) continue;
-
-            var child = dir.openDir(io, entry.name, .{
-                .iterate = true,
-                .follow_symlinks = false,
-            }) catch |err| switch (err) {
-                error.NotDir, error.SymLinkLoop => continue,
-                else => return err,
-            };
-            defer child.close(io);
-            const child_identity = try directoryIdentity(child);
-            if (identityMatchesAny(child_identity, protected_identities.items)) continue;
-            try protected_identities.append(allocator, child_identity);
-            try collectProtectedDescendantIdentities(child, io, allocator, protected_identities);
+            try collectProtectedDescendantEntryNoFollow(dir, .{
+                .allocator = allocator,
+                .io = io,
+                .protected_identities = protected_identities,
+            }, entry.name, entry.kind);
         }
     }
 
@@ -708,36 +742,19 @@ const ExactInstallTreeStep = struct {
         try renameEntryNoReplace(quarantine, quarantine_name, current, destination_name, io);
     }
 
-    const QuarantinePostcheckContext = struct {
-        quarantine: std.Io.Dir,
-        current: std.Io.Dir,
-        io: std.Io,
-        quarantine_name: []const u8,
-        destination_name: []const u8,
-    };
-
     const QuarantinePostcheckOutcome = union(enum) {
+        identity_mismatch,
         observation_failed: anyerror,
-        restoration_failed: anyerror,
-        restored_mismatch,
         verified,
     };
 
     fn resolveQuarantinePostcheck(
-        context: QuarantinePostcheckContext,
-        expected: ?FileIdentity,
+        expected: FileIdentity,
         observation: anyerror!?FileIdentity,
     ) QuarantinePostcheckOutcome {
         const observed = observation catch |err| return .{ .observation_failed = err };
-        if (destinationObservationMatches(expected, observed)) return .verified;
-        restoreQuarantinedEntry(
-            context.quarantine,
-            context.current,
-            context.io,
-            context.quarantine_name,
-            context.destination_name,
-        ) catch |err| return .{ .restoration_failed = err };
-        return .restored_mismatch;
+        if (observed != null and std.meta.eql(expected, observed.?)) return .verified;
+        return .identity_mismatch;
     }
 
     fn deleteNonDirectoryNoFollow(parent: std.Io.Dir, io: std.Io, name: []const u8) !void {
@@ -759,9 +776,22 @@ const ExactInstallTreeStep = struct {
             error.FileNotFound => return,
             else => return err,
         };
-        if (kind != .directory) {
-            try deleteNonDirectoryNoFollow(dir, io, name);
-            return;
+        switch (kind) {
+            .file => {
+                try deleteNonDirectoryNoFollow(dir, io, name);
+                return;
+            },
+            .directory => {},
+            .block_device,
+            .character_device,
+            .named_pipe,
+            .sym_link,
+            .unix_domain_socket,
+            .whiteout,
+            .door,
+            .event_port,
+            .unknown,
+            => return error.UnsupportedOracleTreeEntry,
         }
 
         var child = dir.openDir(io, name, .{
@@ -1051,21 +1081,14 @@ const ExactInstallTreeStep = struct {
 
         const failed_observation: anyerror!?FileIdentity =
             error.InjectedQuarantineObservationFailure;
-        const outcome = resolveQuarantinePostcheck(.{
-            .quarantine = quarantine,
-            .current = tmp.dir,
-            .io = io,
-            .quarantine_name = "tree",
-            .destination_name = "receiver",
-        }, receiver_identity, failed_observation);
+        const outcome = resolveQuarantinePostcheck(receiver_identity, failed_observation);
         switch (outcome) {
             .observation_failed => |err| try std.testing.expectEqual(
                 error.InjectedQuarantineObservationFailure,
                 err,
             ),
+            .identity_mismatch,
             .verified,
-            .restored_mismatch,
-            .restoration_failed,
             => return error.UnexpectedQuarantinePostcheckOutcome,
         }
 
@@ -1100,37 +1123,85 @@ const ExactInstallTreeStep = struct {
             }
         }
 
-        const mismatched_observation: anyerror!?FileIdentity = .{
-            .device = receiver_identity.device,
-            .inode = receiver_identity.inode ^ 1,
-        };
-        const mismatch_outcome = resolveQuarantinePostcheck(.{
-            .quarantine = quarantine,
-            .current = tmp.dir,
-            .io = io,
-            .quarantine_name = "tree",
-            .destination_name = "receiver",
-        }, receiver_identity, mismatched_observation);
-        switch (mismatch_outcome) {
-            .restored_mismatch => {},
-            .verified,
-            .observation_failed,
-            .restoration_failed,
-            => return error.UnexpectedQuarantinePostcheckOutcome,
-        }
-        var restored_receiver = try tmp.dir.openDir(io, "receiver", .{
-            .iterate = false,
+        try quarantine.rename("tree", quarantine, "expected-tree", io);
+        try quarantine.createDir(io, "tree", private_dir_permissions);
+        var unproved = try quarantine.openDir(io, "tree", .{
+            .iterate = true,
             .follow_symlinks = false,
         });
-        defer restored_receiver.close(io);
-        try std.testing.expect(std.meta.eql(
+        try unproved.writeFile(io, .{
+            .sub_path = "unproved-marker.txt",
+            .data = "unproved-replacement\n",
+        });
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            try unproved.setPermissions(io, .fromMode(0o750));
+        }
+        const unproved_identity = try directoryIdentity(unproved);
+        unproved.close(io);
+
+        const mismatch_outcome = resolveQuarantinePostcheck(
             receiver_identity,
-            try directoryIdentity(restored_receiver),
-        ));
+            observedDestinationIdentity(quarantine, io, "tree"),
+        );
+        switch (mismatch_outcome) {
+            .identity_mismatch => {},
+            .verified,
+            .observation_failed,
+            => return error.UnexpectedQuarantinePostcheckOutcome,
+        }
         try std.testing.expectError(
             error.FileNotFound,
-            quarantine.statFile(io, "tree", .{ .follow_symlinks = false }),
+            tmp.dir.statFile(io, "receiver", .{ .follow_symlinks = false }),
         );
+        var retained_unproved = try quarantine.openDir(io, "tree", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer retained_unproved.close(io);
+        try std.testing.expect(std.meta.eql(
+            unproved_identity,
+            try directoryIdentity(retained_unproved),
+        ));
+        const unproved_marker = try retained_unproved.readFileAlloc(
+            io,
+            "unproved-marker.txt",
+            std.testing.allocator,
+            .limited(128),
+        );
+        defer std.testing.allocator.free(unproved_marker);
+        try std.testing.expectEqualStrings("unproved-replacement\n", unproved_marker);
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            const retained_unproved_stat = try retained_unproved.stat(io);
+            try std.testing.expectEqual(
+                @as(std.posix.mode_t, 0o750),
+                retained_unproved_stat.permissions.toMode() & 0o777,
+            );
+        }
+
+        var retained_expected = try quarantine.openDir(io, "expected-tree", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer retained_expected.close(io);
+        try std.testing.expect(std.meta.eql(
+            receiver_identity,
+            try directoryIdentity(retained_expected),
+        ));
+        const expected_marker = try retained_expected.readFileAlloc(
+            io,
+            "receiver-marker.txt",
+            std.testing.allocator,
+            .limited(128),
+        );
+        defer std.testing.allocator.free(expected_marker);
+        try std.testing.expectEqualStrings("receiver-owned-before-quarantine\n", expected_marker);
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            const retained_expected_stat = try retained_expected.stat(io);
+            try std.testing.expectEqual(
+                @as(std.posix.mode_t, 0o710),
+                retained_expected_stat.permissions.toMode() & 0o777,
+            );
+        }
     }
 
     fn testProtectedDescendantIdentityCollection() !void {
@@ -1170,6 +1241,118 @@ const ExactInstallTreeStep = struct {
         try std.testing.expectEqual(std.Io.File.Kind.directory, child_stat.kind);
         const grandchild_stat = try child.statFile(io, "grandchild", .{ .follow_symlinks = false });
         try std.testing.expectEqual(std.Io.File.Kind.directory, grandchild_stat.kind);
+    }
+
+    fn testProtectedDescendantUnknownKindReclassification() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        var identities: std.ArrayList(FileIdentity) = .empty;
+        defer identities.deinit(std.testing.allocator);
+        try identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
+        const context: ProtectedDescendantCollectionContext = .{
+            .allocator = std.testing.allocator,
+            .io = io,
+            .protected_identities = &identities,
+        };
+
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "unknown-file",
+            .data = "protected-file\n",
+        });
+        const identity_count_before_file = identities.items.len;
+        try collectProtectedDescendantEntryNoFollow(
+            tmp.dir,
+            context,
+            "unknown-file",
+            .unknown,
+        );
+        try std.testing.expectEqual(identity_count_before_file, identities.items.len);
+        const file_marker = try tmp.dir.readFileAlloc(
+            io,
+            "unknown-file",
+            std.testing.allocator,
+            .limited(64),
+        );
+        defer std.testing.allocator.free(file_marker);
+        try std.testing.expectEqualStrings("protected-file\n", file_marker);
+
+        try tmp.dir.createDir(io, "unknown-directory", private_dir_permissions);
+        var child = try tmp.dir.openDir(io, "unknown-directory", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        try child.createDir(io, "nested-directory", private_dir_permissions);
+        var nested = try child.openDir(io, "nested-directory", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        const child_identity = try directoryIdentity(child);
+        const nested_identity = try directoryIdentity(nested);
+        nested.close(io);
+        child.close(io);
+        try collectProtectedDescendantEntryNoFollow(
+            tmp.dir,
+            context,
+            "unknown-directory",
+            .unknown,
+        );
+        try std.testing.expect(identityMatchesAny(child_identity, identities.items));
+        try std.testing.expect(identityMatchesAny(nested_identity, identities.items));
+
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "reported-special",
+            .data = "reported-special\n",
+        });
+        try std.testing.expectError(
+            error.UnsupportedOracleTreeEntry,
+            collectProtectedDescendantEntryNoFollow(
+                tmp.dir,
+                context,
+                "reported-special",
+                .named_pipe,
+            ),
+        );
+        const special_marker = try tmp.dir.readFileAlloc(
+            io,
+            "reported-special",
+            std.testing.allocator,
+            .limited(64),
+        );
+        defer std.testing.allocator.free(special_marker);
+        try std.testing.expectEqualStrings("reported-special\n", special_marker);
+
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+            try tmp.dir.writeFile(io, .{
+                .sub_path = "linked-target",
+                .data = "linked-target\n",
+            });
+            try tmp.dir.symLink(io, "linked-target", "unknown-link", .{
+                .is_directory = false,
+            });
+            try std.testing.expectError(
+                error.UnsupportedOracleTreeEntry,
+                collectProtectedDescendantEntryNoFollow(
+                    tmp.dir,
+                    context,
+                    "unknown-link",
+                    .unknown,
+                ),
+            );
+            const linked_stat = try tmp.dir.statFile(io, "unknown-link", .{
+                .follow_symlinks = false,
+            });
+            try std.testing.expectEqual(std.Io.File.Kind.sym_link, linked_stat.kind);
+            const linked_target = try tmp.dir.readFileAlloc(
+                io,
+                "linked-target",
+                std.testing.allocator,
+                .limited(64),
+            );
+            defer std.testing.allocator.free(linked_target);
+            try std.testing.expectEqualStrings("linked-target\n", linked_target);
+        }
     }
 
     fn testLinkedDestinationLeafRejected() !void {
@@ -1241,6 +1424,96 @@ const ExactInstallTreeStep = struct {
             );
             const linked_stat = try tmp.dir.statFile(io, "unknown-link", .{ .follow_symlinks = false });
             try std.testing.expectEqual(std.Io.File.Kind.sym_link, linked_stat.kind);
+        }
+    }
+
+    fn testCleanupEntryKindDispatch() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        const special_cases = [_]struct {
+            kind: std.Io.File.Kind,
+            name: []const u8,
+        }{
+            .{ .kind = .block_device, .name = "reported-block-device" },
+            .{ .kind = .character_device, .name = "reported-character-device" },
+            .{ .kind = .named_pipe, .name = "reported-named-pipe" },
+            .{ .kind = .sym_link, .name = "reported-symbolic-link" },
+            .{ .kind = .unix_domain_socket, .name = "reported-unix-domain-socket" },
+            .{ .kind = .whiteout, .name = "reported-whiteout" },
+            .{ .kind = .door, .name = "reported-door" },
+            .{ .kind = .event_port, .name = "reported-event-port" },
+        };
+        for (special_cases) |case| {
+            try tmp.dir.writeFile(io, .{
+                .sub_path = case.name,
+                .data = "cleanup-special-retained\n",
+            });
+            try std.testing.expectError(
+                error.UnsupportedOracleTreeEntry,
+                clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, case.name, case.kind),
+            );
+            const retained = try tmp.dir.readFileAlloc(
+                io,
+                case.name,
+                std.testing.allocator,
+                .limited(64),
+            );
+            defer std.testing.allocator.free(retained);
+            try std.testing.expectEqualStrings("cleanup-special-retained\n", retained);
+        }
+
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "ordinary-file",
+            .data = "cleanup-file\n",
+        });
+        try clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "ordinary-file", .file);
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(io, "ordinary-file", .{ .follow_symlinks = false }),
+        );
+
+        try tmp.dir.createDir(io, "ordinary-directory", private_dir_permissions);
+        var ordinary_directory = try tmp.dir.openDir(io, "ordinary-directory", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        try ordinary_directory.writeFile(io, .{
+            .sub_path = "nested-file",
+            .data = "cleanup-directory\n",
+        });
+        ordinary_directory.close(io);
+        try clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "ordinary-directory", .directory);
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(io, "ordinary-directory", .{ .follow_symlinks = false }),
+        );
+
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+            try tmp.dir.writeFile(io, .{
+                .sub_path = "actual-link-target",
+                .data = "actual-link-target\n",
+            });
+            try tmp.dir.symLink(io, "actual-link-target", "actual-link", .{
+                .is_directory = false,
+            });
+            try std.testing.expectError(
+                error.UnsupportedOracleTreeEntry,
+                clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "actual-link", .sym_link),
+            );
+            const link_stat = try tmp.dir.statFile(io, "actual-link", .{
+                .follow_symlinks = false,
+            });
+            try std.testing.expectEqual(std.Io.File.Kind.sym_link, link_stat.kind);
+            const target = try tmp.dir.readFileAlloc(
+                io,
+                "actual-link-target",
+                std.testing.allocator,
+                .limited(64),
+            );
+            defer std.testing.allocator.free(target);
+            try std.testing.expectEqualStrings("actual-link-target\n", target);
         }
     }
 
@@ -1706,34 +1979,24 @@ const ExactInstallTreeStep = struct {
             };
             quarantine_tree_present = true;
 
-            const postcheck = resolveQuarantinePostcheck(.{
-                .quarantine = quarantine_container,
-                .current = current,
-                .io = io,
-                .quarantine_name = container_tree_name,
-                .destination_name = destination_leaf,
-            }, validated_destination_identity, observedDestinationIdentity(
-                quarantine_container,
-                io,
-                container_tree_name,
-            ));
+            const postcheck = resolveQuarantinePostcheck(
+                validated_destination_identity.?,
+                observedDestinationIdentity(
+                    quarantine_container,
+                    io,
+                    container_tree_name,
+                ),
+            );
             switch (postcheck) {
                 .verified => {},
                 .observation_failed => |observation_err| return step.fail(
                     "unable to identify quarantined prior oracle destination '{s}/{s}': {s}; the unproved moved entry remains quarantined and restoration and publication were not attempted",
                     .{ quarantine_name, container_tree_name, @errorName(observation_err) },
                 ),
-                .restoration_failed => |restore_err| return step.fail(
-                    "oracle destination '{s}' changed during quarantine; the receiver remains preserved in '{s}/{s}' because no-replace restoration failed: {s}",
-                    .{ destination_leaf, quarantine_name, container_tree_name, @errorName(restore_err) },
+                .identity_mismatch => return step.fail(
+                    "quarantined prior oracle destination '{s}/{s}' does not match the admitted receiver identity for '{s}'; the unproved moved entry remains quarantined and restoration and publication were not attempted",
+                    .{ quarantine_name, container_tree_name, destination_leaf },
                 ),
-                .restored_mismatch => {
-                    quarantine_tree_present = false;
-                    return step.fail(
-                        "oracle destination '{s}' changed during quarantine; the receiver was restored and publication was not attempted",
-                        .{destination_leaf},
-                    );
-                },
             }
             retained_destination.?.close(io);
             retained_destination_open = false;
@@ -1853,12 +2116,20 @@ test "exact oracle protection includes descendant directory identities" {
     try ExactInstallTreeStep.testProtectedDescendantIdentityCollection();
 }
 
+test "exact oracle protected descendants reclassify unknown hints no-follow" {
+    try ExactInstallTreeStep.testProtectedDescendantUnknownKindReclassification();
+}
+
 test "exact oracle destination leaf rejects symbolic links" {
     try ExactInstallTreeStep.testLinkedDestinationLeafRejected();
 }
 
 test "exact oracle unknown iterator hints are reclassified no-follow" {
     try ExactInstallTreeStep.testUnknownEntryKindReclassification();
+}
+
+test "exact oracle cleanup entry kinds dispatch exhaustively no-follow" {
+    try ExactInstallTreeStep.testCleanupEntryKindDispatch();
     try ExactInstallTreeStep.testUnknownDirectoryCleanup();
 }
 
