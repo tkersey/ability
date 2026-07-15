@@ -2112,6 +2112,29 @@ fn listFiles(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !OwnedP
     return listFilesFromDir(io, allocator, dir);
 }
 
+fn oracleTreeEntryKindNoFollow(
+    dir: std.Io.Dir,
+    io: std.Io,
+    name: []const u8,
+    reported_kind: std.Io.File.Kind,
+) !std.Io.File.Kind {
+    if (reported_kind != .unknown) return reported_kind;
+    const observed = try dir.statFile(io, name, .{ .follow_symlinks = false });
+    return switch (observed.kind) {
+        .file, .directory => observed.kind,
+        .block_device,
+        .character_device,
+        .named_pipe,
+        .sym_link,
+        .unix_domain_socket,
+        .whiteout,
+        .door,
+        .event_port,
+        .unknown,
+        => error.UnsupportedOracleTreeEntry,
+    };
+}
+
 fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !OwnedPaths {
     const OracleInventoryFrame = struct {
         dir: std.Io.Dir,
@@ -2151,7 +2174,7 @@ fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !
             if (path_buffer.items.len != 0) try path_buffer.append(allocator, '/');
             try path_buffer.appendSlice(allocator, entry.name);
 
-            switch (entry.kind) {
+            switch (try oracleTreeEntryKindNoFollow(top.dir, io, entry.name, entry.kind)) {
                 .file => {
                     const canonical_path = try canonicalOracleRelativePath(
                         allocator,
@@ -3063,7 +3086,7 @@ fn clearRetainedPublicationTree(dir: std.Io.Dir, io: std.Io) !void {
         {
             return error.UnsupportedOracleTreeEntry;
         }
-        switch (entry.kind) {
+        switch (try oracleTreeEntryKindNoFollow(dir, io, entry.name, entry.kind)) {
             .file => dir.deleteFile(io, entry.name) catch |err| switch (err) {
                 error.FileNotFound => {},
                 error.IsDir, error.NotDir => return error.OraclePublicationConflict,
@@ -3426,6 +3449,84 @@ fn compareTrees(
     }
 }
 
+fn requirePublicOracleModesFromDir(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+) !void {
+    const PublicModeFrame = struct {
+        dir: std.Io.Dir,
+        iterator: std.Io.Dir.Iterator,
+        owns_dir: bool,
+    };
+
+    var frames: std.ArrayList(PublicModeFrame) = .empty;
+    defer {
+        for (frames.items) |frame| {
+            if (frame.owns_dir) frame.dir.close(io);
+        }
+        frames.deinit(allocator);
+    }
+    try frames.append(allocator, .{
+        .dir = dir,
+        .iterator = dir.iterate(),
+        .owns_dir = false,
+    });
+
+    while (frames.items.len != 0) {
+        const top = &frames.items[frames.items.len - 1];
+        if (try top.iterator.next(io)) |entry| {
+            const kind = try oracleTreeEntryKindNoFollow(top.dir, io, entry.name, entry.kind);
+            const stat = try top.dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+            const expected_mode: std.posix.mode_t = switch (kind) {
+                .directory => 0o755,
+                .file => 0o644,
+                .block_device,
+                .character_device,
+                .named_pipe,
+                .sym_link,
+                .unix_domain_socket,
+                .whiteout,
+                .door,
+                .event_port,
+                .unknown,
+                => return error.UnsupportedOracleTreeEntry,
+            };
+            if (stat.permissions.toMode() & 0o777 != expected_mode) {
+                return switch (kind) {
+                    .directory => error.NonPublicOracleDirectoryMode,
+                    .file => error.NonPublicOracleFileMode,
+                    .block_device,
+                    .character_device,
+                    .named_pipe,
+                    .sym_link,
+                    .unix_domain_socket,
+                    .whiteout,
+                    .door,
+                    .event_port,
+                    .unknown,
+                    => unreachable,
+                };
+            }
+            if (kind == .directory) {
+                const child = try top.dir.openDir(io, entry.name, .{
+                    .iterate = true,
+                    .follow_symlinks = false,
+                });
+                errdefer child.close(io);
+                try frames.append(allocator, .{
+                    .dir = child,
+                    .iterator = child.iterate(),
+                    .owns_dir = true,
+                });
+            }
+        } else {
+            const completed = frames.pop().?;
+            if (completed.owns_dir) completed.dir.close(io);
+        }
+    }
+}
+
 fn requirePublicOracleModes(
     init: std.process.Init,
     allocator: std.mem.Allocator,
@@ -3440,40 +3541,31 @@ fn requirePublicOracleModes(
         return error.NonPublicOracleDirectoryMode;
     }
 
-    var walker = try root.walk(allocator);
-    defer walker.deinit();
-    while (try walker.next(init.io)) |entry| {
-        const stat = try root.statFile(init.io, entry.path, .{ .follow_symlinks = false });
-        const expected_mode: std.posix.mode_t = switch (entry.kind) {
-            .directory => 0o755,
-            .file => 0o644,
-            .block_device,
-            .character_device,
-            .named_pipe,
-            .sym_link,
-            .unix_domain_socket,
-            .whiteout,
-            .door,
-            .event_port,
-            .unknown,
-            => return error.UnsupportedOracleTreeEntry,
+    try requirePublicOracleModesFromDir(init.io, allocator, root);
+}
+
+fn testUnknownEntryKindReclassification(
+    init: std.process.Init,
+    root_path: []const u8,
+) !void {
+    var root = try openOracleRootNoFollow(init.io, root_path);
+    defer root.close(init.io);
+    try root.writeFile(init.io, .{ .sub_path = "unknown-kind-file", .data = "oracle\n" });
+    try root.createDir(init.io, "unknown-kind-directory", .default_dir);
+    if (try oracleTreeEntryKindNoFollow(root, init.io, "unknown-kind-file", .unknown) != .file) {
+        return error.UnknownOracleFileKindMisclassified;
+    }
+    if (try oracleTreeEntryKindNoFollow(root, init.io, "unknown-kind-directory", .unknown) != .directory) {
+        return error.UnknownOracleDirectoryKindMisclassified;
+    }
+    if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+        try root.symLink(init.io, "unknown-kind-file", "unknown-kind-link", .{ .is_directory = false });
+        var linked_kind_error: ?anyerror = null;
+        _ = oracleTreeEntryKindNoFollow(root, init.io, "unknown-kind-link", .unknown) catch |err| failed: {
+            linked_kind_error = err;
+            break :failed .unknown;
         };
-        if (stat.permissions.toMode() & 0o777 != expected_mode) {
-            return switch (entry.kind) {
-                .directory => error.NonPublicOracleDirectoryMode,
-                .file => error.NonPublicOracleFileMode,
-                .block_device,
-                .character_device,
-                .named_pipe,
-                .sym_link,
-                .unix_domain_socket,
-                .whiteout,
-                .door,
-                .event_port,
-                .unknown,
-                => unreachable,
-            };
-        }
+        try expectPublicationError(error.UnsupportedOracleTreeEntry, linked_kind_error);
     }
 }
 
@@ -3800,6 +3892,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     try createFreshDirectory(init.io, root);
     defer deleteDirectoryIfPresent(init.io, root) catch {};
+    try testUnknownEntryKindReclassification(init, root);
     try testNoFollowInventory(init, allocator, root);
 
     try createFreshDirectory(init.io, collision_source);

@@ -551,6 +551,29 @@ const ExactInstallTreeStep = struct {
         try atomic_file.link(io);
     }
 
+    fn sourceEntryKindNoFollow(
+        source: std.Io.Dir,
+        io: std.Io,
+        name: []const u8,
+        reported_kind: std.Io.File.Kind,
+    ) !std.Io.File.Kind {
+        if (reported_kind != .unknown) return reported_kind;
+        const observed = try source.statFile(io, name, .{ .follow_symlinks = false });
+        return switch (observed.kind) {
+            .file, .directory => observed.kind,
+            .block_device,
+            .character_device,
+            .named_pipe,
+            .sym_link,
+            .unix_domain_socket,
+            .whiteout,
+            .door,
+            .event_port,
+            .unknown,
+            => error.UnsupportedOracleTreeEntry,
+        };
+    }
+
     fn copyTreeNoFollow(source: std.Io.Dir, destination: std.Io.Dir, io: std.Io) !void {
         var iterator = source.iterateAssumeFirstIteration();
         while (try iterator.next(io)) |entry| {
@@ -561,7 +584,7 @@ const ExactInstallTreeStep = struct {
             {
                 return error.UnsupportedOracleTreeEntry;
             }
-            switch (entry.kind) {
+            switch (try sourceEntryKindNoFollow(source, io, entry.name, entry.kind)) {
                 .file => try copyFileNoFollow(source, destination, io, entry.name),
                 .directory => {
                     try destination.createDir(io, entry.name, public_dir_permissions);
@@ -693,6 +716,53 @@ const ExactInstallTreeStep = struct {
         };
     }
 
+    fn clearDirectoryEntryNoFollow(
+        dir: std.Io.Dir,
+        io: std.Io,
+        protected_identities: []const FileIdentity,
+        name: []const u8,
+        reported_kind: std.Io.File.Kind,
+    ) anyerror!void {
+        const kind = sourceEntryKindNoFollow(dir, io, name, reported_kind) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        if (kind != .directory) {
+            try deleteNonDirectoryNoFollow(dir, io, name);
+            return;
+        }
+
+        var child = dir.openDir(io, name, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            error.NotDir, error.SymLinkLoop => {
+                try deleteNonDirectoryNoFollow(dir, io, name);
+                return;
+            },
+            else => return err,
+        };
+        const child_identity = directoryIdentity(child) catch |err| {
+            child.close(io);
+            return err;
+        };
+        if (identityMatchesAny(child_identity, protected_identities)) {
+            child.close(io);
+            return error.ProtectedOracleCleanupAlias;
+        }
+        clearDirectoryNoFollow(child, io, protected_identities) catch |err| {
+            child.close(io);
+            return err;
+        };
+        child.close(io);
+        dir.deleteDir(io, name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            error.NotDir, error.DirNotEmpty, error.FileBusy => return error.OracleCleanupRace,
+            else => return err,
+        };
+    }
+
     fn clearDirectoryNoFollow(
         dir: std.Io.Dir,
         io: std.Io,
@@ -707,40 +777,7 @@ const ExactInstallTreeStep = struct {
             {
                 return error.UnsupportedOracleTreeEntry;
             }
-            if (entry.kind != .directory) {
-                try deleteNonDirectoryNoFollow(dir, io, entry.name);
-                continue;
-            }
-
-            var child = dir.openDir(io, entry.name, .{
-                .iterate = true,
-                .follow_symlinks = false,
-            }) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                error.NotDir, error.SymLinkLoop => {
-                    try deleteNonDirectoryNoFollow(dir, io, entry.name);
-                    continue;
-                },
-                else => return err,
-            };
-            const child_identity = directoryIdentity(child) catch |err| {
-                child.close(io);
-                return err;
-            };
-            if (identityMatchesAny(child_identity, protected_identities)) {
-                child.close(io);
-                return error.ProtectedOracleCleanupAlias;
-            }
-            clearDirectoryNoFollow(child, io, protected_identities) catch |err| {
-                child.close(io);
-                return err;
-            };
-            child.close(io);
-            dir.deleteDir(io, entry.name) catch |err| switch (err) {
-                error.FileNotFound => {},
-                error.NotDir, error.DirNotEmpty, error.FileBusy => return error.OracleCleanupRace,
-                else => return err,
-            };
+            try clearDirectoryEntryNoFollow(dir, io, protected_identities, entry.name, entry.kind);
         }
     }
 
@@ -1005,6 +1042,62 @@ const ExactInstallTreeStep = struct {
         );
         const stat = try tmp.dir.statFile(io, "boundary", .{ .follow_symlinks = false });
         try std.testing.expectEqual(std.Io.File.Kind.sym_link, stat.kind);
+    }
+
+    fn testUnknownEntryKindReclassification() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.writeFile(io, .{ .sub_path = "ordinary-file", .data = "oracle\n" });
+        try tmp.dir.createDir(io, "ordinary-directory", private_dir_permissions);
+        try std.testing.expectEqual(
+            std.Io.File.Kind.file,
+            try sourceEntryKindNoFollow(tmp.dir, io, "ordinary-file", .unknown),
+        );
+        try std.testing.expectEqual(
+            std.Io.File.Kind.directory,
+            try sourceEntryKindNoFollow(tmp.dir, io, "ordinary-directory", .unknown),
+        );
+
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+            try tmp.dir.symLink(io, "ordinary-file", "linked-file", .{ .is_directory = false });
+            try std.testing.expectError(
+                error.UnsupportedOracleTreeEntry,
+                sourceEntryKindNoFollow(tmp.dir, io, "linked-file", .unknown),
+            );
+        }
+    }
+
+    fn testUnknownDirectoryCleanup() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "unknown-directory", private_dir_permissions);
+        var child = try tmp.dir.openDir(io, "unknown-directory", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        try child.writeFile(io, .{ .sub_path = "nested-file", .data = "oracle\n" });
+        child.close(io);
+
+        try clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "unknown-directory", .unknown);
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(io, "unknown-directory", .{ .follow_symlinks = false }),
+        );
+
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+            try tmp.dir.writeFile(io, .{ .sub_path = "linked-target", .data = "oracle\n" });
+            try tmp.dir.symLink(io, "linked-target", "unknown-link", .{ .is_directory = false });
+            try std.testing.expectError(
+                error.UnsupportedOracleTreeEntry,
+                clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "unknown-link", .unknown),
+            );
+            const linked_stat = try tmp.dir.statFile(io, "unknown-link", .{ .follow_symlinks = false });
+            try std.testing.expectEqual(std.Io.File.Kind.sym_link, linked_stat.kind);
+        }
     }
 
     fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
@@ -1607,6 +1700,11 @@ test "exact oracle protection includes descendant directory identities" {
 
 test "exact oracle destination leaf rejects symbolic links" {
     try ExactInstallTreeStep.testLinkedDestinationLeafRejected();
+}
+
+test "exact oracle unknown iterator hints are reclassified no-follow" {
+    try ExactInstallTreeStep.testUnknownEntryKindReclassification();
+    try ExactInstallTreeStep.testUnknownDirectoryCleanup();
 }
 
 test "exact oracle Linux identity observes the retained directory with statx" {
