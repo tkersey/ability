@@ -3061,19 +3061,49 @@ fn publicationLeafMatches(
     return std.meta.eql(expected, observed.identity);
 }
 
+const RetainedPublicationMoveOutcome = enum {
+    moved,
+    post_move_terminal,
+};
+
+const PublicationPostMoveFault = enum {
+    none,
+    observation_failure,
+    replace_target,
+};
+
 fn moveRetainedPublicationTree(
     root: PublicationRoot,
     io: std.Io,
     source: []const u8,
     target: []const u8,
     retained: RetainedPublicationTree,
-) !void {
+    post_move_fault: PublicationPostMoveFault,
+) !RetainedPublicationMoveOutcome {
     if (!try publicationLeafMatches(root, io, source, retained.identity)) {
         return error.OraclePublicationConflict;
     }
     try root.renameDirectoryToMissing(io, source, target);
-    if (try publicationLeafMatches(root, io, target, retained.identity)) return;
-    return error.OraclePublicationConflict;
+
+    switch (post_move_fault) {
+        .none => {},
+        .observation_failure => return .post_move_terminal,
+        .replace_target => {
+            root.renameDirectoryToMissing(io, target, source) catch return .post_move_terminal;
+            root.createFreshDirectory(io, target) catch return .post_move_terminal;
+            const replacement = root.openTree(io, target) catch return .post_move_terminal;
+            defer replacement.close(io);
+            replacement.writeFile(io, .{
+                .sub_path = "receiver-marker.txt",
+                .data = "receiver-owned-after-move\n",
+            }) catch return .post_move_terminal;
+        },
+    }
+
+    const target_matches = publicationLeafMatches(root, io, target, retained.identity) catch {
+        return .post_move_terminal;
+    };
+    return if (target_matches) .moved else .post_move_terminal;
 }
 
 fn clearRetainedPublicationTree(dir: std.Io.Dir, io: std.Io) !void {
@@ -3192,6 +3222,14 @@ const PublicationFault = enum {
     replace_target_before_backup,
     rollback_conflict,
     during_backup_cleanup,
+    post_move_observation_failure,
+    replace_promoted_target,
+};
+
+const RetainedStageLocation = enum {
+    at_stage,
+    move_unproved,
+    at_target,
 };
 
 const PublicationOutcome = union(enum) {
@@ -3275,13 +3313,17 @@ fn recoverPublicationAtRoot(
             const retained_backup = try RetainedPublicationTree.open(root, init.io, root.backup);
             defer retained_backup.close(init.io);
             try validateOracleTreeIntegrityFromDir(init.io, allocator, retained_backup.dir);
-            try moveRetainedPublicationTree(
+            switch (try moveRetainedPublicationTree(
                 root,
                 init.io,
                 root.backup,
                 root.target,
                 retained_backup,
-            );
+                .none,
+            )) {
+                .moved => {},
+                .post_move_terminal => return error.OraclePublicationPostMoveConflict,
+            }
         } else {
             if (target_kind.? != .directory) return error.UnsafeOraclePath;
             // Once both public names are occupied, recovery has no retained
@@ -3316,8 +3358,8 @@ fn publishOracleTree(
         root.stage,
     );
     defer retained_stage.close(init.io);
-    var stage_at_stage_name = true;
-    errdefer if (stage_at_stage_name) {
+    var stage_location: RetainedStageLocation = .at_stage;
+    errdefer if (stage_location == .at_stage) {
         cleanupRetainedPublicationTree(root, init.io, root.stage, retained_stage) catch {};
     };
     try validateOracleTreeFromDir(init.io, allocator, retained_stage.dir, request.receiver_pin);
@@ -3333,37 +3375,38 @@ fn publishOracleTree(
         });
     }
 
-    try moveRetainedPublicationTree(
+    switch (try moveRetainedPublicationTree(
         root,
         init.io,
         root.target,
         root.backup,
         retained_target,
-    );
+        .none,
+    )) {
+        .moved => {},
+        .post_move_terminal => return error.OraclePublicationPostMoveConflict,
+    }
 
-    promoteOracleTree(init, allocator, request, root, retained_stage) catch |promotion_error| {
-        if (try publicationLeafMatches(root, init.io, root.target, retained_stage.identity)) {
-            moveRetainedPublicationTree(
-                root,
-                init.io,
-                root.target,
-                root.stage,
-                retained_stage,
-            ) catch return error.OraclePublicationConflict;
-            stage_at_stage_name = true;
-        } else if (!try publicationLeafMatches(root, init.io, root.stage, retained_stage.identity)) {
-            return error.OraclePublicationConflict;
-        }
-        moveRetainedPublicationTree(
+    stage_location = .move_unproved;
+    const promotion_outcome = promoteOracleTree(init, allocator, request, root, retained_stage) catch |promotion_error| {
+        stage_location = .at_stage;
+        const rollback_outcome = moveRetainedPublicationTree(
             root,
             init.io,
             root.backup,
             root.target,
             retained_target,
+            .none,
         ) catch return error.OraclePublicationConflict;
+        if (rollback_outcome == .post_move_terminal) {
+            return error.OraclePublicationPostMoveConflict;
+        }
         return promotion_error;
     };
-    stage_at_stage_name = false;
+    switch (promotion_outcome) {
+        .moved => stage_location = .at_target,
+        .post_move_terminal => return error.OraclePublicationPostMoveConflict,
+    }
     if (request.fault == .during_backup_cleanup) {
         return .{ .committed_cleanup_pending = error.InjectedOracleBackupCleanupFailure };
     }
@@ -3379,17 +3422,33 @@ fn promoteOracleTree(
     request: PublicationRequest,
     root: PublicationRoot,
     retained_stage: RetainedPublicationTree,
-) !void {
+) !RetainedPublicationMoveOutcome {
     if (request.fault == .after_backup) return error.InjectedOraclePublicationFailure;
     if (request.fault == .rollback_conflict) {
         try root.dir.writeFile(init.io, .{ .sub_path = root.target, .data = "rollback-conflict\n" });
         return error.InjectedOraclePublicationFailure;
     }
-    try moveRetainedPublicationTree(root, init.io, root.stage, root.target, retained_stage);
-    try validateOracleTreeFromDir(init.io, allocator, retained_stage.dir, request.receiver_pin);
-    if (!try publicationLeafMatches(root, init.io, root.target, retained_stage.identity)) {
-        return error.OraclePublicationConflict;
-    }
+    const post_move_fault: PublicationPostMoveFault = switch (request.fault) {
+        .post_move_observation_failure => .observation_failure,
+        .replace_promoted_target => .replace_target,
+        else => .none,
+    };
+    const move_outcome = try moveRetainedPublicationTree(
+        root,
+        init.io,
+        root.stage,
+        root.target,
+        retained_stage,
+        post_move_fault,
+    );
+    if (move_outcome == .post_move_terminal) return .post_move_terminal;
+    validateOracleTreeFromDir(init.io, allocator, retained_stage.dir, request.receiver_pin) catch {
+        return .post_move_terminal;
+    };
+    const target_matches = publicationLeafMatches(root, init.io, root.target, retained_stage.identity) catch {
+        return .post_move_terminal;
+    };
+    return if (target_matches) .moved else .post_move_terminal;
 }
 
 fn publishTrackedOracle(
@@ -4290,6 +4349,53 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     _ = try publishOracleTree(init, allocator, exclusivePublicationRequest(candidate, receiver_pin, paths, .none));
     try compareTrees(init, allocator, candidate, target);
+
+    try deleteDirectoryIfPresent(init.io, target);
+    try copyOracleTree(init, allocator, stale_provenance_candidate, target);
+    var post_move_observation_error: ?anyerror = null;
+    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+        candidate,
+        receiver_pin,
+        paths,
+        .post_move_observation_failure,
+    )) catch |err| {
+        post_move_observation_error = err;
+    };
+    try expectPublicationError(error.OraclePublicationPostMoveConflict, post_move_observation_error);
+    try compareTrees(init, allocator, candidate, target);
+    try compareTrees(init, allocator, stale_provenance_candidate, backup);
+    if (try pathKindNoFollow(init.io, stage) != null) {
+        return error.OraclePublicationPostMoveCompensation;
+    }
+    try deleteDirectoryIfPresent(init.io, backup);
+
+    try deleteDirectoryIfPresent(init.io, target);
+    try copyOracleTree(init, allocator, stale_provenance_candidate, target);
+    var post_move_replacement_error: ?anyerror = null;
+    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+        candidate,
+        receiver_pin,
+        paths,
+        .replace_promoted_target,
+    )) catch |err| {
+        post_move_replacement_error = err;
+    };
+    try expectPublicationError(error.OraclePublicationPostMoveConflict, post_move_replacement_error);
+    const post_move_receiver_marker = try readRelative(
+        init.io,
+        allocator,
+        target,
+        "receiver-marker.txt",
+    );
+    defer allocator.free(post_move_receiver_marker);
+    try expectEqualBytes("receiver-owned-after-move\n", post_move_receiver_marker);
+    try compareTrees(init, allocator, candidate, stage);
+    try compareTrees(init, allocator, stale_provenance_candidate, backup);
+
+    try deleteDirectoryIfPresent(init.io, target);
+    try deleteDirectoryIfPresent(init.io, stage);
+    try deleteDirectoryIfPresent(init.io, backup);
+    try copyOracleTree(init, allocator, candidate, target);
 
     try deleteDirectoryIfPresent(init.io, target);
     try createFreshDirectory(init.io, backup);
