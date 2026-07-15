@@ -818,11 +818,21 @@ fn expectLoadedRequestSiteParity(
     generated_request: anytype,
     loaded_request: anytype,
 ) !void {
+    const expected_world_port_id = Target.WorldDispatchTable.lookup(
+        generated_request.operation_site_index,
+    ) orelse return error.OracleSemanticMismatch;
+    const expected_world_port_index: usize = @intCast(expected_world_port_id);
+    if (expected_world_port_index >= Target.WorldPortTable.entries.len) {
+        return error.OracleSemanticMismatch;
+    }
+    const expected_world_port_ref = Target.WorldPortTable.entries[expected_world_port_index].world_port_ref;
+    const loaded_world_port_ref = loaded_request.world_port_ref orelse return error.OracleSemanticMismatch;
     if (!generated_request.matches(Site) or
-        Target.WorldDispatchTable.lookup(generated_request.operation_site_index) != loaded_request.world_port_id or
+        expected_world_port_id != loaded_request.world_port_id or
         generated_request.operation_site_index != loaded_request.residual_site_index or
         generated_request.operation_site_fingerprint != loaded_request.residual_site_fingerprint or
-        loaded_request.response_kind != .@"resume")
+        loaded_request.response_kind != .@"resume" or
+        !loaded_world_port_ref.eql(expected_world_port_ref))
     {
         return error.OracleSemanticMismatch;
     }
@@ -2161,6 +2171,29 @@ test "agent root request boundary parity rejects metadata drift" {
     );
     drifted_request = loaded_request;
     drifted_request.response_kind = .return_now;
+    try std.testing.expectError(
+        error.OracleSemanticMismatch,
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+    );
+    drifted_request = loaded_request;
+    drifted_request.world_port_ref = null;
+    try std.testing.expectError(
+        error.OracleSemanticMismatch,
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+    );
+    const expected_world_port_id = RootTarget.WorldDispatchTable.lookup(
+        generated_request.operation_site_index,
+    ) orelse return error.OracleSemanticMismatch;
+    const expected_world_port_index: usize = @intCast(expected_world_port_id);
+    const alternate_world_port_index: usize = if (expected_world_port_index == 0) 1 else 0;
+    if (alternate_world_port_index >= RootTarget.WorldPortTable.entries.len) {
+        return error.OracleSemanticMismatch;
+    }
+    const expected_world_port_ref = RootTarget.WorldPortTable.entries[expected_world_port_index].world_port_ref;
+    const alternate_world_port_ref = RootTarget.WorldPortTable.entries[alternate_world_port_index].world_port_ref;
+    try std.testing.expect(!expected_world_port_ref.eql(alternate_world_port_ref));
+    drifted_request = loaded_request;
+    drifted_request.world_port_ref = alternate_world_port_ref;
     try std.testing.expectError(
         error.OracleSemanticMismatch,
         expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),

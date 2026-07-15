@@ -3098,6 +3098,7 @@ pub fn build(b: *std.Build) void {
     oracle_update_run.addDirectoryArg(oracle_update_candidate_a_dir);
     oracle_update_run.addArg("--receiver-pin");
     oracle_update_run.addFileArg(b.path(world_image_v1_receiver_pin));
+    oracle_update_run.addArg("--exclusive-publication-namespace");
     oracle_update_run.step.dependOn(&oracle_update_compare.step);
     const oracle_update_step = b.step(
         "update-boundary-world-image-v1-oracle",
