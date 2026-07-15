@@ -752,6 +752,32 @@ fn expectLoadedStringRequestParity(
     try expectEqualBytes(generated_payload, loaded_payload.bytes);
 }
 
+fn observeLoadedStringRequestParity(
+    comptime Program: type,
+    comptime Target: type,
+    comptime Site: type,
+    allocator: std.mem.Allocator,
+    generated_request: anytype,
+    loaded_request: anytype,
+    observed_request_count: *usize,
+) !void {
+    try expectLoadedStringRequestParity(
+        Program,
+        Target,
+        Site,
+        allocator,
+        generated_request,
+        loaded_request,
+    );
+    observed_request_count.* = std.math.add(usize, observed_request_count.*, 1) catch {
+        return error.OracleRequestObservationCountOverflow;
+    };
+}
+
+fn formatObservedRequestCountLine(allocator: std.mem.Allocator, observed_request_count: usize) ![]u8 {
+    return std.fmt.allocPrint(allocator, "request_count: {d}", .{observed_request_count});
+}
+
 fn joinPath(allocator: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     return std.Io.Dir.path.join(allocator, parts);
 }
@@ -1647,21 +1673,35 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         .done => return error.UnexpectedLoadedDone,
         .failed => return error.UnexpectedLoadedFailure,
     };
-    try expectLoadedStringRequestParity(DualProgram, MultipleTarget, DualFirstSite, allocator, generated_first, loaded_first);
+    var observed_request_count: usize = 0;
+    try observeLoadedStringRequestParity(
+        DualProgram,
+        MultipleTarget,
+        DualFirstSite,
+        allocator,
+        generated_first,
+        loaded_first,
+        &observed_request_count,
+    );
     var drifted_first = loaded_first;
     drifted_first.world_port_ref = null;
+    const count_before_missing_ref_probe = observed_request_count;
     var missing_world_port_ref_error: ?anyerror = null;
-    expectLoadedStringRequestParity(
+    observeLoadedStringRequestParity(
         DualProgram,
         MultipleTarget,
         DualFirstSite,
         allocator,
         generated_first,
         drifted_first,
+        &observed_request_count,
     ) catch |err| {
         missing_world_port_ref_error = err;
     };
     try expectPublicationError(error.OracleSemanticMismatch, missing_world_port_ref_error);
+    if (observed_request_count != count_before_missing_ref_probe) {
+        return error.FailedRequestParityCounted;
+    }
     const expected_world_port_id = MultipleTarget.WorldDispatchTable.lookup(
         generated_first.operation_site_index,
     ) orelse return error.OracleSemanticMismatch;
@@ -1675,18 +1715,23 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
     if (expected_world_port_ref.eql(alternate_world_port_ref)) return error.OracleSemanticMismatch;
     drifted_first = loaded_first;
     drifted_first.world_port_ref = alternate_world_port_ref;
+    const count_before_alternate_ref_probe = observed_request_count;
     var alternate_world_port_ref_error: ?anyerror = null;
-    expectLoadedStringRequestParity(
+    observeLoadedStringRequestParity(
         DualProgram,
         MultipleTarget,
         DualFirstSite,
         allocator,
         generated_first,
         drifted_first,
+        &observed_request_count,
     ) catch |err| {
         alternate_world_port_ref_error = err;
     };
     try expectPublicationError(error.OracleSemanticMismatch, alternate_world_port_ref_error);
+    if (observed_request_count != count_before_alternate_ref_probe) {
+        return error.FailedRequestParityCounted;
+    }
     try writeArtifact(io, allocator, output_dir, "artifacts/values/multiple-residual.first.payload.loaded-value", loaded_first.canonical_payload_image);
     const first_state = try loaded_session.freeze(allocator);
     defer allocator.free(first_state);
@@ -1772,7 +1817,15 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         .done => return error.UnexpectedLoadedDone,
         .failed => return error.UnexpectedLoadedFailure,
     };
-    try expectLoadedStringRequestParity(DualProgram, MultipleTarget, DualSecondSite, allocator, generated_second, loaded_second);
+    try observeLoadedStringRequestParity(
+        DualProgram,
+        MultipleTarget,
+        DualSecondSite,
+        allocator,
+        generated_second,
+        loaded_second,
+        &observed_request_count,
+    );
     if (loaded_first.canonical_request_fingerprint == loaded_second.canonical_request_fingerprint) return error.RequestIdentityCollision;
     try writeArtifact(io, allocator, output_dir, "artifacts/values/multiple-residual.second.payload.loaded-value", loaded_second.canonical_payload_image);
     const second_state = try loaded_session.freeze(allocator);
@@ -1882,11 +1935,14 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
     defer allocator.free(completed_state);
     try writeArtifact(io, allocator, output_dir, "artifacts/states/multiple-residual.completed.loaded-session", completed_state);
 
+    const request_count_line = try formatObservedRequestCountLine(allocator, observed_request_count);
+    defer allocator.free(request_count_line);
+
     const transcript = try std.fmt.allocPrint(allocator,
         \\case_id: multiple-residual
         \\generated_status: completed
         \\loaded_status: completed
-        \\request_count: 2
+        \\{s}
         \\first_site_index: {d}
         \\first_site_fingerprint: 0x{x:0>16}
         \\first_request_fingerprint: 0x{x:0>16}
@@ -1901,6 +1957,7 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         \\completed_state: artifacts/states/multiple-residual.completed.loaded-session
         \\
     , .{
+        request_count_line,
         loaded_first.residual_site_index,
         loaded_first.residual_site_fingerprint,
         loaded_first.canonical_request_fingerprint,
@@ -2135,7 +2192,27 @@ fn oracleTreeEntryKindNoFollow(
     };
 }
 
+const OracleInventoryLimits = struct {
+    maximum_depth: usize = 32,
+    maximum_entries: usize = 4096,
+    maximum_path_bytes: usize = 4096,
+    maximum_cumulative_path_bytes: usize = 16 * 1024 * 1024,
+    maximum_retained_paths: usize = 4096,
+    maximum_open_directories: usize = 33,
+};
+
+const default_oracle_inventory_limits: OracleInventoryLimits = .{};
+
 fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !OwnedPaths {
+    return listFilesFromDirWithLimits(io, allocator, dir, default_oracle_inventory_limits);
+}
+
+fn listFilesFromDirWithLimits(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    limits: OracleInventoryLimits,
+) !OwnedPaths {
     const OracleInventoryFrame = struct {
         dir: std.Io.Dir,
         iterator: std.Io.Dir.Iterator,
@@ -2150,6 +2227,9 @@ fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !
             if (frame.owns_dir) frame.dir.close(io);
         }
         frames.deinit(allocator);
+    }
+    if (limits.maximum_open_directories == 0) {
+        return error.OracleInventoryOpenDirectoryLimitExceeded;
     }
     try frames.append(allocator, .{
         .dir = dir,
@@ -2166,16 +2246,51 @@ fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !
         for (items.items) |item| allocator.free(item);
         items.deinit(allocator);
     }
+    var entry_count: usize = 0;
+    var cumulative_path_bytes: usize = 0;
     while (frames.items.len != 0) {
         const top = &frames.items[frames.items.len - 1];
         if (try top.iterator.next(io)) |entry| {
             top.saw_entry = true;
+
+            const next_entry_count = std.math.add(usize, entry_count, 1) catch {
+                return error.OracleInventoryEntryLimitExceeded;
+            };
+            if (next_entry_count > limits.maximum_entries) {
+                return error.OracleInventoryEntryLimitExceeded;
+            }
+            entry_count = next_entry_count;
+
+            const separator_bytes: usize = @intFromBool(top.prefix_len != 0);
+            const entry_path_bytes = std.math.add(
+                usize,
+                std.math.add(usize, top.prefix_len, separator_bytes) catch {
+                    return error.OracleInventoryPathLimitExceeded;
+                },
+                entry.name.len,
+            ) catch return error.OracleInventoryPathLimitExceeded;
+            if (entry_path_bytes > limits.maximum_path_bytes) {
+                return error.OracleInventoryPathLimitExceeded;
+            }
+            const next_cumulative_path_bytes = std.math.add(
+                usize,
+                cumulative_path_bytes,
+                entry_path_bytes,
+            ) catch return error.OracleInventoryCumulativePathLimitExceeded;
+            if (next_cumulative_path_bytes > limits.maximum_cumulative_path_bytes) {
+                return error.OracleInventoryCumulativePathLimitExceeded;
+            }
+            cumulative_path_bytes = next_cumulative_path_bytes;
+
             path_buffer.shrinkRetainingCapacity(top.prefix_len);
             if (path_buffer.items.len != 0) try path_buffer.append(allocator, '/');
             try path_buffer.appendSlice(allocator, entry.name);
 
             switch (try oracleTreeEntryKindNoFollow(top.dir, io, entry.name, entry.kind)) {
                 .file => {
+                    if (items.items.len >= limits.maximum_retained_paths) {
+                        return error.OracleInventoryRetainedPathLimitExceeded;
+                    }
                     const canonical_path = try canonicalOracleRelativePath(
                         allocator,
                         path_buffer.items,
@@ -2187,6 +2302,13 @@ fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !
                     };
                 },
                 .directory => {
+                    const child_depth = frames.items.len;
+                    if (child_depth > limits.maximum_depth) {
+                        return error.OracleInventoryDepthLimitExceeded;
+                    }
+                    if (frames.items.len >= limits.maximum_open_directories) {
+                        return error.OracleInventoryOpenDirectoryLimitExceeded;
+                    }
                     const canonical_path = try canonicalOracleRelativePath(
                         allocator,
                         path_buffer.items,
@@ -3072,6 +3194,37 @@ const PublicationPostMoveFault = enum {
     replace_target,
 };
 
+const PublicationStagePrimaryFault = enum {
+    none,
+    after_create_before_open,
+    after_copy_before_return,
+    after_copy_transfer,
+};
+
+const PublicationStageRollbackFault = enum {
+    none,
+    unretained_delete,
+    retained_before_clear,
+    retained_before_delete,
+};
+
+const PublicationStageFaults = struct {
+    primary: PublicationStagePrimaryFault = .none,
+    rollback: PublicationStageRollbackFault = .none,
+};
+
+const PublicationStageFailurePhase = enum {
+    acquire,
+    copy,
+    post_copy,
+};
+
+const RetainedPublicationCleanupFault = enum {
+    none,
+    before_clear,
+    before_leaf_delete,
+};
+
 fn moveRetainedPublicationTree(
     root: PublicationRoot,
     io: std.Io,
@@ -3182,8 +3335,20 @@ fn cleanupRetainedPublicationTree(
     leaf: []const u8,
     retained: RetainedPublicationTree,
 ) !void {
+    return cleanupRetainedPublicationTreeWithFault(root, io, leaf, retained, .none);
+}
+
+fn cleanupRetainedPublicationTreeWithFault(
+    root: PublicationRoot,
+    io: std.Io,
+    leaf: []const u8,
+    retained: RetainedPublicationTree,
+    fault: RetainedPublicationCleanupFault,
+) !void {
     root.requireMutationAuthority();
+    if (fault == .before_clear) return error.InjectedOracleStageRollbackFailure;
     try clearRetainedPublicationTree(retained.dir, io);
+    if (fault == .before_leaf_delete) return error.InjectedOracleStageRollbackFailure;
     if (!try publicationLeafMatches(root, io, leaf, retained.identity)) {
         return error.OraclePublicationConflict;
     }
@@ -3194,18 +3359,103 @@ fn cleanupRetainedPublicationTree(
     };
 }
 
+fn rollbackCreatedUnretainedStage(
+    root: PublicationRoot,
+    io: std.Io,
+    leaf: []const u8,
+    fault: PublicationStageRollbackFault,
+) !void {
+    root.requireMutationAuthority();
+    switch (fault) {
+        .none => {},
+        .unretained_delete => return error.InjectedOracleStageRollbackFailure,
+        .retained_before_clear,
+        .retained_before_delete,
+        => return error.InvalidPublicationStageFault,
+    }
+    root.dir.deleteDir(io, leaf) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+fn rollbackRetainedStage(
+    root: PublicationRoot,
+    io: std.Io,
+    leaf: []const u8,
+    retained: RetainedPublicationTree,
+    fault: PublicationStageRollbackFault,
+) !void {
+    const cleanup_fault: RetainedPublicationCleanupFault = switch (fault) {
+        .none => .none,
+        .retained_before_clear => .before_clear,
+        .retained_before_delete => .before_leaf_delete,
+        .unretained_delete => return error.InvalidPublicationStageFault,
+    };
+    try cleanupRetainedPublicationTreeWithFault(root, io, leaf, retained, cleanup_fault);
+}
+
+fn reportStageRollbackFailure(
+    phase: PublicationStageFailurePhase,
+    primary_error: anyerror,
+    rollback_error: anyerror,
+    stage: []const u8,
+) void {
+    std.debug.print(
+        "oracle publication stage rollback failed during {s}: primary {s}; rollback {s}; stage {s} may remain and requires inspection before retry\n",
+        .{ @tagName(phase), @errorName(primary_error), @errorName(rollback_error), stage },
+    );
+}
+
 fn copyOracleTreeToPublicationLeaf(
     init: std.process.Init,
     allocator: std.mem.Allocator,
     source_dir: []const u8,
     root: PublicationRoot,
-    target: []const u8,
+    faults: PublicationStageFaults,
 ) !RetainedPublicationTree {
+    const target = root.stage;
     try requireDirectory(init.io, source_dir);
     try root.createFreshDirectory(init.io, target);
-    const retained_target = try RetainedPublicationTree.open(root, init.io, target);
+    if (faults.primary == .after_create_before_open) {
+        const primary_error = error.InjectedOraclePublicationStageFailure;
+        rollbackCreatedUnretainedStage(root, init.io, target, faults.rollback) catch |rollback_error| {
+            reportStageRollbackFailure(.acquire, primary_error, rollback_error, target);
+            return error.OraclePublicationStageRollbackFailed;
+        };
+        return primary_error;
+    }
+    const retained_target = RetainedPublicationTree.open(root, init.io, target) catch |primary_error| {
+        rollbackCreatedUnretainedStage(root, init.io, target, faults.rollback) catch |rollback_error| {
+            reportStageRollbackFailure(.acquire, primary_error, rollback_error, target);
+            return error.OraclePublicationStageRollbackFailed;
+        };
+        return primary_error;
+    };
     errdefer retained_target.close(init.io);
-    errdefer cleanupRetainedPublicationTree(root, init.io, target, retained_target) catch {};
+    copyOracleTreeIntoRetainedStage(
+        init,
+        allocator,
+        source_dir,
+        retained_target,
+        faults.primary,
+    ) catch |primary_error| {
+        rollbackRetainedStage(root, init.io, target, retained_target, faults.rollback) catch |rollback_error| {
+            reportStageRollbackFailure(.copy, primary_error, rollback_error, target);
+            return error.OraclePublicationStageRollbackFailed;
+        };
+        return primary_error;
+    };
+    return retained_target;
+}
+
+fn copyOracleTreeIntoRetainedStage(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    source_dir: []const u8,
+    retained_target: RetainedPublicationTree,
+    primary_fault: PublicationStagePrimaryFault,
+) !void {
     var paths = try listFiles(init.io, allocator, source_dir);
     defer paths.deinit();
     for (paths.items) |relative_path| {
@@ -3213,7 +3463,9 @@ fn copyOracleTreeToPublicationLeaf(
         defer allocator.free(bytes);
         try writeArtifactFromDir(init.io, retained_target.dir, relative_path, bytes);
     }
-    return retained_target;
+    if (primary_fault == .after_copy_before_return) {
+        return error.InjectedOraclePublicationStageFailure;
+    }
 }
 
 const PublicationFault = enum {
@@ -3242,6 +3494,7 @@ const PublicationRequest = struct {
     receiver_pin: []const u8,
     paths: PublicationPaths,
     fault: PublicationFault,
+    stage_faults: PublicationStageFaults = .{},
     authority: ?TrackedPublicationAuthority,
 };
 
@@ -3260,6 +3513,18 @@ fn exclusivePublicationRequest(
     };
 }
 
+fn stageFaultPublicationRequest(
+    candidate_dir: []const u8,
+    receiver_pin: []const u8,
+    paths: PublicationPaths,
+    primary: PublicationStagePrimaryFault,
+    rollback: PublicationStageRollbackFault,
+) PublicationRequest {
+    var request = exclusivePublicationRequest(candidate_dir, receiver_pin, paths, .none);
+    request.stage_faults = .{ .primary = primary, .rollback = rollback };
+    return request;
+}
+
 fn isOracleIntegrityFailure(err: anyerror) bool {
     return switch (err) {
         error.InvalidOracleManifest,
@@ -3269,6 +3534,12 @@ fn isOracleIntegrityFailure(err: anyerror) bool {
         error.UnsupportedOracleTreeEntry,
         error.NonPortableOraclePath,
         error.NonPortableOraclePathCollision,
+        error.OracleInventoryDepthLimitExceeded,
+        error.OracleInventoryEntryLimitExceeded,
+        error.OracleInventoryPathLimitExceeded,
+        error.OracleInventoryCumulativePathLimitExceeded,
+        error.OracleInventoryRetainedPathLimitExceeded,
+        error.OracleInventoryOpenDirectoryLimitExceeded,
         error.FileNotFound,
         error.IsDir,
         error.NotDir,
@@ -3333,6 +3604,8 @@ fn recoverPublicationAtRoot(
         }
     } else if (target_kind) |kind| {
         if (kind != .directory) return error.UnsafeOraclePath;
+    } else {
+        return error.OraclePublicationConflict;
     }
 }
 
@@ -3355,13 +3628,51 @@ fn publishOracleTree(
         allocator,
         request.candidate_dir,
         root,
-        root.stage,
+        request.stage_faults,
     );
     defer retained_stage.close(init.io);
     var stage_location: RetainedStageLocation = .at_stage;
-    errdefer if (stage_location == .at_stage) {
-        cleanupRetainedPublicationTree(root, init.io, root.stage, retained_stage) catch {};
+    return completeStagedOraclePublication(init, allocator, request, .{
+        .root = root,
+        .retained_target = retained_target,
+        .retained_stage = retained_stage,
+        .stage_location = &stage_location,
+    }) catch |primary_error| {
+        if (stage_location == .at_stage) {
+            rollbackRetainedStage(
+                root,
+                init.io,
+                root.stage,
+                retained_stage,
+                request.stage_faults.rollback,
+            ) catch |rollback_error| {
+                reportStageRollbackFailure(.post_copy, primary_error, rollback_error, root.stage);
+                return error.OraclePublicationStageRollbackFailed;
+            };
+        }
+        return primary_error;
     };
+}
+
+const StagedPublicationContext = struct {
+    root: PublicationRoot,
+    retained_target: RetainedPublicationTree,
+    retained_stage: RetainedPublicationTree,
+    stage_location: *RetainedStageLocation,
+};
+
+fn completeStagedOraclePublication(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    request: PublicationRequest,
+    context: StagedPublicationContext,
+) !PublicationOutcome {
+    const root = context.root;
+    const retained_target = context.retained_target;
+    const retained_stage = context.retained_stage;
+    if (request.stage_faults.primary == .after_copy_transfer) {
+        return error.InjectedOraclePublicationStageFailure;
+    }
     try validateOracleTreeFromDir(init.io, allocator, retained_stage.dir, request.receiver_pin);
 
     if (request.fault == .replace_target_before_backup) {
@@ -3387,9 +3698,9 @@ fn publishOracleTree(
         .post_move_terminal => return error.OraclePublicationPostMoveConflict,
     }
 
-    stage_location = .move_unproved;
+    context.stage_location.* = .move_unproved;
     const promotion_outcome = promoteOracleTree(init, allocator, request, root, retained_stage) catch |promotion_error| {
-        stage_location = .at_stage;
+        context.stage_location.* = .at_stage;
         const rollback_outcome = moveRetainedPublicationTree(
             root,
             init.io,
@@ -3404,7 +3715,7 @@ fn publishOracleTree(
         return promotion_error;
     };
     switch (promotion_outcome) {
-        .moved => stage_location = .at_target,
+        .moved => context.stage_location.* = .at_target,
         .post_move_terminal => return error.OraclePublicationPostMoveConflict,
     }
     if (request.fault == .during_backup_cleanup) {
@@ -3856,6 +4167,311 @@ fn testNoFollowInventory(
     try expectEqualBytes("must-not-be-inventoried\n", external_bytes);
 }
 
+fn expectOracleInventoryLimit(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    source: std.Io.Dir,
+    limits: OracleInventoryLimits,
+    expected_error: anyerror,
+) !void {
+    var inventory_error: ?anyerror = null;
+    const unexpected_paths: ?OwnedPaths = listFilesFromDirWithLimits(
+        init.io,
+        allocator,
+        source,
+        limits,
+    ) catch |err| failed: {
+        inventory_error = err;
+        break :failed null;
+    };
+    if (unexpected_paths) |paths| {
+        var owned_paths = paths;
+        owned_paths.deinit();
+    }
+    try expectPublicationError(expected_error, inventory_error);
+}
+
+fn testOracleInventoryLimits(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+) !void {
+    const source = try joinPath(allocator, &.{ root, "inventory-limits" });
+    defer allocator.free(source);
+    const child = try joinPath(allocator, &.{ source, "child" });
+    defer allocator.free(child);
+
+    try createFreshDirectory(init.io, source);
+    errdefer deleteDirectoryIfPresent(init.io, source) catch {};
+    try createFreshDirectory(init.io, child);
+    try writeArtifact(init.io, allocator, source, "a.txt", "a\n");
+    try writeArtifact(init.io, allocator, source, "b.txt", "b\n");
+    try writeArtifact(init.io, allocator, child, "c.txt", "c\n");
+
+    {
+        var source_dir = try openOracleRootNoFollow(init.io, source);
+        defer source_dir.close(init.io);
+
+        try expectOracleInventoryLimit(
+            init,
+            allocator,
+            source_dir,
+            .{ .maximum_depth = 0 },
+            error.OracleInventoryDepthLimitExceeded,
+        );
+        try expectOracleInventoryLimit(
+            init,
+            allocator,
+            source_dir,
+            .{ .maximum_entries = 3 },
+            error.OracleInventoryEntryLimitExceeded,
+        );
+        try expectOracleInventoryLimit(
+            init,
+            allocator,
+            source_dir,
+            .{ .maximum_path_bytes = 4 },
+            error.OracleInventoryPathLimitExceeded,
+        );
+        try expectOracleInventoryLimit(
+            init,
+            allocator,
+            source_dir,
+            .{ .maximum_cumulative_path_bytes = 4 },
+            error.OracleInventoryCumulativePathLimitExceeded,
+        );
+        try expectOracleInventoryLimit(
+            init,
+            allocator,
+            source_dir,
+            .{ .maximum_retained_paths = 2 },
+            error.OracleInventoryRetainedPathLimitExceeded,
+        );
+        try expectOracleInventoryLimit(
+            init,
+            allocator,
+            source_dir,
+            .{ .maximum_open_directories = 1 },
+            error.OracleInventoryOpenDirectoryLimitExceeded,
+        );
+
+        var paths = try listFilesFromDir(init.io, allocator, source_dir);
+        defer paths.deinit();
+        if (paths.items.len != 3) return error.UnexpectedOracleInventoryCount;
+        try expectEqualBytes("a.txt", paths.items[0]);
+        try expectEqualBytes("b.txt", paths.items[1]);
+        try expectEqualBytes("child/c.txt", paths.items[2]);
+    }
+
+    try deleteDirectoryIfPresent(init.io, source);
+    if (try pathKindNoFollow(init.io, source) != null) {
+        return error.OracleInventoryDirectoryHandleLeaked;
+    }
+}
+
+fn expectInvalidPublishTrackedArguments(args: []const []const u8) !void {
+    var parse_error: ?anyerror = null;
+    if (parsePublishTrackedArguments(args)) |_| {
+        // Success is the condition under test; the missing error fails below.
+    } else |err| {
+        parse_error = err;
+    }
+    try expectPublicationError(error.InvalidArguments, parse_error);
+}
+
+fn expectValidPublishTrackedArguments(args: []const []const u8) !void {
+    const parsed = try parsePublishTrackedArguments(args);
+    try expectEqualBytes("candidate", parsed.candidate_dir);
+    try expectEqualBytes("receiver-pin", parsed.receiver_pin_path);
+    if (parsed.authority != .exclusive_receiver_namespace) {
+        return error.InvalidPublicationAuthority;
+    }
+}
+
+fn testPublishTrackedArgumentGrammar() !void {
+    const valid_cases = [_][]const []const u8{
+        &.{ "--candidate-dir", "candidate", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "candidate", "--exclusive-publication-namespace", "--receiver-pin", "receiver-pin" },
+        &.{ "--receiver-pin", "receiver-pin", "--candidate-dir", "candidate", "--exclusive-publication-namespace" },
+        &.{ "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace", "--candidate-dir", "candidate" },
+        &.{ "--exclusive-publication-namespace", "--candidate-dir", "candidate", "--receiver-pin", "receiver-pin" },
+        &.{ "--exclusive-publication-namespace", "--receiver-pin", "receiver-pin", "--candidate-dir", "candidate" },
+    };
+    for (valid_cases) |args| try expectValidPublishTrackedArguments(args);
+
+    const malformed_cases = [_][]const []const u8{
+        &.{ "--candidate-dir", "--exclusive-publication-namespace", "--receiver-pin", "receiver-pin", "ignored" },
+        &.{ "--candidate-dir", "--candidate-dir", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace", "ignored" },
+        &.{ "--receiver-pin", "--candidate-dir", "candidate", "--exclusive-publication-namespace", "ignored" },
+        &.{ "--receiver-pin", "--receiver-pin", "--candidate-dir", "candidate", "--exclusive-publication-namespace" },
+        &.{ "--receiver-pin", "--exclusive-publication-namespace", "--candidate-dir", "candidate", "ignored" },
+        &.{ "--candidate-dir", "candidate-a", "--candidate-dir", "candidate-b", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--receiver-pin", "pin-a", "--receiver-pin", "pin-b", "--candidate-dir", "candidate", "--exclusive-publication-namespace" },
+        &.{ "--exclusive-publication-namespace", "--exclusive-publication-namespace", "--candidate-dir", "candidate", "--receiver-pin", "receiver-pin" },
+        &.{ "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "candidate", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "candidate", "--receiver-pin", "receiver-pin" },
+        &.{"--candidate-dir"},
+        &.{ "--candidate-dir", "candidate", "--receiver-pin" },
+        &.{ "--candidate-dir", "", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "candidate", "--receiver-pin", "", "--exclusive-publication-namespace" },
+        &.{ "--unknown", "--candidate-dir", "candidate", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "--unknown", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "candidate", "--receiver-pin", "--unknown", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir=candidate", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace", "ignored" },
+        &.{ "--candidate-dir", "candidate", "--receiver-pin=receiver-pin", "--exclusive-publication-namespace", "ignored" },
+        &.{ "extra", "--candidate-dir", "candidate", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "candidate", "extra", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+        &.{ "--candidate-dir", "candidate", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace", "extra" },
+        &.{ "--candidate-dir", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace", "candidate" },
+        &.{ "positional", "candidate", "--receiver-pin", "receiver-pin", "--exclusive-publication-namespace" },
+    };
+    for (malformed_cases) |args| try expectInvalidPublishTrackedArguments(args);
+}
+
+const StageFailureResidue = enum {
+    absent,
+    empty,
+    copied_candidate,
+};
+
+const StageFailureTestCase = struct {
+    primary: PublicationStagePrimaryFault,
+    rollback: PublicationStageRollbackFault,
+    expected_error: anyerror,
+    residue: StageFailureResidue,
+};
+
+const StageFailureTestContext = struct {
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    candidate: []const u8,
+    receiver_pin: []const u8,
+    paths: PublicationPaths,
+};
+
+fn requireEmptyPublicationDirectory(context: StageFailureTestContext, path: []const u8) !void {
+    var dir = try openOracleRootNoFollow(context.init.io, path);
+    defer dir.close(context.init.io);
+    var iterator = dir.iterate();
+    if (try iterator.next(context.init.io) != null) {
+        return error.ExpectedEmptyPublicationStage;
+    }
+}
+
+fn requireStageFailureResidue(
+    context: StageFailureTestContext,
+    residue: StageFailureResidue,
+) !void {
+    switch (residue) {
+        .absent => if (try pathKindNoFollow(context.init.io, context.paths.stage) != null) {
+            return error.OraclePublicationResidue;
+        },
+        .empty => {
+            if (try pathKindNoFollow(context.init.io, context.paths.stage) != .directory) {
+                return error.ExpectedOraclePublicationResidue;
+            }
+            try requireEmptyPublicationDirectory(context, context.paths.stage);
+        },
+        .copied_candidate => try compareTrees(
+            context.init,
+            context.allocator,
+            context.candidate,
+            context.paths.stage,
+        ),
+    }
+}
+
+fn expectStageFailureCase(
+    context: StageFailureTestContext,
+    test_case: StageFailureTestCase,
+) !void {
+    var publication_error: ?anyerror = null;
+    if (publishOracleTree(context.init, context.allocator, stageFaultPublicationRequest(
+        context.candidate,
+        context.receiver_pin,
+        context.paths,
+        test_case.primary,
+        test_case.rollback,
+    ))) |_| {
+        // Success is the condition under test; the missing error fails below.
+    } else |err| {
+        publication_error = err;
+    }
+    try expectPublicationError(test_case.expected_error, publication_error);
+    try compareTrees(context.init, context.allocator, context.candidate, context.paths.target);
+    if (try pathKindNoFollow(context.init.io, context.paths.backup) != null) {
+        return error.OraclePublicationResidue;
+    }
+    try requireStageFailureResidue(context, test_case.residue);
+
+    if (test_case.residue != .absent) {
+        var recovery_error: ?anyerror = null;
+        recoverExclusivePublication(context.init, context.allocator, context.paths) catch |err| {
+            recovery_error = err;
+        };
+        try expectPublicationError(error.OraclePublicationConflict, recovery_error);
+        try requireStageFailureResidue(context, test_case.residue);
+        try deleteDirectoryIfPresent(context.init.io, context.paths.stage);
+    }
+
+    _ = try publishOracleTree(context.init, context.allocator, exclusivePublicationRequest(
+        context.candidate,
+        context.receiver_pin,
+        context.paths,
+        .none,
+    ));
+    try compareTrees(context.init, context.allocator, context.candidate, context.paths.target);
+    if (try pathKindNoFollow(context.init.io, context.paths.stage) != null or
+        try pathKindNoFollow(context.init.io, context.paths.backup) != null)
+    {
+        return error.OraclePublicationResidue;
+    }
+}
+
+fn testStageFailureTotality(context: StageFailureTestContext) !void {
+    const stage_failure_cases = [_]StageFailureTestCase{
+        .{
+            .primary = .after_create_before_open,
+            .rollback = .none,
+            .expected_error = error.InjectedOraclePublicationStageFailure,
+            .residue = .absent,
+        },
+        .{
+            .primary = .after_create_before_open,
+            .rollback = .unretained_delete,
+            .expected_error = error.OraclePublicationStageRollbackFailed,
+            .residue = .empty,
+        },
+        .{
+            .primary = .after_copy_before_return,
+            .rollback = .none,
+            .expected_error = error.InjectedOraclePublicationStageFailure,
+            .residue = .absent,
+        },
+        .{
+            .primary = .after_copy_before_return,
+            .rollback = .retained_before_clear,
+            .expected_error = error.OraclePublicationStageRollbackFailed,
+            .residue = .copied_candidate,
+        },
+        .{
+            .primary = .after_copy_transfer,
+            .rollback = .none,
+            .expected_error = error.InjectedOraclePublicationStageFailure,
+            .residue = .absent,
+        },
+        .{
+            .primary = .after_copy_transfer,
+            .rollback = .retained_before_delete,
+            .expected_error = error.OraclePublicationStageRollbackFailed,
+            .residue = .empty,
+        },
+    };
+    for (stage_failure_cases) |test_case| try expectStageFailureCase(context, test_case);
+}
+
 fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receiver_pin: []const u8) !void {
     const root = "publication-sandbox";
     const candidate = root ++ "/candidate";
@@ -3880,6 +4496,11 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     const collision_backup = root ++ "/collision-backup";
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
+
+    const sentinel_request_count_line = try formatObservedRequestCountLine(allocator, 3);
+    defer allocator.free(sentinel_request_count_line);
+    try expectEqualBytes("request_count: 3", sentinel_request_count_line);
+    try testPublishTrackedArgumentGrammar();
 
     const windows_path = try canonicalOracleRelativePath(
         allocator,
@@ -3951,8 +4572,26 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     try createFreshDirectory(init.io, root);
     defer deleteDirectoryIfPresent(init.io, root) catch {};
+
+    inline for (.{ target, stage, backup }) |publication_path| {
+        if (try pathKindNoFollow(init.io, publication_path) != null) {
+            return error.ExpectedAllMissingPublicationState;
+        }
+    }
+    var all_missing_recovery_error: ?anyerror = null;
+    recoverExclusivePublication(init, allocator, paths) catch |err| {
+        all_missing_recovery_error = err;
+    };
+    try expectPublicationError(error.OraclePublicationConflict, all_missing_recovery_error);
+    inline for (.{ target, stage, backup }) |publication_path| {
+        if (try pathKindNoFollow(init.io, publication_path) != null) {
+            return error.AllMissingPublicationStateMutated;
+        }
+    }
+
     try testUnknownEntryKindReclassification(init, root);
     try testNoFollowInventory(init, allocator, root);
+    try testOracleInventoryLimits(init, allocator, root);
 
     try createFreshDirectory(init.io, collision_source);
     try writeArtifact(init.io, allocator, collision_source, "source.txt", "source-remains\n");
@@ -4013,6 +4652,13 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try copyOracleTree(init, allocator, candidate, target);
     try compareTrees(init, allocator, candidate, target);
     try testMissingPublicationAuthority(init, allocator, candidate, receiver_pin, paths);
+    try testStageFailureTotality(.{
+        .init = init,
+        .allocator = allocator,
+        .candidate = candidate,
+        .receiver_pin = receiver_pin,
+        .paths = paths,
+    });
 
     try copyOracleTree(init, allocator, candidate, special_entry_candidate);
     try deleteArtifact(init.io, allocator, special_entry_candidate, "manifest.json");
@@ -4632,6 +5278,54 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     }
 }
 
+const PublishTrackedArguments = struct {
+    candidate_dir: []const u8,
+    receiver_pin_path: []const u8,
+    authority: TrackedPublicationAuthority,
+};
+
+fn publishTrackedValue(args: []const []const u8, index: *usize) ![]const u8 {
+    index.* = std.math.add(usize, index.*, 1) catch return error.InvalidArguments;
+    if (index.* >= args.len) return error.InvalidArguments;
+    const value = args[index.*];
+    if (value.len == 0 or std.mem.startsWith(u8, value, "--")) {
+        return error.InvalidArguments;
+    }
+    index.* += 1;
+    return value;
+}
+
+fn parsePublishTrackedArguments(args: []const []const u8) !PublishTrackedArguments {
+    if (args.len != 5) return error.InvalidArguments;
+
+    var candidate_dir: ?[]const u8 = null;
+    var receiver_pin_path: ?[]const u8 = null;
+    var authority: ?TrackedPublicationAuthority = null;
+    var index: usize = 0;
+    while (index < args.len) {
+        const argument = args[index];
+        if (std.mem.eql(u8, argument, "--candidate-dir")) {
+            if (candidate_dir != null) return error.InvalidArguments;
+            candidate_dir = try publishTrackedValue(args, &index);
+        } else if (std.mem.eql(u8, argument, "--receiver-pin")) {
+            if (receiver_pin_path != null) return error.InvalidArguments;
+            receiver_pin_path = try publishTrackedValue(args, &index);
+        } else if (std.mem.eql(u8, argument, "--exclusive-publication-namespace")) {
+            if (authority != null) return error.InvalidArguments;
+            authority = .exclusive_receiver_namespace;
+            index += 1;
+        } else {
+            return error.InvalidArguments;
+        }
+    }
+
+    return .{
+        .candidate_dir = candidate_dir orelse return error.InvalidArguments,
+        .receiver_pin_path = receiver_pin_path orelse return error.InvalidArguments,
+        .authority = authority orelse return error.InvalidArguments,
+    };
+}
+
 fn argumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -4642,14 +5336,6 @@ fn argumentValue(args: []const []const u8, flag: []const u8) ![]const u8 {
         }
     }
     return error.InvalidArguments;
-}
-
-fn requireUniqueFlag(args: []const []const u8, flag: []const u8) !void {
-    var count: usize = 0;
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, flag)) count += 1;
-    }
-    if (count != 1) return error.InvalidArguments;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -4668,13 +5354,10 @@ pub fn main(init: std.process.Init) !void {
         return generateFresh(init, allocator, generated_bundle_path);
     }
     if (std.mem.eql(u8, command, "publish-tracked")) {
-        if (argv.items.len != 5) return error.InvalidArguments;
-        const candidate_dir = try argumentValue(argv.items, "--candidate-dir");
-        const receiver_pin_path = try argumentValue(argv.items, "--receiver-pin");
-        try requireUniqueFlag(argv.items, "--exclusive-publication-namespace");
+        const request = try parsePublishTrackedArguments(argv.items);
         const receiver_pin_bytes = try std.Io.Dir.cwd().readFileAlloc(
             init.io,
-            receiver_pin_path,
+            request.receiver_pin_path,
             allocator,
             .limited(66),
         );
@@ -4683,9 +5366,9 @@ pub fn main(init: std.process.Init) !void {
         return publishTrackedOracle(
             init,
             allocator,
-            candidate_dir,
+            request.candidate_dir,
             receiver_pin,
-            .exclusive_receiver_namespace,
+            request.authority,
         );
     }
     if (std.mem.eql(u8, command, "test-publication")) {

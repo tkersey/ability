@@ -708,6 +708,38 @@ const ExactInstallTreeStep = struct {
         try renameEntryNoReplace(quarantine, quarantine_name, current, destination_name, io);
     }
 
+    const QuarantinePostcheckContext = struct {
+        quarantine: std.Io.Dir,
+        current: std.Io.Dir,
+        io: std.Io,
+        quarantine_name: []const u8,
+        destination_name: []const u8,
+    };
+
+    const QuarantinePostcheckOutcome = union(enum) {
+        observation_failed: anyerror,
+        restoration_failed: anyerror,
+        restored_mismatch,
+        verified,
+    };
+
+    fn resolveQuarantinePostcheck(
+        context: QuarantinePostcheckContext,
+        expected: ?FileIdentity,
+        observation: anyerror!?FileIdentity,
+    ) QuarantinePostcheckOutcome {
+        const observed = observation catch |err| return .{ .observation_failed = err };
+        if (destinationObservationMatches(expected, observed)) return .verified;
+        restoreQuarantinedEntry(
+            context.quarantine,
+            context.current,
+            context.io,
+            context.quarantine_name,
+            context.destination_name,
+        ) catch |err| return .{ .restoration_failed = err };
+        return .restored_mismatch;
+    }
+
     fn deleteNonDirectoryNoFollow(parent: std.Io.Dir, io: std.Io, name: []const u8) !void {
         parent.deleteFile(io, name) catch |err| switch (err) {
             error.FileNotFound => {},
@@ -987,6 +1019,118 @@ const ExactInstallTreeStep = struct {
         const marker = try tmp.dir.readFileAlloc(io, "file-receiver", std.testing.allocator, .limited(64));
         defer std.testing.allocator.free(marker);
         try std.testing.expectEqualStrings("receiver-owned\n", marker);
+    }
+
+    fn testAmbiguousQuarantineObservationPreservesUnprovedMovedEntry() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "receiver", private_dir_permissions);
+        var receiver = try tmp.dir.openDir(io, "receiver", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        try receiver.writeFile(io, .{
+            .sub_path = "receiver-marker.txt",
+            .data = "receiver-owned-before-quarantine\n",
+        });
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            try receiver.setPermissions(io, .fromMode(0o710));
+        }
+        const receiver_identity = try directoryIdentity(receiver);
+        receiver.close(io);
+
+        try tmp.dir.createDir(io, "quarantine", private_dir_permissions);
+        var quarantine = try tmp.dir.openDir(io, "quarantine", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer quarantine.close(io);
+        try tmp.dir.rename("receiver", quarantine, "tree", io);
+
+        const failed_observation: anyerror!?FileIdentity =
+            error.InjectedQuarantineObservationFailure;
+        const outcome = resolveQuarantinePostcheck(.{
+            .quarantine = quarantine,
+            .current = tmp.dir,
+            .io = io,
+            .quarantine_name = "tree",
+            .destination_name = "receiver",
+        }, receiver_identity, failed_observation);
+        switch (outcome) {
+            .observation_failed => |err| try std.testing.expectEqual(
+                error.InjectedQuarantineObservationFailure,
+                err,
+            ),
+            .verified,
+            .restored_mismatch,
+            .restoration_failed,
+            => return error.UnexpectedQuarantinePostcheckOutcome,
+        }
+
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(io, "receiver", .{ .follow_symlinks = false }),
+        );
+        {
+            var retained_receiver = try quarantine.openDir(io, "tree", .{
+                .iterate = true,
+                .follow_symlinks = false,
+            });
+            defer retained_receiver.close(io);
+            try std.testing.expect(std.meta.eql(
+                receiver_identity,
+                try directoryIdentity(retained_receiver),
+            ));
+            const marker = try retained_receiver.readFileAlloc(
+                io,
+                "receiver-marker.txt",
+                std.testing.allocator,
+                .limited(128),
+            );
+            defer std.testing.allocator.free(marker);
+            try std.testing.expectEqualStrings("receiver-owned-before-quarantine\n", marker);
+            if (std.Io.Dir.Permissions.has_executable_bit) {
+                const retained_stat = try retained_receiver.stat(io);
+                try std.testing.expectEqual(
+                    @as(std.posix.mode_t, 0o710),
+                    retained_stat.permissions.toMode() & 0o777,
+                );
+            }
+        }
+
+        const mismatched_observation: anyerror!?FileIdentity = .{
+            .device = receiver_identity.device,
+            .inode = receiver_identity.inode ^ 1,
+        };
+        const mismatch_outcome = resolveQuarantinePostcheck(.{
+            .quarantine = quarantine,
+            .current = tmp.dir,
+            .io = io,
+            .quarantine_name = "tree",
+            .destination_name = "receiver",
+        }, receiver_identity, mismatched_observation);
+        switch (mismatch_outcome) {
+            .restored_mismatch => {},
+            .verified,
+            .observation_failed,
+            .restoration_failed,
+            => return error.UnexpectedQuarantinePostcheckOutcome,
+        }
+        var restored_receiver = try tmp.dir.openDir(io, "receiver", .{
+            .iterate = false,
+            .follow_symlinks = false,
+        });
+        defer restored_receiver.close(io);
+        try std.testing.expect(std.meta.eql(
+            receiver_identity,
+            try directoryIdentity(restored_receiver),
+        ));
+        try std.testing.expectError(
+            error.FileNotFound,
+            quarantine.statFile(io, "tree", .{ .follow_symlinks = false }),
+        );
     }
 
     fn testProtectedDescendantIdentityCollection() !void {
@@ -1562,27 +1706,34 @@ const ExactInstallTreeStep = struct {
             };
             quarantine_tree_present = true;
 
-            const quarantined_identity = observedDestinationIdentity(
+            const postcheck = resolveQuarantinePostcheck(.{
+                .quarantine = quarantine_container,
+                .current = current,
+                .io = io,
+                .quarantine_name = container_tree_name,
+                .destination_name = destination_leaf,
+            }, validated_destination_identity, observedDestinationIdentity(
                 quarantine_container,
                 io,
                 container_tree_name,
-            ) catch null;
-            if (!destinationObservationMatches(validated_destination_identity, quarantined_identity)) {
-                restoreQuarantinedEntry(
-                    quarantine_container,
-                    current,
-                    io,
-                    container_tree_name,
-                    destination_leaf,
-                ) catch |restore_err| return step.fail(
+            ));
+            switch (postcheck) {
+                .verified => {},
+                .observation_failed => |observation_err| return step.fail(
+                    "unable to identify quarantined prior oracle destination '{s}/{s}': {s}; the unproved moved entry remains quarantined and restoration and publication were not attempted",
+                    .{ quarantine_name, container_tree_name, @errorName(observation_err) },
+                ),
+                .restoration_failed => |restore_err| return step.fail(
                     "oracle destination '{s}' changed during quarantine; the receiver remains preserved in '{s}/{s}' because no-replace restoration failed: {s}",
                     .{ destination_leaf, quarantine_name, container_tree_name, @errorName(restore_err) },
-                );
-                quarantine_tree_present = false;
-                return step.fail(
-                    "oracle destination '{s}' changed during quarantine; the receiver was restored and publication was not attempted",
-                    .{destination_leaf},
-                );
+                ),
+                .restored_mismatch => {
+                    quarantine_tree_present = false;
+                    return step.fail(
+                        "oracle destination '{s}' changed during quarantine; the receiver was restored and publication was not attempted",
+                        .{destination_leaf},
+                    );
+                },
             }
             retained_destination.?.close(io);
             retained_destination_open = false;
@@ -1692,6 +1843,10 @@ test "exact oracle destination collision classifier includes DirNotEmpty" {
 
 test "exact oracle final promotion preserves an empty receiver directory" {
     try ExactInstallTreeStep.testNoReplacePromotionPreservesReceiverDirectory();
+}
+
+test "exact-install quarantine ambiguity preserves the unproved moved entry" {
+    try ExactInstallTreeStep.testAmbiguousQuarantineObservationPreservesUnprovedMovedEntry();
 }
 
 test "exact oracle protection includes descendant directory identities" {
@@ -3200,7 +3355,7 @@ pub fn build(b: *std.Build) void {
     oracle_update_run.step.dependOn(&oracle_update_compare.step);
     const oracle_update_step = b.step(
         "update-boundary-world-image-v1-oracle",
-        "Update the checked-in Boundary World Image v1 rewrite oracle.",
+        "Update the checked-in Boundary World Image v1 rewrite oracle; invoking this step asserts exclusive control of its tracked publication namespace for the command's duration.",
     );
     oracle_update_step.dependOn(&oracle_update_run.step);
 
