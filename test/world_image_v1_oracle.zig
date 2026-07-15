@@ -1853,7 +1853,7 @@ fn pathLessThan(_: void, lhs: []u8, rhs: []u8) bool {
 
 fn isWindowsReservedOracleComponent(component: []const u8) bool {
     const stem_end = std.mem.findScalar(u8, component, '.') orelse component.len;
-    const stem = component[0..stem_end];
+    const stem = std.mem.trimEnd(u8, component[0..stem_end], " ");
     if (std.ascii.eqlIgnoreCase(stem, "CON") or
         std.ascii.eqlIgnoreCase(stem, "PRN") or
         std.ascii.eqlIgnoreCase(stem, "AUX") or
@@ -2982,13 +2982,31 @@ fn requirePublicOracleModes(
         const expected_mode: std.posix.mode_t = switch (entry.kind) {
             .directory => 0o755,
             .file => 0o644,
-            else => return error.UnsupportedOracleTreeEntry,
+            .block_device,
+            .character_device,
+            .named_pipe,
+            .sym_link,
+            .unix_domain_socket,
+            .whiteout,
+            .door,
+            .event_port,
+            .unknown,
+            => return error.UnsupportedOracleTreeEntry,
         };
         if (stat.permissions.toMode() & 0o777 != expected_mode) {
             return switch (entry.kind) {
                 .directory => error.NonPublicOracleDirectoryMode,
                 .file => error.NonPublicOracleFileMode,
-                else => unreachable,
+                .block_device,
+                .character_device,
+                .named_pipe,
+                .sym_link,
+                .unix_domain_socket,
+                .whiteout,
+                .door,
+                .event_port,
+                .unknown,
+                => unreachable,
             };
         }
     }
@@ -3138,7 +3156,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     if (nonportable_path) |path| allocator.free(path);
     try expectPublicationError(error.NonPortableOraclePath, nonportable_error);
 
-    inline for (.{ "CON", "aux.txt", "COM1.bin", "lpt9", "CONIN$", "conout$", "COM\xc2\xb9.bin", "lpt\xc2\xb3", "trailing." }) |reserved_path| {
+    inline for (.{ "CON", "aux.txt", "AUX .txt", "COM1.bin", "COM1 .bin", "lpt9", "CONIN$", "conout$", "COM\xc2\xb9.bin", "lpt\xc2\xb3", "trailing." }) |reserved_path| {
         const candidate_path = try std.fmt.allocPrint(allocator, "artifacts/{s}", .{reserved_path});
         defer allocator.free(candidate_path);
         var reserved_error: ?anyerror = null;
@@ -3149,6 +3167,9 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         if (canonical_reserved) |path| allocator.free(path);
         try expectPublicationError(error.NonPortableOraclePath, reserved_error);
     }
+    const ordinary_spaced_path = try canonicalOracleRelativePath(allocator, "artifacts/AUXiliary .txt", '/');
+    defer allocator.free(ordinary_spaced_path);
+    try expectEqualBytes("artifacts/AUXiliary .txt", ordinary_spaced_path);
     if (!oraclePathsEqualFolded("cases/agent-skeleton.txt", "CASES/AGENT-SKELETON.TXT")) {
         return error.NonPortableOraclePathCollisionNotDetected;
     }

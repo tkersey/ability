@@ -100,6 +100,11 @@ const ExactInstallTreeStep = struct {
     else
         .default_file;
 
+    const private_dir_permissions: std.Io.Dir.Permissions = if (std.Io.Dir.Permissions.has_executable_bit)
+        .fromMode(0o700)
+    else
+        .default_dir;
+
     fn create(
         b: *std.Build,
         source_dir: std.Build.LazyPath,
@@ -262,7 +267,6 @@ const ExactInstallTreeStep = struct {
     const ResolvedDestinationDir = struct {
         dir: std.Io.Dir,
         followed_link: bool,
-        created: bool,
     };
 
     fn openDestinationDir(parent: std.Io.Dir, io: std.Io, name: []const u8) !ResolvedDestinationDir {
@@ -276,24 +280,190 @@ const ExactInstallTreeStep = struct {
                     .follow_symlinks = true,
                 }),
                 .followed_link = true,
-                .created = false,
             },
             else => return open_err,
         };
-        return .{ .dir = dir, .followed_link = false, .created = false };
+        return .{ .dir = dir, .followed_link = false };
+    }
+
+    fn discardPreparedDestinationDir(
+        parent: std.Io.Dir,
+        io: std.Io,
+        private_name: []const u8,
+        private_identity: FileIdentity,
+        private_dir: std.Io.Dir,
+    ) !void {
+        private_dir.close(io);
+        try cleanupEmptyContainerName(parent, io, private_name, private_identity);
+    }
+
+    const darwin_rename = struct {
+        extern "c" fn renameatx_np(
+            old_dir: std.posix.fd_t,
+            old_path: [*:0]const u8,
+            new_dir: std.posix.fd_t,
+            new_path: [*:0]const u8,
+            flags: c_uint,
+        ) c_int;
+    };
+
+    fn darwinRenameDirectoryPreserve(
+        old_dir: std.Io.Dir,
+        old_name: []const u8,
+        new_dir: std.Io.Dir,
+        new_name: []const u8,
+    ) std.Io.Dir.RenamePreserveError!void {
+        const old_path = try std.posix.toPosixPath(old_name);
+        const new_path = try std.posix.toPosixPath(new_name);
+        while (true) switch (std.c.errno(darwin_rename.renameatx_np(
+            old_dir.handle,
+            &old_path,
+            new_dir.handle,
+            &new_path,
+            0x00000004, // RENAME_EXCL
+        ))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .ACCES => return error.AccessDenied,
+            .PERM => return error.PermissionDenied,
+            .BUSY => return error.FileBusy,
+            .DQUOT => return error.DiskQuota,
+            .ISDIR => return error.IsDir,
+            .IO => return error.HardwareFailure,
+            .LOOP => return error.SymLinkLoop,
+            .MLINK => return error.LinkQuotaExceeded,
+            .NAMETOOLONG => return error.NameTooLong,
+            .NOENT => return error.FileNotFound,
+            .NOTDIR => return error.NotDir,
+            .NOMEM => return error.SystemResources,
+            .NOSPC => return error.NoSpaceLeft,
+            .EXIST, .NOTEMPTY => return error.PathAlreadyExists,
+            .ROFS => return error.ReadOnlyFileSystem,
+            .XDEV => return error.CrossDevice,
+            .NODEV => return error.NoDevice,
+            .OPNOTSUPP => return error.OperationUnsupported,
+            .ILSEQ => return error.BadPathName,
+            else => |err| return std.posix.unexpectedErrno(err),
+        };
+    }
+
+    fn renameDirectoryPreserve(
+        old_dir: std.Io.Dir,
+        old_name: []const u8,
+        new_dir: std.Io.Dir,
+        new_name: []const u8,
+        io: std.Io,
+    ) std.Io.Dir.RenamePreserveError!void {
+        if (comptime builtin.os.tag.isDarwin()) {
+            return darwinRenameDirectoryPreserve(old_dir, old_name, new_dir, new_name);
+        }
+        return switch (builtin.os.tag) {
+            .linux, .windows => old_dir.renamePreserve(old_name, new_dir, new_name, io),
+            else => error.OperationUnsupported,
+        };
+    }
+
+    const PreparedDestinationDir = struct {
+        name: []const u8,
+        identity: FileIdentity,
+        dir: std.Io.Dir,
+    };
+
+    fn installPreparedDestinationDir(
+        parent: std.Io.Dir,
+        io: std.Io,
+        name: []const u8,
+        prepared: PreparedDestinationDir,
+    ) !ResolvedDestinationDir {
+        renameDirectoryPreserve(parent, prepared.name, parent, name, io) catch |rename_err| switch (rename_err) {
+            error.PathAlreadyExists => {
+                const receiver_dir = openDestinationDir(parent, io, name) catch |open_err| {
+                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                    return open_err;
+                };
+                discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir) catch |cleanup_err| {
+                    receiver_dir.dir.close(io);
+                    return cleanup_err;
+                };
+                return receiver_dir;
+            },
+            error.AccessDenied => {
+                if (builtin.os.tag != .windows) {
+                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                    return rename_err;
+                }
+                _ = parent.statFile(io, name, .{ .follow_symlinks = false }) catch {
+                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                    return rename_err;
+                };
+                const receiver_dir = openDestinationDir(parent, io, name) catch {
+                    try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                    return rename_err;
+                };
+                discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir) catch |cleanup_err| {
+                    receiver_dir.dir.close(io);
+                    return cleanup_err;
+                };
+                return receiver_dir;
+            },
+            else => {
+                try discardPreparedDestinationDir(parent, io, prepared.name, prepared.identity, prepared.dir);
+                return rename_err;
+            },
+        };
+        return .{ .dir = prepared.dir, .followed_link = false };
+    }
+
+    fn createDestinationDir(parent: std.Io.Dir, io: std.Io, name: []const u8) !ResolvedDestinationDir {
+        var private_name_buffer: [80]u8 = undefined;
+        var attempt: usize = 0;
+        while (attempt < 16) : (attempt += 1) {
+            var random_integer: u64 = 0;
+            io.random(@ptrCast(&random_integer));
+            const private_name = try std.fmt.bufPrint(
+                &private_name_buffer,
+                ".boundary-oracle-parent-{x}",
+                .{random_integer},
+            );
+            parent.createDir(io, private_name, private_dir_permissions) catch |create_err| switch (create_err) {
+                error.PathAlreadyExists => continue,
+                else => return create_err,
+            };
+            const private_dir = parent.openDir(io, private_name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |open_err| {
+                parent.deleteDir(io, private_name) catch |cleanup_err| return cleanup_err;
+                return open_err;
+            };
+            const private_identity = directoryIdentity(private_dir) catch |identity_err| {
+                private_dir.close(io);
+                parent.deleteDir(io, private_name) catch |cleanup_err| return cleanup_err;
+                return identity_err;
+            };
+            if (std.Io.Dir.Permissions.has_executable_bit) {
+                private_dir.setPermissions(io, public_dir_permissions) catch |permissions_err| {
+                    try discardPreparedDestinationDir(parent, io, private_name, private_identity, private_dir);
+                    return permissions_err;
+                };
+            }
+            return installPreparedDestinationDir(
+                parent,
+                io,
+                name,
+                .{
+                    .name = private_name,
+                    .identity = private_identity,
+                    .dir = private_dir,
+                },
+            );
+        }
+        return error.OracleDestinationNameExhausted;
     }
 
     fn openOrCreateDestinationDir(parent: std.Io.Dir, io: std.Io, name: []const u8) !ResolvedDestinationDir {
         return openDestinationDir(parent, io, name) catch |open_err| switch (open_err) {
-            error.FileNotFound => create: {
-                parent.createDir(io, name, .default_dir) catch |create_err| switch (create_err) {
-                    error.PathAlreadyExists => {},
-                    else => return create_err,
-                };
-                var created = try openDestinationDir(parent, io, name);
-                created.created = true;
-                break :create created;
-            },
+            error.FileNotFound => createDestinationDir(parent, io, name),
             else => return open_err,
         };
     }
@@ -396,6 +566,66 @@ const ExactInstallTreeStep = struct {
                 => return error.UnsupportedOracleTreeEntry,
             }
         }
+    }
+
+    fn collectProtectedDescendantIdentities(
+        dir: std.Io.Dir,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        protected_identities: *std.ArrayList(FileIdentity),
+    ) !void {
+        var iterator = dir.iterate();
+        while (try iterator.next(io)) |entry| {
+            if (entry.name.len == 0 or
+                std.mem.eql(u8, entry.name, ".") or
+                std.mem.eql(u8, entry.name, "..") or
+                std.mem.findAny(u8, entry.name, "/\\") != null)
+            {
+                return error.UnsupportedOracleTreeEntry;
+            }
+            if (entry.kind != .directory and entry.kind != .unknown) continue;
+
+            var child = dir.openDir(io, entry.name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.NotDir, error.SymLinkLoop => continue,
+                else => return err,
+            };
+            defer child.close(io);
+            const child_identity = try directoryIdentity(child);
+            if (identityMatchesAny(child_identity, protected_identities.items)) continue;
+            try protected_identities.append(allocator, child_identity);
+            try collectProtectedDescendantIdentities(child, io, allocator, protected_identities);
+        }
+    }
+
+    fn openExistingDestinationLeafNoFollow(
+        parent: std.Io.Dir,
+        io: std.Io,
+        name: []const u8,
+    ) !?std.Io.Dir {
+        const stat = parent.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        return switch (stat.kind) {
+            .sym_link => error.LinkedOracleDestination,
+            .directory => try parent.openDir(io, name, .{
+                .iterate = false,
+                .follow_symlinks = false,
+            }),
+            .block_device,
+            .character_device,
+            .named_pipe,
+            .file,
+            .unix_domain_socket,
+            .whiteout,
+            .door,
+            .event_port,
+            .unknown,
+            => null,
+        };
     }
 
     fn deleteNonDirectoryNoFollow(parent: std.Io.Dir, io: std.Io, name: []const u8) !void {
@@ -526,6 +756,142 @@ const ExactInstallTreeStep = struct {
         };
     }
 
+    fn testDestinationCollisionPreservesReceiverDirectory() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "prepared-success", private_dir_permissions);
+        const prepared_success = try tmp.dir.openDir(io, "prepared-success", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        const prepared_success_identity = try directoryIdentity(prepared_success);
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            try prepared_success.setPermissions(io, public_dir_permissions);
+        }
+        const installed = try installPreparedDestinationDir(
+            tmp.dir,
+            io,
+            "installed",
+            .{
+                .name = "prepared-success",
+                .identity = prepared_success_identity,
+                .dir = prepared_success,
+            },
+        );
+        defer installed.dir.close(io);
+        try std.testing.expect(std.meta.eql(prepared_success_identity, try directoryIdentity(installed.dir)));
+        var installed_by_name = try tmp.dir.openDir(io, "installed", .{ .follow_symlinks = false });
+        defer installed_by_name.close(io);
+        try std.testing.expect(std.meta.eql(prepared_success_identity, try directoryIdentity(installed_by_name)));
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(io, "prepared-success", .{ .follow_symlinks = false }),
+        );
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            const installed_stat = try installed.dir.stat(io);
+            try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), installed_stat.permissions.toMode() & 0o777);
+        }
+
+        try tmp.dir.createDir(io, "receiver", private_dir_permissions);
+        var receiver = try tmp.dir.openDir(io, "receiver", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            try receiver.setPermissions(io, .fromMode(0o710));
+        }
+        const receiver_identity = try directoryIdentity(receiver);
+        receiver.close(io);
+
+        try tmp.dir.createDir(io, "prepared", private_dir_permissions);
+        const prepared = try tmp.dir.openDir(io, "prepared", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        const prepared_identity = try directoryIdentity(prepared);
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            try prepared.setPermissions(io, public_dir_permissions);
+        }
+
+        const resolved = try installPreparedDestinationDir(
+            tmp.dir,
+            io,
+            "receiver",
+            .{
+                .name = "prepared",
+                .identity = prepared_identity,
+                .dir = prepared,
+            },
+        );
+        defer resolved.dir.close(io);
+        try std.testing.expect(std.meta.eql(receiver_identity, try directoryIdentity(resolved.dir)));
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(io, "prepared", .{ .follow_symlinks = false }),
+        );
+        if (std.Io.Dir.Permissions.has_executable_bit) {
+            const receiver_stat = try resolved.dir.stat(io);
+            try std.testing.expectEqual(@as(std.posix.mode_t, 0o710), receiver_stat.permissions.toMode() & 0o777);
+        }
+    }
+
+    fn testProtectedDescendantIdentityCollection() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "child", private_dir_permissions);
+        var child = try tmp.dir.openDir(io, "child", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer child.close(io);
+        try child.createDir(io, "grandchild", private_dir_permissions);
+        var grandchild = try child.openDir(io, "grandchild", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer grandchild.close(io);
+
+        var identities: std.ArrayList(FileIdentity) = .empty;
+        defer identities.deinit(std.testing.allocator);
+        try identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
+        try collectProtectedDescendantIdentities(
+            tmp.dir,
+            io,
+            std.testing.allocator,
+            &identities,
+        );
+        try std.testing.expect(identityMatchesAny(try directoryIdentity(child), identities.items));
+        try std.testing.expect(identityMatchesAny(try directoryIdentity(grandchild), identities.items));
+        try std.testing.expectError(
+            error.ProtectedOracleCleanupAlias,
+            clearDirectoryNoFollow(tmp.dir, io, identities.items),
+        );
+        const child_stat = try tmp.dir.statFile(io, "child", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.directory, child_stat.kind);
+        const grandchild_stat = try child.statFile(io, "grandchild", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.directory, grandchild_stat.kind);
+    }
+
+    fn testLinkedDestinationLeafRejected() !void {
+        if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "target", private_dir_permissions);
+        try tmp.dir.symLink(io, "target", "boundary", .{ .is_directory = true });
+        try std.testing.expectError(
+            error.LinkedOracleDestination,
+            openExistingDestinationLeafNoFollow(tmp.dir, io, "boundary"),
+        );
+        const stat = try tmp.dir.statFile(io, "boundary", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.sym_link, stat.kind);
+    }
+
     fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
         const exact_tree: *@This() = @fieldParentPtr("step", step);
         const io = step.owner.graph.io;
@@ -554,6 +920,7 @@ const ExactInstallTreeStep = struct {
         const protected_root_path = protected_components.root() orelse
             return step.fail("protected Boundary oracle corpus path is not absolute: '{s}'", .{exact_tree.protected_path});
         const protected_root = std.Io.Dir.openDirAbsolute(io, protected_root_path, .{
+            .iterate = protected_components.peekNext() == null,
             .follow_symlinks = false,
         }) catch |err| return step.fail(
             "unable to open protected Boundary oracle filesystem root '{s}' without following links: {s}",
@@ -576,6 +943,7 @@ const ExactInstallTreeStep = struct {
                 return step.fail("unsafe protected Boundary oracle component '{s}'", .{component.name});
             }
             const child = protected_current.openDir(io, component.name, .{
+                .iterate = protected_components.peekNext() == null,
                 .follow_symlinks = false,
             }) catch |err| return step.fail(
                 "unable to open protected Boundary oracle component '{s}' without following links: {s}",
@@ -595,6 +963,15 @@ const ExactInstallTreeStep = struct {
             protected_current = child;
         }
         const protected_identity = protected_identities.items[protected_identities.items.len - 1];
+        collectProtectedDescendantIdentities(
+            protected_current,
+            io,
+            options.gpa,
+            &protected_identities,
+        ) catch |err| return step.fail(
+            "unable to identify every protected Boundary oracle descendant: {s}",
+            .{@errorName(err)},
+        );
 
         const source_path = try exact_tree.source_dir.getPath4(step.owner, step);
         var source_opened: std.ArrayList(std.Io.Dir) = .empty;
@@ -719,20 +1096,6 @@ const ExactInstallTreeStep = struct {
                     .{component.name},
                 );
             }
-            if (resolved_child.created and std.Io.Dir.Permissions.has_executable_bit) {
-                var permissions_dir = child.openDir(io, ".", .{
-                    .iterate = true,
-                    .follow_symlinks = false,
-                }) catch |err| return step.fail(
-                    "unable to reopen newly created public oracle destination component '{s}' for mode normalization: {s}",
-                    .{ component.name, @errorName(err) },
-                );
-                defer permissions_dir.close(io);
-                permissions_dir.setPermissions(io, public_dir_permissions) catch |err| return step.fail(
-                    "unable to set public permissions on newly created oracle destination component '{s}': {s}",
-                    .{ component.name, @errorName(err) },
-                );
-            }
             const resolved_inside_protected = if (destination_used_link)
                 directoryIsWithinIdentity(child, io, protected_identity) catch |err| {
                     return step.fail(
@@ -751,10 +1114,15 @@ const ExactInstallTreeStep = struct {
         }
 
         var validated_destination_identity: ?FileIdentity = null;
-        const existing_destination = current.openDir(io, destination_leaf, .{
-            .follow_symlinks = false,
-        }) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir, error.SymLinkLoop => null,
+        const existing_destination = openExistingDestinationLeafNoFollow(
+            current,
+            io,
+            destination_leaf,
+        ) catch |err| switch (err) {
+            error.LinkedOracleDestination => return step.fail(
+                "refusing symbolic-link oracle destination leaf '{s}'",
+                .{destination_leaf},
+            ),
             else => return step.fail(
                 "unable to inspect oracle destination leaf '{s}' without following links: {s}",
                 .{ destination_leaf, @errorName(err) },
@@ -775,10 +1143,6 @@ const ExactInstallTreeStep = struct {
             validated_destination_identity = destination_identity;
         }
 
-        const private_dir_permissions: std.Io.Dir.Permissions = if (std.Io.Dir.Permissions.has_executable_bit)
-            .fromMode(0o700)
-        else
-            .default_dir;
         const container_tree_name = "tree";
 
         var staging_name_buffer: [80]u8 = undefined;
@@ -1053,6 +1417,18 @@ const ExactInstallTreeStep = struct {
 
 test "exact oracle identities compare canonically" {
     try ExactInstallTreeStep.testFileIdentityComparison();
+}
+
+test "exact oracle destination collision preserves the receiver directory" {
+    try ExactInstallTreeStep.testDestinationCollisionPreservesReceiverDirectory();
+}
+
+test "exact oracle protection includes descendant directory identities" {
+    try ExactInstallTreeStep.testProtectedDescendantIdentityCollection();
+}
+
+test "exact oracle destination leaf rejects symbolic links" {
+    try ExactInstallTreeStep.testLinkedDestinationLeafRejected();
 }
 
 test "exact oracle Linux identity observes the retained directory with statx" {
