@@ -2201,7 +2201,49 @@ const OracleInventoryLimits = struct {
     maximum_open_directories: usize = 33,
 };
 
+const OracleValidationWorkLimits = struct {
+    // Path bytes and case rows are separate resource dimensions. Keeping them
+    // separate avoids inventing a machine-dependent conversion between the two.
+    maximum_portable_pair_bytes: usize = 16 * 1024 * 1024,
+    maximum_integrity_cases: usize = cases.len,
+
+    fn validatePortablePaths(self: @This(), paths: anytype) !void {
+        if (paths.len <= 1) return;
+
+        var cumulative_path_bytes: usize = 0;
+        for (paths) |path| {
+            cumulative_path_bytes = std.math.add(
+                usize,
+                cumulative_path_bytes,
+                path.len,
+            ) catch return error.OracleValidationWorkLimitExceeded;
+        }
+        const scheduled_pair_bytes = std.math.mul(
+            usize,
+            paths.len - 1,
+            cumulative_path_bytes,
+        ) catch return error.OracleValidationWorkLimitExceeded;
+        if (scheduled_pair_bytes > self.maximum_portable_pair_bytes) {
+            return error.OracleValidationWorkLimitExceeded;
+        }
+        for (paths, 0..) |path, index| {
+            for (paths[index + 1 ..]) |other| {
+                if (oraclePathsConflictOnPortableCheckout(path, other)) {
+                    return error.NonPortableOraclePathCollision;
+                }
+            }
+        }
+    }
+
+    fn admitIntegrityCases(self: @This(), case_count: usize) !void {
+        if (case_count > self.maximum_integrity_cases) {
+            return error.OracleValidationWorkLimitExceeded;
+        }
+    }
+};
+
 const default_oracle_inventory_limits: OracleInventoryLimits = .{};
+const default_oracle_validation_work_limits: OracleValidationWorkLimits = .{};
 
 fn listFilesFromDir(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !OwnedPaths {
     return listFilesFromDirWithLimits(io, allocator, dir, default_oracle_inventory_limits);
@@ -2212,6 +2254,40 @@ fn listFilesFromDirWithLimits(
     allocator: std.mem.Allocator,
     dir: std.Io.Dir,
     limits: OracleInventoryLimits,
+) !OwnedPaths {
+    return listFilesFromDirBounded(
+        io,
+        allocator,
+        dir,
+        limits,
+        default_oracle_validation_work_limits,
+    );
+}
+
+fn finishOracleInventory(
+    allocator: std.mem.Allocator,
+    items: *std.ArrayList([]u8),
+    work_limits: OracleValidationWorkLimits,
+) !OwnedPaths {
+    const owned = try items.toOwnedSlice(allocator);
+    errdefer {
+        for (owned) |item| allocator.free(item);
+        allocator.free(owned);
+    }
+    // Reserve the complete all-pairs byte schedule before sorting or entering
+    // the quadratic collision loop. Each retained path participates in exactly
+    // paths.len - 1 pairs.
+    try work_limits.validatePortablePaths(owned);
+    std.mem.sort([]u8, owned, {}, pathLessThan);
+    return .{ .allocator = allocator, .items = owned };
+}
+
+fn listFilesFromDirBounded(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    limits: OracleInventoryLimits,
+    work_limits: OracleValidationWorkLimits,
 ) !OwnedPaths {
     const OracleInventoryFrame = struct {
         dir: std.Io.Dir,
@@ -2353,18 +2429,7 @@ fn listFilesFromDirWithLimits(
             }
         }
     }
-    const owned = try items.toOwnedSlice(allocator);
-    errdefer {
-        for (owned) |item| allocator.free(item);
-        allocator.free(owned);
-    }
-    std.mem.sort([]u8, owned, {}, pathLessThan);
-    for (owned, 0..) |path, index| {
-        for (owned[index + 1 ..]) |other| {
-            if (oraclePathsConflictOnPortableCheckout(path, other)) return error.NonPortableOraclePathCollision;
-        }
-    }
-    return .{ .allocator = allocator, .items = owned };
+    return finishOracleInventory(allocator, &items, work_limits);
 }
 
 fn readRelative(
@@ -2701,9 +2766,31 @@ fn validateManifestFromDir(
     dir: std.Io.Dir,
     policy: OracleManifestPolicy,
 ) !void {
+    return validateManifestBounded(
+        io,
+        allocator,
+        dir,
+        policy,
+        default_oracle_validation_work_limits,
+    );
+}
+
+fn validateManifestBounded(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    policy: OracleManifestPolicy,
+    work_limits: OracleValidationWorkLimits,
+) !void {
     // Inventory first so unsupported entries are rejected before any path is
     // opened as a byte stream (notably FIFOs at manifest or case paths).
-    var paths = try listFilesFromDir(io, allocator, dir);
+    var paths = try listFilesFromDirBounded(
+        io,
+        allocator,
+        dir,
+        default_oracle_inventory_limits,
+        work_limits,
+    );
     defer paths.deinit();
     const manifest_bytes = try readRelativeFromDir(io, allocator, dir, "manifest.json");
     defer allocator.free(manifest_bytes);
@@ -2723,7 +2810,11 @@ fn validateManifestFromDir(
     {
         return error.InvalidOracleManifest;
     }
-    if (policy != .integrity) {
+    if (policy == .integrity) {
+        // Integrity mode intentionally accepts bounded duplicate rows for legacy
+        // compatibility. Admit the complete row count before artifact or case work.
+        try work_limits.admitIntegrityCases(manifest.case_count);
+    } else {
         if (manifest.case_count != cases.len) return error.InvalidOracleManifest;
         const source = manifest.semantic_source;
         if (!std.mem.eql(u8, source.package, oracle_semantic_source.package) or
@@ -3225,14 +3316,22 @@ const RetainedPublicationCleanupFault = enum {
     before_leaf_delete,
 };
 
-fn moveRetainedPublicationTree(
+const RetainedTreeMoveRequest = struct {
     root: PublicationRoot,
     io: std.Io,
     source: []const u8,
     target: []const u8,
     retained: RetainedPublicationTree,
     post_move_fault: PublicationPostMoveFault,
-) !RetainedPublicationMoveOutcome {
+};
+
+fn moveRetainedPublicationTree(request: RetainedTreeMoveRequest) !RetainedPublicationMoveOutcome {
+    const root = request.root;
+    const io = request.io;
+    const source = request.source;
+    const target = request.target;
+    const retained = request.retained;
+    const post_move_fault = request.post_move_fault;
     if (!try publicationLeafMatches(root, io, source, retained.identity)) {
         return error.OraclePublicationConflict;
     }
@@ -3540,6 +3639,7 @@ fn isOracleIntegrityFailure(err: anyerror) bool {
         error.OracleInventoryCumulativePathLimitExceeded,
         error.OracleInventoryRetainedPathLimitExceeded,
         error.OracleInventoryOpenDirectoryLimitExceeded,
+        error.OracleValidationWorkLimitExceeded,
         error.FileNotFound,
         error.IsDir,
         error.NotDir,
@@ -3584,14 +3684,14 @@ fn recoverPublicationAtRoot(
             const retained_backup = try RetainedPublicationTree.open(root, init.io, root.backup);
             defer retained_backup.close(init.io);
             try validateOracleTreeIntegrityFromDir(init.io, allocator, retained_backup.dir);
-            switch (try moveRetainedPublicationTree(
-                root,
-                init.io,
-                root.backup,
-                root.target,
-                retained_backup,
-                .none,
-            )) {
+            switch (try moveRetainedPublicationTree(.{
+                .root = root,
+                .io = init.io,
+                .source = root.backup,
+                .target = root.target,
+                .retained = retained_backup,
+                .post_move_fault = .none,
+            })) {
                 .moved => {},
                 .post_move_terminal => return error.OraclePublicationPostMoveConflict,
             }
@@ -3686,14 +3786,14 @@ fn completeStagedOraclePublication(
         });
     }
 
-    switch (try moveRetainedPublicationTree(
-        root,
-        init.io,
-        root.target,
-        root.backup,
-        retained_target,
-        .none,
-    )) {
+    switch (try moveRetainedPublicationTree(.{
+        .root = root,
+        .io = init.io,
+        .source = root.target,
+        .target = root.backup,
+        .retained = retained_target,
+        .post_move_fault = .none,
+    })) {
         .moved => {},
         .post_move_terminal => return error.OraclePublicationPostMoveConflict,
     }
@@ -3701,14 +3801,14 @@ fn completeStagedOraclePublication(
     context.stage_location.* = .move_unproved;
     const promotion_outcome = promoteOracleTree(init, allocator, request, root, retained_stage) catch |promotion_error| {
         context.stage_location.* = .at_stage;
-        const rollback_outcome = moveRetainedPublicationTree(
-            root,
-            init.io,
-            root.backup,
-            root.target,
-            retained_target,
-            .none,
-        ) catch return error.OraclePublicationConflict;
+        const rollback_outcome = moveRetainedPublicationTree(.{
+            .root = root,
+            .io = init.io,
+            .source = root.backup,
+            .target = root.target,
+            .retained = retained_target,
+            .post_move_fault = .none,
+        }) catch return error.OraclePublicationConflict;
         if (rollback_outcome == .post_move_terminal) {
             return error.OraclePublicationPostMoveConflict;
         }
@@ -3742,16 +3842,21 @@ fn promoteOracleTree(
     const post_move_fault: PublicationPostMoveFault = switch (request.fault) {
         .post_move_observation_failure => .observation_failure,
         .replace_promoted_target => .replace_target,
-        else => .none,
+        .none,
+        .after_backup,
+        .replace_target_before_backup,
+        .rollback_conflict,
+        .during_backup_cleanup,
+        => .none,
     };
-    const move_outcome = try moveRetainedPublicationTree(
-        root,
-        init.io,
-        root.stage,
-        root.target,
-        retained_stage,
-        post_move_fault,
-    );
+    const move_outcome = try moveRetainedPublicationTree(.{
+        .root = root,
+        .io = init.io,
+        .source = root.stage,
+        .target = root.target,
+        .retained = retained_stage,
+        .post_move_fault = post_move_fault,
+    });
     if (move_outcome == .post_move_terminal) return .post_move_terminal;
     validateOracleTreeFromDir(init.io, allocator, retained_stage.dir, request.receiver_pin) catch {
         return .post_move_terminal;
@@ -4011,6 +4116,162 @@ fn writeEmptyIntegrityBundle(
     try writeChecksums(init, allocator, output_dir);
 }
 
+fn rewriteIntegrityManifestCases(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    repeated_case_count: usize,
+) !void {
+    const manifest_bytes = try readRelative(init.io, allocator, output_dir, "manifest.json");
+    defer allocator.free(manifest_bytes);
+    const parsed = try std.json.parseFromSlice(OracleManifest, allocator, manifest_bytes, .{
+        .ignore_unknown_fields = false,
+    });
+    defer parsed.deinit();
+    if (parsed.value.cases.len == 0) return error.InvalidOracleManifest;
+
+    const repeated_cases = try allocator.alloc(OracleManifestCase, repeated_case_count);
+    defer allocator.free(repeated_cases);
+    for (repeated_cases) |*case| case.* = parsed.value.cases[0];
+
+    var manifest = parsed.value;
+    manifest.case_count = repeated_cases.len;
+    manifest.cases = repeated_cases;
+    const encoded = try std.json.Stringify.valueAlloc(allocator, manifest, .{});
+    defer allocator.free(encoded);
+    try writeArtifact(init.io, allocator, output_dir, "manifest.json", encoded);
+    try writeChecksums(init, allocator, output_dir);
+}
+
+fn expectOracleInventoryFinishError(
+    allocator: std.mem.Allocator,
+    paths: []const []const u8,
+    maximum_portable_pair_bytes: usize,
+    expected_error: anyerror,
+) !void {
+    var items: std.ArrayList([]u8) = .empty;
+    defer {
+        for (items.items) |item| allocator.free(item);
+        items.deinit(allocator);
+    }
+    for (paths) |path| {
+        const owned = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned);
+        try items.append(allocator, owned);
+    }
+
+    var work_limits = default_oracle_validation_work_limits;
+    work_limits.maximum_portable_pair_bytes = maximum_portable_pair_bytes;
+    var finish_error: ?anyerror = null;
+    const unexpected_paths: ?OwnedPaths = finishOracleInventory(
+        allocator,
+        &items,
+        work_limits,
+    ) catch |err| failed: {
+        finish_error = err;
+        break :failed null;
+    };
+    if (unexpected_paths) |paths_result| {
+        var owned_paths = paths_result;
+        owned_paths.deinit();
+    }
+    try expectPublicationError(expected_error, finish_error);
+}
+
+fn testOracleValidationWorkLimits(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    candidate: []const u8,
+) !void {
+    const portable_paths = [_][]const u8{ "a.txt", "b.txt", "child/c.txt" };
+    const exact_pair_bytes = (portable_paths.len - 1) *
+        (portable_paths[0].len + portable_paths[1].len + portable_paths[2].len);
+    var bounded_paths = default_oracle_validation_work_limits;
+    bounded_paths.maximum_portable_pair_bytes = exact_pair_bytes - 1;
+    var pair_work_error: ?anyerror = null;
+    bounded_paths.validatePortablePaths(&portable_paths) catch |err| {
+        pair_work_error = err;
+    };
+    try expectPublicationError(error.OracleValidationWorkLimitExceeded, pair_work_error);
+
+    bounded_paths.maximum_portable_pair_bytes = exact_pair_bytes;
+    try bounded_paths.validatePortablePaths(&portable_paths);
+
+    const colliding_paths = [_][]const u8{ "Cases/new.txt", "cases/other.txt" };
+    const exact_collision_bytes = colliding_paths[0].len + colliding_paths[1].len;
+    try expectOracleInventoryFinishError(
+        allocator,
+        &colliding_paths,
+        exact_collision_bytes - 1,
+        error.OracleValidationWorkLimitExceeded,
+    );
+    try expectOracleInventoryFinishError(
+        allocator,
+        &colliding_paths,
+        exact_collision_bytes,
+        error.NonPortableOraclePathCollision,
+    );
+
+    const manifest_candidate = try joinPath(allocator, &.{ root, "validation-work-manifest" });
+    defer allocator.free(manifest_candidate);
+    try copyOracleTree(init, allocator, candidate, manifest_candidate);
+
+    {
+        var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
+        defer manifest_dir.close(init.io);
+        var strict_limits = default_oracle_validation_work_limits;
+        strict_limits.maximum_integrity_cases = 0;
+        inline for (.{ OracleManifestPolicy.current, .generated }) |policy| {
+            try validateManifestBounded(
+                init.io,
+                allocator,
+                manifest_dir,
+                policy,
+                strict_limits,
+            );
+        }
+    }
+
+    try rewriteIntegrityManifestCases(init, allocator, manifest_candidate, cases.len);
+    try validateOracleTreeIntegrity(init, allocator, manifest_candidate);
+
+    try rewriteIntegrityManifestCases(init, allocator, manifest_candidate, cases.len + 1);
+    {
+        var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
+        defer manifest_dir.close(init.io);
+        inline for (.{ OracleManifestPolicy.current, .generated }) |policy| {
+            var strict_error: ?anyerror = null;
+            validateManifestBounded(
+                init.io,
+                allocator,
+                manifest_dir,
+                policy,
+                default_oracle_validation_work_limits,
+            ) catch |err| {
+                strict_error = err;
+            };
+            try expectPublicationError(error.InvalidOracleManifest, strict_error);
+        }
+    }
+
+    // Keep the bundle checksum-consistent while making artifact validation fail.
+    // The work-limit error must win before artifact or per-case processing.
+    try writeArtifact(
+        init.io,
+        allocator,
+        manifest_candidate,
+        cases[0].transcript,
+        "invalid-before-integrity-case-work\n",
+    );
+    try writeChecksums(init, allocator, manifest_candidate);
+    var manifest_work_error: ?anyerror = null;
+    validateOracleTreeIntegrity(init, allocator, manifest_candidate) catch |err| {
+        manifest_work_error = err;
+    };
+    try expectPublicationError(error.OracleValidationWorkLimitExceeded, manifest_work_error);
+}
+
 const RejectedCandidateRequest = struct {
     candidate: []const u8,
     expected_target: []const u8,
@@ -4255,7 +4516,36 @@ fn testOracleInventoryLimits(
             error.OracleInventoryOpenDirectoryLimitExceeded,
         );
 
-        var paths = try listFilesFromDir(init.io, allocator, source_dir);
+        const portable_paths = [_][]const u8{ "a.txt", "b.txt", "child/c.txt" };
+        const exact_pair_bytes = (portable_paths.len - 1) *
+            (portable_paths[0].len + portable_paths[1].len + portable_paths[2].len);
+        var work_limits = default_oracle_validation_work_limits;
+        work_limits.maximum_portable_pair_bytes = exact_pair_bytes - 1;
+        var work_error: ?anyerror = null;
+        const unexpected_paths: ?OwnedPaths = listFilesFromDirBounded(
+            init.io,
+            allocator,
+            source_dir,
+            default_oracle_inventory_limits,
+            work_limits,
+        ) catch |err| failed: {
+            work_error = err;
+            break :failed null;
+        };
+        if (unexpected_paths) |bounded_paths| {
+            var owned_paths = bounded_paths;
+            owned_paths.deinit();
+        }
+        try expectPublicationError(error.OracleValidationWorkLimitExceeded, work_error);
+
+        work_limits.maximum_portable_pair_bytes = exact_pair_bytes;
+        var paths = try listFilesFromDirBounded(
+            init.io,
+            allocator,
+            source_dir,
+            default_oracle_inventory_limits,
+            work_limits,
+        );
         defer paths.deinit();
         if (paths.items.len != 3) return error.UnexpectedOracleInventoryCount;
         try expectEqualBytes("a.txt", paths.items[0]);
@@ -4566,7 +4856,10 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
             return error.UnsafeOraclePathMisclassified;
         }
     }
-    if (!isOracleIntegrityFailure(error.InvalidOracleManifest) or !isOracleIntegrityFailure(error.FileNotFound)) {
+    if (!isOracleIntegrityFailure(error.InvalidOracleManifest) or
+        !isOracleIntegrityFailure(error.OracleValidationWorkLimitExceeded) or
+        !isOracleIntegrityFailure(error.FileNotFound))
+    {
         return error.OracleIntegrityFailureMisclassified;
     }
 
@@ -4649,6 +4942,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     try generateFresh(init, allocator, candidate);
     try validateOracleTree(init, allocator, candidate, receiver_pin);
+    try testOracleValidationWorkLimits(init, allocator, root, candidate);
     try copyOracleTree(init, allocator, candidate, target);
     try compareTrees(init, allocator, candidate, target);
     try testMissingPublicationAuthority(init, allocator, candidate, receiver_pin, paths);

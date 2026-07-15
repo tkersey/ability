@@ -617,7 +617,7 @@ const ExactInstallTreeStep = struct {
         }
     }
 
-    const ProtectedDescendantCollectionContext = struct {
+    const ProtectedDescendantContext = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         protected_identities: *std.ArrayList(FileIdentity),
@@ -625,7 +625,7 @@ const ExactInstallTreeStep = struct {
 
     fn collectProtectedDescendantEntryNoFollow(
         dir: std.Io.Dir,
-        context: ProtectedDescendantCollectionContext,
+        context: ProtectedDescendantContext,
         name: []const u8,
         reported_kind: std.Io.File.Kind,
     ) anyerror!void {
@@ -1251,7 +1251,7 @@ const ExactInstallTreeStep = struct {
         var identities: std.ArrayList(FileIdentity) = .empty;
         defer identities.deinit(std.testing.allocator);
         try identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
-        const context: ProtectedDescendantCollectionContext = .{
+        const context: ProtectedDescendantContext = .{
             .allocator = std.testing.allocator,
             .io = io,
             .protected_identities = &identities,
@@ -3815,6 +3815,7 @@ pub fn build(b: *std.Build) void {
     }
     defer b.graph.global_cache_root.path = saved_global_cache_path;
     lint_step.dependOn(builder.build());
+    oracle_check_step.dependOn(lint_step);
 
     for (&[_]*std.Build.Step{
         protocol_manifest_step,
