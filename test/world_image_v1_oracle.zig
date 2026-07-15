@@ -3346,6 +3346,7 @@ const RetainedPublicationMoveOutcome = enum {
 };
 
 const PublicationPostMoveFault = enum {
+    identity_mismatch,
     none,
     observation_failure,
     replace_target,
@@ -3404,7 +3405,7 @@ fn moveRetainedPublicationTree(request: RetainedTreeMoveRequest) !RetainedPublic
     try root.renameDirectoryToMissing(io, source, target);
 
     switch (post_move_fault) {
-        .none => {},
+        .identity_mismatch, .none => {},
         .observation_failure => return .post_move_terminal,
         .replace_target => {
             root.renameDirectoryToMissing(io, target, source) catch return .post_move_terminal;
@@ -3418,9 +3419,12 @@ fn moveRetainedPublicationTree(request: RetainedTreeMoveRequest) !RetainedPublic
         },
     }
 
-    const target_matches = publicationLeafMatches(root, io, target, retained.identity) catch {
-        return .post_move_terminal;
-    };
+    const target_matches = if (post_move_fault == .identity_mismatch)
+        false
+    else
+        publicationLeafMatches(root, io, target, retained.identity) catch {
+            return .post_move_terminal;
+        };
     return if (target_matches) .moved else .post_move_terminal;
 }
 
@@ -3637,6 +3641,7 @@ const PublicationFault = enum {
     after_backup,
     during_backup_cleanup,
     none,
+    post_move_identity_mismatch,
     post_move_observation_failure,
     replace_promoted_target,
     replace_target_before_backup,
@@ -3906,6 +3911,7 @@ fn promoteOracleTree(
         return error.InjectedOraclePublicationFailure;
     }
     const post_move_fault: PublicationPostMoveFault = switch (request.fault) {
+        .post_move_identity_mismatch => .identity_mismatch,
         .post_move_observation_failure => .observation_failure,
         .replace_promoted_target => .replace_target,
         .none,
@@ -5411,6 +5417,25 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     _ = try publishOracleTree(init, allocator, exclusivePublicationRequest(candidate, receiver_pin, paths, .none));
     try compareTrees(init, allocator, candidate, target);
+
+    try deleteDirectoryIfPresent(init.io, target);
+    try copyOracleTree(init, allocator, stale_provenance_candidate, target);
+    var identity_mismatch_error: ?anyerror = null;
+    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+        candidate,
+        receiver_pin,
+        paths,
+        .post_move_identity_mismatch,
+    )) catch |err| {
+        identity_mismatch_error = err;
+    };
+    try expectPublicationError(error.OraclePublicationPostMoveConflict, identity_mismatch_error);
+    try compareTrees(init, allocator, candidate, target);
+    try compareTrees(init, allocator, stale_provenance_candidate, backup);
+    if (try pathKindNoFollow(init.io, stage) != null) {
+        return error.OraclePublicationPostMoveCompensation;
+    }
+    try deleteDirectoryIfPresent(init.io, backup);
 
     try deleteDirectoryIfPresent(init.io, target);
     try copyOracleTree(init, allocator, stale_provenance_candidate, target);
