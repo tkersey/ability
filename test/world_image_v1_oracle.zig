@@ -2220,11 +2220,21 @@ const OracleInventoryLimits = struct {
     maximum_open_directories: usize = 33,
 };
 
+// This format-v1 compatibility ceiling is release-independent and must never
+// decrease. Current and generated policy remain exact to the current registry.
+const max_integrity_case_rows_v1: usize = 16;
+
+comptime {
+    if (cases.len > max_integrity_case_rows_v1) {
+        @compileError("Boundary oracle cases exceed the format-v1 integrity compatibility ceiling");
+    }
+}
+
 const OracleValidationWorkLimits = struct {
     // Path bytes and case rows are separate resource dimensions. Keeping them
     // separate avoids inventing a machine-dependent conversion between the two.
     maximum_portable_pair_bytes: usize = 16 * 1024 * 1024,
-    maximum_integrity_cases: usize = cases.len,
+    maximum_integrity_cases: usize = max_integrity_case_rows_v1,
 
     fn validatePortablePaths(self: @This(), paths: anytype) !void {
         if (paths.len <= 1) return;
@@ -4341,6 +4351,7 @@ fn testOracleValidationWorkLimits(
     try validateOracleTreeIntegrity(init, allocator, manifest_candidate);
 
     try rewriteIntegrityManifestCases(init, allocator, manifest_candidate, cases.len + 1);
+    try validateOracleTreeIntegrity(init, allocator, manifest_candidate);
     {
         var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
         defer manifest_dir.close(init.io);
@@ -4358,6 +4369,20 @@ fn testOracleValidationWorkLimits(
             try expectPublicationError(error.InvalidOracleManifest, strict_error);
         }
     }
+
+    try rewriteIntegrityManifestCases(
+        init,
+        allocator,
+        manifest_candidate,
+        max_integrity_case_rows_v1,
+    );
+    try validateOracleTreeIntegrity(init, allocator, manifest_candidate);
+    try rewriteIntegrityManifestCases(
+        init,
+        allocator,
+        manifest_candidate,
+        max_integrity_case_rows_v1 + 1,
+    );
 
     // Keep the bundle checksum-consistent while making artifact validation fail.
     // The work-limit error must win before artifact or per-case processing.
@@ -5075,6 +5100,23 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     try copyOracleTree(init, allocator, candidate, target);
     try compareTrees(init, allocator, candidate, target);
+    try rewriteIntegrityManifestCases(init, allocator, target, cases.len + 1);
+    try validateOracleTreeIntegrity(init, allocator, target);
+    switch (try publishOracleTree(init, allocator, exclusivePublicationRequest(
+        candidate,
+        receiver_pin,
+        paths,
+        .none,
+    ))) {
+        .committed => {},
+        .committed_cleanup_pending => |cleanup_error| return cleanup_error,
+    }
+    try compareTrees(init, allocator, candidate, target);
+    if (try pathKindNoFollow(init.io, stage) != null or
+        try pathKindNoFollow(init.io, backup) != null)
+    {
+        return error.OraclePublicationResidue;
+    }
     try testMissingPublicationAuthority(init, allocator, candidate, receiver_pin, paths);
     try testStageFailureTotality(.{
         .init = init,
