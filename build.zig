@@ -840,7 +840,6 @@ const ExactInstallTreeStep = struct {
         name: []const u8,
         reported_kind: std.Io.File.Kind,
     ) anyerror!void {
-        try traversal.budget.consumeEntry();
         const kind = sourceEntryKindNoFollow(dir, io, name, reported_kind) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
@@ -917,6 +916,7 @@ const ExactInstallTreeStep = struct {
     ) !void {
         var iterator = dir.iterate();
         while (try iterator.next(io)) |entry| {
+            try traversal.budget.consumeEntry();
             if (entry.name.len == 0 or
                 std.mem.eql(u8, entry.name, ".") or
                 std.mem.eql(u8, entry.name, "..") or
@@ -1923,6 +1923,42 @@ const ExactInstallTreeStep = struct {
         defer retained_child.close(io);
         const nested = try retained_child.statFile(io, "nested", .{ .follow_symlinks = false });
         try std.testing.expectEqual(std.Io.File.Kind.file, nested.kind);
+
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+            var malformed = std.testing.tmpDir(.{ .iterate = true });
+            defer malformed.cleanup();
+            try malformed.dir.writeFile(io, .{
+                .sub_path = "bad\\name",
+                .data = "malformed-name\n",
+            });
+
+            var exhausted_budget: CleanupBudget = .{ .remaining_entries = 0 };
+            try std.testing.expectError(
+                error.OracleCleanupWorkLimitExceeded,
+                clearDirectoryNoFollow(malformed.dir, io, .{
+                    .protected_identities = &.{},
+                    .current_depth = 0,
+                    .budget = &exhausted_budget,
+                }),
+            );
+
+            var one_entry_budget: CleanupBudget = .{ .remaining_entries = 1 };
+            try std.testing.expectError(
+                error.UnsupportedOracleTreeEntry,
+                clearDirectoryNoFollow(malformed.dir, io, .{
+                    .protected_identities = &.{},
+                    .current_depth = 0,
+                    .budget = &one_entry_budget,
+                }),
+            );
+            try std.testing.expectEqual(@as(usize, 0), one_entry_budget.remaining_entries);
+            const retained_malformed = try malformed.dir.statFile(
+                io,
+                "bad\\name",
+                .{ .follow_symlinks = false },
+            );
+            try std.testing.expectEqual(std.Io.File.Kind.file, retained_malformed.kind);
+        }
     }
 
     fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
@@ -4062,6 +4098,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("test/world_image_v1_oracle.zig"),
         .target = b.graph.host,
         .optimize = optimize,
+        .link_libc = true,
     });
     world_image_v1_oracle_mod.addImport("boundary", host_boundary);
     world_image_v1_oracle_mod.addImport("agent_loop", boundary_agent_runtime_mod);

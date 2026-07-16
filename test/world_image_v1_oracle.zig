@@ -4349,11 +4349,59 @@ comptime {
     {
         @compileError("Boundary publication executable admission must use effective credentials");
     }
+    if ((builtin.os.tag == .linux or builtin.os.tag == .macos) and !builtin.link_libc) {
+        @compileError("Boundary publication executable admission requires libc-managed faccessat compatibility");
+    }
+}
+
+const ExecutableCandidateIdentity = struct {
+    device: u128,
+    inode: u128,
+};
+
+fn observeExecutableCandidateForPublicationTest(path: []const u8) !?ExecutableCandidateIdentity {
+    const path_posix = try std.posix.toPosixPath(path);
+    var stat = std.mem.zeroes(std.c.Stat);
+    while (true) switch (std.c.errno(std.c.fstatat(
+        std.posix.AT.FDCWD,
+        &path_posix,
+        &stat,
+        0,
+    ))) {
+        .SUCCESS => {
+            if (!std.c.S.ISREG(@intCast(stat.mode))) return null;
+            return .{
+                .device = @intCast(stat.dev),
+                .inode = @intCast(stat.ino),
+            };
+        },
+        .INTR => {},
+        .ACCES => return error.AccessDenied,
+        .PERM => return error.PermissionDenied,
+        .ROFS => return error.ReadOnlyFileSystem,
+        .LOOP => return error.SymLinkLoop,
+        .TXTBSY => return error.FileBusy,
+        .NOTDIR, .NOENT => return null,
+        .NAMETOOLONG => return error.NameTooLong,
+        .IO => return error.InputOutput,
+        .NOMEM => return error.SystemResources,
+        .ILSEQ => return error.BadPathName,
+        .INVAL, .FAULT => |err| return std.posix.unexpectedErrno(err),
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+}
+
+fn executableCandidateIdentityRemained(
+    before: ExecutableCandidateIdentity,
+    after: ?ExecutableCandidateIdentity,
+) bool {
+    const observed_after = after orelse return false;
+    return std.meta.eql(before, observed_after);
 }
 
 fn requireEffectiveExecuteAccessForPublicationTest(path: []const u8) !void {
     const path_posix = try std.posix.toPosixPath(path);
-    while (true) switch (std.posix.errno(std.posix.system.faccessat(
+    while (true) switch (std.c.errno(std.c.faccessat(
         std.posix.AT.FDCWD,
         &path_posix,
         std.posix.X_OK,
@@ -4380,14 +4428,13 @@ fn admitExecutableCandidateForPublicationTest(
     init: std.process.Init,
     path: []const u8,
 ) !bool {
-    const cwd = std.Io.Dir.cwd();
-    const stat = cwd.statFile(init.io, path, .{ .follow_symlinks = true }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return false,
-        else => return err,
-    };
-    if (stat.kind != .file) return false;
+    _ = init;
+    const before = try observeExecutableCandidateForPublicationTest(path) orelse return false;
     try requireEffectiveExecuteAccessForPublicationTest(path);
-    return true;
+    return executableCandidateIdentityRemained(
+        before,
+        try observeExecutableCandidateForPublicationTest(path),
+    );
 }
 
 fn resolveExecutableForPublicationTest(
@@ -5578,6 +5625,40 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         ) orelse return error.EffectiveIdentityExecutableNotResolved;
         defer allocator.free(effective_identity_resolved);
         try expectEqualBytes(effective_identity_command, effective_identity_resolved);
+
+        const replaced_candidate = try joinPath(
+            allocator,
+            &.{ root, "replaced-executable-candidate" },
+        );
+        defer allocator.free(replaced_candidate);
+        try cwd.writeFile(init.io, .{
+            .sub_path = replaced_candidate,
+            .data = "candidate replaced before access\n",
+        });
+        try cwd.setFilePermissions(
+            init.io,
+            replaced_candidate,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+        const replaced_before = try observeExecutableCandidateForPublicationTest(
+            replaced_candidate,
+        ) orelse return error.ExecutableCandidateIdentityMissing;
+        try cwd.deleteFile(init.io, replaced_candidate);
+        try cwd.createDirPath(init.io, replaced_candidate);
+        try cwd.setFilePermissions(
+            init.io,
+            replaced_candidate,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+        try requireEffectiveExecuteAccessForPublicationTest(replaced_candidate);
+        if (executableCandidateIdentityRemained(
+            replaced_before,
+            try observeExecutableCandidateForPublicationTest(replaced_candidate),
+        )) {
+            return error.ReplacedExecutableCandidateAdmitted;
+        }
 
         const shadow_path_entry = try joinPath(allocator, &.{ root, "path-shadow-directory" });
         defer allocator.free(shadow_path_entry);
