@@ -3767,6 +3767,7 @@ fn exclusivePublicationRequest(
         .receiver_pin = receiver_pin,
         .paths = paths,
         .fault = fault,
+        .diagnostic_context = .injected_sandbox,
         .authority = .exclusive_receiver_namespace,
     };
 }
@@ -3780,7 +3781,6 @@ fn stageFaultPublicationRequest(
 ) PublicationRequest {
     var request = exclusivePublicationRequest(candidate_dir, receiver_pin, paths, .none);
     request.stage_faults = .{ .primary = primary, .rollback = rollback };
-    request.diagnostic_context = .injected_sandbox;
     return request;
 }
 
@@ -4223,6 +4223,44 @@ fn expectPublicationError(expected: anyerror, actual: ?anyerror) !void {
     if (received != expected) return received;
 }
 
+fn resolveExecutableForPublicationTest(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    command: []const u8,
+) !?[]u8 {
+    if (command.len == 0) return null;
+
+    const cwd = std.Io.Dir.cwd();
+    if (std.mem.findScalar(u8, command, '/') != null) {
+        cwd.access(init.io, command, .{ .execute = true }) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        return try allocator.dupe(u8, command);
+    }
+
+    const search_path = init.environ_map.get("PATH") orelse std.Io.Threaded.default_PATH;
+    var entries = std.mem.tokenizeScalar(u8, search_path, ':');
+    var access_error: ?anyerror = null;
+    while (entries.next()) |entry| {
+        const candidate = try joinPath(allocator, &.{ entry, command });
+        cwd.access(init.io, candidate, .{ .execute = true }) catch |err| {
+            allocator.free(candidate);
+            switch (err) {
+                error.FileNotFound => continue,
+                error.AccessDenied, error.PermissionDenied => {
+                    access_error = err;
+                    continue;
+                },
+                else => return err,
+            }
+        };
+        return candidate;
+    }
+    if (access_error) |err| return err;
+    return null;
+}
+
 fn createNamedPipeForPublicationTest(
     init: std.process.Init,
     allocator: std.mem.Allocator,
@@ -4233,15 +4271,14 @@ fn createNamedPipeForPublicationTest(
         .linux, .macos => {},
         else => return false,
     }
-    const result = std.process.run(allocator, init.io, .{
-        .argv = &.{ command, path },
+    const executable = try resolveExecutableForPublicationTest(init, allocator, command) orelse return false;
+    defer allocator.free(executable);
+    const result = try std.process.run(allocator, init.io, .{
+        .argv = &.{ executable, path },
         .stdout_limit = .limited(1024),
         .stderr_limit = .limited(1024),
         .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } },
-    }) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
+    });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
@@ -4983,6 +5020,21 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
 
+    const sandbox_context_probe = exclusivePublicationRequest(candidate, receiver_pin, paths, .none);
+    if (sandbox_context_probe.diagnostic_context != .injected_sandbox) {
+        return error.SandboxPublicationDiagnosticContextLost;
+    }
+    const live_context_probe = PublicationRequest{
+        .candidate_dir = candidate,
+        .receiver_pin = receiver_pin,
+        .paths = paths,
+        .fault = .none,
+        .authority = .exclusive_receiver_namespace,
+    };
+    if (live_context_probe.diagnostic_context != .live) {
+        return error.LivePublicationDiagnosticContextLost;
+    }
+
     const sentinel_request_count_line = try formatObservedRequestCountLine(allocator, 3);
     defer allocator.free(sentinel_request_count_line);
     try expectEqualBytes("request_count: 3", sentinel_request_count_line);
@@ -5200,6 +5252,40 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     )) {
         return error.MissingNamedPipeCommandAccepted;
     }
+    const missing_named_pipe_interpreter = "/boundary-oracle-v1-missing-interpreter-216a051";
+    if (try pathKindNoFollow(init.io, missing_named_pipe_interpreter) != null) {
+        return error.MissingNamedPipeInterpreterExists;
+    }
+    const unlaunchable_fifo_command = try joinPath(
+        allocator,
+        &.{ root, "boundary-oracle-found-unlaunchable-mkfifo-command" },
+    );
+    defer allocator.free(unlaunchable_fifo_command);
+    if (try pathKindNoFollow(init.io, unlaunchable_fifo_command) != null) {
+        return error.OraclePublicationResidue;
+    }
+    try cwd.writeFile(init.io, .{
+        .sub_path = unlaunchable_fifo_command,
+        .data = "#!/boundary-oracle-v1-missing-interpreter-216a051\nexit 0\n",
+    });
+    try cwd.setFilePermissions(
+        init.io,
+        unlaunchable_fifo_command,
+        std.Io.File.Permissions.fromMode(0o700),
+        .{},
+    );
+    var missing_interpreter_error: ?anyerror = null;
+    const missing_interpreter_available = createNamedPipeForPublicationTest(
+        init,
+        allocator,
+        unlaunchable_fifo_command,
+        special_manifest_path,
+    ) catch |err| failed: {
+        missing_interpreter_error = err;
+        break :failed false;
+    };
+    if (missing_interpreter_available) return error.MissingNamedPipeInterpreterExecuted;
+    try expectPublicationError(error.FileNotFound, missing_interpreter_error);
     if (try createNamedPipeForPublicationTest(init, allocator, "mkfifo", special_manifest_path)) {
         var direct_read_error: ?anyerror = null;
         const unexpected_bytes = readRelative(
@@ -5408,13 +5494,12 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         }
     };
     var diagnostic_failure_error: ?anyerror = null;
-    var diagnostic_request = exclusivePublicationRequest(
+    const diagnostic_request = exclusivePublicationRequest(
         metadata_variant_candidate,
         receiver_pin,
         paths,
         .none,
     );
-    diagnostic_request.diagnostic_context = .injected_sandbox;
     publishTrackedOracleRequest(
         init,
         allocator,
