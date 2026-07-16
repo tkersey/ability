@@ -2327,7 +2327,11 @@ const OracleValidationWorkLimits = struct {
     }
 
     fn admitIntegrityCases(self: @This(), case_count: usize) !void {
-        if (case_count > self.maximum_integrity_cases) {
+        const maximum_admitted_cases = @min(
+            max_integrity_case_rows_v1,
+            self.maximum_integrity_cases,
+        );
+        if (case_count > maximum_admitted_cases) {
             return error.OracleValidationWorkLimitExceeded;
         }
     }
@@ -4334,6 +4338,20 @@ fn expectPublicationError(expected: anyerror, actual: ?anyerror) !void {
     if (received != expected) return received;
 }
 
+fn isExecutableFileForPublicationTest(
+    init: std.process.Init,
+    path: []const u8,
+) !bool {
+    const cwd = std.Io.Dir.cwd();
+    const stat = cwd.statFile(init.io, path, .{ .follow_symlinks = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => return err,
+    };
+    if (stat.kind != .file) return false;
+    try cwd.access(init.io, path, .{ .follow_symlinks = true, .execute = true });
+    return true;
+}
+
 fn resolveExecutableForPublicationTest(
     init: std.process.Init,
     allocator: std.mem.Allocator,
@@ -4341,12 +4359,8 @@ fn resolveExecutableForPublicationTest(
 ) !?[]u8 {
     if (command.len == 0) return null;
 
-    const cwd = std.Io.Dir.cwd();
     if (std.mem.findScalar(u8, command, '/') != null) {
-        cwd.access(init.io, command, .{ .execute = true }) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => return err,
-        };
+        if (!try isExecutableFileForPublicationTest(init, command)) return null;
         return try allocator.dupe(u8, command);
     }
 
@@ -4358,10 +4372,9 @@ fn resolveExecutableForPublicationTest(
             try std.fmt.allocPrint(allocator, "./{s}", .{command})
         else
             try joinPath(allocator, &.{ entry, command });
-        cwd.access(init.io, candidate, .{ .execute = true }) catch |err| {
+        const executable_file = isExecutableFileForPublicationTest(init, candidate) catch |err| {
             allocator.free(candidate);
             switch (err) {
-                error.FileNotFound => continue,
                 error.AccessDenied, error.PermissionDenied => {
                     access_error = err;
                     continue;
@@ -4369,6 +4382,10 @@ fn resolveExecutableForPublicationTest(
                 else => return err,
             }
         };
+        if (!executable_file) {
+            allocator.free(candidate);
+            continue;
+        }
         return candidate;
     }
     if (access_error) |err| return err;
@@ -4564,6 +4581,23 @@ fn testOracleValidationWorkLimits(
 
     try rewriteIntegrityManifestCases(init, allocator, manifest_candidate, cases.len);
     try validateOracleTreeIntegrity(init, allocator, manifest_candidate);
+    {
+        var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
+        defer manifest_dir.close(init.io);
+        var tighter_limits = default_validation_work_limits;
+        tighter_limits.maximum_integrity_cases = cases.len - 1;
+        var tighter_limit_error: ?anyerror = null;
+        validateManifestBounded(
+            init.io,
+            allocator,
+            manifest_dir,
+            .integrity,
+            tighter_limits,
+        ) catch |err| {
+            tighter_limit_error = err;
+        };
+        try expectPublicationError(error.OracleValidationWorkLimitExceeded, tighter_limit_error);
+    }
 
     try rewriteIntegrityManifestCases(init, allocator, manifest_candidate, cases.len + 1);
     try validateOracleTreeIntegrity(init, allocator, manifest_candidate);
@@ -4598,6 +4632,23 @@ fn testOracleValidationWorkLimits(
         manifest_candidate,
         max_integrity_case_rows_v1 + 1,
     );
+    {
+        var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
+        defer manifest_dir.close(init.io);
+        var widened_limits = default_validation_work_limits;
+        widened_limits.maximum_integrity_cases = max_integrity_case_rows_v1 + 1;
+        var widened_limit_error: ?anyerror = null;
+        validateManifestBounded(
+            init.io,
+            allocator,
+            manifest_dir,
+            .integrity,
+            widened_limits,
+        ) catch |err| {
+            widened_limit_error = err;
+        };
+        try expectPublicationError(error.OracleValidationWorkLimitExceeded, widened_limit_error);
+    }
 
     // Keep the bundle checksum-consistent while making artifact validation fail.
     // The work-limit error must win before artifact or per-case processing.
@@ -5461,6 +5512,85 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     };
     if (missing_interpreter_available) return error.MissingNamedPipeInterpreterExecuted;
     try expectPublicationError(error.FileNotFound, missing_interpreter_error);
+
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        const shadow_path_entry = try joinPath(allocator, &.{ root, "path-shadow-directory" });
+        defer allocator.free(shadow_path_entry);
+        const executable_path_entry = try joinPath(allocator, &.{ root, "path-executable-file" });
+        defer allocator.free(executable_path_entry);
+        try cwd.createDirPath(init.io, shadow_path_entry);
+        try cwd.createDirPath(init.io, executable_path_entry);
+
+        const shadow_command = try joinPath(allocator, &.{ shadow_path_entry, "mkfifo" });
+        defer allocator.free(shadow_command);
+        try cwd.createDirPath(init.io, shadow_command);
+        try cwd.setFilePermissions(
+            init.io,
+            shadow_command,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+        if (try resolveExecutableForPublicationTest(init, allocator, shadow_command)) |unexpected| {
+            allocator.free(unexpected);
+            return error.SearchableDirectoryAcceptedAsExecutable;
+        }
+
+        const executable_command = try joinPath(allocator, &.{ executable_path_entry, "mkfifo" });
+        defer allocator.free(executable_command);
+        try cwd.writeFile(init.io, .{
+            .sub_path = executable_command,
+            .data = "not executed by the resolver test\n",
+        });
+        try cwd.setFilePermissions(
+            init.io,
+            executable_command,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+
+        const path_value = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{s}",
+            .{ shadow_path_entry, executable_path_entry },
+        );
+        defer allocator.free(path_value);
+        var directory_shadow_environment = try init.environ_map.clone(allocator);
+        defer directory_shadow_environment.deinit();
+        try directory_shadow_environment.put("PATH", path_value);
+        var directory_shadow_init = init;
+        directory_shadow_init.environ_map = &directory_shadow_environment;
+        const resolved_after_directory = try resolveExecutableForPublicationTest(
+            directory_shadow_init,
+            allocator,
+            "mkfifo",
+        ) orelse return error.ExecutableAfterDirectoryNotResolved;
+        defer allocator.free(resolved_after_directory);
+        try expectEqualBytes(executable_command, resolved_after_directory);
+
+        const symlink_path_entry = try joinPath(allocator, &.{ root, "path-executable-symlink" });
+        defer allocator.free(symlink_path_entry);
+        try cwd.createDirPath(init.io, symlink_path_entry);
+        const symlink_command = try joinPath(allocator, &.{ symlink_path_entry, "mkfifo" });
+        defer allocator.free(symlink_command);
+        try cwd.symLink(
+            init.io,
+            "../path-executable-file/mkfifo",
+            symlink_command,
+            .{ .is_directory = false },
+        );
+        var symlink_environment = try init.environ_map.clone(allocator);
+        defer symlink_environment.deinit();
+        try symlink_environment.put("PATH", symlink_path_entry);
+        var symlink_init = init;
+        symlink_init.environ_map = &symlink_environment;
+        const resolved_symlink = try resolveExecutableForPublicationTest(
+            symlink_init,
+            allocator,
+            "mkfifo",
+        ) orelse return error.ExecutableSymlinkNotResolved;
+        defer allocator.free(resolved_symlink);
+        try expectEqualBytes(symlink_command, resolved_symlink);
+    }
 
     const path_precedence_command = "mkfifo";
     if (try pathKindNoFollow(init.io, path_precedence_command) != null) {
