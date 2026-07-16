@@ -6708,6 +6708,15 @@ pub const BoundaryTargetModule = struct {
                 canonical_payload_image: []const u8 = &.{},
                 canonical_request_fingerprint: u64 = 0,
                 deterministic_continuation_fingerprint: u64,
+
+                pub fn matchesOwner(
+                    request: @This(),
+                    module_fingerprint: u64,
+                    entry_function: u16,
+                ) bool {
+                    return request.module_fingerprint == module_fingerprint and
+                        request.entry_function == entry_function;
+                }
             };
 
             pub const Done = struct {
@@ -9313,8 +9322,7 @@ pub const BoundaryTargetModule = struct {
     }
 
     fn loadedRequestsEqual(left: LoadedModule.Session.Request, right: LoadedModule.Session.Request) bool {
-        return left.module_fingerprint == right.module_fingerprint and
-            left.entry_function == right.entry_function and
+        return left.matchesOwner(right.module_fingerprint, right.entry_function) and
             left.residual_site_index == right.residual_site_index and
             left.residual_site_fingerprint == right.residual_site_fingerprint and
             left.world_port_id == right.world_port_id and

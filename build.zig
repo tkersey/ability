@@ -69,17 +69,25 @@ fn resolveExistingAbsolutePrefix(b: *std.Build, absolute_path: []const u8) []con
     }
 }
 
-fn canonicalizeBuildOwnedCacheRoot(b: *std.Build) void {
-    const cache_path = b.cache_root.path orelse return;
+fn canonicalizeBuildOwnedCachePath(b: *std.Build, cache_path: []const u8) []const u8 {
     const absolute_cache_path = if (std.Io.Dir.path.isAbsolute(cache_path))
         cache_path
     else
         b.pathResolve(&.{ b.graph.cache.cwd, cache_path });
 
+    return resolveExistingAbsolutePrefix(b, absolute_cache_path);
+}
+
+fn canonicalizeBuildOwnedCacheRoots(b: *std.Build) void {
     // Generated LazyPaths carry this spelling into no-follow oracle readers.
-    // Canonicalize only the build-owned cache carrier; receiver-supplied paths
-    // retain their original admission semantics.
-    b.cache_root.path = resolveExistingAbsolutePrefix(b, absolute_cache_path);
+    // Canonicalize only the two build-owned cache carriers; receiver-supplied
+    // paths retain their original admission semantics.
+    if (b.cache_root.path) |path| {
+        b.cache_root.path = canonicalizeBuildOwnedCachePath(b, path);
+    }
+    if (b.graph.global_cache_root.path) |path| {
+        b.graph.global_cache_root.path = canonicalizeBuildOwnedCachePath(b, path);
+    }
 }
 
 const ExactInstallTreeStep = struct {
@@ -2601,6 +2609,55 @@ fn addZigPathCoverageGuard(b: *std.Build) *std.Build.Step {
     return &guard.step;
 }
 
+fn addGlobalCacheCwdOwnershipProbe(b: *std.Build) *std.Build.Step {
+    const global_cache_path = b.graph.global_cache_root.path orelse
+        std.process.fatal("selected global cache has no path carrier", .{});
+
+    const leaf = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\case "$1" in
+        \\  /*) ;;
+        \\  *) exit 1 ;;
+        \\esac
+        \\test -d "$1"
+        ,
+        "boundary-global-cache-owner-leaf",
+        global_cache_path,
+    });
+    leaf.setName("check canonical global-cache path from repository root");
+    leaf.setCwd(b.path("."));
+    const leaf_step = b.step(
+        "check-boundary-global-cache-path-owner-leaf",
+        "Check that the selected global-cache carrier is an absolute directory from the repository root.",
+    );
+    leaf_step.dependOn(&leaf.step);
+
+    const probe = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\tmp=$(mktemp -d "${TMPDIR:-/tmp}/boundary-global-cache-owner.XXXXXX")
+        \\trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+        \\ln -s "$1" "$tmp/build.zig"
+        \\cd "$tmp"
+        \\"$2" build --build-file "$3" --cache-dir local-cache --global-cache-dir build.zig check-boundary-global-cache-path-owner-leaf --summary all
+        ,
+        "boundary-global-cache-owner-probe",
+        global_cache_path,
+        b.graph.zig_exe,
+        b.pathFromRoot("build.zig"),
+    });
+    probe.setName("check external-cwd relative global-cache ownership");
+    const probe_step = b.step(
+        "check-boundary-global-cache-cwd-ownership",
+        "Check relative global-cache ownership across an external build cwd and repository-root child.",
+    );
+    probe_step.dependOn(&probe.step);
+    return probe_step;
+}
+
 fn addCoreModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -2738,7 +2795,7 @@ fn wireBoundaryImports(mod: *std.Build.Module, core: CoreModules) void {
 }
 
 pub fn build(b: *std.Build) void {
-    canonicalizeBuildOwnedCacheRoot(b);
+    canonicalizeBuildOwnedCacheRoots(b);
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
@@ -3995,6 +4052,7 @@ pub fn build(b: *std.Build) void {
     for (&independent_oracle_gates) |independent_oracle_gate| {
         oracle_check_step.dependOn(independent_oracle_gate);
     }
+    oracle_check_step.dependOn(addGlobalCacheCwdOwnershipProbe(b));
     check_step.dependOn(oracle_check_step);
 
     const oracle_emit_dir = b.pathResolve(&.{
@@ -4113,13 +4171,6 @@ pub fn build(b: *std.Build) void {
         const rule: zlinter.BuiltinLintRule = @enumFromInt(field.value);
         builder.addRule(.{ .builtin = rule }, .{});
     }
-    const saved_global_cache_path = b.graph.global_cache_root.path;
-    if (saved_global_cache_path) |path| {
-        if (!std.Io.Dir.path.isAbsolute(path)) {
-            b.graph.global_cache_root.path = b.pathFromRoot(path);
-        }
-    }
-    defer b.graph.global_cache_root.path = saved_global_cache_path;
     const interactive_lint = builder.build();
     lint_step.dependOn(interactive_lint);
     const strict_oracle_lint = strict: {

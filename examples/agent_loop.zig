@@ -817,6 +817,7 @@ fn expectLoadedRequestSiteParity(
     comptime Site: type,
     generated_request: anytype,
     loaded_request: anytype,
+    loaded_module: anytype,
 ) !void {
     const expected_world_port_id = Target.WorldDispatchTable.lookup(
         generated_request.operation_site_index,
@@ -827,7 +828,8 @@ fn expectLoadedRequestSiteParity(
     }
     const expected_world_port_ref = Target.WorldPortTable.entries[expected_world_port_index].world_port_ref;
     const loaded_world_port_ref = loaded_request.world_port_ref orelse return error.OracleSemanticMismatch;
-    if (!generated_request.matches(Site) or
+    if (!loaded_request.matchesOwner(loaded_module.moduleFingerprint(), loaded_module.entryFunctionRef()) or
+        !generated_request.matches(Site) or
         expected_world_port_id != loaded_request.world_port_id or
         generated_request.operation_site_index != loaded_request.residual_site_index or
         generated_request.operation_site_fingerprint != loaded_request.residual_site_fingerprint or
@@ -1161,7 +1163,7 @@ fn runToolboxProviderParityScenarioWithSink(
                 const loaded_payload = try decodeToolboxLoadedString(allocator, &payload_arena, loaded_request.canonical_payload_image);
 
                 if (generated_request.matches(FileRead)) {
-                    try expectLoadedRequestSiteParity(ToolboxProgram, ToolboxTarget, FileRead, generated_request, loaded_request);
+                    try expectLoadedRequestSiteParity(ToolboxProgram, ToolboxTarget, FileRead, generated_request, loaded_request, &loaded);
                     const typed = try generated_request.as(FileRead);
                     const path: FileRead.Payload = try typed.payload();
                     try std.testing.expectEqualStrings(path, loaded_payload);
@@ -1172,7 +1174,7 @@ fn runToolboxProviderParityScenarioWithSink(
                     try generated_session.resumeTyped(typed, read_response_const);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(FileWrite)) {
-                    try expectLoadedRequestSiteParity(ToolboxProgram, ToolboxTarget, FileWrite, generated_request, loaded_request);
+                    try expectLoadedRequestSiteParity(ToolboxProgram, ToolboxTarget, FileWrite, generated_request, loaded_request, &loaded);
                     const typed = try generated_request.as(FileWrite);
                     const payload: FileWrite.Payload = try typed.payload();
                     try std.testing.expectEqualStrings(payload, loaded_payload);
@@ -1262,7 +1264,7 @@ fn runLoadedFailureParityScenario(
                     .failed => return error.UnexpectedLoadedFailure,
                 };
                 if (generated_request.matches(AgentDecision)) {
-                    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
+                    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request, &loaded);
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
                     const loaded_payload = try decodeLoadedString(allocator, &payload_arena, loaded_request.canonical_payload_image);
@@ -1275,7 +1277,7 @@ fn runLoadedFailureParityScenario(
                     try generated_session.resumeTyped(typed, action);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(ToolboxCall)) {
-                    try expectLoadedRequestSiteParity(Program, RootTarget, ToolboxCall, generated_request, loaded_request);
+                    try expectLoadedRequestSiteParity(Program, RootTarget, ToolboxCall, generated_request, loaded_request, &loaded);
                     var capsule = try generated_session.capture(allocator);
                     defer capsule.deinit();
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
@@ -1336,7 +1338,7 @@ fn runMalformedLoadedActionImageScenario(allocator: std.mem.Allocator) !void {
     };
 
     try std.testing.expect(generated_request.matches(AgentDecision));
-    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
+    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request, &loaded);
 
     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
     defer payload_arena.deinit();
@@ -1422,7 +1424,7 @@ fn runLoadedParityScenarioWithSink(
                     .failed => return error.UnexpectedLoadedFailure,
                 };
                 if (generated_request.matches(AgentDecision)) {
-                    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
+                    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request, &loaded);
                     if (oracle_sink) |sink| sink.model_calls += 1;
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
@@ -1437,7 +1439,7 @@ fn runLoadedParityScenarioWithSink(
                     try generated_session.resumeTyped(typed, action);
                     try loaded_session.@"resume"(loaded_request, loaded_response);
                 } else if (generated_request.matches(ToolboxCall)) {
-                    try expectLoadedRequestSiteParity(Program, RootTarget, ToolboxCall, generated_request, loaded_request);
+                    try expectLoadedRequestSiteParity(Program, RootTarget, ToolboxCall, generated_request, loaded_request, &loaded);
                     if (oracle_sink) |sink| sink.tool_calls += 1;
                     var payload_arena = RootTarget.Module.LoadedValueArena.init(allocator);
                     defer payload_arena.deinit();
@@ -2156,30 +2158,42 @@ test "agent root request boundary parity rejects metadata drift" {
         .failed => return error.UnexpectedLoadedFailure,
     };
 
-    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request);
+    try expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, loaded_request, &loaded);
     var drifted_request = loaded_request;
+    drifted_request.module_fingerprint +%= 1;
+    try std.testing.expectError(
+        error.OracleSemanticMismatch,
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request, &loaded),
+    );
+    drifted_request = loaded_request;
+    drifted_request.entry_function +%= 1;
+    try std.testing.expectError(
+        error.OracleSemanticMismatch,
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request, &loaded),
+    );
+    drifted_request = loaded_request;
     drifted_request.payload_ref = .{ .codec = "unit" };
     try std.testing.expectError(
         error.OracleSemanticMismatch,
-        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request, &loaded),
     );
     drifted_request = loaded_request;
     drifted_request.expected_response_ref = .{ .codec = "unit" };
     try std.testing.expectError(
         error.OracleSemanticMismatch,
-        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request, &loaded),
     );
     drifted_request = loaded_request;
     drifted_request.response_kind = .return_now;
     try std.testing.expectError(
         error.OracleSemanticMismatch,
-        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request, &loaded),
     );
     drifted_request = loaded_request;
     drifted_request.world_port_ref = null;
     try std.testing.expectError(
         error.OracleSemanticMismatch,
-        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request, &loaded),
     );
     const expected_world_port_id = RootTarget.WorldDispatchTable.lookup(
         generated_request.operation_site_index,
@@ -2196,7 +2210,7 @@ test "agent root request boundary parity rejects metadata drift" {
     drifted_request.world_port_ref = alternate_world_port_ref;
     try std.testing.expectError(
         error.OracleSemanticMismatch,
-        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request),
+        expectLoadedRequestSiteParity(Program, RootTarget, AgentDecision, generated_request, drifted_request, &loaded),
     );
 }
 

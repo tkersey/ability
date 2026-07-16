@@ -721,6 +721,7 @@ fn expectLoadedStringRequestParity(
     allocator: std.mem.Allocator,
     generated_request: anytype,
     loaded_request: anytype,
+    loaded_module: anytype,
 ) !void {
     const expected_world_port_id = Target.WorldDispatchTable.lookup(
         generated_request.operation_site_index,
@@ -731,7 +732,8 @@ fn expectLoadedStringRequestParity(
     }
     const expected_world_port_ref = Target.WorldPortTable.entries[expected_world_port_index].world_port_ref;
     const loaded_world_port_ref = loaded_request.world_port_ref orelse return error.OracleSemanticMismatch;
-    if (expected_world_port_id != loaded_request.world_port_id or
+    if (!loaded_request.matchesOwner(loaded_module.moduleFingerprint(), loaded_module.entryFunctionRef()) or
+        expected_world_port_id != loaded_request.world_port_id or
         generated_request.operation_site_index != loaded_request.residual_site_index or
         generated_request.operation_site_fingerprint != loaded_request.residual_site_fingerprint or
         loaded_request.response_kind != .@"resume" or
@@ -774,6 +776,7 @@ fn observeLoadedStringRequestParity(
     allocator: std.mem.Allocator,
     generated_request: anytype,
     loaded_request: anytype,
+    loaded_module: anytype,
     observed_request_count: *usize,
 ) !void {
     try expectLoadedStringRequestParity(
@@ -783,6 +786,7 @@ fn observeLoadedStringRequestParity(
         allocator,
         generated_request,
         loaded_request,
+        loaded_module,
     );
     observed_request_count.* = std.math.add(usize, observed_request_count.*, 1) catch {
         return error.OracleRequestObservationCountOverflow;
@@ -1263,7 +1267,45 @@ fn emitOneEffect(init: std.process.Init, allocator: std.mem.Allocator, output_di
         .done => return error.UnexpectedLoadedDone,
         .failed => return error.UnexpectedLoadedFailure,
     };
-    try expectLoadedStringRequestParity(OneEffectProgram, OneEffectTarget, OneEffectSite, allocator, generated_request, loaded_request);
+    try expectLoadedStringRequestParity(
+        OneEffectProgram,
+        OneEffectTarget,
+        OneEffectSite,
+        allocator,
+        generated_request,
+        loaded_request,
+        &loaded,
+    );
+    var drifted_owner_request = loaded_request;
+    drifted_owner_request.module_fingerprint +%= 1;
+    var drifted_owner_error: ?anyerror = null;
+    expectLoadedStringRequestParity(
+        OneEffectProgram,
+        OneEffectTarget,
+        OneEffectSite,
+        allocator,
+        generated_request,
+        drifted_owner_request,
+        &loaded,
+    ) catch |err| {
+        drifted_owner_error = err;
+    };
+    try expectPublicationError(error.OracleSemanticMismatch, drifted_owner_error);
+    drifted_owner_request = loaded_request;
+    drifted_owner_request.entry_function +%= 1;
+    drifted_owner_error = null;
+    expectLoadedStringRequestParity(
+        OneEffectProgram,
+        OneEffectTarget,
+        OneEffectSite,
+        allocator,
+        generated_request,
+        drifted_owner_request,
+        &loaded,
+    ) catch |err| {
+        drifted_owner_error = err;
+    };
+    try expectPublicationError(error.OracleSemanticMismatch, drifted_owner_error);
     try writeArtifact(io, allocator, output_dir, "artifacts/values/one-effect.payload.loaded-value", loaded_request.canonical_payload_image);
     const parked_state = try loaded_session.freeze(allocator);
     defer allocator.free(parked_state);
@@ -1414,7 +1456,15 @@ fn emitStructured(init: std.process.Init, allocator: std.mem.Allocator, output_d
         .done => return error.UnexpectedLoadedDone,
         .failed => return error.UnexpectedLoadedFailure,
     };
-    try expectLoadedStringRequestParity(StructuredProgram, StructuredTarget, StructuredSite, allocator, generated_request, loaded_request);
+    try expectLoadedStringRequestParity(
+        StructuredProgram,
+        StructuredTarget,
+        StructuredSite,
+        allocator,
+        generated_request,
+        loaded_request,
+        &loaded,
+    );
     try writeArtifact(io, allocator, output_dir, "artifacts/values/typed-product-sum.payload.loaded-value", loaded_request.canonical_payload_image);
     const parked_state = try loaded_session.freeze(allocator);
     defer allocator.free(parked_state);
@@ -1571,7 +1621,15 @@ fn emitHelperPark(init: std.process.Init, allocator: std.mem.Allocator, output_d
         .done => return error.UnexpectedLoadedDone,
         .failed => return error.UnexpectedLoadedFailure,
     };
-    try expectLoadedStringRequestParity(NestedHelperProgram, NestedHelperTarget, NestedHelperSite, allocator, generated_request, loaded_request);
+    try expectLoadedStringRequestParity(
+        NestedHelperProgram,
+        NestedHelperTarget,
+        NestedHelperSite,
+        allocator,
+        generated_request,
+        loaded_request,
+        &loaded,
+    );
     try writeArtifact(io, allocator, output_dir, "artifacts/values/helper-park.payload.loaded-value", loaded_request.canonical_payload_image);
     const parked_state = try loaded_session.freeze(allocator);
     defer allocator.free(parked_state);
@@ -1700,6 +1758,7 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         allocator,
         generated_first,
         loaded_first,
+        &loaded,
         &observed_request_count,
     );
     var drifted_first = loaded_first;
@@ -1713,6 +1772,7 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         allocator,
         generated_first,
         drifted_first,
+        &loaded,
         &observed_request_count,
     ) catch |err| {
         missing_world_port_ref_error = err;
@@ -1743,6 +1803,7 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         allocator,
         generated_first,
         drifted_first,
+        &loaded,
         &observed_request_count,
     ) catch |err| {
         alternate_world_port_ref_error = err;
@@ -1843,6 +1904,7 @@ fn emitMultipleResidual(init: std.process.Init, allocator: std.mem.Allocator, ou
         allocator,
         generated_second,
         loaded_second,
+        &loaded,
         &observed_request_count,
     );
     if (loaded_first.canonical_request_fingerprint == loaded_second.canonical_request_fingerprint) return error.RequestIdentityCollision;
@@ -3388,6 +3450,11 @@ const PublicationStageFailurePhase = enum {
     post_copy,
 };
 
+const PublicationDiagnosticContext = enum {
+    injected_sandbox,
+    live,
+};
+
 const RetainedCleanupFault = enum {
     before_clear,
     before_leaf_delete,
@@ -3576,38 +3643,47 @@ fn rollbackRetainedStage(
 }
 
 fn reportStageRollbackFailure(
+    diagnostic_context: PublicationDiagnosticContext,
     phase: PublicationStageFailurePhase,
     primary_error: anyerror,
     rollback_error: anyerror,
     stage: []const u8,
 ) void {
-    std.debug.print(
-        "oracle publication stage rollback failed during {s}: primary {s}; rollback {s}; stage {s} may remain and requires inspection before retry\n",
-        .{ @tagName(phase), @errorName(primary_error), @errorName(rollback_error), stage },
-    );
+    switch (diagnostic_context) {
+        .injected_sandbox => std.debug.print(
+            "oracle publication-safety test observed expected injected sandbox rollback failure during {s}: primary {s}; rollback {s}; sandbox stage {s} is retained only for fixture verification and cleanup\n",
+            .{ @tagName(phase), @errorName(primary_error), @errorName(rollback_error), stage },
+        ),
+        .live => std.debug.print(
+            "oracle publication stage rollback failed during {s}: primary {s}; rollback {s}; stage {s} may remain and requires inspection before retry\n",
+            .{ @tagName(phase), @errorName(primary_error), @errorName(rollback_error), stage },
+        ),
+    }
 }
 
 fn copyOracleTreeToPublicationLeaf(
     init: std.process.Init,
     allocator: std.mem.Allocator,
-    source_dir: []const u8,
+    request: PublicationRequest,
     root: PublicationRoot,
-    faults: PublicationStageFaults,
 ) !RetainedPublicationTree {
+    const source_dir = request.candidate_dir;
+    const faults = request.stage_faults;
+    const diagnostic_context = request.diagnostic_context;
     const target = root.stage;
     try requireDirectory(init.io, source_dir);
     try root.createFreshDirectory(init.io, target);
     if (faults.primary == .after_create_before_open) {
         const primary_error = error.InjectedOraclePublicationStageFailure;
         rollbackCreatedUnretainedStage(root, init.io, target, faults.rollback) catch |rollback_error| {
-            reportStageRollbackFailure(.acquire, primary_error, rollback_error, target);
+            reportStageRollbackFailure(diagnostic_context, .acquire, primary_error, rollback_error, target);
             return error.OraclePublicationStageRollbackFailed;
         };
         return primary_error;
     }
     const retained_target = RetainedPublicationTree.open(root, init.io, target) catch |primary_error| {
         rollbackCreatedUnretainedStage(root, init.io, target, faults.rollback) catch |rollback_error| {
-            reportStageRollbackFailure(.acquire, primary_error, rollback_error, target);
+            reportStageRollbackFailure(diagnostic_context, .acquire, primary_error, rollback_error, target);
             return error.OraclePublicationStageRollbackFailed;
         };
         return primary_error;
@@ -3621,7 +3697,7 @@ fn copyOracleTreeToPublicationLeaf(
         faults.primary,
     ) catch |primary_error| {
         rollbackRetainedStage(root, init.io, target, retained_target, faults.rollback) catch |rollback_error| {
-            reportStageRollbackFailure(.copy, primary_error, rollback_error, target);
+            reportStageRollbackFailure(diagnostic_context, .copy, primary_error, rollback_error, target);
             return error.OraclePublicationStageRollbackFailed;
         };
         return primary_error;
@@ -3676,6 +3752,7 @@ const PublicationRequest = struct {
     paths: PublicationPaths,
     fault: PublicationFault,
     stage_faults: PublicationStageFaults = .{},
+    diagnostic_context: PublicationDiagnosticContext = .live,
     authority: ?TrackedPublicationAuthority,
 };
 
@@ -3703,6 +3780,7 @@ fn stageFaultPublicationRequest(
 ) PublicationRequest {
     var request = exclusivePublicationRequest(candidate_dir, receiver_pin, paths, .none);
     request.stage_faults = .{ .primary = primary, .rollback = rollback };
+    request.diagnostic_context = .injected_sandbox;
     return request;
 }
 
@@ -3780,9 +3858,8 @@ fn publishOracleTree(
     const retained_stage = try copyOracleTreeToPublicationLeaf(
         init,
         allocator,
-        request.candidate_dir,
+        request,
         root,
-        request.stage_faults,
     );
     defer retained_stage.close(init.io);
     var stage_location: RetainedStageLocation = .at_stage;
@@ -3800,7 +3877,13 @@ fn publishOracleTree(
                 retained_stage,
                 request.stage_faults.rollback,
             ) catch |rollback_error| {
-                reportStageRollbackFailure(.post_copy, primary_error, rollback_error, root.stage);
+                reportStageRollbackFailure(
+                    request.diagnostic_context,
+                    .post_copy,
+                    primary_error,
+                    rollback_error,
+                    root.stage,
+                );
                 return error.OraclePublicationStageRollbackFailed;
             };
         }
@@ -3935,16 +4018,28 @@ fn publishTrackedOracleRequest(
                 allocator,
                 request.candidate_dir,
             ) catch |diagnostic_error| {
-                std.debug.print(
-                    "oracle receiver pin mismatch: expected {s}, producer candidate diagnostic unavailable after {s}, candidate tree {s}; candidate identity is diagnostic only; do not replace the receiver pin without independent receiver-owner approval\n",
-                    .{ request.receiver_pin, @errorName(diagnostic_error), request.candidate_dir },
-                );
+                switch (request.diagnostic_context) {
+                    .injected_sandbox => std.debug.print(
+                        "oracle publication-safety test observed expected injected sandbox receiver pin mismatch: expected {s}, producer candidate diagnostic unavailable after {s}, sandbox candidate tree {s}; receiver authority is unchanged\n",
+                        .{ request.receiver_pin, @errorName(diagnostic_error), request.candidate_dir },
+                    ),
+                    .live => std.debug.print(
+                        "oracle receiver pin mismatch: expected {s}, producer candidate diagnostic unavailable after {s}, candidate tree {s}; candidate identity is diagnostic only; do not replace the receiver pin without independent receiver-owner approval\n",
+                        .{ request.receiver_pin, @errorName(diagnostic_error), request.candidate_dir },
+                    ),
+                }
                 return primary_error;
             };
-            std.debug.print(
-                "oracle receiver pin mismatch: expected {s}, producer candidate {s}, candidate tree {s}; candidate identity is diagnostic only; do not replace the receiver pin without independent receiver-owner approval\n",
-                .{ request.receiver_pin, &candidate_pin, request.candidate_dir },
-            );
+            switch (request.diagnostic_context) {
+                .injected_sandbox => std.debug.print(
+                    "oracle publication-safety test observed expected injected sandbox receiver pin mismatch: expected {s}, producer candidate {s}, sandbox candidate tree {s}; receiver authority is unchanged\n",
+                    .{ request.receiver_pin, &candidate_pin, request.candidate_dir },
+                ),
+                .live => std.debug.print(
+                    "oracle receiver pin mismatch: expected {s}, producer candidate {s}, candidate tree {s}; candidate identity is diagnostic only; do not replace the receiver pin without independent receiver-owner approval\n",
+                    .{ request.receiver_pin, &candidate_pin, request.candidate_dir },
+                ),
+            }
         }
         return primary_error;
     };
@@ -5293,15 +5388,17 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         }
     };
     var diagnostic_failure_error: ?anyerror = null;
+    var diagnostic_request = exclusivePublicationRequest(
+        metadata_variant_candidate,
+        receiver_pin,
+        paths,
+        .none,
+    );
+    diagnostic_request.diagnostic_context = .injected_sandbox;
     publishTrackedOracleRequest(
         init,
         allocator,
-        exclusivePublicationRequest(
-            metadata_variant_candidate,
-            receiver_pin,
-            paths,
-            .none,
-        ),
+        diagnostic_request,
         failing_pin_diagnostic.read,
     ) catch |err| {
         diagnostic_failure_error = err;
