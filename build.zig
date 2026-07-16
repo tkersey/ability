@@ -108,6 +108,14 @@ const ExactInstallTreeStep = struct {
     else
         .default_dir;
 
+    const maximum_cleanup_depth: usize = 32;
+    const max_cleanup_open_directories: usize = maximum_cleanup_depth + 1;
+
+    const CleanupTraversal = struct {
+        protected_identities: []const FileIdentity,
+        current_depth: usize,
+    };
+
     fn create(
         b: *std.Build,
         source_dir: std.Build.LazyPath,
@@ -807,7 +815,7 @@ const ExactInstallTreeStep = struct {
     fn clearDirectoryEntryNoFollow(
         dir: std.Io.Dir,
         io: std.Io,
-        protected_identities: []const FileIdentity,
+        traversal: CleanupTraversal,
         name: []const u8,
         reported_kind: std.Io.File.Kind,
     ) anyerror!void {
@@ -833,6 +841,14 @@ const ExactInstallTreeStep = struct {
             => return error.UnsupportedOracleTreeEntry,
         }
 
+        const child_depth = traversal.current_depth + 1;
+        const child_open_directories = child_depth + 1;
+        if (child_depth > maximum_cleanup_depth or
+            child_open_directories > max_cleanup_open_directories)
+        {
+            return error.OracleCleanupDepthLimitExceeded;
+        }
+
         var child = dir.openDir(io, name, .{
             .iterate = true,
             .follow_symlinks = false,
@@ -848,11 +864,16 @@ const ExactInstallTreeStep = struct {
             child.close(io);
             return err;
         };
-        if (identityMatchesAny(child_identity, protected_identities)) {
+        if (identityMatchesAny(child_identity, traversal.protected_identities)) {
             child.close(io);
             return error.ProtectedOracleCleanupAlias;
         }
-        clearDirectoryNoFollow(child, io, protected_identities) catch |err| {
+        clearDirectoryNoFollow(
+            child,
+            io,
+            traversal.protected_identities,
+            child_depth,
+        ) catch |err| {
             child.close(io);
             return err;
         };
@@ -868,6 +889,7 @@ const ExactInstallTreeStep = struct {
         dir: std.Io.Dir,
         io: std.Io,
         protected_identities: []const FileIdentity,
+        current_depth: usize,
     ) !void {
         var iterator = dir.iterate();
         while (try iterator.next(io)) |entry| {
@@ -878,7 +900,16 @@ const ExactInstallTreeStep = struct {
             {
                 return error.UnsupportedOracleTreeEntry;
             }
-            try clearDirectoryEntryNoFollow(dir, io, protected_identities, entry.name, entry.kind);
+            try clearDirectoryEntryNoFollow(
+                dir,
+                io,
+                .{
+                    .protected_identities = protected_identities,
+                    .current_depth = current_depth,
+                },
+                entry.name,
+                entry.kind,
+            );
         }
     }
 
@@ -911,7 +942,7 @@ const ExactInstallTreeStep = struct {
             dir.close(io);
             return error.OracleQuarantineIdentityChanged;
         }
-        clearDirectoryNoFollow(dir, io, protected_identities) catch |err| {
+        clearDirectoryNoFollow(dir, io, protected_identities, 0) catch |err| {
             dir.close(io);
             return err;
         };
@@ -1345,7 +1376,7 @@ const ExactInstallTreeStep = struct {
         try std.testing.expect(identityMatchesAny(try directoryIdentity(grandchild), identities.items));
         try std.testing.expectError(
             error.ProtectedOracleCleanupAlias,
-            clearDirectoryNoFollow(tmp.dir, io, identities.items),
+            clearDirectoryNoFollow(tmp.dir, io, identities.items, 0),
         );
         const child_stat = try tmp.dir.statFile(io, "child", .{ .follow_symlinks = false });
         try std.testing.expectEqual(std.Io.File.Kind.directory, child_stat.kind);
@@ -1519,7 +1550,13 @@ const ExactInstallTreeStep = struct {
         try child.writeFile(io, .{ .sub_path = "nested-file", .data = "oracle\n" });
         child.close(io);
 
-        try clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "unknown-directory", .unknown);
+        try clearDirectoryEntryNoFollow(
+            tmp.dir,
+            io,
+            .{ .protected_identities = &.{}, .current_depth = 0 },
+            "unknown-directory",
+            .unknown,
+        );
         try std.testing.expectError(
             error.FileNotFound,
             tmp.dir.statFile(io, "unknown-directory", .{ .follow_symlinks = false }),
@@ -1530,7 +1567,13 @@ const ExactInstallTreeStep = struct {
             try tmp.dir.symLink(io, "linked-target", "unknown-link", .{ .is_directory = false });
             try std.testing.expectError(
                 error.UnsupportedOracleTreeEntry,
-                clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "unknown-link", .unknown),
+                clearDirectoryEntryNoFollow(
+                    tmp.dir,
+                    io,
+                    .{ .protected_identities = &.{}, .current_depth = 0 },
+                    "unknown-link",
+                    .unknown,
+                ),
             );
             const linked_stat = try tmp.dir.statFile(io, "unknown-link", .{ .follow_symlinks = false });
             try std.testing.expectEqual(std.Io.File.Kind.sym_link, linked_stat.kind);
@@ -1562,7 +1605,13 @@ const ExactInstallTreeStep = struct {
             });
             try std.testing.expectError(
                 error.UnsupportedOracleTreeEntry,
-                clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, case.name, case.kind),
+                clearDirectoryEntryNoFollow(
+                    tmp.dir,
+                    io,
+                    .{ .protected_identities = &.{}, .current_depth = 0 },
+                    case.name,
+                    case.kind,
+                ),
             );
             const retained = try tmp.dir.readFileAlloc(
                 io,
@@ -1578,7 +1627,13 @@ const ExactInstallTreeStep = struct {
             .sub_path = "ordinary-file",
             .data = "cleanup-file\n",
         });
-        try clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "ordinary-file", .file);
+        try clearDirectoryEntryNoFollow(
+            tmp.dir,
+            io,
+            .{ .protected_identities = &.{}, .current_depth = 0 },
+            "ordinary-file",
+            .file,
+        );
         try std.testing.expectError(
             error.FileNotFound,
             tmp.dir.statFile(io, "ordinary-file", .{ .follow_symlinks = false }),
@@ -1594,7 +1649,13 @@ const ExactInstallTreeStep = struct {
             .data = "cleanup-directory\n",
         });
         ordinary_directory.close(io);
-        try clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "ordinary-directory", .directory);
+        try clearDirectoryEntryNoFollow(
+            tmp.dir,
+            io,
+            .{ .protected_identities = &.{}, .current_depth = 0 },
+            "ordinary-directory",
+            .directory,
+        );
         try std.testing.expectError(
             error.FileNotFound,
             tmp.dir.statFile(io, "ordinary-directory", .{ .follow_symlinks = false }),
@@ -1610,7 +1671,13 @@ const ExactInstallTreeStep = struct {
             });
             try std.testing.expectError(
                 error.UnsupportedOracleTreeEntry,
-                clearDirectoryEntryNoFollow(tmp.dir, io, &.{}, "actual-link", .sym_link),
+                clearDirectoryEntryNoFollow(
+                    tmp.dir,
+                    io,
+                    .{ .protected_identities = &.{}, .current_depth = 0 },
+                    "actual-link",
+                    .sym_link,
+                ),
             );
             const link_stat = try tmp.dir.statFile(io, "actual-link", .{
                 .follow_symlinks = false,
@@ -1625,6 +1692,119 @@ const ExactInstallTreeStep = struct {
             defer std.testing.allocator.free(target);
             try std.testing.expectEqualStrings("actual-link-target\n", target);
         }
+    }
+
+    fn createCleanupDirectoryChain(
+        parent: std.Io.Dir,
+        io: std.Io,
+        depth: usize,
+    ) !void {
+        var cursor = try parent.openDir(io, ".", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer cursor.close(io);
+
+        for (0..depth) |index| {
+            var name_buffer: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buffer, "level-{d}", .{index});
+            try cursor.createDir(io, name, private_dir_permissions);
+            const child = try cursor.openDir(io, name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            });
+            cursor.close(io);
+            cursor = child;
+        }
+        try cursor.writeFile(io, .{
+            .sub_path = "retained-marker.txt",
+            .data = "retained-cleanup-root\n",
+        });
+    }
+
+    fn expectCleanupDirectoryChainMarker(
+        parent: std.Io.Dir,
+        io: std.Io,
+        root_name: []const u8,
+        depth: usize,
+    ) !void {
+        var cursor = try parent.openDir(io, root_name, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer cursor.close(io);
+
+        for (0..depth) |index| {
+            var name_buffer: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buffer, "level-{d}", .{index});
+            const child = try cursor.openDir(io, name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            });
+            cursor.close(io);
+            cursor = child;
+        }
+        const marker = try cursor.readFileAlloc(
+            io,
+            "retained-marker.txt",
+            std.testing.allocator,
+            .limited(64),
+        );
+        defer std.testing.allocator.free(marker);
+        try std.testing.expectEqualStrings("retained-cleanup-root\n", marker);
+    }
+
+    fn testCleanupDepthBound() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "exact-depth", private_dir_permissions);
+        var exact = try tmp.dir.openDir(io, "exact-depth", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        const exact_identity = try directoryIdentity(exact);
+        try createCleanupDirectoryChain(exact, io, maximum_cleanup_depth);
+        exact.close(io);
+        try cleanupQuarantinedLeaf(
+            tmp.dir,
+            io,
+            "exact-depth",
+            exact_identity,
+            &.{},
+        );
+        try std.testing.expectError(
+            error.FileNotFound,
+            tmp.dir.statFile(io, "exact-depth", .{ .follow_symlinks = false }),
+        );
+
+        try tmp.dir.createDir(io, "over-depth", private_dir_permissions);
+        var over = try tmp.dir.openDir(io, "over-depth", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        const over_identity = try directoryIdentity(over);
+        try createCleanupDirectoryChain(over, io, maximum_cleanup_depth + 1);
+        over.close(io);
+        try std.testing.expectError(
+            error.OracleCleanupDepthLimitExceeded,
+            cleanupQuarantinedLeaf(
+                tmp.dir,
+                io,
+                "over-depth",
+                over_identity,
+                &.{},
+            ),
+        );
+        const retained = try tmp.dir.statFile(io, "over-depth", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.directory, retained.kind);
+        try expectCleanupDirectoryChainMarker(
+            tmp.dir,
+            io,
+            "over-depth",
+            maximum_cleanup_depth + 1,
+        );
     }
 
     fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
@@ -2249,6 +2429,10 @@ test "exact oracle unknown iterator hints are reclassified no-follow" {
 test "exact oracle cleanup entry kinds dispatch exhaustively no-follow" {
     try ExactInstallTreeStep.testCleanupEntryKindDispatch();
     try ExactInstallTreeStep.testUnknownDirectoryCleanup();
+}
+
+test "exact oracle cleanup depth is bounded before descent" {
+    try ExactInstallTreeStep.testCleanupDepthBound();
 }
 
 test "exact oracle Linux identity observes the retained directory with statx" {
