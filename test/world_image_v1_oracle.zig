@@ -2911,6 +2911,114 @@ fn validateManifestFromDir(
     );
 }
 
+fn nextManifestScanToken(scanner: *std.json.Scanner) !std.json.Token {
+    return scanner.next() catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidOracleManifest,
+    };
+}
+
+fn peekManifestScanToken(scanner: *std.json.Scanner) !std.json.TokenType {
+    return scanner.peekNextTokenType() catch return error.InvalidOracleManifest;
+}
+
+fn skipManifestScanValue(scanner: *std.json.Scanner) !void {
+    switch (try peekManifestScanToken(scanner)) {
+        .object_begin, .array_begin, .number, .string, .true, .false, .null => {},
+        .object_end, .array_end, .end_of_document => return error.InvalidOracleManifest,
+    }
+    scanner.skipValue() catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidOracleManifest,
+    };
+}
+
+fn admitIntegrityManifestRows(
+    allocator: std.mem.Allocator,
+    manifest_bytes: []const u8,
+    work_limits: OracleValidationWorkLimits,
+) !void {
+    var scanner = std.json.Scanner.initCompleteInput(allocator, manifest_bytes);
+    defer scanner.deinit();
+
+    switch (try nextManifestScanToken(&scanner)) {
+        .object_begin => {},
+        else => return error.InvalidOracleManifest,
+    }
+
+    var saw_cases = false;
+    while (true) {
+        switch (try peekManifestScanToken(&scanner)) {
+            .object_end => {
+                _ = try nextManifestScanToken(&scanner);
+                break;
+            },
+            .string => {},
+            .object_begin,
+            .array_begin,
+            .array_end,
+            .true,
+            .false,
+            .null,
+            .number,
+            .end_of_document,
+            => return error.InvalidOracleManifest,
+        }
+
+        const key_token = scanner.nextAllocMax(
+            allocator,
+            .alloc_if_needed,
+            manifest_bytes.len,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidOracleManifest,
+        };
+        const is_cases = switch (key_token) {
+            .string => |key| std.mem.eql(u8, key, "cases"),
+            .allocated_string => |key| matched: {
+                defer allocator.free(key);
+                break :matched std.mem.eql(u8, key, "cases");
+            },
+            else => return error.InvalidOracleManifest,
+        };
+
+        if (!is_cases) {
+            try skipManifestScanValue(&scanner);
+            continue;
+        }
+        if (saw_cases) return error.InvalidOracleManifest;
+        saw_cases = true;
+
+        if (try peekManifestScanToken(&scanner) != .array_begin) {
+            return error.InvalidOracleManifest;
+        }
+        _ = try nextManifestScanToken(&scanner);
+
+        var row_count: usize = 0;
+        while (true) {
+            switch (try peekManifestScanToken(&scanner)) {
+                .array_end => {
+                    _ = try nextManifestScanToken(&scanner);
+                    break;
+                },
+                .object_begin, .array_begin, .number, .string, .true, .false, .null => {
+                    row_count = std.math.add(usize, row_count, 1) catch
+                        return error.OracleValidationWorkLimitExceeded;
+                    try work_limits.admitIntegrityCases(row_count);
+                    try skipManifestScanValue(&scanner);
+                },
+                .object_end, .end_of_document => return error.InvalidOracleManifest,
+            }
+        }
+    }
+
+    switch (try nextManifestScanToken(&scanner)) {
+        .end_of_document => {},
+        else => return error.InvalidOracleManifest,
+    }
+    if (!saw_cases) return error.InvalidOracleManifest;
+}
+
 fn validateManifestBounded(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -2930,6 +3038,9 @@ fn validateManifestBounded(
     defer paths.deinit();
     const manifest_bytes = try readRelativeFromDir(io, allocator, dir, "manifest.json");
     defer allocator.free(manifest_bytes);
+    if (policy == .integrity) {
+        try admitIntegrityManifestRows(allocator, manifest_bytes, work_limits);
+    }
     const parsed = std.json.parseFromSlice(OracleManifest, allocator, manifest_bytes, .{
         .ignore_unknown_fields = false,
     }) catch |err| switch (err) {
@@ -2947,8 +3058,8 @@ fn validateManifestBounded(
         return error.InvalidOracleManifest;
     }
     if (policy == .integrity) {
-        // Integrity mode intentionally accepts bounded duplicate rows for legacy
-        // compatibility. Admit the complete row count before artifact or case work.
+        // The scanner admitted actual rows before typed allocation. Retain the
+        // declared-count check as a typed consistency invariant.
         try work_limits.admitIntegrityCases(manifest.case_count);
     } else {
         if (manifest.case_count != cases.len) return error.InvalidOracleManifest;
@@ -3756,7 +3867,7 @@ const PublicationRequest = struct {
     authority: ?TrackedPublicationAuthority,
 };
 
-fn exclusivePublicationRequest(
+fn injectedSandboxPublicationRequest(
     candidate_dir: []const u8,
     receiver_pin: []const u8,
     paths: PublicationPaths,
@@ -3779,7 +3890,7 @@ fn stageFaultPublicationRequest(
     primary: PublicationStagePrimaryFault,
     rollback: PublicationStageRollbackFault,
 ) PublicationRequest {
-    var request = exclusivePublicationRequest(candidate_dir, receiver_pin, paths, .none);
+    var request = injectedSandboxPublicationRequest(candidate_dir, receiver_pin, paths, .none);
     request.stage_faults = .{ .primary = primary, .rollback = rollback };
     return request;
 }
@@ -4240,10 +4351,13 @@ fn resolveExecutableForPublicationTest(
     }
 
     const search_path = init.environ_map.get("PATH") orelse std.Io.Threaded.default_PATH;
-    var entries = std.mem.tokenizeScalar(u8, search_path, ':');
+    var entries = std.mem.splitScalar(u8, search_path, ':');
     var access_error: ?anyerror = null;
     while (entries.next()) |entry| {
-        const candidate = try joinPath(allocator, &.{ entry, command });
+        const candidate = if (entry.len == 0)
+            try std.fmt.allocPrint(allocator, "./{s}", .{command})
+        else
+            try joinPath(allocator, &.{ entry, command });
         cwd.access(init.io, candidate, .{ .execute = true }) catch |err| {
             allocator.free(candidate);
             switch (err) {
@@ -4282,8 +4396,8 @@ fn createNamedPipeForPublicationTest(
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
-        .exited => |code| if (code != 0) return error.NamedPipeFixtureUnavailable,
-        else => return error.NamedPipeFixtureUnavailable,
+        .exited => |code| if (code != 0) return error.NamedPipeFixtureCommandFailed,
+        else => return error.NamedPipeFixtureCommandFailed,
     }
     return true;
 }
@@ -4500,6 +4614,67 @@ fn testOracleValidationWorkLimits(
         manifest_work_error = err;
     };
     try expectPublicationError(error.OracleValidationWorkLimitExceeded, manifest_work_error);
+
+    var invalid_typed_case_rows: std.ArrayList(u8) = .empty;
+    defer invalid_typed_case_rows.deinit(allocator);
+    try invalid_typed_case_rows.appendSlice(allocator, "{\"cases\":[");
+    const overlimit_case_rows = max_integrity_case_rows_v1 + 1;
+    for (0..overlimit_case_rows) |index| {
+        if (index != 0) try invalid_typed_case_rows.append(allocator, ',');
+        try invalid_typed_case_rows.appendSlice(allocator, "null");
+    }
+    try invalid_typed_case_rows.appendSlice(allocator, "]}");
+    try writeArtifact(
+        init.io,
+        allocator,
+        manifest_candidate,
+        "manifest.json",
+        invalid_typed_case_rows.items,
+    );
+    var preparse_work_error: ?anyerror = null;
+    {
+        var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
+        defer manifest_dir.close(init.io);
+        validateManifestBounded(
+            init.io,
+            allocator,
+            manifest_dir,
+            .integrity,
+            default_validation_work_limits,
+        ) catch |err| {
+            preparse_work_error = err;
+        };
+    }
+    try expectPublicationError(error.OracleValidationWorkLimitExceeded, preparse_work_error);
+
+    const in_budget_null_row = "{\"cases\":[null]}";
+    try admitIntegrityManifestRows(
+        allocator,
+        in_budget_null_row,
+        default_validation_work_limits,
+    );
+    try writeArtifact(
+        init.io,
+        allocator,
+        manifest_candidate,
+        "manifest.json",
+        in_budget_null_row,
+    );
+    var typed_manifest_error: ?anyerror = null;
+    {
+        var manifest_dir = try openOracleRootNoFollow(init.io, manifest_candidate);
+        defer manifest_dir.close(init.io);
+        validateManifestBounded(
+            init.io,
+            allocator,
+            manifest_dir,
+            .integrity,
+            default_validation_work_limits,
+        ) catch |err| {
+            typed_manifest_error = err;
+        };
+    }
+    try expectPublicationError(error.InvalidOracleManifest, typed_manifest_error);
 }
 
 const RejectedCandidateRequest = struct {
@@ -4517,7 +4692,7 @@ fn expectSelfConsistentCandidateRejected(
 ) !void {
     try rewriteOracleMetadata(init, allocator, request.candidate);
     var candidate_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         request.candidate,
         request.receiver_pin,
         request.paths,
@@ -4549,7 +4724,7 @@ fn testMissingPublicationAuthority(
         return error.OraclePublicationResidue;
     }
 
-    var request = exclusivePublicationRequest(candidate, receiver_pin, paths, .none);
+    var request = injectedSandboxPublicationRequest(candidate, receiver_pin, paths, .none);
     request.authority = null;
     var publication_error: ?anyerror = null;
     _ = publishOracleTree(init, allocator, request) catch |err| {
@@ -4938,7 +5113,7 @@ fn expectStageFailureCase(
         try deleteDirectoryIfPresent(context.init.io, context.paths.stage);
     }
 
-    _ = try publishOracleTree(context.init, context.allocator, exclusivePublicationRequest(
+    _ = try publishOracleTree(context.init, context.allocator, injectedSandboxPublicationRequest(
         context.candidate,
         context.receiver_pin,
         context.paths,
@@ -5020,7 +5195,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
 
-    const sandbox_context_probe = exclusivePublicationRequest(candidate, receiver_pin, paths, .none);
+    const sandbox_context_probe = injectedSandboxPublicationRequest(candidate, receiver_pin, paths, .none);
     if (sandbox_context_probe.diagnostic_context != .injected_sandbox) {
         return error.SandboxPublicationDiagnosticContextLost;
     }
@@ -5208,7 +5383,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try compareTrees(init, allocator, candidate, target);
     try rewriteIntegrityManifestCases(init, allocator, target, cases.len + 1);
     try validateOracleTreeIntegrity(init, allocator, target);
-    switch (try publishOracleTree(init, allocator, exclusivePublicationRequest(
+    switch (try publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5286,6 +5461,46 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     };
     if (missing_interpreter_available) return error.MissingNamedPipeInterpreterExecuted;
     try expectPublicationError(error.FileNotFound, missing_interpreter_error);
+
+    const path_precedence_command = "mkfifo";
+    if (try pathKindNoFollow(init.io, path_precedence_command) != null) {
+        return error.OraclePublicationResidue;
+    }
+    try cwd.writeFile(init.io, .{
+        .sub_path = path_precedence_command,
+        .data = "#!/boundary-oracle-v1-missing-interpreter-216a051\nexit 0\n",
+    });
+    try cwd.setFilePermissions(
+        init.io,
+        path_precedence_command,
+        std.Io.File.Permissions.fromMode(0o700),
+        .{},
+    );
+    var path_command_present = true;
+    defer if (path_command_present) {
+        cwd.deleteFile(init.io, path_precedence_command) catch |cleanup_error|
+            reportCleanupFailure(path_precedence_command, cleanup_error);
+    };
+    var path_environment = try init.environ_map.clone(allocator);
+    defer path_environment.deinit();
+    try path_environment.put("PATH", ":/usr/bin");
+    var path_test_init = init;
+    path_test_init.environ_map = &path_environment;
+    var path_precedence_error: ?anyerror = null;
+    const path_precedence_available = createNamedPipeForPublicationTest(
+        path_test_init,
+        allocator,
+        path_precedence_command,
+        special_manifest_path,
+    ) catch |err| failed: {
+        path_precedence_error = err;
+        break :failed false;
+    };
+    if (path_precedence_available) return error.EmptyPathCommandPrecedenceLost;
+    try expectPublicationError(error.FileNotFound, path_precedence_error);
+    try cwd.deleteFile(init.io, path_precedence_command);
+    path_command_present = false;
+
     if (try createNamedPipeForPublicationTest(init, allocator, "mkfifo", special_manifest_path)) {
         var direct_read_error: ?anyerror = null;
         const unexpected_bytes = readRelative(
@@ -5341,7 +5556,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try copyOracleTree(init, allocator, candidate, invalid_candidate);
     try writeArtifact(init.io, allocator, invalid_candidate, "cases/scalar-pure.txt", "corrupt\n");
     var invalid_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         invalid_candidate,
         receiver_pin,
         paths,
@@ -5418,7 +5633,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try writeArtifact(init.io, allocator, stale_provenance_candidate, "manifest.json", stale_manifest);
     try writeChecksums(init, allocator, stale_provenance_candidate);
     var stale_provenance_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         stale_provenance_candidate,
         receiver_pin,
         paths,
@@ -5447,7 +5662,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try writeArtifact(init.io, allocator, alternate_provenance_candidate, "manifest.json", alternate_provenance_manifest);
     try writeChecksums(init, allocator, alternate_provenance_candidate);
     var alternate_provenance_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         alternate_provenance_candidate,
         receiver_pin,
         paths,
@@ -5470,7 +5685,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try writeArtifact(init.io, allocator, metadata_variant_candidate, "manifest.json", whitespace_manifest);
     try writeChecksums(init, allocator, metadata_variant_candidate);
     var metadata_variant_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         metadata_variant_candidate,
         receiver_pin,
         paths,
@@ -5494,7 +5709,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         }
     };
     var diagnostic_failure_error: ?anyerror = null;
-    const diagnostic_request = exclusivePublicationRequest(
+    const diagnostic_request = injectedSandboxPublicationRequest(
         metadata_variant_candidate,
         receiver_pin,
         paths,
@@ -5540,7 +5755,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try deleteDirectoryIfPresent(init.io, target);
     try copyOracleTree(init, allocator, stale_provenance_candidate, target);
     var stale_prior_fault: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5622,7 +5837,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try compareTrees(init, allocator, stale_provenance_candidate, target);
 
     var replacement_race_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5645,13 +5860,13 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try deleteDirectoryIfPresent(init.io, target);
     try copyOracleTree(init, allocator, stale_provenance_candidate, target);
 
-    _ = try publishOracleTree(init, allocator, exclusivePublicationRequest(candidate, receiver_pin, paths, .none));
+    _ = try publishOracleTree(init, allocator, injectedSandboxPublicationRequest(candidate, receiver_pin, paths, .none));
     try compareTrees(init, allocator, candidate, target);
 
     try deleteDirectoryIfPresent(init.io, target);
     try copyOracleTree(init, allocator, stale_provenance_candidate, target);
     var identity_mismatch_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5670,7 +5885,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try deleteDirectoryIfPresent(init.io, target);
     try copyOracleTree(init, allocator, stale_provenance_candidate, target);
     var post_move_observation_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5689,7 +5904,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try deleteDirectoryIfPresent(init.io, target);
     try copyOracleTree(init, allocator, stale_provenance_candidate, target);
     var post_move_replacement_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5731,7 +5946,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try copyOracleTree(init, allocator, candidate, target);
 
     var rollback_conflict_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5751,7 +5966,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     if (try pathKindNoFollow(init.io, backup) != null) return error.OraclePublicationResidue;
 
     var injected_error: ?anyerror = null;
-    _ = publishOracleTree(init, allocator, exclusivePublicationRequest(
+    _ = publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5767,7 +5982,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
 
     try testUnownedStageRecoveryConflict(init, allocator, candidate, paths);
 
-    const cleanup_outcome = try publishOracleTree(init, allocator, exclusivePublicationRequest(
+    const cleanup_outcome = try publishOracleTree(init, allocator, injectedSandboxPublicationRequest(
         candidate,
         receiver_pin,
         paths,
@@ -5790,7 +6005,7 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try validateOracleTreeIntegrity(init, allocator, backup);
     try deleteDirectoryIfPresent(init.io, backup);
 
-    _ = try publishOracleTree(init, allocator, exclusivePublicationRequest(candidate, receiver_pin, paths, .none));
+    _ = try publishOracleTree(init, allocator, injectedSandboxPublicationRequest(candidate, receiver_pin, paths, .none));
     try compareTrees(init, allocator, candidate, target);
 
     try cwd.writeFile(init.io, .{ .sub_path = stage, .data = "unsafe-stage\n" });
