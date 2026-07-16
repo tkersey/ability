@@ -4427,11 +4427,20 @@ fn requireExecuteAccessForPublicationTest(path: []const u8, flags: u32) !void {
 const ExecutableAdmissionOps = struct {
     init: std.process.Init,
     access_flags_probe: ?*?u32 = null,
+    disappear_before_access_path: ?[]const u8 = null,
+    disappearance_performed: ?*bool = null,
     replacement_source: ?[]const u8 = null,
     replacement_performed: ?*bool = null,
 
     fn requireExecuteAccess(self: *@This(), path: []const u8, flags: u32) !void {
         if (self.access_flags_probe) |probe| probe.* = flags;
+        if (self.disappear_before_access_path) |disappearing_path| {
+            if (std.mem.eql(u8, path, disappearing_path)) {
+                try std.Io.Dir.cwd().deleteFile(self.init.io, disappearing_path);
+                self.disappear_before_access_path = null;
+                if (self.disappearance_performed) |performed| performed.* = true;
+            }
+        }
         try requireExecuteAccessForPublicationTest(path, flags);
     }
 
@@ -4456,23 +4465,19 @@ fn admitExecutableCandidateForPublicationTestWithOps(
     );
 }
 
-fn admitExecutableCandidateForPublicationTest(
-    init: std.process.Init,
-    path: []const u8,
-) !bool {
-    var ops = ExecutableAdmissionOps{ .init = init };
-    return admitExecutableCandidateForPublicationTestWithOps(path, &ops);
-}
-
-fn resolveExecutableForPublicationTest(
+fn resolveExecutableForPublicationTestWithOps(
     init: std.process.Init,
     allocator: std.mem.Allocator,
     command: []const u8,
+    supplied_ops: ?*ExecutableAdmissionOps,
 ) !?[]u8 {
     if (command.len == 0) return null;
 
+    var default_ops = ExecutableAdmissionOps{ .init = init };
+    const ops = supplied_ops orelse &default_ops;
+
     if (std.mem.findScalar(u8, command, '/') != null) {
-        if (!try admitExecutableCandidateForPublicationTest(init, command)) return null;
+        if (!try admitExecutableCandidateForPublicationTestWithOps(command, ops)) return null;
         return try allocator.dupe(u8, command);
     }
 
@@ -4484,9 +4489,10 @@ fn resolveExecutableForPublicationTest(
             try std.fmt.allocPrint(allocator, "./{s}", .{command})
         else
             try joinPath(allocator, &.{ entry, command });
-        const executable_file = admitExecutableCandidateForPublicationTest(init, candidate) catch |err| {
+        const executable_file = admitExecutableCandidateForPublicationTestWithOps(candidate, ops) catch |err| {
             allocator.free(candidate);
             switch (err) {
+                error.FileNotFound => continue,
                 error.AccessDenied, error.PermissionDenied => {
                     access_error = err;
                     continue;
@@ -4504,8 +4510,20 @@ fn resolveExecutableForPublicationTest(
     return null;
 }
 
+fn resolveExecutableForPublicationTest(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    command: []const u8,
+) !?[]u8 {
+    return resolveExecutableForPublicationTestWithOps(init, allocator, command, null);
+}
+
 fn publicationFixtureHostSupported(os_tag: std.Target.Os.Tag) bool {
     return os_tag == .linux or os_tag == .macos;
+}
+
+fn publicationMutationHostSupported(os_tag: std.Target.Os.Tag) bool {
+    return os_tag.isDarwin() or os_tag == .linux or os_tag == .windows;
 }
 
 fn createNamedPipeForPublicationTest(
@@ -5362,6 +5380,10 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try std.testing.expect(publicationFixtureHostSupported(.linux));
     try std.testing.expect(publicationFixtureHostSupported(.macos));
     try std.testing.expect(!publicationFixtureHostSupported(.freebsd));
+    try std.testing.expect(publicationMutationHostSupported(.linux));
+    try std.testing.expect(publicationMutationHostSupported(.macos));
+    try std.testing.expect(publicationMutationHostSupported(.windows));
+    try std.testing.expect(!publicationMutationHostSupported(.freebsd));
 
     const sandbox_context_probe = injectedSandboxPublicationRequest(candidate, receiver_pin, paths, .none);
     if (sandbox_context_probe.diagnostic_context != .injected_sandbox) {
@@ -5444,6 +5466,8 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
             return error.UnsafeOraclePathMisclassified;
         }
     }
+    if (!publicationMutationHostSupported(builtin.os.tag)) return;
+
     try createFreshDirectory(init.io, root);
     defer deleteDirectoryIfPresent(init.io, root) catch |cleanup_error|
         reportCleanupFailure(root, cleanup_error);
@@ -5813,6 +5837,94 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         ) orelse return error.ExecutableSymlinkNotResolved;
         defer allocator.free(resolved_symlink);
         try expectEqualBytes(symlink_command, resolved_symlink);
+
+        const disappearing_path_entry = try joinPath(
+            allocator,
+            &.{ root, "path-disappearing-file" },
+        );
+        defer allocator.free(disappearing_path_entry);
+        try cwd.createDirPath(init.io, disappearing_path_entry);
+        const disappearing_command = try joinPath(
+            allocator,
+            &.{ disappearing_path_entry, "mkfifo" },
+        );
+        defer allocator.free(disappearing_command);
+        try cwd.writeFile(init.io, .{
+            .sub_path = disappearing_command,
+            .data = "removed before executable access\n",
+        });
+        try cwd.setFilePermissions(
+            init.io,
+            disappearing_command,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+        const disappearing_path_value = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{s}",
+            .{ disappearing_path_entry, executable_path_entry },
+        );
+        defer allocator.free(disappearing_path_value);
+        var disappearing_environment = try init.environ_map.clone(allocator);
+        defer disappearing_environment.deinit();
+        try disappearing_environment.put("PATH", disappearing_path_value);
+        var disappearing_init = init;
+        disappearing_init.environ_map = &disappearing_environment;
+        var disappearance_performed = false;
+        var disappearance_ops = ExecutableAdmissionOps{
+            .init = disappearing_init,
+            .disappear_before_access_path = disappearing_command,
+            .disappearance_performed = &disappearance_performed,
+        };
+        const resolved_after_disappearance = try resolveExecutableForPublicationTestWithOps(
+            disappearing_init,
+            allocator,
+            "mkfifo",
+            &disappearance_ops,
+        ) orelse return error.ExecutableAfterDisappearanceNotResolved;
+        defer allocator.free(resolved_after_disappearance);
+        try expectEqualBytes(executable_command, resolved_after_disappearance);
+        if (!disappearance_performed) return error.ExecutableDisappearanceHookNotInvoked;
+        if (try pathKindNoFollow(init.io, disappearing_command) != null) {
+            return error.DisappearingExecutableCandidateRetained;
+        }
+
+        const direct_disappearing_command = try joinPath(
+            allocator,
+            &.{ root, "direct-disappearing-executable" },
+        );
+        defer allocator.free(direct_disappearing_command);
+        try cwd.writeFile(init.io, .{
+            .sub_path = direct_disappearing_command,
+            .data = "removed before direct executable access\n",
+        });
+        try cwd.setFilePermissions(
+            init.io,
+            direct_disappearing_command,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+        var direct_disappearance_performed = false;
+        var direct_disappearance_ops = ExecutableAdmissionOps{
+            .init = init,
+            .disappear_before_access_path = direct_disappearing_command,
+            .disappearance_performed = &direct_disappearance_performed,
+        };
+        var direct_disappearance_error: ?anyerror = null;
+        const direct_disappearance_result = resolveExecutableForPublicationTestWithOps(
+            init,
+            allocator,
+            direct_disappearing_command,
+            &direct_disappearance_ops,
+        ) catch |err| failed: {
+            direct_disappearance_error = err;
+            break :failed null;
+        };
+        if (direct_disappearance_result) |unexpected| allocator.free(unexpected);
+        try expectPublicationError(error.FileNotFound, direct_disappearance_error);
+        if (!direct_disappearance_performed) {
+            return error.DirectExecutableDisappearanceHookNotInvoked;
+        }
     }
 
     if (publicationFixtureHostSupported(builtin.os.tag)) {

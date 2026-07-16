@@ -131,6 +131,17 @@ const ExactInstallTreeStep = struct {
         }
     };
 
+    const ProtectedDescendantBudget = struct {
+        remaining_entries: usize = maximum_cleanup_entries,
+
+        fn consumeEntry(budget: *@This()) !void {
+            if (budget.remaining_entries == 0) {
+                return error.OracleProtectedTraversalWorkLimitExceeded;
+            }
+            budget.remaining_entries -= 1;
+        }
+    };
+
     const CleanupTraversal = struct {
         protected_identities: []const FileIdentity,
         current_depth: usize,
@@ -685,19 +696,30 @@ const ExactInstallTreeStep = struct {
         }
     }
 
-    const ProtectedDescendantContext = struct {
+    const ProtectedDescendantTraversal = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         protected_identities: *std.ArrayList(FileIdentity),
+        current_depth: usize,
+        budget: *ProtectedDescendantBudget,
     };
 
     fn collectProtectedDescendantEntryNoFollow(
         dir: std.Io.Dir,
-        context: ProtectedDescendantContext,
+        traversal: ProtectedDescendantTraversal,
         name: []const u8,
         reported_kind: std.Io.File.Kind,
     ) anyerror!void {
-        switch (try sourceEntryKindNoFollow(dir, context.io, name, reported_kind)) {
+        try traversal.budget.consumeEntry();
+        if (name.len == 0 or
+            std.mem.eql(u8, name, ".") or
+            std.mem.eql(u8, name, "..") or
+            std.mem.findAny(u8, name, "/\\") != null)
+        {
+            return error.UnsupportedOracleTreeEntry;
+        }
+
+        switch (try sourceEntryKindNoFollow(dir, traversal.io, name, reported_kind)) {
             .file => return,
             .directory => {},
             .block_device,
@@ -712,42 +734,40 @@ const ExactInstallTreeStep = struct {
             => return error.UnsupportedOracleTreeEntry,
         }
 
-        var child = try dir.openDir(context.io, name, .{
+        if (traversal.current_depth >= maximum_cleanup_depth) {
+            return error.OracleProtectedTraversalDepthLimitExceeded;
+        }
+        const child_depth = traversal.current_depth + 1;
+
+        var child = try dir.openDir(traversal.io, name, .{
             .iterate = true,
             .follow_symlinks = false,
         });
-        defer child.close(context.io);
+        defer child.close(traversal.io);
         const child_identity = try directoryIdentity(child);
-        if (identityMatchesAny(child_identity, context.protected_identities.items)) return;
-        try context.protected_identities.append(context.allocator, child_identity);
-        try collectProtectedDescendantIdentities(
-            child,
-            context.io,
-            context.allocator,
-            context.protected_identities,
-        );
+        if (identityMatchesAny(child_identity, traversal.protected_identities.items)) return;
+        try traversal.protected_identities.append(traversal.allocator, child_identity);
+        try collectProtectedDescendantIdentities(child, .{
+            .allocator = traversal.allocator,
+            .io = traversal.io,
+            .protected_identities = traversal.protected_identities,
+            .current_depth = child_depth,
+            .budget = traversal.budget,
+        });
     }
 
     fn collectProtectedDescendantIdentities(
         dir: std.Io.Dir,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        protected_identities: *std.ArrayList(FileIdentity),
+        traversal: ProtectedDescendantTraversal,
     ) !void {
         var iterator = dir.iterate();
-        while (try iterator.next(io)) |entry| {
-            if (entry.name.len == 0 or
-                std.mem.eql(u8, entry.name, ".") or
-                std.mem.eql(u8, entry.name, "..") or
-                std.mem.findAny(u8, entry.name, "/\\") != null)
-            {
-                return error.UnsupportedOracleTreeEntry;
-            }
-            try collectProtectedDescendantEntryNoFollow(dir, .{
-                .allocator = allocator,
-                .io = io,
-                .protected_identities = protected_identities,
-            }, entry.name, entry.kind);
+        while (try iterator.next(traversal.io)) |entry| {
+            try collectProtectedDescendantEntryNoFollow(
+                dir,
+                traversal,
+                entry.name,
+                entry.kind,
+            );
         }
     }
 
@@ -1392,12 +1412,14 @@ const ExactInstallTreeStep = struct {
         var identities: std.ArrayList(FileIdentity) = .empty;
         defer identities.deinit(std.testing.allocator);
         try identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
-        try collectProtectedDescendantIdentities(
-            tmp.dir,
-            io,
-            std.testing.allocator,
-            &identities,
-        );
+        var protected_descendant_budget: ProtectedDescendantBudget = .{};
+        try collectProtectedDescendantIdentities(tmp.dir, .{
+            .allocator = std.testing.allocator,
+            .io = io,
+            .protected_identities = &identities,
+            .current_depth = 0,
+            .budget = &protected_descendant_budget,
+        });
         try std.testing.expect(identityMatchesAny(try directoryIdentity(child), identities.items));
         try std.testing.expect(identityMatchesAny(try directoryIdentity(grandchild), identities.items));
         var cleanup_budget: CleanupBudget = .{};
@@ -1423,10 +1445,13 @@ const ExactInstallTreeStep = struct {
         var identities: std.ArrayList(FileIdentity) = .empty;
         defer identities.deinit(std.testing.allocator);
         try identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
-        const context: ProtectedDescendantContext = .{
+        var protected_descendant_budget: ProtectedDescendantBudget = .{};
+        const traversal: ProtectedDescendantTraversal = .{
             .allocator = std.testing.allocator,
             .io = io,
             .protected_identities = &identities,
+            .current_depth = 0,
+            .budget = &protected_descendant_budget,
         };
 
         try tmp.dir.writeFile(io, .{
@@ -1436,7 +1461,7 @@ const ExactInstallTreeStep = struct {
         const identity_count_before_file = identities.items.len;
         try collectProtectedDescendantEntryNoFollow(
             tmp.dir,
-            context,
+            traversal,
             "unknown-file",
             .unknown,
         );
@@ -1466,7 +1491,7 @@ const ExactInstallTreeStep = struct {
         child.close(io);
         try collectProtectedDescendantEntryNoFollow(
             tmp.dir,
-            context,
+            traversal,
             "unknown-directory",
             .unknown,
         );
@@ -1481,7 +1506,7 @@ const ExactInstallTreeStep = struct {
             error.UnsupportedOracleTreeEntry,
             collectProtectedDescendantEntryNoFollow(
                 tmp.dir,
-                context,
+                traversal,
                 "reported-special",
                 .named_pipe,
             ),
@@ -1507,7 +1532,7 @@ const ExactInstallTreeStep = struct {
                 error.UnsupportedOracleTreeEntry,
                 collectProtectedDescendantEntryNoFollow(
                     tmp.dir,
-                    context,
+                    traversal,
                     "unknown-link",
                     .unknown,
                 ),
@@ -1524,6 +1549,153 @@ const ExactInstallTreeStep = struct {
             );
             defer std.testing.allocator.free(linked_target);
             try std.testing.expectEqualStrings("linked-target\n", linked_target);
+        }
+    }
+
+    fn testProtectedDescendantDepthBound() !void {
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+
+        try tmp.dir.createDir(io, "child", private_dir_permissions);
+        var child = try tmp.dir.openDir(io, "child", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer child.close(io);
+        const child_identity = try directoryIdentity(child);
+
+        var exact_identities: std.ArrayList(FileIdentity) = .empty;
+        defer exact_identities.deinit(std.testing.allocator);
+        try exact_identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
+        var exact_budget: ProtectedDescendantBudget = .{ .remaining_entries = 1 };
+        try collectProtectedDescendantIdentities(tmp.dir, .{
+            .allocator = std.testing.allocator,
+            .io = io,
+            .protected_identities = &exact_identities,
+            .current_depth = maximum_cleanup_depth - 1,
+            .budget = &exact_budget,
+        });
+        try std.testing.expectEqual(@as(usize, 0), exact_budget.remaining_entries);
+        try std.testing.expect(identityMatchesAny(child_identity, exact_identities.items));
+
+        var over_identities: std.ArrayList(FileIdentity) = .empty;
+        defer over_identities.deinit(std.testing.allocator);
+        try over_identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
+        var over_budget: ProtectedDescendantBudget = .{ .remaining_entries = 1 };
+        try std.testing.expectError(
+            error.OracleProtectedTraversalDepthLimitExceeded,
+            collectProtectedDescendantIdentities(tmp.dir, .{
+                .allocator = std.testing.allocator,
+                .io = io,
+                .protected_identities = &over_identities,
+                .current_depth = maximum_cleanup_depth,
+                .budget = &over_budget,
+            }),
+        );
+        try std.testing.expectEqual(@as(usize, 0), over_budget.remaining_entries);
+        try std.testing.expectEqual(@as(usize, 1), over_identities.items.len);
+        try std.testing.expect(!identityMatchesAny(child_identity, over_identities.items));
+        const child_stat = try tmp.dir.statFile(io, "child", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.directory, child_stat.kind);
+    }
+
+    fn testProtectedDescendantWorkBound() !void {
+        var production_budget: ProtectedDescendantBudget = .{};
+        for (0..maximum_cleanup_entries) |_| try production_budget.consumeEntry();
+        try std.testing.expectEqual(@as(usize, 0), production_budget.remaining_entries);
+        try std.testing.expectError(
+            error.OracleProtectedTraversalWorkLimitExceeded,
+            production_budget.consumeEntry(),
+        );
+
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        try tmp.dir.createDir(io, "child", private_dir_permissions);
+        var child = try tmp.dir.openDir(io, "child", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        });
+        defer child.close(io);
+        try child.writeFile(io, .{
+            .sub_path = "nested-marker.txt",
+            .data = "protected-descendant-work-bound\n",
+        });
+        const child_identity = try directoryIdentity(child);
+
+        var exact_identities: std.ArrayList(FileIdentity) = .empty;
+        defer exact_identities.deinit(std.testing.allocator);
+        try exact_identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
+        var exact_budget: ProtectedDescendantBudget = .{ .remaining_entries = 2 };
+        try collectProtectedDescendantIdentities(tmp.dir, .{
+            .allocator = std.testing.allocator,
+            .io = io,
+            .protected_identities = &exact_identities,
+            .current_depth = 0,
+            .budget = &exact_budget,
+        });
+        try std.testing.expectEqual(@as(usize, 0), exact_budget.remaining_entries);
+        try std.testing.expect(identityMatchesAny(child_identity, exact_identities.items));
+
+        var limited_identities: std.ArrayList(FileIdentity) = .empty;
+        defer limited_identities.deinit(std.testing.allocator);
+        try limited_identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
+        var limited_budget: ProtectedDescendantBudget = .{ .remaining_entries = 1 };
+        try std.testing.expectError(
+            error.OracleProtectedTraversalWorkLimitExceeded,
+            collectProtectedDescendantIdentities(tmp.dir, .{
+                .allocator = std.testing.allocator,
+                .io = io,
+                .protected_identities = &limited_identities,
+                .current_depth = 0,
+                .budget = &limited_budget,
+            }),
+        );
+        try std.testing.expectEqual(@as(usize, 0), limited_budget.remaining_entries);
+        try std.testing.expect(identityMatchesAny(child_identity, limited_identities.items));
+        const nested_marker = try child.readFileAlloc(
+            io,
+            "nested-marker.txt",
+            std.testing.allocator,
+            .limited(64),
+        );
+        defer std.testing.allocator.free(nested_marker);
+        try std.testing.expectEqualStrings("protected-descendant-work-bound\n", nested_marker);
+
+        if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+            try tmp.dir.writeFile(io, .{
+                .sub_path = "bad\\name",
+                .data = "malformed protected entry\n",
+            });
+            var malformed_identities: std.ArrayList(FileIdentity) = .empty;
+            defer malformed_identities.deinit(std.testing.allocator);
+            try malformed_identities.append(std.testing.allocator, try directoryIdentity(tmp.dir));
+
+            var exhausted_budget: ProtectedDescendantBudget = .{ .remaining_entries = 0 };
+            try std.testing.expectError(
+                error.OracleProtectedTraversalWorkLimitExceeded,
+                collectProtectedDescendantEntryNoFollow(tmp.dir, .{
+                    .allocator = std.testing.allocator,
+                    .io = io,
+                    .protected_identities = &malformed_identities,
+                    .current_depth = 0,
+                    .budget = &exhausted_budget,
+                }, "bad\\name", .file),
+            );
+
+            var one_entry_budget: ProtectedDescendantBudget = .{ .remaining_entries = 1 };
+            try std.testing.expectError(
+                error.UnsupportedOracleTreeEntry,
+                collectProtectedDescendantEntryNoFollow(tmp.dir, .{
+                    .allocator = std.testing.allocator,
+                    .io = io,
+                    .protected_identities = &malformed_identities,
+                    .current_depth = 0,
+                    .budget = &one_entry_budget,
+                }, "bad\\name", .file),
+            );
+            try std.testing.expectEqual(@as(usize, 0), one_entry_budget.remaining_entries);
         }
     }
 
@@ -2033,12 +2205,14 @@ const ExactInstallTreeStep = struct {
         }
         const protected_subtree_start = protected_identities.items.len - 1;
         const protected_identity = protected_identities.items[protected_subtree_start];
-        collectProtectedDescendantIdentities(
-            protected_current,
-            io,
-            options.gpa,
-            &protected_identities,
-        ) catch |err| return step.fail(
+        var protected_descendant_budget: ProtectedDescendantBudget = .{};
+        collectProtectedDescendantIdentities(protected_current, .{
+            .allocator = options.gpa,
+            .io = io,
+            .protected_identities = &protected_identities,
+            .current_depth = 0,
+            .budget = &protected_descendant_budget,
+        }) catch |err| return step.fail(
             "unable to identify every protected Boundary oracle descendant: {s}",
             .{@errorName(err)},
         );
@@ -2570,6 +2744,14 @@ test "exact oracle protection includes descendant directory identities" {
 
 test "exact oracle protected descendants reclassify unknown hints no-follow" {
     try ExactInstallTreeStep.testProtectedDescendantUnknownKindReclassification();
+}
+
+test "exact oracle protected descendant depth is bounded before descent" {
+    try ExactInstallTreeStep.testProtectedDescendantDepthBound();
+}
+
+test "exact oracle protected descendant work is cumulatively bounded" {
+    try ExactInstallTreeStep.testProtectedDescendantWorkBound();
 }
 
 test "exact oracle destination leaf rejects symbolic links" {
