@@ -4399,13 +4399,13 @@ fn executableCandidateIdentityRemained(
     return std.meta.eql(before, observed_after);
 }
 
-fn requireEffectiveExecuteAccessForPublicationTest(path: []const u8) !void {
+fn requireExecuteAccessForPublicationTest(path: []const u8, flags: u32) !void {
     const path_posix = try std.posix.toPosixPath(path);
     while (true) switch (std.c.errno(std.c.faccessat(
         std.posix.AT.FDCWD,
         &path_posix,
         std.posix.X_OK,
-        effective_execute_access_flags,
+        flags,
     ))) {
         .SUCCESS => return,
         .INTR => {},
@@ -4424,17 +4424,44 @@ fn requireEffectiveExecuteAccessForPublicationTest(path: []const u8) !void {
     };
 }
 
-fn admitExecutableCandidateForPublicationTest(
+const ExecutableAdmissionOps = struct {
     init: std.process.Init,
+    access_flags_probe: ?*?u32 = null,
+    replacement_source: ?[]const u8 = null,
+    replacement_performed: ?*bool = null,
+
+    fn requireExecuteAccess(self: *@This(), path: []const u8, flags: u32) !void {
+        if (self.access_flags_probe) |probe| probe.* = flags;
+        try requireExecuteAccessForPublicationTest(path, flags);
+    }
+
+    fn betweenObservations(self: *@This(), path: []const u8) !void {
+        const source = self.replacement_source orelse return;
+        const cwd = std.Io.Dir.cwd();
+        try cwd.rename(source, cwd, path, self.init.io);
+        if (self.replacement_performed) |performed| performed.* = true;
+    }
+};
+
+fn admitExecutableCandidateForPublicationTestWithOps(
     path: []const u8,
+    ops: *ExecutableAdmissionOps,
 ) !bool {
-    _ = init;
     const before = try observeExecutableCandidateForPublicationTest(path) orelse return false;
-    try requireEffectiveExecuteAccessForPublicationTest(path);
+    try ops.requireExecuteAccess(path, effective_execute_access_flags);
+    try ops.betweenObservations(path);
     return executableCandidateIdentityRemained(
         before,
         try observeExecutableCandidateForPublicationTest(path),
     );
+}
+
+fn admitExecutableCandidateForPublicationTest(
+    init: std.process.Init,
+    path: []const u8,
+) !bool {
+    var ops = ExecutableAdmissionOps{ .init = init };
+    return admitExecutableCandidateForPublicationTestWithOps(path, &ops);
 }
 
 fn resolveExecutableForPublicationTest(
@@ -4477,16 +4504,17 @@ fn resolveExecutableForPublicationTest(
     return null;
 }
 
+fn publicationFixtureHostSupported(os_tag: std.Target.Os.Tag) bool {
+    return os_tag == .linux or os_tag == .macos;
+}
+
 fn createNamedPipeForPublicationTest(
     init: std.process.Init,
     allocator: std.mem.Allocator,
     command: []const u8,
     path: []const u8,
 ) !bool {
-    switch (builtin.os.tag) {
-        .linux, .macos => {},
-        else => return false,
-    }
+    if (!publicationFixtureHostSupported(builtin.os.tag)) return false;
     const executable = try resolveExecutableForPublicationTest(init, allocator, command) orelse return false;
     defer allocator.free(executable);
     const result = try std.process.run(allocator, init.io, .{
@@ -5331,6 +5359,10 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     const paths = PublicationPaths{ .target = target, .stage = stage, .backup = backup };
     const cwd = std.Io.Dir.cwd();
 
+    try std.testing.expect(publicationFixtureHostSupported(.linux));
+    try std.testing.expect(publicationFixtureHostSupported(.macos));
+    try std.testing.expect(!publicationFixtureHostSupported(.freebsd));
+
     const sandbox_context_probe = injectedSandboxPublicationRequest(candidate, receiver_pin, paths, .none);
     if (sandbox_context_probe.diagnostic_context != .injected_sandbox) {
         return error.SandboxPublicationDiagnosticContextLost;
@@ -5563,40 +5595,42 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     )) {
         return error.MissingNamedPipeCommandAccepted;
     }
-    const missing_named_pipe_interpreter = "/boundary-oracle-v1-missing-interpreter-216a051";
-    if (try pathKindNoFollow(init.io, missing_named_pipe_interpreter) != null) {
-        return error.MissingNamedPipeInterpreterExists;
+    if (publicationFixtureHostSupported(builtin.os.tag)) {
+        const missing_named_pipe_interpreter = "/boundary-oracle-v1-missing-interpreter-216a051";
+        if (try pathKindNoFollow(init.io, missing_named_pipe_interpreter) != null) {
+            return error.MissingNamedPipeInterpreterExists;
+        }
+        const unlaunchable_fifo_command = try joinPath(
+            allocator,
+            &.{ root, "boundary-oracle-found-unlaunchable-mkfifo-command" },
+        );
+        defer allocator.free(unlaunchable_fifo_command);
+        if (try pathKindNoFollow(init.io, unlaunchable_fifo_command) != null) {
+            return error.OraclePublicationResidue;
+        }
+        try cwd.writeFile(init.io, .{
+            .sub_path = unlaunchable_fifo_command,
+            .data = "#!/boundary-oracle-v1-missing-interpreter-216a051\nexit 0\n",
+        });
+        try cwd.setFilePermissions(
+            init.io,
+            unlaunchable_fifo_command,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+        var missing_interpreter_error: ?anyerror = null;
+        const missing_interpreter_available = createNamedPipeForPublicationTest(
+            init,
+            allocator,
+            unlaunchable_fifo_command,
+            special_manifest_path,
+        ) catch |err| failed: {
+            missing_interpreter_error = err;
+            break :failed false;
+        };
+        if (missing_interpreter_available) return error.MissingNamedPipeInterpreterExecuted;
+        try expectPublicationError(error.FileNotFound, missing_interpreter_error);
     }
-    const unlaunchable_fifo_command = try joinPath(
-        allocator,
-        &.{ root, "boundary-oracle-found-unlaunchable-mkfifo-command" },
-    );
-    defer allocator.free(unlaunchable_fifo_command);
-    if (try pathKindNoFollow(init.io, unlaunchable_fifo_command) != null) {
-        return error.OraclePublicationResidue;
-    }
-    try cwd.writeFile(init.io, .{
-        .sub_path = unlaunchable_fifo_command,
-        .data = "#!/boundary-oracle-v1-missing-interpreter-216a051\nexit 0\n",
-    });
-    try cwd.setFilePermissions(
-        init.io,
-        unlaunchable_fifo_command,
-        std.Io.File.Permissions.fromMode(0o700),
-        .{},
-    );
-    var missing_interpreter_error: ?anyerror = null;
-    const missing_interpreter_available = createNamedPipeForPublicationTest(
-        init,
-        allocator,
-        unlaunchable_fifo_command,
-        special_manifest_path,
-    ) catch |err| failed: {
-        missing_interpreter_error = err;
-        break :failed false;
-    };
-    if (missing_interpreter_available) return error.MissingNamedPipeInterpreterExecuted;
-    try expectPublicationError(error.FileNotFound, missing_interpreter_error);
 
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
         try std.testing.expectEqual(
@@ -5617,6 +5651,21 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
             effective_identity_command,
             std.Io.File.Permissions.fromMode(0o100),
             .{},
+        );
+        var observed_access_flags: ?u32 = null;
+        var access_probe_ops = ExecutableAdmissionOps{
+            .init = init,
+            .access_flags_probe = &observed_access_flags,
+        };
+        if (!try admitExecutableCandidateForPublicationTestWithOps(
+            effective_identity_command,
+            &access_probe_ops,
+        )) {
+            return error.EffectiveIdentityExecutableNotAdmitted;
+        }
+        try std.testing.expectEqual(
+            effective_execute_access_flags,
+            observed_access_flags orelse return error.EffectiveAccessFlagsNotObserved,
         );
         const effective_identity_resolved = try resolveExecutableForPublicationTest(
             init,
@@ -5644,20 +5693,48 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         const replaced_before = try observeExecutableCandidateForPublicationTest(
             replaced_candidate,
         ) orelse return error.ExecutableCandidateIdentityMissing;
-        try cwd.deleteFile(init.io, replaced_candidate);
-        try cwd.createDirPath(init.io, replaced_candidate);
+        const replacement_source = try joinPath(
+            allocator,
+            &.{ root, "replacement-executable-candidate" },
+        );
+        defer allocator.free(replacement_source);
+        try cwd.writeFile(init.io, .{
+            .sub_path = replacement_source,
+            .data = "replacement candidate for identity proof\n",
+        });
         try cwd.setFilePermissions(
             init.io,
-            replaced_candidate,
+            replacement_source,
             std.Io.File.Permissions.fromMode(0o700),
             .{},
         );
-        try requireEffectiveExecuteAccessForPublicationTest(replaced_candidate);
-        if (executableCandidateIdentityRemained(
-            replaced_before,
-            try observeExecutableCandidateForPublicationTest(replaced_candidate),
+        const replacement_identity = try observeExecutableCandidateForPublicationTest(
+            replacement_source,
+        ) orelse return error.ExecutableReplacementIdentityMissing;
+        if (std.meta.eql(replaced_before, replacement_identity)) {
+            return error.ExecutableReplacementIdentityReused;
+        }
+        var replacement_performed = false;
+        var replacement_ops = ExecutableAdmissionOps{
+            .init = init,
+            .replacement_source = replacement_source,
+            .replacement_performed = &replacement_performed,
+        };
+        if (try admitExecutableCandidateForPublicationTestWithOps(
+            replaced_candidate,
+            &replacement_ops,
         )) {
             return error.ReplacedExecutableCandidateAdmitted;
+        }
+        if (!replacement_performed) return error.ExecutableReplacementHookNotInvoked;
+        const replaced_after = try observeExecutableCandidateForPublicationTest(
+            replaced_candidate,
+        ) orelse return error.ExecutableReplacementIdentityMissing;
+        if (!std.meta.eql(replacement_identity, replaced_after)) {
+            return error.ExecutableReplacementIdentityLost;
+        }
+        if (try pathKindNoFollow(init.io, replacement_source) != null) {
+            return error.ExecutableReplacementSourceRetained;
         }
 
         const shadow_path_entry = try joinPath(allocator, &.{ root, "path-shadow-directory" });
@@ -5738,44 +5815,46 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
         try expectEqualBytes(symlink_command, resolved_symlink);
     }
 
-    const path_precedence_command = "mkfifo";
-    if (try pathKindNoFollow(init.io, path_precedence_command) != null) {
-        return error.OraclePublicationResidue;
+    if (publicationFixtureHostSupported(builtin.os.tag)) {
+        const path_precedence_command = "mkfifo";
+        if (try pathKindNoFollow(init.io, path_precedence_command) != null) {
+            return error.OraclePublicationResidue;
+        }
+        try cwd.writeFile(init.io, .{
+            .sub_path = path_precedence_command,
+            .data = "#!/boundary-oracle-v1-missing-interpreter-216a051\nexit 0\n",
+        });
+        try cwd.setFilePermissions(
+            init.io,
+            path_precedence_command,
+            std.Io.File.Permissions.fromMode(0o700),
+            .{},
+        );
+        var path_command_present = true;
+        defer if (path_command_present) {
+            cwd.deleteFile(init.io, path_precedence_command) catch |cleanup_error|
+                reportCleanupFailure(path_precedence_command, cleanup_error);
+        };
+        var path_environment = try init.environ_map.clone(allocator);
+        defer path_environment.deinit();
+        try path_environment.put("PATH", ":/usr/bin");
+        var path_test_init = init;
+        path_test_init.environ_map = &path_environment;
+        var path_precedence_error: ?anyerror = null;
+        const path_precedence_available = createNamedPipeForPublicationTest(
+            path_test_init,
+            allocator,
+            path_precedence_command,
+            special_manifest_path,
+        ) catch |err| failed: {
+            path_precedence_error = err;
+            break :failed false;
+        };
+        if (path_precedence_available) return error.EmptyPathCommandPrecedenceLost;
+        try expectPublicationError(error.FileNotFound, path_precedence_error);
+        try cwd.deleteFile(init.io, path_precedence_command);
+        path_command_present = false;
     }
-    try cwd.writeFile(init.io, .{
-        .sub_path = path_precedence_command,
-        .data = "#!/boundary-oracle-v1-missing-interpreter-216a051\nexit 0\n",
-    });
-    try cwd.setFilePermissions(
-        init.io,
-        path_precedence_command,
-        std.Io.File.Permissions.fromMode(0o700),
-        .{},
-    );
-    var path_command_present = true;
-    defer if (path_command_present) {
-        cwd.deleteFile(init.io, path_precedence_command) catch |cleanup_error|
-            reportCleanupFailure(path_precedence_command, cleanup_error);
-    };
-    var path_environment = try init.environ_map.clone(allocator);
-    defer path_environment.deinit();
-    try path_environment.put("PATH", ":/usr/bin");
-    var path_test_init = init;
-    path_test_init.environ_map = &path_environment;
-    var path_precedence_error: ?anyerror = null;
-    const path_precedence_available = createNamedPipeForPublicationTest(
-        path_test_init,
-        allocator,
-        path_precedence_command,
-        special_manifest_path,
-    ) catch |err| failed: {
-        path_precedence_error = err;
-        break :failed false;
-    };
-    if (path_precedence_available) return error.EmptyPathCommandPrecedenceLost;
-    try expectPublicationError(error.FileNotFound, path_precedence_error);
-    try cwd.deleteFile(init.io, path_precedence_command);
-    path_command_present = false;
 
     if (try createNamedPipeForPublicationTest(init, allocator, "mkfifo", special_manifest_path)) {
         var direct_read_error: ?anyerror = null;
