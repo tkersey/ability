@@ -3323,13 +3323,6 @@ const PublicationRoot = struct {
         try root.dir.createDir(io, leaf, .default_dir);
     }
 
-    fn deleteDirectoryIfPresent(root: PublicationRoot, io: std.Io, leaf: []const u8) !void {
-        root.requireMutationAuthority();
-        const kind = try root.pathKind(io, leaf) orelse return;
-        if (kind != .directory) return error.UnsafeOraclePath;
-        try root.dir.deleteTree(io, leaf);
-    }
-
     fn renameDirectoryToMissing(
         root: PublicationRoot,
         io: std.Io,
@@ -3711,34 +3704,6 @@ fn stageFaultPublicationRequest(
     var request = exclusivePublicationRequest(candidate_dir, receiver_pin, paths, .none);
     request.stage_faults = .{ .primary = primary, .rollback = rollback };
     return request;
-}
-
-fn isOracleIntegrityFailure(err: anyerror) bool {
-    return switch (err) {
-        error.InvalidOracleManifest,
-        error.InvalidOracleChecksums,
-        error.OracleDirectoryMissing,
-        error.UnsafeOraclePath,
-        error.UnsupportedOracleTreeEntry,
-        error.NonPortableOraclePath,
-        error.NonPortableOraclePathCollision,
-        error.OracleInventoryDepthLimitExceeded,
-        error.OracleInventoryEntryLimitExceeded,
-        error.OracleInventoryPathLimitExceeded,
-        error.OracleInventoryCumulativePathLimitExceeded,
-        error.OracleInventoryRetainedPathLimitExceeded,
-        error.OracleInventoryOpenDirectoryLimitExceeded,
-        error.OracleValidationWorkLimitExceeded,
-        error.FileNotFound,
-        error.IsDir,
-        error.NotDir,
-        error.StreamTooLong,
-        error.SymLinkLoop,
-        error.BadPathName,
-        error.NameTooLong,
-        => true,
-        else => false,
-    };
 }
 
 fn recoverExclusivePublication(
@@ -4970,9 +4935,6 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     {
         return error.NonPortableOraclePathCollisionNotDetected;
     }
-    if (isOracleIntegrityFailure(error.AccessDenied) or isOracleIntegrityFailure(error.OutOfMemory)) {
-        return error.OperationalOracleFailureMisclassified;
-    }
     inline for (.{
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
@@ -4988,13 +4950,6 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
             return error.UnsafeOraclePathMisclassified;
         }
     }
-    if (!isOracleIntegrityFailure(error.InvalidOracleManifest) or
-        !isOracleIntegrityFailure(error.OracleValidationWorkLimitExceeded) or
-        !isOracleIntegrityFailure(error.FileNotFound))
-    {
-        return error.OracleIntegrityFailureMisclassified;
-    }
-
     try createFreshDirectory(init.io, root);
     defer deleteDirectoryIfPresent(init.io, root) catch |cleanup_error|
         reportCleanupFailure(root, cleanup_error);

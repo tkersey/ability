@@ -2590,11 +2590,14 @@ fn addZigPathCoverageGuard(b: *std.Build) *std.Build.Step {
         "-c",
         \\set -eu
         \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
-        \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
-        \\find src examples test bench -type f -name '*.zig' | sort > "$tmp.actual"
-        \\grep -E '^(src|examples|test|bench)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
+        \\trap 'rm -f "$tmp.actual" "$tmp.actual.unsorted" "$tmp.expected" "$tmp.expected.unsorted"' EXIT
+        \\find src examples test bench -type f -name '*.zig' > "$tmp.actual.unsorted"
+        \\sort "$tmp.actual.unsorted" > "$tmp.actual"
+        \\grep -E '^(src|examples|test|bench)/.*\.zig$' repo_zig_paths.txt > "$tmp.expected.unsorted"
+        \\sort "$tmp.expected.unsorted" > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
+    guard.setCwd(b.path("."));
     return &guard.step;
 }
 
