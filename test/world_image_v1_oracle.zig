@@ -2287,6 +2287,9 @@ const OracleInventoryLimits = struct {
 const max_integrity_case_rows_v1: usize = 16;
 
 comptime {
+    if (max_integrity_case_rows_v1 != 16) {
+        @compileError("Boundary format-v1 integrity compatibility ceiling must remain exactly 16");
+    }
     if (cases.len > max_integrity_case_rows_v1) {
         @compileError("Boundary oracle cases exceed the format-v1 integrity compatibility ceiling");
     }
@@ -4338,7 +4341,42 @@ fn expectPublicationError(expected: anyerror, actual: ?anyerror) !void {
     if (received != expected) return received;
 }
 
-fn isExecutableFileForPublicationTest(
+const effective_execute_access_flags: u32 = @intCast(std.posix.AT.EACCESS);
+
+comptime {
+    if ((builtin.os.tag == .linux or builtin.os.tag == .macos) and
+        effective_execute_access_flags & @as(u32, @intCast(std.posix.AT.EACCESS)) == 0)
+    {
+        @compileError("Boundary publication executable admission must use effective credentials");
+    }
+}
+
+fn requireEffectiveExecuteAccessForPublicationTest(path: []const u8) !void {
+    const path_posix = try std.posix.toPosixPath(path);
+    while (true) switch (std.posix.errno(std.posix.system.faccessat(
+        std.posix.AT.FDCWD,
+        &path_posix,
+        std.posix.X_OK,
+        effective_execute_access_flags,
+    ))) {
+        .SUCCESS => return,
+        .INTR => {},
+        .ACCES => return error.AccessDenied,
+        .PERM => return error.PermissionDenied,
+        .ROFS => return error.ReadOnlyFileSystem,
+        .LOOP => return error.SymLinkLoop,
+        .TXTBSY => return error.FileBusy,
+        .NOTDIR, .NOENT => return error.FileNotFound,
+        .NAMETOOLONG => return error.NameTooLong,
+        .IO => return error.InputOutput,
+        .NOMEM => return error.SystemResources,
+        .ILSEQ => return error.BadPathName,
+        .INVAL, .FAULT => |err| return std.posix.unexpectedErrno(err),
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+}
+
+fn admitExecutableCandidateForPublicationTest(
     init: std.process.Init,
     path: []const u8,
 ) !bool {
@@ -4348,7 +4386,7 @@ fn isExecutableFileForPublicationTest(
         else => return err,
     };
     if (stat.kind != .file) return false;
-    try cwd.access(init.io, path, .{ .follow_symlinks = true, .execute = true });
+    try requireEffectiveExecuteAccessForPublicationTest(path);
     return true;
 }
 
@@ -4360,7 +4398,7 @@ fn resolveExecutableForPublicationTest(
     if (command.len == 0) return null;
 
     if (std.mem.findScalar(u8, command, '/') != null) {
-        if (!try isExecutableFileForPublicationTest(init, command)) return null;
+        if (!try admitExecutableCandidateForPublicationTest(init, command)) return null;
         return try allocator.dupe(u8, command);
     }
 
@@ -4372,7 +4410,7 @@ fn resolveExecutableForPublicationTest(
             try std.fmt.allocPrint(allocator, "./{s}", .{command})
         else
             try joinPath(allocator, &.{ entry, command });
-        const executable_file = isExecutableFileForPublicationTest(init, candidate) catch |err| {
+        const executable_file = admitExecutableCandidateForPublicationTest(init, candidate) catch |err| {
             allocator.free(candidate);
             switch (err) {
                 error.AccessDenied, error.PermissionDenied => {
@@ -5514,6 +5552,33 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try expectPublicationError(error.FileNotFound, missing_interpreter_error);
 
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.posix.AT.EACCESS)),
+            effective_execute_access_flags,
+        );
+        const effective_identity_command = try joinPath(
+            allocator,
+            &.{ root, "effective-identity-executable" },
+        );
+        defer allocator.free(effective_identity_command);
+        try cwd.writeFile(init.io, .{
+            .sub_path = effective_identity_command,
+            .data = "not executed by effective-identity admission proof\n",
+        });
+        try cwd.setFilePermissions(
+            init.io,
+            effective_identity_command,
+            std.Io.File.Permissions.fromMode(0o100),
+            .{},
+        );
+        const effective_identity_resolved = try resolveExecutableForPublicationTest(
+            init,
+            allocator,
+            effective_identity_command,
+        ) orelse return error.EffectiveIdentityExecutableNotResolved;
+        defer allocator.free(effective_identity_resolved);
+        try expectEqualBytes(effective_identity_command, effective_identity_resolved);
+
         const shadow_path_entry = try joinPath(allocator, &.{ root, "path-shadow-directory" });
         defer allocator.free(shadow_path_entry);
         const executable_path_entry = try joinPath(allocator, &.{ root, "path-executable-file" });
