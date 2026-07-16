@@ -732,7 +732,7 @@ fn expectLoadedStringRequestParity(
     }
     const expected_world_port_ref = Target.WorldPortTable.entries[expected_world_port_index].world_port_ref;
     const loaded_world_port_ref = loaded_request.world_port_ref orelse return error.OracleSemanticMismatch;
-    if (!loaded_request.matchesOwner(loaded_module.moduleFingerprint(), loaded_module.entryFunctionRef()) or
+    if (!loaded_module.ownsRequest(loaded_request) or
         expected_world_port_id != loaded_request.world_port_id or
         generated_request.operation_site_index != loaded_request.residual_site_index or
         generated_request.operation_site_fingerprint != loaded_request.residual_site_fingerprint or
@@ -4226,18 +4226,22 @@ fn expectPublicationError(expected: anyerror, actual: ?anyerror) !void {
 fn createNamedPipeForPublicationTest(
     init: std.process.Init,
     allocator: std.mem.Allocator,
+    command: []const u8,
     path: []const u8,
 ) !bool {
     switch (builtin.os.tag) {
         .linux, .macos => {},
         else => return false,
     }
-    const result = try std.process.run(allocator, init.io, .{
-        .argv = &.{ "mkfifo", path },
+    const result = std.process.run(allocator, init.io, .{
+        .argv = &.{ command, path },
         .stdout_limit = .limited(1024),
         .stderr_limit = .limited(1024),
         .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } },
-    });
+    }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
@@ -5180,7 +5184,23 @@ fn testPublication(init: std.process.Init, allocator: std.mem.Allocator, receive
     try deleteArtifact(init.io, allocator, special_entry_candidate, "manifest.json");
     const special_manifest_path = try joinPath(allocator, &.{ special_entry_candidate, "manifest.json" });
     defer allocator.free(special_manifest_path);
-    if (try createNamedPipeForPublicationTest(init, allocator, special_manifest_path)) {
+    const missing_named_pipe_command = try joinPath(
+        allocator,
+        &.{ special_entry_candidate, "boundary-oracle-missing-mkfifo-command" },
+    );
+    defer allocator.free(missing_named_pipe_command);
+    if (try pathKindNoFollow(init.io, missing_named_pipe_command) != null) {
+        return error.OraclePublicationResidue;
+    }
+    if (try createNamedPipeForPublicationTest(
+        init,
+        allocator,
+        missing_named_pipe_command,
+        special_manifest_path,
+    )) {
+        return error.MissingNamedPipeCommandAccepted;
+    }
+    if (try createNamedPipeForPublicationTest(init, allocator, "mkfifo", special_manifest_path)) {
         var direct_read_error: ?anyerror = null;
         const unexpected_bytes = readRelative(
             init.io,

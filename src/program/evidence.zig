@@ -6626,6 +6626,11 @@ pub const BoundaryTargetModule = struct {
             return self.main_export_surface.entry_function_index;
         }
 
+        pub fn ownsRequest(self: @This(), request: Session.Request) bool {
+            return request.module_fingerprint == self.moduleFingerprint() and
+                request.entry_function == self.entryFunctionRef();
+        }
+
         pub fn exportNormalFormKind(self: @This()) BoundaryNormalFormKind {
             return self.main_export_surface.normal_form;
         }
@@ -6709,14 +6714,6 @@ pub const BoundaryTargetModule = struct {
                 canonical_request_fingerprint: u64 = 0,
                 deterministic_continuation_fingerprint: u64,
 
-                pub fn matchesOwner(
-                    request: @This(),
-                    module_fingerprint: u64,
-                    entry_function: u16,
-                ) bool {
-                    return request.module_fingerprint == module_fingerprint and
-                        request.entry_function == entry_function;
-                }
             };
 
             pub const Done = struct {
@@ -9322,7 +9319,8 @@ pub const BoundaryTargetModule = struct {
     }
 
     fn loadedRequestsEqual(left: LoadedModule.Session.Request, right: LoadedModule.Session.Request) bool {
-        return left.matchesOwner(right.module_fingerprint, right.entry_function) and
+        return left.module_fingerprint == right.module_fingerprint and
+            left.entry_function == right.entry_function and
             left.residual_site_index == right.residual_site_index and
             left.residual_site_fingerprint == right.residual_site_fingerprint and
             left.world_port_id == right.world_port_id and

@@ -828,7 +828,7 @@ fn expectLoadedRequestSiteParity(
     }
     const expected_world_port_ref = Target.WorldPortTable.entries[expected_world_port_index].world_port_ref;
     const loaded_world_port_ref = loaded_request.world_port_ref orelse return error.OracleSemanticMismatch;
-    if (!loaded_request.matchesOwner(loaded_module.moduleFingerprint(), loaded_module.entryFunctionRef()) or
+    if (!loaded_module.ownsRequest(loaded_request) or
         !generated_request.matches(Site) or
         expected_world_port_id != loaded_request.world_port_id or
         generated_request.operation_site_index != loaded_request.residual_site_index or
