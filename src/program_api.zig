@@ -1244,6 +1244,191 @@ fn mapProgramRunError(comptime ErrorSet: type, err: anyerror) ErrorSet {
     return error.ProgramContractViolation;
 }
 
+/// Canonical state encoding selected for a generated StaticMachine.
+pub const StaticMachineStateEncoding = enum {
+    canonical_v1,
+};
+
+/// Residual port policy selected for a generated StaticMachine.
+pub const StaticMachineWorldPorts = enum {
+    explicit,
+};
+
+/// Compile-time controls for the Boundary StaticMachine backend.
+pub const StaticMachineOptions = struct {
+    state_encoding: StaticMachineStateEncoding = .canonical_v1,
+    world_ports: StaticMachineWorldPorts = .explicit,
+    debug_metadata: bool = false,
+    maximum_frames: usize = 64,
+    maximum_state_bytes: usize = 1 << 20,
+};
+
+/// Generate a typed static reducer for one Boundary Program.
+pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOptions) type {
+    if (!hasDeclSafe(Program, "_staticMachine")) {
+        @compileError("boundary.staticMachine expects a type returned by boundary.program");
+    }
+    return Program._staticMachine(options);
+}
+
+fn StaticInitialArgs(comptime Body: type) type {
+    if (!hasDeclSafe(Body, "encodeArgs")) return @TypeOf(.{});
+    const function_info = @typeInfo(@TypeOf(Body.encodeArgs)).@"fn";
+    return function_info.return_type orelse @compileError("Boundary Body.encodeArgs must return entry arguments");
+}
+
+fn StaticMachineFor(
+    comptime Program: type,
+    comptime Body: type,
+    comptime Core: type,
+    comptime options: StaticMachineOptions,
+) type {
+    if (options.maximum_frames == 0) @compileError("Boundary StaticMachine maximum_frames must be positive");
+    if (options.maximum_frames < Core.maximum_frame_depth) {
+        @compileError("Boundary StaticMachine maximum_frames is smaller than the reachable helper-frame depth");
+    }
+    if (options.maximum_state_bytes == 0) @compileError("Boundary StaticMachine maximum_state_bytes must be positive");
+
+    return struct {
+        const Self = @This();
+
+        /// Boundary StaticMachine ABI version consumed by World comptime.
+        pub const abi_version: u32 = 1;
+        /// Ephemeral owner for one decoded explicit machine state.
+        pub const State = Core;
+        /// Typed entry arguments accepted by initialState.
+        pub const InitialArgs = StaticInitialArgs(Body);
+        /// Typed terminal program value.
+        pub const Result = Program.contract.ResultType;
+        /// Deterministic program failure set.
+        pub const Failure = Program.Error;
+        /// Static operation and after-continuation site descriptors.
+        pub const EffectRow = Program.protocol;
+        /// Defunctionalized operation request.
+        pub const Request = Core.Request;
+        /// Defunctionalized after-continuation request.
+        pub const AfterRequest = Core.AfterRequest;
+        /// Current parked request projection.
+        pub const Current = Core.Current;
+
+        /// One reduction boundary exposed to World.
+        pub const Transition = union(enum) {
+            request: Request,
+            after: AfterRequest,
+            done: Core.RawResult,
+            yielded_fuel,
+        };
+
+        /// Compile-time machine manifest.
+        pub const Manifest = struct {
+            /// StaticMachine ABI version.
+            pub const abi = abi_version;
+            /// Boundary program identity label.
+            pub const program_label = Program.contract.label;
+            /// Compiled ProgramPlan identity label.
+            pub const plan_label = Program.compiled_plan.label;
+            /// Deterministic compiled ProgramPlan identity.
+            pub const plan_hash = Program.compiled_plan.hash();
+            /// Canonical state image format version.
+            pub const state_image_format_version = Core.state_image_format_version;
+            /// Canonical state image fingerprint version.
+            pub const state_image_fingerprint_version = Core.state_image_fingerprint_version;
+            /// Reachable operation-site metadata in semantic order.
+            pub const operation_sites = Program.protocol.operation_site_metadata;
+            /// Reachable after-continuation-site metadata in semantic order.
+            pub const after_sites = Program.protocol.after_site_metadata;
+            /// Number of reachable operation sites.
+            pub const operation_site_count = Program.protocol.operation_site_count;
+            /// Number of reachable after-continuation sites.
+            pub const after_site_count = Program.protocol.after_site_count;
+            /// Maximum statically reachable helper-frame depth.
+            pub const maximum_frame_depth = Core.maximum_frame_depth;
+            /// Maximum cumulative instruction fuel enforced by Boundary.
+            pub const maximum_interpreter_fuel = Core.maximum_interpreter_fuel;
+            /// Maximum canonical state image bytes selected by the application.
+            pub const maximum_state_bytes = options.maximum_state_bytes;
+            /// Whether diagnostic metadata was requested.
+            pub const includes_debug_metadata = options.debug_metadata;
+            /// Whether every residual world port must be explicit.
+            pub const ports_are_explicit = options.world_ports == .explicit;
+            /// Whether the machine uses canonical state image v1.
+            pub const state_is_canonical_v1 = options.state_encoding == .canonical_v1;
+        };
+
+        /// Construct an initial explicit state from typed entry arguments.
+        pub fn initialState(allocator: std.mem.Allocator, args: InitialArgs) anyerror!State {
+            return Core.start(allocator, args);
+        }
+
+        /// Construct an initial explicit state from any entry-argument representation accepted by Program.Session.
+        pub fn initialStateWithArgs(allocator: std.mem.Allocator, args: anytype) anyerror!State {
+            return Core.start(allocator, args);
+        }
+
+        /// Advance to one effect, terminal result, or deterministic fuel boundary.
+        pub fn reduce(state: *State, fuel: *u64) anyerror!Transition {
+            return switch (try state.nextWithFuel(fuel)) {
+                .yielded_fuel => .yielded_fuel,
+                .step => |step| switch (step) {
+                    .request => |request| .{ .request = request },
+                    .after => |after| .{ .after = after },
+                    .done => |done| .{ .done = done },
+                },
+            };
+        }
+
+        /// Return the current parked request without advancing.
+        pub fn current(state: *State) error{ProgramContractViolation}!Current {
+            return state.current();
+        }
+
+        /// Resume one operation request with a typed value.
+        pub fn @"resume"(state: *State, request: Request, value: anytype) anyerror!void {
+            return state.@"resume"(request, value);
+        }
+
+        /// Resume one after-continuation request with a typed value.
+        pub fn resumeAfter(state: *State, request: AfterRequest, value: anytype) anyerror!void {
+            return state.resumeAfter(request, value);
+        }
+
+        /// Complete one choice or abort request immediately.
+        pub fn returnNow(state: *State, request: Request, value: anytype) anyerror!void {
+            return state.returnNow(request, value);
+        }
+
+        /// Encode target-neutral authoritative continuation bytes.
+        pub fn encodeState(allocator: std.mem.Allocator, state: *const State) anyerror![]u8 {
+            const bytes = try state.encodeState(allocator);
+            if (bytes.len > options.maximum_state_bytes) {
+                allocator.free(bytes);
+                return error.ProgramContractViolation;
+            }
+            return bytes;
+        }
+
+        /// Decode and validate target-neutral continuation bytes.
+        pub fn decodeState(allocator: std.mem.Allocator, bytes: []const u8) anyerror!State {
+            if (bytes.len > options.maximum_state_bytes) return error.ProgramContractViolation;
+            return Core.decodeState(allocator, bytes);
+        }
+
+        /// Validate one live explicit state without advancing it.
+        pub fn validateState(state: *State) error{ProgramContractViolation}!void {
+            return state.validateState();
+        }
+
+        /// Release ephemeral allocations owned by a decoded or initial state.
+        pub fn deinitState(state: *State) void {
+            state.deinit();
+        }
+
+        comptime {
+            _ = Self;
+        }
+    };
+}
+
 /// Declare one reusable explicit local effect program.
 pub fn program(
     comptime label: []const u8,
@@ -1281,6 +1466,10 @@ pub fn program(
         pub const Evidence = program_evidence;
         /// Static closure and evidence certificates over configured Boundary effect graphs.
         pub const BoundaryClosure = Evidence.BoundaryClosure(@This());
+        /// Internal constructor used by the boundary.staticMachine public factory.
+        pub fn _staticMachine(comptime options: StaticMachineOptions) type {
+            return StaticMachineFor(@This(), Body, Session.Core, options);
+        }
         /// Separate fingerprint domain for protocol reinterpretation metadata.
         pub const reinterpret_fingerprint_version: u32 = Evidence.domains.reinterpretation.fingerprint_version;
         /// Separate fingerprint domain for residual ProgramPlan transformation metadata.

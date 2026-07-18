@@ -10,6 +10,10 @@ pub const ir = shared.ir;
 pub const Runtime = shared.Runtime;
 /// Declare one reusable explicit effect program.
 pub const program = shared.program;
+/// Generate a typed defunctionalized StaticMachine for a Boundary program.
+pub const staticMachine = shared.staticMachine;
+/// Compile-time controls for boundary.staticMachine.
+pub const StaticMachineOptions = shared.StaticMachineOptions;
 /// Canonical v0 protocol manifest namespace.
 pub const Protocol = shared.Protocol;
 /// Boundary protocol manifest binary format version.
@@ -21,6 +25,8 @@ test {
     _ = Runtime;
     _ = Agent;
     _ = program;
+    _ = staticMachine;
+    _ = StaticMachineOptions;
     _ = effect;
     _ = ir;
     _ = Protocol;

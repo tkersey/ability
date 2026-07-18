@@ -4270,6 +4270,12 @@ pub fn ExecutableSessionForPlan(
             request: Request,
         };
 
+        /// One fuel-bounded static-machine reduction outcome.
+        pub const FuelStep = union(enum) {
+            step: Step,
+            yielded_fuel,
+        };
+
         // zlinter-disable declaration_naming - these public constants mirror the metadata field names.
         pub const capsule_version: u32 = 1;
         pub const continuation_fingerprint_version: u32 = 1;
@@ -4382,14 +4388,66 @@ pub fn ExecutableSessionForPlan(
             }
         };
 
+        /// Encode any runnable or parked generated-machine state without runtime ownership data.
+        pub fn encodeState(self: *const Self, allocator: std.mem.Allocator) anyerror![]u8 {
+            try @constCast(self).validateState();
+            var writer = DurableWriter.init(allocator);
+            errdefer writer.deinit();
+            try writer.writeBytes(state_image_magic);
+            try writer.writeU32(state_image_format_version);
+            try writer.writeU32(state_image_fingerprint_version);
+            try writer.writeLenBytes(program_label);
+            try writer.writeLenBytes(compiled_plan.label);
+            try writer.writeU64(plan_hash);
+            try writeCoreImage(&writer, self);
+            const payload = writer.bytes.items;
+            try writer.writeU64(stateImageFingerprint(payload));
+            return writer.toOwnedSlice();
+        }
+
+        /// Decode and validate one canonical generated-machine state image.
+        pub fn decodeState(allocator: std.mem.Allocator, bytes: []const u8) anyerror!Self {
+            if (bytes.len < state_image_magic.len + 4 + 4 + 8) return error.ProgramContractViolation;
+            const stored_checksum = std.mem.readInt(u64, bytes[bytes.len - 8 ..][0..8], .little);
+            const payload = bytes[0 .. bytes.len - 8];
+            if (stored_checksum != stateImageFingerprint(payload)) return error.ProgramContractViolation;
+            var reader = DurableReader.init(payload);
+            try reader.expectBytes(state_image_magic);
+            if (try reader.readU32() != state_image_format_version) return error.ProgramContractViolation;
+            if (try reader.readU32() != state_image_fingerprint_version) return error.ProgramContractViolation;
+            if (!std.mem.eql(u8, try reader.readLenBytes(), program_label)) return error.ProgramContractViolation;
+            if (!std.mem.eql(u8, try reader.readLenBytes(), compiled_plan.label)) return error.ProgramContractViolation;
+            if (try reader.readU64() != plan_hash) return error.ProgramContractViolation;
+            var state = try readCoreImage(allocator, &reader);
+            errdefer state.deinit();
+            if (!reader.eof()) return error.ProgramContractViolation;
+            try state.validateState();
+            return state;
+        }
+
+        /// Validate one live generated-machine state without advancing it.
+        pub fn validateState(self: *Self) error{ProgramContractViolation}!void {
+            if (self.completed != null or self.done_consumed) return error.ProgramContractViolation;
+            if (self.remaining_steps > max_interpreter_steps or self.next_turn_index > max_interpreter_steps) {
+                return error.ProgramContractViolation;
+            }
+            try self.validateDecodedFrameStack();
+            try self.validateDecodedPendingState();
+        }
+
         // zlinter-disable declaration_naming - public durable format constants intentionally use stable API names.
         pub const capsule_image_format_version: u32 = 1;
         pub const capsule_image_fingerprint_version: u32 = 1;
+        pub const state_image_format_version: u32 = 1;
+        pub const state_image_fingerprint_version: u32 = 1;
         pub const journal_format_version: u32 = 1;
         pub const journal_fingerprint_version: u32 = 1;
+        pub const maximum_frame_depth: usize = analysis.max_active_frame_depth;
+        pub const maximum_interpreter_fuel: usize = max_interpreter_steps;
         // zlinter-enable declaration_naming
 
         const capsule_image_magic = "ABL_CAP1";
+        const state_image_magic = "ABL_STM1";
 
         const DurableWriter = struct {
             allocator: std.mem.Allocator,
@@ -4524,6 +4582,14 @@ pub fn ExecutableSessionForPlan(
             var hasher = std.hash.Wyhash.init(0);
             traceHashBytes(&hasher, domain);
             traceHashU32(&hasher, capsule_image_fingerprint_version);
+            traceHashBytes(&hasher, bytes);
+            return hasher.final();
+        }
+
+        fn stateImageFingerprint(bytes: []const u8) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            traceHashBytes(&hasher, "boundary.static-machine.state.image");
+            traceHashU32(&hasher, state_image_fingerprint_version);
             traceHashBytes(&hasher, bytes);
             return hasher.final();
         }
@@ -6934,6 +7000,26 @@ pub fn ExecutableSessionForPlan(
                 }
             }
             return error.ProgramContractViolation;
+        }
+
+        /// Advance with a caller-owned deterministic fuel allowance.
+        pub fn nextWithFuel(self: *Self, fuel: *u64) anyerror!FuelStep {
+            const cumulative_remaining = self.remaining_steps;
+            const requested: usize = if (fuel.* > std.math.maxInt(usize)) std.math.maxInt(usize) else @intCast(fuel.*);
+            const allowance = @min(cumulative_remaining, requested);
+            self.remaining_steps = allowance;
+
+            const step = self.next() catch |err| {
+                const consumed = allowance - self.remaining_steps;
+                self.remaining_steps = cumulative_remaining - consumed;
+                fuel.* -= consumed;
+                if (err == error.ExecutionBudgetExceeded) return .yielded_fuel;
+                return err;
+            };
+            const consumed = allowance - self.remaining_steps;
+            self.remaining_steps = cumulative_remaining - consumed;
+            fuel.* -= consumed;
+            return .{ .step = step };
         }
 
         pub fn @"resume"(self: *Self, request: Request, value: anytype) anyerror!void {

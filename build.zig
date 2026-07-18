@@ -990,6 +990,32 @@ pub fn build(b: *std.Build) void {
     const program_api_tests = b.addTest(.{ .root_module = program_api_tests_mod, .filters = test_args.filters });
     test_step.dependOn(&addRunArtifactWithArgs(b, program_api_tests, test_args.passthrough).step);
 
+    const static_machine_tests_mod = b.createModule(.{
+        .root_source_file = b.path("test/static_machine_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    static_machine_tests_mod.addImport("boundary", boundary);
+    const static_machine_tests = b.addTest(.{ .root_module = static_machine_tests_mod });
+    const run_static_machine_tests = b.addRunArtifact(static_machine_tests);
+    test_step.dependOn(&run_static_machine_tests.step);
+    const static_machine_step = b.step("check-boundary-static-machine", "Check the Boundary StaticMachine API, state codec, and reducer.");
+    static_machine_step.dependOn(&run_static_machine_tests.step);
+    const static_machine_parity_step = b.step("check-boundary-static-machine-parity", "Check Program.Session and StaticMachine semantic parity.");
+    static_machine_parity_step.dependOn(&run_static_machine_tests.step);
+    const static_agent_step = b.step("check-boundary-static-agent", "Check the StaticMachine agent fixture.");
+    const static_agent_tests = b.addTest(.{
+        .root_module = agent_loop_tests_mod,
+        .filters = &.{"agent StaticMachine root"},
+    });
+    static_agent_step.dependOn(&b.addRunArtifact(static_agent_tests).step);
+    const static_provider_step = b.step("check-boundary-static-provider", "Check StaticMachine helper and provider suspension.");
+    const static_provider_tests = b.addTest(.{
+        .root_module = agent_loop_tests_mod,
+        .filters = &.{"agent StaticMachine toolbox provider"},
+    });
+    static_provider_step.dependOn(&b.addRunArtifact(static_provider_tests).step);
+
     const evidence_kernel_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/evidence_kernel_test.zig"),
         .target = target,

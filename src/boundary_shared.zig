@@ -16,6 +16,10 @@ pub const ir = ir_api;
 pub const Runtime = lowered_machine.Runtime;
 /// Declare one reusable explicit effect program.
 pub const program = program_api.program;
+/// Generate a typed defunctionalized StaticMachine for a Boundary program.
+pub const staticMachine = program_api.staticMachine;
+/// Compile-time controls for boundary.staticMachine.
+pub const StaticMachineOptions = program_api.StaticMachineOptions;
 /// Canonical v0 protocol manifest namespace.
 pub const Protocol = protocol.Protocol;
 /// Boundary protocol manifest binary format version.
@@ -31,5 +35,7 @@ test "shared public surface exposes only the local execution front door" {
     try std.testing.expect(@hasDecl(@This(), "ir"));
     try std.testing.expect(@hasDecl(@This(), "Runtime"));
     try std.testing.expect(@hasDecl(@This(), "program"));
+    try std.testing.expect(@hasDecl(@This(), "staticMachine"));
+    try std.testing.expect(@hasDecl(@This(), "StaticMachineOptions"));
     try std.testing.expect(@hasDecl(@This(), "Protocol"));
 }
