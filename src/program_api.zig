@@ -646,6 +646,11 @@ fn ProgramContractFor(
     };
 }
 
+const ProgramProtocolIdentity = enum {
+    legacy_session,
+    static_machine,
+};
+
 // zlinter-disable require_doc_comment
 fn ProgramProtocolFor(
     comptime program_label: []const u8,
@@ -659,6 +664,55 @@ fn ProgramProtocolFor(
 ) type {
     const operation_sites = lowering_api.sessionOperationYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
     const after_sites = lowering_api.sessionAfterYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
+    return ProgramProtocolForSites(
+        program_label,
+        plan,
+        schema_types,
+        HandlersType,
+        ProtocolOwner,
+        InterpreterToken,
+        operation_sites,
+        after_sites,
+        .legacy_session,
+    );
+}
+
+fn StaticMachineProtocolFor(
+    comptime program_label: []const u8,
+    comptime plan: lowering_api.ProgramPlan,
+    comptime schema_types: anytype,
+    comptime nested_targets: anytype,
+    comptime HandlersType: type,
+    comptime ProtocolOwner: type,
+    comptime site_metadata: anytype,
+    comptime InterpreterToken: type,
+) type {
+    const operation_sites = lowering_api.staticMachineOperationYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
+    const after_sites = lowering_api.staticMachineAfterYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
+    return ProgramProtocolForSites(
+        program_label,
+        plan,
+        schema_types,
+        HandlersType,
+        ProtocolOwner,
+        InterpreterToken,
+        operation_sites,
+        after_sites,
+        .static_machine,
+    );
+}
+
+fn ProgramProtocolForSites(
+    comptime program_label: []const u8,
+    comptime plan: lowering_api.ProgramPlan,
+    comptime schema_types: anytype,
+    comptime HandlersType: type,
+    comptime ProtocolOwner: type,
+    comptime InterpreterToken: type,
+    comptime operation_sites: anytype,
+    comptime after_sites: anytype,
+    comptime identity: ProgramProtocolIdentity,
+) type {
     const plan_hash = plan.hash();
 
     return struct {
@@ -670,6 +724,7 @@ fn ProgramProtocolFor(
         pub const after_site_count = after_sites.len;
         pub const operation_site_metadata = &operation_sites;
         pub const after_site_metadata = &after_sites;
+        pub const uses_static_machine_identity = identity == .static_machine;
 
         fn operationDescriptor(comptime site: lowering_api.SessionOperationYieldSite) type {
             const PayloadType = ProgramValueTypeForRef(plan, schema_types, site.payload_ref);
@@ -687,6 +742,7 @@ fn ProgramProtocolFor(
                 pub const metadata = site;
                 pub const index = site.index;
                 pub const fingerprint = site.fingerprint;
+                pub const canonical_fingerprint = site.canonical_fingerprint;
                 pub const semantic_label = site.semantic_label;
                 pub const function_index = site.function_index;
                 pub const function_symbol_name = site.function_symbol_name;
@@ -728,9 +784,11 @@ fn ProgramProtocolFor(
                     pub const metadata = site;
                     pub const index = site.index;
                     pub const fingerprint = site.fingerprint;
+                    pub const canonical_fingerprint = site.canonical_fingerprint;
                     pub const semantic_label = site.semantic_label;
                     pub const source_operation_site_index = site.source_operation_site_index;
                     pub const source_operation_site_fingerprint = site.source_operation_site_fingerprint;
+                    pub const source_operation_site_canonical_fingerprint = site.source_operation_site_canonical_fingerprint;
                     pub const source_function_index = site.source_function_index;
                     pub const source_block_index = site.source_block_index;
                     pub const source_instruction_index = site.source_instruction_index;
@@ -756,9 +814,11 @@ fn ProgramProtocolFor(
                 pub const metadata = site;
                 pub const index = site.index;
                 pub const fingerprint = site.fingerprint;
+                pub const canonical_fingerprint = site.canonical_fingerprint;
                 pub const semantic_label = site.semantic_label;
                 pub const source_operation_site_index = site.source_operation_site_index;
                 pub const source_operation_site_fingerprint = site.source_operation_site_fingerprint;
+                pub const source_operation_site_canonical_fingerprint = site.source_operation_site_canonical_fingerprint;
                 pub const source_function_index = site.source_function_index;
                 pub const source_block_index = site.source_block_index;
                 pub const source_instruction_index = site.source_instruction_index;
@@ -1263,12 +1323,39 @@ pub const StaticMachineOptions = struct {
     maximum_state_bytes: usize = 1 << 20,
 };
 
+const StaticMachineProgramAuthenticityToken = opaque {};
+
 /// Generate a typed static reducer for one Boundary Program.
 pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOptions) type {
-    if (!hasDeclSafe(Program, "_staticMachine")) {
+    if (!hasDeclSafe(Program, "StaticMachineProgramAuthenticity")) {
         @compileError("boundary.staticMachine expects a type returned by boundary.program");
     }
-    return Program._staticMachine(options);
+    if (Program.StaticMachineProgramAuthenticity != StaticMachineProgramAuthenticityToken) {
+        @compileError("boundary.staticMachine expects a type returned by boundary.program");
+    }
+    const Body = Program.StaticMachineBody;
+    const nested_targets = BodyNestedWithTargets(Body).values;
+    const site_metadata = BodySiteMetadata(Body).values;
+    const StaticProtocol = StaticMachineProtocolFor(
+        Program.contract.label,
+        Program.compiled_plan,
+        Program.value_schema_types,
+        nested_targets,
+        Program.Handlers,
+        Body,
+        site_metadata,
+        Program.InterpreterToken,
+    );
+    const StaticCore = lowering_api.StaticExecutableSessionForPlan(
+        BodyErrorSet(Body),
+        Program.contract.label,
+        Program.compiled_plan,
+        Program.value_schema_types,
+        nested_targets,
+        Program.Handlers,
+        Body,
+    );
+    return StaticMachineFor(Program, Body, StaticCore, StaticProtocol, options);
 }
 
 fn StaticInitialArgs(comptime Program: type) type {
@@ -1290,6 +1377,7 @@ fn StaticMachineFor(
     comptime Program: type,
     comptime Body: type,
     comptime Core: type,
+    comptime StaticProtocol: type,
     comptime options: StaticMachineOptions,
 ) type {
     if (@typeInfo(BodyErrorSet(Body)).error_set == null) {
@@ -1316,9 +1404,16 @@ fn StaticMachineFor(
 
         /// Boundary StaticMachine ABI version consumed by World comptime.
         pub const abi_version: u32 = 1;
-        /// Opaque owner for one decoded explicit machine state.
+        const StateStorage = opaque {};
+        /// Machine-branded owner handle for one decoded explicit state backed by opaque storage.
         pub const State = struct {
-            _storage: *anyopaque,
+            _storage: *StateStorage,
+            _program_brand: [0]*const Program = undefined,
+            _state_encoding_brand: [@as(usize, @intFromEnum(options.state_encoding)) + 1]void = undefined,
+            _world_ports_brand: [@as(usize, @intFromEnum(options.world_ports)) + 1]void = undefined,
+            _debug_metadata_brand: [@as(usize, @intFromBool(options.debug_metadata))]void = undefined,
+            _maximum_frames_brand: [options.maximum_frames]void = undefined,
+            _maximum_state_bytes_brand: [options.maximum_state_bytes]void = undefined,
         };
         /// Typed entry arguments accepted by initialState.
         pub const InitialArgs = StaticInitialArgs(Program);
@@ -1333,7 +1428,7 @@ fn StaticMachineFor(
             ExecutionBudgetExceeded,
         };
         /// Static operation and after-continuation site descriptors.
-        pub const EffectRow = Program.protocol;
+        pub const EffectRow = StaticProtocol;
         /// Defunctionalized operation request.
         pub const Request = Core.Request;
         /// Defunctionalized after-continuation request.
@@ -1368,13 +1463,13 @@ fn StaticMachineFor(
             /// Canonical state image fingerprint version.
             pub const state_image_fingerprint_version = Core.state_image_fingerprint_version;
             /// Reachable operation-site metadata in semantic order.
-            pub const operation_sites = Program.protocol.operation_site_metadata;
+            pub const operation_sites = StaticProtocol.operation_site_metadata;
             /// Reachable after-continuation-site metadata in semantic order.
-            pub const after_sites = Program.protocol.after_site_metadata;
+            pub const after_sites = StaticProtocol.after_site_metadata;
             /// Number of reachable operation sites.
-            pub const operation_site_count = Program.protocol.operation_site_count;
+            pub const operation_site_count = StaticProtocol.operation_site_count;
             /// Number of reachable after-continuation sites.
-            pub const after_site_count = Program.protocol.after_site_count;
+            pub const after_site_count = StaticProtocol.after_site_count;
             /// Maximum statically reachable helper-frame depth.
             pub const maximum_frame_depth = Core.maximum_frame_depth;
             /// Maximum cumulative instruction fuel enforced by Boundary.
@@ -1391,18 +1486,18 @@ fn StaticMachineFor(
             pub const state_is_canonical_v1 = options.state_encoding == .canonical_v1;
         };
 
-        fn stateCore(state: *State) *Core {
+        fn stateCore(state: State) *Core {
             return @ptrCast(@alignCast(state._storage));
         }
 
-        fn stateCoreConst(state: *const State) *const Core {
+        fn stateCoreConst(state: State) *const Core {
             return @ptrCast(@alignCast(state._storage));
         }
 
         fn ownCore(allocator: std.mem.Allocator, core_value: Core) Error!State {
             const storage = allocator.create(Core) catch return error.OutOfMemory;
             storage.* = core_value;
-            return .{ ._storage = storage };
+            return .{ ._storage = @ptrCast(storage) };
         }
 
         fn mapError(err: anyerror) Error {
@@ -1424,7 +1519,7 @@ fn StaticMachineFor(
         }
 
         /// Advance to one effect, terminal result, or deterministic fuel boundary.
-        pub fn reduce(state: *State, fuel: *u64) Error!Transition {
+        pub fn reduce(state: State, fuel: *u64) Error!Transition {
             return switch (stateCore(state).nextWithFuel(fuel) catch |err| return mapError(err)) {
                 .yielded_fuel => .yielded_fuel,
                 .step => |step| switch (step) {
@@ -1436,27 +1531,27 @@ fn StaticMachineFor(
         }
 
         /// Return the current parked request without advancing.
-        pub fn current(state: *State) error{ProgramContractViolation}!Current {
+        pub fn current(state: State) error{ProgramContractViolation}!Current {
             return stateCore(state).current();
         }
 
         /// Resume one operation request with a typed value.
-        pub fn @"resume"(state: *State, request: Request, value: anytype) Error!void {
+        pub fn @"resume"(state: State, request: Request, value: anytype) Error!void {
             stateCore(state).@"resume"(request, value) catch |err| return mapError(err);
         }
 
         /// Resume one after-continuation request with a typed value.
-        pub fn resumeAfter(state: *State, request: AfterRequest, value: anytype) Error!void {
+        pub fn resumeAfter(state: State, request: AfterRequest, value: anytype) Error!void {
             stateCore(state).resumeAfter(request, value) catch |err| return mapError(err);
         }
 
         /// Complete one choice or abort request immediately.
-        pub fn returnNow(state: *State, request: Request, value: anytype) Error!void {
+        pub fn returnNow(state: State, request: Request, value: anytype) Error!void {
             stateCore(state).returnNow(request, value) catch |err| return mapError(err);
         }
 
         /// Encode target-neutral authoritative continuation bytes.
-        pub fn encodeState(allocator: std.mem.Allocator, state: *const State) Error![]u8 {
+        pub fn encodeState(allocator: std.mem.Allocator, state: State) Error![]u8 {
             return stateCoreConst(state).encodeStateBounded(allocator, options.maximum_state_bytes) catch |err|
                 return mapError(err);
         }
@@ -1470,12 +1565,12 @@ fn StaticMachineFor(
         }
 
         /// Validate one live explicit state without advancing it.
-        pub fn validateState(state: *State) error{ProgramContractViolation}!void {
+        pub fn validateState(state: State) error{ProgramContractViolation}!void {
             return stateCore(state).validateState();
         }
 
         /// Release ephemeral allocations owned by a decoded or initial state.
-        pub fn deinitState(state: *State) void {
+        pub fn deinitState(state: State) void {
             const core = stateCore(state);
             const allocator = core.allocator;
             core.deinit();
@@ -1525,10 +1620,8 @@ pub fn program(
         pub const Evidence = program_evidence;
         /// Static closure and evidence certificates over configured Boundary effect graphs.
         pub const BoundaryClosure = Evidence.BoundaryClosure(@This());
-        /// Internal constructor used by the boundary.staticMachine public factory.
-        pub fn _staticMachine(comptime options: StaticMachineOptions) type {
-            return StaticMachineFor(@This(), Body, Session.Core, options);
-        }
+        const StaticMachineProgramAuthenticity = StaticMachineProgramAuthenticityToken;
+        const StaticMachineBody = Body;
         /// Separate fingerprint domain for protocol reinterpretation metadata.
         pub const reinterpret_fingerprint_version: u32 = Evidence.domains.reinterpretation.fingerprint_version;
         /// Separate fingerprint domain for residual ProgramPlan transformation metadata.

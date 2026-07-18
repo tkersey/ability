@@ -2,7 +2,8 @@
 
 StaticMachine state has two representations with different ownership:
 
-1. `Machine.State` is an opaque transient working-state owner.
+1. `Machine.State` is a machine-branded owner handle over opaque transient
+   working storage.
 2. `Machine.encodeState` returns the canonical portable continuation image.
 
 Only the second representation crosses process, storage, repository, or WASM
@@ -28,8 +29,15 @@ image checksum
 ```
 
 The machine contract fingerprint binds a target-neutral canonical ProgramPlan
-identity and every nested-provider target mapping. The legacy `ProgramPlan.hash`
-remains diagnostic v0 provenance and is not the portable state identity.
+identity, every nested-provider target mapping, and handler-derived
+after-continuation input and output refs. The legacy `ProgramPlan.hash` and
+legacy session-site fingerprints remain diagnostic v0 provenance; neither is a
+portable StaticMachine state identity.
+
+StaticMachine request and after-site identities use a target-neutral canonical
+domain. Provenance-only changes such as `ir_hash` do not change canonical
+requests or state bytes. Contract-equivalent machines may therefore decode each
+other's state even though their live Zig `State` handle types remain distinct.
 
 Integers use fixed little-endian encodings. Value encoding is independent of
 transient pointer aliasing: semantically equal live states produce identical
@@ -38,9 +46,10 @@ and the configured maximum image size are checked during writer growth, before
 additional capacity is allocated.
 
 Readers reject a mismatched machine identity, invalid enum or boolean, malformed
-frame topology, inconsistent pending state, checksum mismatch, and trailing
-bytes. The checksum detects corruption and accidental mismatches. It is not a
-signature and grants no trust.
+frame topology, an after stack that is not reachable along the decoded control
+path, inconsistent pending state, checksum mismatch, and trailing bytes. The
+checksum detects corruption and accidental mismatches. It is not a signature
+and grants no trust.
 
 ## State law
 
@@ -64,7 +73,8 @@ ownership, so live request tokens may change; semantic site identity, payload,
 and continuation behavior may not.
 
 Completed and terminally failed states are not encoded as runnable continuation
-state.
+state. Terminal failures include program-authored failures, cumulative machine
+budget exhaustion, and deterministic reduction failures after dispatch begins.
 
 ## Limits
 

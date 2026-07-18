@@ -1696,54 +1696,56 @@ test "agent StaticMachine root parks on the model decision site" {
         .maximum_frames = 64,
         .maximum_state_bytes = 1 << 20,
     });
-    var state = try Machine.initialState(
+    const StaticAgentDecision = Machine.EffectRow.operationSite("agent", "decide", 0);
+    const StaticToolboxCall = Machine.EffectRow.operationSite("tool", "call", 0);
+    const state = try Machine.initialState(
         std.testing.allocator,
         .{ @as(usize, 5), @as([]const u8, "goal=invoke") },
     );
-    defer Machine.deinitState(&state);
+    defer Machine.deinitState(state);
 
     var fuel: u64 = 100;
-    const request = switch (try Machine.reduce(&state, &fuel)) {
+    const request = switch (try Machine.reduce(state, &fuel)) {
         .request => |request| request,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expect(request.matches(AgentDecision));
-    const typed = try request.as(AgentDecision);
+    try std.testing.expect(request.matches(StaticAgentDecision));
+    const typed = try request.as(StaticAgentDecision);
     try std.testing.expectEqualStrings("goal=invoke", try typed.payload());
 
-    const encoded = try Machine.encodeState(std.testing.allocator, &state);
+    const encoded = try Machine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
-    var restored = try Machine.decodeState(std.testing.allocator, encoded);
-    defer Machine.deinitState(&restored);
-    const current = switch (try Machine.current(&restored)) {
+    const restored = try Machine.decodeState(std.testing.allocator, encoded);
+    defer Machine.deinitState(restored);
+    const current = switch (try Machine.current(restored)) {
         .request => |parked| parked,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expect(current.matches(AgentDecision));
+    try std.testing.expect(current.matches(StaticAgentDecision));
 
-    try Machine.@"resume"(&restored, current, Action{ .tool = toolRequest(0, "") });
-    const toolbox = switch (try Machine.reduce(&restored, &fuel)) {
+    try Machine.@"resume"(restored, current, Action{ .tool = toolRequest(0, "") });
+    const toolbox = switch (try Machine.reduce(restored, &fuel)) {
         .request => |parked| parked,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expect(toolbox.matches(ToolboxCall));
-    const typed_toolbox = try toolbox.as(ToolboxCall);
+    try std.testing.expect(toolbox.matches(StaticToolboxCall));
+    const typed_toolbox = try toolbox.as(StaticToolboxCall);
     const tool_request = try typed_toolbox.payload();
     try std.testing.expect(tool_request.tool_id.eql(BoundaryTools.id(0)));
     try std.testing.expectEqualStrings("", tool_request.payload);
 
-    try Machine.@"resume"(&restored, toolbox, @as([]const u8, "actuate"));
-    const second_decision = switch (try Machine.reduce(&restored, &fuel)) {
+    try Machine.@"resume"(restored, toolbox, @as([]const u8, "actuate"));
+    const second_decision = switch (try Machine.reduce(restored, &fuel)) {
         .request => |parked| parked,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expect(second_decision.matches(AgentDecision));
+    try std.testing.expect(second_decision.matches(StaticAgentDecision));
     try Machine.@"resume"(
-        &restored,
+        restored,
         second_decision,
         Action{ .final = "final=actuate skeleton complete" },
     );
-    var result = switch (try Machine.reduce(&restored, &fuel)) {
+    var result = switch (try Machine.reduce(restored, &fuel)) {
         .done => |done| done,
         else => return error.UnexpectedTransition,
     };
@@ -1756,28 +1758,29 @@ test "agent StaticMachine toolbox provider parks on a file effect" {
         .maximum_frames = 64,
         .maximum_state_bytes = 1 << 20,
     });
-    var state = try Machine.initialState(
+    const StaticFileRead = Machine.EffectRow.operationSite("file", "read", 0);
+    const state = try Machine.initialState(
         std.testing.allocator,
         .{ @as(usize, 1), @as([]const u8, fixture_input_path) },
     );
-    defer Machine.deinitState(&state);
+    defer Machine.deinitState(state);
 
     var fuel: u64 = 100;
-    const request = switch (try Machine.reduce(&state, &fuel)) {
+    const request = switch (try Machine.reduce(state, &fuel)) {
         .request => |request| request,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expect(request.matches(FileRead));
-    const typed = try request.as(FileRead);
+    try std.testing.expect(request.matches(StaticFileRead));
+    const typed = try request.as(StaticFileRead);
     try std.testing.expectEqualStrings(fixture_input_path, try typed.payload());
 
-    const encoded = try Machine.encodeState(std.testing.allocator, &state);
+    const encoded = try Machine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
-    var restored = try Machine.decodeState(std.testing.allocator, encoded);
-    defer Machine.deinitState(&restored);
-    const current = switch (try Machine.current(&restored)) {
+    const restored = try Machine.decodeState(std.testing.allocator, encoded);
+    defer Machine.deinitState(restored);
+    const current = switch (try Machine.current(restored)) {
         .request => |parked| parked,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expect(current.matches(FileRead));
+    try std.testing.expect(current.matches(StaticFileRead));
 }

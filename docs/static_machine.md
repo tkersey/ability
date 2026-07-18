@@ -26,7 +26,7 @@ interpret an arbitrary serialized module at runtime.
 
 The generated type exposes:
 
-- `State`, an opaque owner for one decoded machine state;
+- `State`, a machine-branded owner handle backed by opaque state storage;
 - `InitialArgs`, derived from the entry function parameter tuple;
 - `Result`, application-authored `Failure`, and the closed machine `Error` set;
 - `EffectRow`, the program's static protocol and site descriptors;
@@ -36,8 +36,16 @@ The generated type exposes:
 
 `reduce` stops at an operation request, an after-continuation request, terminal
 completion, or an explicit caller-fuel yield. Caller-fuel exhaustion is
-resumable. Cumulative machine-budget exhaustion and program-authored failures
-are terminal errors.
+resumable. Cumulative machine-budget exhaustion, program-authored failures, and
+deterministic reduction failures after dispatch begins are terminal errors.
+Terminal states cannot be validated or encoded as resumable state.
+
+`boundary.staticMachine` accepts only the authentic type returned by
+`boundary.program`. Live `State` handles are branded by that Program and the
+StaticMachine options, so one machine cannot consume another machine's handle.
+Contract-equivalent machines may still exchange canonical state bytes through
+`encodeState` and `decodeState`; that compatibility is checked from the encoded
+machine contract rather than the live Zig handle type.
 
 StaticMachine v1 rejects recursive helper/provider frame graphs and programs
 with output collection or result/output cleanup hooks. Those restrictions keep
@@ -46,12 +54,13 @@ may expand support.
 
 ## Authority boundary
 
-The live `State` owns allocator-backed working storage because Zig values such
-as strings and structured payloads require transient memory. Accepted response
-values are cloned into this storage before they can affect continuation state.
-The storage is not portable or authoritative. Only bytes returned by
-`encodeState` represent continuation state across a process, allocator, or
-WASM-instance boundary.
+The live `State` handle owns allocator-backed working storage because Zig
+values such as strings and structured payloads require transient memory.
+Accepted response values are cloned into this opaque storage before they can
+affect continuation state. Failed cloning leaves the request pending and the
+owned storage valid. The storage is not portable or authoritative. Only bytes
+returned by `encodeState` represent continuation state across a process,
+allocator, or WASM-instance boundary.
 
 Encoded state contains no implicit allocator identity, native address, function
 pointer, session token, runtime handle, or host authority. Application values

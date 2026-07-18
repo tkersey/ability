@@ -1066,6 +1066,14 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
         },
         .{
+            .path = "test/compile_fail/static_machine_forged_program.zig",
+            .expected_error = "boundary.staticMachine expects a type returned by boundary.program",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_cross_machine_state.zig",
+            .expected_error = "parameter type declared here",
+        },
+        .{
             .path = "test/compile_fail/value_schema_variant_mismatch.zig",
             .expected_error = "Body.value_schema_types does not match Body.compiled_plan.value_variants[1]",
         },
