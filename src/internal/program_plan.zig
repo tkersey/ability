@@ -757,6 +757,114 @@ pub const ProgramPlan = struct {
         return hasher.final();
     }
 
+    /// Compute a target-neutral hash over every field that changes executable plan semantics.
+    ///
+    /// Unlike `hash`, this identity writes every integer explicitly in little-endian order and
+    /// length-prefixes byte strings. `hash` remains the v0 compatibility fingerprint.
+    pub fn canonicalHash(self: @This()) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        canonicalHashBytes(&hasher, "boundary.program-plan.canonical.v1");
+        canonicalHashU32(&hasher, self.schema_version);
+        canonicalHashBytes(&hasher, self.label);
+        // `ir_hash` is v0 source provenance. It is not consulted by execution and its legacy
+        // construction includes native-width values, so it cannot enter a target-neutral identity.
+        canonicalHashU16(&hasher, self.entry_index);
+        canonicalHashU64(&hasher, self.functions.len);
+        for (self.functions) |function| {
+            canonicalHashBytes(&hasher, function.symbol_name);
+            canonicalHashTag(&hasher, function.value_codec);
+            canonicalHashOptionalU16(&hasher, function.value_schema_index);
+            canonicalHashOptionalTag(&hasher, function.result_codec);
+            canonicalHashOptionalU16(&hasher, function.result_schema_index);
+            canonicalHashU16(&hasher, function.parameter_count);
+            canonicalHashU16(&hasher, function.first_requirement);
+            canonicalHashU16(&hasher, function.requirement_count);
+            canonicalHashU16(&hasher, function.first_output);
+            canonicalHashU16(&hasher, function.output_count);
+            canonicalHashU16(&hasher, function.first_local);
+            canonicalHashU16(&hasher, function.local_count);
+            canonicalHashU16(&hasher, function.first_block);
+            canonicalHashU16(&hasher, function.entry_block);
+            canonicalHashU16(&hasher, function.block_count);
+            canonicalHashU16(&hasher, function.first_instruction);
+            canonicalHashU16(&hasher, function.instruction_count);
+        }
+        canonicalHashU64(&hasher, self.requirements.len);
+        for (self.requirements) |requirement| {
+            canonicalHashBytes(&hasher, requirement.label);
+            canonicalHashU16(&hasher, requirement.first_op);
+            canonicalHashU16(&hasher, requirement.op_count);
+            canonicalHashTag(&hasher, requirement.lifecycle_tag);
+            canonicalHashTag(&hasher, requirement.output_tag);
+        }
+        canonicalHashU64(&hasher, self.ops.len);
+        for (self.ops) |op| {
+            canonicalHashU16(&hasher, op.requirement_index);
+            canonicalHashBytes(&hasher, op.op_name);
+            canonicalHashTag(&hasher, op.mode);
+            canonicalHashTag(&hasher, op.payload_codec);
+            canonicalHashOptionalU16(&hasher, op.payload_schema_index);
+            canonicalHashTag(&hasher, op.resume_codec);
+            canonicalHashOptionalU16(&hasher, op.resume_schema_index);
+            canonicalHashBool(&hasher, op.has_after);
+        }
+        canonicalHashU64(&hasher, self.outputs.len);
+        for (self.outputs) |output| {
+            canonicalHashBytes(&hasher, output.label);
+            canonicalHashTag(&hasher, output.codec);
+            canonicalHashOptionalU16(&hasher, output.schema_index);
+        }
+        canonicalHashU64(&hasher, self.value_schemas.len);
+        for (self.value_schemas) |schema| {
+            canonicalHashBytes(&hasher, schema.label);
+            canonicalHashTag(&hasher, schema.codec);
+            canonicalHashU16(&hasher, schema.first_field);
+            canonicalHashU16(&hasher, schema.field_count);
+            canonicalHashU16(&hasher, schema.first_variant);
+            canonicalHashU16(&hasher, schema.variant_count);
+        }
+        canonicalHashU64(&hasher, self.value_fields.len);
+        for (self.value_fields) |field| {
+            canonicalHashBytes(&hasher, field.name);
+            canonicalHashTag(&hasher, field.codec);
+            canonicalHashOptionalU16(&hasher, field.schema_index);
+        }
+        canonicalHashU64(&hasher, self.value_variants.len);
+        for (self.value_variants) |variant| {
+            canonicalHashBytes(&hasher, variant.name);
+            canonicalHashTag(&hasher, variant.codec);
+            canonicalHashOptionalU16(&hasher, variant.schema_index);
+        }
+        canonicalHashU64(&hasher, self.locals.len);
+        for (self.locals) |local| {
+            canonicalHashTag(&hasher, local.codec);
+            canonicalHashOptionalU16(&hasher, local.schema_index);
+        }
+        canonicalHashU64(&hasher, self.call_args.len);
+        for (self.call_args) |local_id| canonicalHashU16(&hasher, local_id);
+        canonicalHashU64(&hasher, self.blocks.len);
+        for (self.blocks) |block| {
+            canonicalHashU16(&hasher, block.first_instruction);
+            canonicalHashU16(&hasher, block.instruction_count);
+            canonicalHashU16(&hasher, block.terminator_index);
+        }
+        canonicalHashU64(&hasher, self.terminators.len);
+        for (self.terminators) |terminator| {
+            canonicalHashTag(&hasher, terminator.kind);
+            canonicalHashU16(&hasher, terminator.primary);
+            canonicalHashU16(&hasher, terminator.secondary);
+        }
+        canonicalHashU64(&hasher, self.instructions.len);
+        for (self.instructions) |instruction| {
+            canonicalHashTag(&hasher, instruction.kind);
+            canonicalHashU16(&hasher, instruction.dst);
+            canonicalHashU16(&hasher, instruction.operand);
+            canonicalHashU16(&hasher, instruction.aux);
+            canonicalHashBytes(&hasher, instruction.string_literal);
+        }
+        return hasher.final();
+    }
+
     fn validateFunctionOutputLabels(self: @This(), function: FunctionPlan) ValidationError!void {
         const output_start = function.first_output;
         const output_end = rangeEnd(output_start, function.output_count) orelse return error.InvalidFunctionOutputSpan;
@@ -2128,6 +2236,47 @@ fn hashOptionalU16(hasher: *std.hash.Wyhash, value: ?u16) void {
     if (value) |unwrapped| hasher.update(std.mem.asBytes(&unwrapped));
 }
 
+fn canonicalHashBytes(hasher: *std.hash.Wyhash, value: []const u8) void {
+    canonicalHashU64(hasher, value.len);
+    hasher.update(value);
+}
+
+fn canonicalHashBool(hasher: *std.hash.Wyhash, value: bool) void {
+    hasher.update(&[_]u8{@intFromBool(value)});
+}
+
+fn canonicalHashU16(hasher: *std.hash.Wyhash, value: u16) void {
+    var bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn canonicalHashU32(hasher: *std.hash.Wyhash, value: u32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn canonicalHashU64(hasher: *std.hash.Wyhash, value: anytype) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, @intCast(value), .little);
+    hasher.update(&bytes);
+}
+
+fn canonicalHashOptionalU16(hasher: *std.hash.Wyhash, value: ?u16) void {
+    canonicalHashBool(hasher, value != null);
+    if (value) |unwrapped| canonicalHashU16(hasher, unwrapped);
+}
+
+fn canonicalHashTag(hasher: *std.hash.Wyhash, value: anytype) void {
+    canonicalHashBytes(hasher, @tagName(value));
+}
+
+fn canonicalHashOptionalTag(hasher: *std.hash.Wyhash, value: anytype) void {
+    canonicalHashBool(hasher, value != null);
+    if (value) |unwrapped| canonicalHashTag(hasher, unwrapped);
+}
+
 fn hashEffectIrValueRef(hasher: *std.hash.Wyhash, ref: effect_ir.ValueRef) void {
     hashBytes(hasher, @tagName(ref.codec));
     hashOptionalU16(hasher, ref.schema_index);
@@ -2625,7 +2774,7 @@ pub fn entryExecutionAnalysisWithNestedTargets(
             }
         }
 
-        analysis.helper_cycle = entryAnalysisHasHelperCycle(plan, analysis);
+        analysis.helper_cycle = entryAnalysisHasHelperCycle(plan, analysis, nested_with_targets);
         analysis.max_active_frame_depth = entryAnalysisMaxFrameDepth(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
         analysis.max_active_local_slots = entryAnalysisMaxLocalSlots(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
         analysis.max_active_call_arg_slots = entryAnalysisMaxCallArgSlots(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
@@ -2699,7 +2848,11 @@ fn markEntryAnalysisFunctionBlocks(
     return changed;
 }
 
-fn entryAnalysisHasHelperCycle(comptime plan: ProgramPlan, comptime analysis: EntryExecutionAnalysis(plan)) bool {
+fn entryAnalysisHasHelperCycle(
+    comptime plan: ProgramPlan,
+    comptime analysis: EntryExecutionAnalysis(plan),
+    comptime nested_with_targets: anytype,
+) bool {
     for (plan.functions, 0..) |_, start_index| {
         if (!analysis.reachable_functions[start_index]) continue;
         var seen = [_]bool{false} ** plan.functions.len;
@@ -2711,10 +2864,16 @@ fn entryAnalysisHasHelperCycle(comptime plan: ProgramPlan, comptime analysis: En
                 if (!seen[owner_index]) continue :seen_owner_scan;
                 const instruction_end = rangeEnd(owner_function.first_instruction, owner_function.instruction_count) orelse continue :seen_owner_scan;
                 reachable_instruction_scan: for (plan.instructions[owner_function.first_instruction..instruction_end], owner_function.first_instruction..) |instruction, instruction_index| {
-                    if (!analysis.reachable_instructions[instruction_index] or instruction.kind != .call_helper) continue :reachable_instruction_scan;
-                    if (instruction.operand == start_index) return true;
-                    if (instruction.operand < seen.len and !seen[instruction.operand]) {
-                        seen[instruction.operand] = true;
+                    if (!analysis.reachable_instructions[instruction_index]) continue :reachable_instruction_scan;
+                    const target_index = switch (instruction.kind) {
+                        .call_helper => instruction.operand,
+                        .call_nested_with => nestedWithTargetIndexForMetadata(nested_with_targets, instruction.string_literal) orelse
+                            continue :reachable_instruction_scan,
+                        else => continue :reachable_instruction_scan,
+                    };
+                    if (target_index == start_index) return true;
+                    if (target_index < seen.len and !seen[target_index]) {
+                        seen[target_index] = true;
                         changed = true;
                     }
                 }
@@ -7021,6 +7180,7 @@ test "ProgramPlan hash survives JSON roundtrip" {
 
     try parsed.value.validate();
     try std.testing.expectEqual(plan.hash(), parsed.value.hash());
+    try std.testing.expectEqual(plan.canonicalHash(), parsed.value.canonicalHash());
 }
 
 test "ProgramPlan hash includes requirement semantics" {
@@ -7076,4 +7236,10 @@ test "ProgramPlan hash includes requirement semantics" {
     };
 
     try std.testing.expect(base.hash() != enriched.hash());
+    try std.testing.expect(base.canonicalHash() != enriched.canonicalHash());
+
+    var provenance_only = base;
+    provenance_only.ir_hash +%= 1;
+    try std.testing.expect(base.hash() != provenance_only.hash());
+    try std.testing.expectEqual(base.canonicalHash(), provenance_only.canonicalHash());
 }

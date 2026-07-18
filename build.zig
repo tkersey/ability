@@ -996,8 +996,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     static_machine_tests_mod.addImport("boundary", boundary);
-    const static_machine_tests = b.addTest(.{ .root_module = static_machine_tests_mod });
-    const run_static_machine_tests = b.addRunArtifact(static_machine_tests);
+    const static_machine_tests = b.addTest(.{ .root_module = static_machine_tests_mod, .filters = test_args.filters });
+    const run_static_machine_tests = addRunArtifactWithArgs(b, static_machine_tests, test_args.passthrough);
     test_step.dependOn(&run_static_machine_tests.step);
     const static_machine_step = b.step("check-boundary-static-machine", "Check the Boundary StaticMachine API, state codec, and reducer.");
     static_machine_step.dependOn(&run_static_machine_tests.step);
@@ -1008,13 +1008,13 @@ pub fn build(b: *std.Build) void {
         .root_module = agent_loop_tests_mod,
         .filters = &.{"agent StaticMachine root"},
     });
-    static_agent_step.dependOn(&b.addRunArtifact(static_agent_tests).step);
+    static_agent_step.dependOn(&addRunArtifactWithArgs(b, static_agent_tests, test_args.passthrough).step);
     const static_provider_step = b.step("check-boundary-static-provider", "Check StaticMachine helper and provider suspension.");
     const static_provider_tests = b.addTest(.{
         .root_module = agent_loop_tests_mod,
         .filters = &.{"agent StaticMachine toolbox provider"},
     });
-    static_provider_step.dependOn(&b.addRunArtifact(static_provider_tests).step);
+    static_provider_step.dependOn(&addRunArtifactWithArgs(b, static_provider_tests, test_args.passthrough).step);
 
     const evidence_kernel_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/evidence_kernel_test.zig"),
@@ -1056,6 +1056,14 @@ pub fn build(b: *std.Build) void {
         .{
             .path = "test/compile_fail/invalid_result_cleanup_with_outputs.zig",
             .expected_error = "Body.deinitResult with Body.Outputs must have type fn (std.mem.Allocator, value) void; release outputs separately with Body.deinitOutputs",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_cleanup_unsupported.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",
+            .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
         },
         .{
             .path = "test/compile_fail/value_schema_variant_mismatch.zig",

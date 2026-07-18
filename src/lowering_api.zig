@@ -3611,6 +3611,23 @@ fn BodySiteMetadata(comptime Body: type) type {
     };
 }
 
+fn staticMachineContractFingerprint(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+) u64 {
+    @setEvalBranchQuota(1_000_000);
+    var hasher = std.hash.Wyhash.init(0);
+    sessionSiteHashBytes(&hasher, "boundary.static-machine.contract.v1");
+    sessionSiteHashU64(&hasher, compiled_plan.canonicalHash());
+    sessionSiteHashUsize(&hasher, nested_with_targets.len);
+    inline for (nested_with_targets) |target| {
+        sessionSiteHashBytes(&hasher, target.metadata);
+        sessionSiteHashU16(&hasher, target.function_index);
+    }
+    sessionSiteHashUsize(&hasher, max_interpreter_steps);
+    return hasher.final();
+}
+
 pub fn ExecutableSessionForPlan(
     comptime ErrorSet: type,
     comptime program_label: []const u8,
@@ -3832,6 +3849,7 @@ pub fn ExecutableSessionForPlan(
         next_turn_index: usize = 0,
         pending: ?Pending = null,
         unwinding_after: ?AfterUnwind = null,
+        terminal_failure_instruction_index: ?usize = null,
         completed: ?ExecutionResult = null,
         done_consumed: bool = false,
 
@@ -4390,15 +4408,24 @@ pub fn ExecutableSessionForPlan(
 
         /// Encode any runnable or parked generated-machine state without runtime ownership data.
         pub fn encodeState(self: *const Self, allocator: std.mem.Allocator) anyerror![]u8 {
+            return self.encodeStateBounded(allocator, null);
+        }
+
+        /// Encode authoritative continuation bytes while enforcing a structural byte limit during growth.
+        pub fn encodeStateBounded(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            maximum_bytes: ?usize,
+        ) anyerror![]u8 {
             try @constCast(self).validateState();
-            var writer = DurableWriter.init(allocator);
+            var writer = DurableWriter.initBounded(allocator, maximum_bytes);
             errdefer writer.deinit();
             try writer.writeBytes(state_image_magic);
             try writer.writeU32(state_image_format_version);
             try writer.writeU32(state_image_fingerprint_version);
             try writer.writeLenBytes(program_label);
             try writer.writeLenBytes(compiled_plan.label);
-            try writer.writeU64(plan_hash);
+            try writer.writeU64(contract_fingerprint);
             try writeCoreImage(&writer, self);
             const payload = writer.bytes.items;
             try writer.writeU64(stateImageFingerprint(payload));
@@ -4411,13 +4438,13 @@ pub fn ExecutableSessionForPlan(
             const stored_checksum = std.mem.readInt(u64, bytes[bytes.len - 8 ..][0..8], .little);
             const payload = bytes[0 .. bytes.len - 8];
             if (stored_checksum != stateImageFingerprint(payload)) return error.ProgramContractViolation;
-            var reader = DurableReader.init(payload);
+            var reader = DurableReader.initCanonical(payload);
             try reader.expectBytes(state_image_magic);
             if (try reader.readU32() != state_image_format_version) return error.ProgramContractViolation;
             if (try reader.readU32() != state_image_fingerprint_version) return error.ProgramContractViolation;
             if (!std.mem.eql(u8, try reader.readLenBytes(), program_label)) return error.ProgramContractViolation;
             if (!std.mem.eql(u8, try reader.readLenBytes(), compiled_plan.label)) return error.ProgramContractViolation;
-            if (try reader.readU64() != plan_hash) return error.ProgramContractViolation;
+            if (try reader.readU64() != contract_fingerprint) return error.ProgramContractViolation;
             var state = try readCoreImage(allocator, &reader);
             errdefer state.deinit();
             if (!reader.eof()) return error.ProgramContractViolation;
@@ -4427,8 +4454,10 @@ pub fn ExecutableSessionForPlan(
 
         /// Validate one live generated-machine state without advancing it.
         pub fn validateState(self: *Self) error{ProgramContractViolation}!void {
-            if (self.completed != null or self.done_consumed) return error.ProgramContractViolation;
-            if (self.remaining_steps > max_interpreter_steps or self.next_turn_index > max_interpreter_steps) {
+            if (self.completed != null or self.done_consumed or self.terminal_failure_instruction_index != null) {
+                return error.ProgramContractViolation;
+            }
+            if (self.remaining_steps > max_interpreter_steps or self.next_turn_index > maximum_turn_count) {
                 return error.ProgramContractViolation;
             }
             try self.validateDecodedFrameStack();
@@ -4444,6 +4473,10 @@ pub fn ExecutableSessionForPlan(
         pub const journal_fingerprint_version: u32 = 1;
         pub const maximum_frame_depth: usize = analysis.max_active_frame_depth;
         pub const maximum_interpreter_fuel: usize = max_interpreter_steps;
+        pub const maximum_turn_count: usize = max_interpreter_steps * 2;
+        pub const has_frame_cycle: bool = analysis.helper_cycle;
+        pub const canonical_plan_fingerprint: u64 = compiled_plan.canonicalHash();
+        pub const contract_fingerprint: u64 = staticMachineContractFingerprint(compiled_plan, nested_with_targets);
         // zlinter-enable declaration_naming
 
         const capsule_image_magic = "ABL_CAP1";
@@ -4452,9 +4485,21 @@ pub fn ExecutableSessionForPlan(
         const DurableWriter = struct {
             allocator: std.mem.Allocator,
             bytes: std.ArrayList(u8) = .empty,
+            maximum_bytes: ?usize = null,
+            canonical_values: bool = false,
+
+            const WriteError = std.mem.Allocator.Error || error{ProgramContractViolation};
 
             fn init(allocator: std.mem.Allocator) @This() {
                 return .{ .allocator = allocator };
+            }
+
+            fn initBounded(allocator: std.mem.Allocator, maximum_bytes: ?usize) @This() {
+                return .{
+                    .allocator = allocator,
+                    .maximum_bytes = maximum_bytes,
+                    .canonical_values = true,
+                };
             }
 
             fn deinit(self: *@This()) void {
@@ -4465,46 +4510,52 @@ pub fn ExecutableSessionForPlan(
                 return self.bytes.toOwnedSlice(self.allocator);
             }
 
-            fn writeBytes(self: *@This(), value: []const u8) std.mem.Allocator.Error!void {
-                try self.bytes.appendSlice(self.allocator, value);
+            fn writeBytes(self: *@This(), value: []const u8) WriteError!void {
+                const next_len = std.math.add(usize, self.bytes.items.len, value.len) catch
+                    return error.ProgramContractViolation;
+                if (self.maximum_bytes) |maximum| {
+                    if (next_len > maximum) return error.ProgramContractViolation;
+                }
+                try self.bytes.ensureUnusedCapacity(self.allocator, value.len);
+                self.bytes.appendSliceAssumeCapacity(value);
             }
 
-            fn writeLenBytes(self: *@This(), value: []const u8) std.mem.Allocator.Error!void {
+            fn writeLenBytes(self: *@This(), value: []const u8) WriteError!void {
                 try self.writeUsize(value.len);
                 try self.writeBytes(value);
             }
 
-            fn writeBool(self: *@This(), value: bool) std.mem.Allocator.Error!void {
-                try self.bytes.append(self.allocator, @intFromBool(value));
+            fn writeBool(self: *@This(), value: bool) WriteError!void {
+                try self.writeU8(@intFromBool(value));
             }
 
-            fn writeU8(self: *@This(), value: u8) std.mem.Allocator.Error!void {
-                try self.bytes.append(self.allocator, value);
+            fn writeU8(self: *@This(), value: u8) WriteError!void {
+                try self.writeBytes(&.{value});
             }
 
-            fn writeU16(self: *@This(), value: u16) std.mem.Allocator.Error!void {
+            fn writeU16(self: *@This(), value: u16) WriteError!void {
                 var buffer: [2]u8 = undefined;
                 std.mem.writeInt(u16, &buffer, value, .little);
                 try self.writeBytes(&buffer);
             }
 
-            fn writeU32(self: *@This(), value: u32) std.mem.Allocator.Error!void {
+            fn writeU32(self: *@This(), value: u32) WriteError!void {
                 var buffer: [4]u8 = undefined;
                 std.mem.writeInt(u32, &buffer, value, .little);
                 try self.writeBytes(&buffer);
             }
 
-            fn writeU64(self: *@This(), value: u64) std.mem.Allocator.Error!void {
+            fn writeU64(self: *@This(), value: u64) WriteError!void {
                 var buffer: [8]u8 = undefined;
                 std.mem.writeInt(u64, &buffer, value, .little);
                 try self.writeBytes(&buffer);
             }
 
-            fn writeUsize(self: *@This(), value: usize) std.mem.Allocator.Error!void {
+            fn writeUsize(self: *@This(), value: usize) WriteError!void {
                 try self.writeU64(@intCast(value));
             }
 
-            fn writeI32(self: *@This(), value: i32) std.mem.Allocator.Error!void {
+            fn writeI32(self: *@This(), value: i32) WriteError!void {
                 try self.writeU32(@bitCast(value));
             }
         };
@@ -4512,9 +4563,14 @@ pub fn ExecutableSessionForPlan(
         const DurableReader = struct {
             bytes: []const u8,
             index: usize = 0,
+            canonical_values: bool = false,
 
             fn init(bytes: []const u8) @This() {
                 return .{ .bytes = bytes };
+            }
+
+            fn initCanonical(bytes: []const u8) @This() {
+                return .{ .bytes = bytes, .canonical_values = true };
             }
 
             fn eof(self: @This()) bool {
@@ -4594,7 +4650,7 @@ pub fn ExecutableSessionForPlan(
             return hasher.final();
         }
 
-        fn writeOptionalUsize(writer: *DurableWriter, value: ?usize) std.mem.Allocator.Error!void {
+        fn writeOptionalUsize(writer: *DurableWriter, value: ?usize) DurableWriter.WriteError!void {
             try writer.writeBool(value != null);
             if (value) |actual| try writer.writeUsize(actual);
         }
@@ -4604,7 +4660,7 @@ pub fn ExecutableSessionForPlan(
             return try reader.readUsize();
         }
 
-        fn writeValueRef(writer: *DurableWriter, ref: program_plan.ValueRef) std.mem.Allocator.Error!void {
+        fn writeValueRef(writer: *DurableWriter, ref: program_plan.ValueRef) DurableWriter.WriteError!void {
             try writer.writeU8(@intFromEnum(ref.codec));
             try writer.writeBool(ref.schema_index != null);
             if (ref.schema_index) |schema_index| try writer.writeU16(schema_index);
@@ -4630,7 +4686,7 @@ pub fn ExecutableSessionForPlan(
             return .{ .codec = codec, .schema_index = schema_index };
         }
 
-        fn writeParkedKind(writer: *DurableWriter, parked: ParkedKind) std.mem.Allocator.Error!void {
+        fn writeParkedKind(writer: *DurableWriter, parked: ParkedKind) DurableWriter.WriteError!void {
             try writer.writeU8(switch (parked) {
                 .operation => 0,
                 .after => 1,
@@ -4645,7 +4701,7 @@ pub fn ExecutableSessionForPlan(
             };
         }
 
-        fn writeControlMode(writer: *DurableWriter, mode: program_plan.ControlMode) std.mem.Allocator.Error!void {
+        fn writeControlMode(writer: *DurableWriter, mode: program_plan.ControlMode) DurableWriter.WriteError!void {
             try writer.writeU8(switch (mode) {
                 .abort => 0,
                 .choice => 1,
@@ -4695,14 +4751,16 @@ pub fn ExecutableSessionForPlan(
             writer: *DurableWriter,
             context: *DurableValueImageContext,
             value: []const u8,
-        ) std.mem.Allocator.Error!void {
-            if (context.stringIndex(value)) |index| {
-                try writer.writeU8(1);
-                try writer.writeUsize(index);
-                return;
+        ) DurableWriter.WriteError!void {
+            if (!writer.canonical_values) {
+                if (context.stringIndex(value)) |index| {
+                    try writer.writeU8(1);
+                    try writer.writeUsize(index);
+                    return;
+                }
+                try context.strings.append(context.allocator, value);
             }
             try writer.writeU8(0);
-            try context.strings.append(context.allocator, value);
             try writer.writeLenBytes(value);
         }
 
@@ -4714,10 +4772,11 @@ pub fn ExecutableSessionForPlan(
             return switch (try reader.readU8()) {
                 0 => blk: {
                     const value = try scratch.storeOwnedString(try reader.readLenBytes());
-                    try context.strings.append(context.allocator, value);
+                    if (!reader.canonical_values) try context.strings.append(context.allocator, value);
                     break :blk value;
                 },
                 1 => blk: {
+                    if (reader.canonical_values) return error.ProgramContractViolation;
                     const index = try reader.readUsize();
                     if (index >= context.strings.items.len) return error.ProgramContractViolation;
                     break :blk context.strings.items[index];
@@ -4731,13 +4790,15 @@ pub fn ExecutableSessionForPlan(
             context: *DurableValueImageContext,
             value: []const []const u8,
         ) anyerror!void {
-            if (context.stringListIndex(value)) |index| {
-                try writer.writeU8(1);
-                try writer.writeUsize(index);
-                return;
+            if (!writer.canonical_values) {
+                if (context.stringListIndex(value)) |index| {
+                    try writer.writeU8(1);
+                    try writer.writeUsize(index);
+                    return;
+                }
+                try context.string_lists.append(context.allocator, value);
             }
             try writer.writeU8(0);
-            try context.string_lists.append(context.allocator, value);
             try writer.writeUsize(value.len);
             for (value) |item| try writeImageString(writer, context, item);
         }
@@ -4755,12 +4816,13 @@ pub fn ExecutableSessionForPlan(
                     var items_owned = false;
                     errdefer if (!items_owned) scratch.allocator.free(items);
                     for (items) |*item| item.* = try readImageString(reader, scratch, context);
-                    try context.string_lists.append(context.allocator, items);
+                    if (!reader.canonical_values) try context.string_lists.append(context.allocator, items);
                     try scratch.owned_string_lists.append(scratch.allocator, items);
                     items_owned = true;
                     break :blk items;
                 },
                 1 => blk: {
+                    if (reader.canonical_values) return error.ProgramContractViolation;
                     const index = try reader.readUsize();
                     if (index >= context.string_lists.items.len) return error.ProgramContractViolation;
                     break :blk context.string_lists.items[index];
@@ -4769,7 +4831,7 @@ pub fn ExecutableSessionForPlan(
             };
         }
 
-        fn writeCapsuleMetadata(writer: *DurableWriter, metadata: CapsuleMetadata) std.mem.Allocator.Error!void {
+        fn writeCapsuleMetadata(writer: *DurableWriter, metadata: CapsuleMetadata) DurableWriter.WriteError!void {
             try writer.writeU32(metadata.version);
             try writer.writeU32(metadata.continuation_fingerprint_version);
             try writer.writeLenBytes(metadata.program_label);
@@ -5138,11 +5200,13 @@ pub fn ExecutableSessionForPlan(
             value: ExecutableValue,
             decoded_locals: []const ExecutableValue,
         ) anyerror!void {
-            for (decoded_locals, 0..) |local, local_index| {
-                if (valueMatchesRef(ref, local) and executableValuesShareIdentity(local, value)) {
-                    try writer.writeU8(1);
-                    try writer.writeUsize(local_index);
-                    return;
+            if (!writer.canonical_values) {
+                for (decoded_locals, 0..) |local, local_index| {
+                    if (valueMatchesRef(ref, local) and executableValuesShareIdentity(local, value)) {
+                        try writer.writeU8(1);
+                        try writer.writeUsize(local_index);
+                        return;
+                    }
                 }
             }
             try writer.writeU8(0);
@@ -5159,6 +5223,7 @@ pub fn ExecutableSessionForPlan(
             return switch (try reader.readU8()) {
                 0 => try readExecutableValueForRef(reader, scratch, context, ref),
                 1 => blk: {
+                    if (reader.canonical_values) return error.ProgramContractViolation;
                     const local_index = try reader.readUsize();
                     if (local_index >= decoded_locals.len) return error.ProgramContractViolation;
                     const value = decoded_locals[local_index];
@@ -5211,11 +5276,13 @@ pub fn ExecutableSessionForPlan(
                 try writer.writeU8(0);
                 return;
             }
-            for (decoded_locals, 0..) |local, local_index| {
-                if (valueMatchesRef(ref, local) and executableValuesShareIdentity(local, value)) {
-                    try writer.writeU8(2);
-                    try writer.writeUsize(local_index);
-                    return;
+            if (!writer.canonical_values) {
+                for (decoded_locals, 0..) |local, local_index| {
+                    if (valueMatchesRef(ref, local) and executableValuesShareIdentity(local, value)) {
+                        try writer.writeU8(2);
+                        try writer.writeUsize(local_index);
+                        return;
+                    }
                 }
             }
             try writer.writeU8(1);
@@ -5233,6 +5300,7 @@ pub fn ExecutableSessionForPlan(
                 0 => .none,
                 1 => try readExecutableValueForRef(reader, scratch, context, ref),
                 2 => blk: {
+                    if (reader.canonical_values) return error.ProgramContractViolation;
                     const local_index = try reader.readUsize();
                     if (local_index >= decoded_locals.len) return error.ProgramContractViolation;
                     const value = decoded_locals[local_index];
@@ -5243,7 +5311,7 @@ pub fn ExecutableSessionForPlan(
             };
         }
 
-        fn writeSessionAfterEntry(writer: *DurableWriter, entry_value: SessionAfterStackEntry) std.mem.Allocator.Error!void {
+        fn writeSessionAfterEntry(writer: *DurableWriter, entry_value: SessionAfterStackEntry) DurableWriter.WriteError!void {
             try writer.writeU16(entry_value.op_index);
             try writer.writeU16(entry_value.operation_site_index);
             try writer.writeU16(entry_value.after_site_index);
@@ -5637,11 +5705,13 @@ pub fn ExecutableSessionForPlan(
                 try writer.writeU8(0);
                 return;
             }
-            for (locals, 0..) |local, local_index| {
-                if (executableValuesShareIdentity(local, value)) {
-                    try writer.writeU8(2);
-                    try writer.writeUsize(local_index);
-                    return;
+            if (!writer.canonical_values) {
+                for (locals, 0..) |local, local_index| {
+                    if (executableValuesShareIdentity(local, value)) {
+                        try writer.writeU8(2);
+                        try writer.writeUsize(local_index);
+                        return;
+                    }
                 }
             }
             try writer.writeU8(1);
@@ -5659,6 +5729,7 @@ pub fn ExecutableSessionForPlan(
                 0 => .none,
                 1 => try readExecutableValueForRef(reader, scratch, context, ref),
                 2 => blk: {
+                    if (reader.canonical_values) return error.ProgramContractViolation;
                     const local_index = try reader.readUsize();
                     if (local_index >= locals.len) return error.ProgramContractViolation;
                     const value = locals[local_index];
@@ -5872,6 +5943,7 @@ pub fn ExecutableSessionForPlan(
         }
 
         fn validateDecodedChildFrame(self: *const Self, parent: ActiveInterpreterFrame, child: ActiveInterpreterFrame) error{ProgramContractViolation}!void {
+            if (comptime compiled_plan.instructions.len == 0) return error.ProgramContractViolation;
             const dst = parent.waiting_helper_dst orelse return error.ProgramContractViolation;
             const parent_bounds = try blockInstructionBounds(compiled_plan, parent.function_index, parent.block_index);
             if (parent.instruction_index <= parent_bounds.first or parent.instruction_index > parent_bounds.end) return error.ProgramContractViolation;
@@ -5924,17 +5996,11 @@ pub fn ExecutableSessionForPlan(
             const parent_fingerprint = try Self.fingerprintExecutableValueForRef(ref, parent_value);
             const child_fingerprint = try Self.fingerprintExecutableValueForRef(ref, child_value);
             if (parent_fingerprint != child_fingerprint) return error.ProgramContractViolation;
-            switch (ref.codec) {
-                .unit, .bool, .i32, .usize => {},
-                .string, .string_list, .product, .sum => {
-                    if (!executableValuesShareIdentity(parent_value, child_value)) return error.ProgramContractViolation;
-                },
-            }
         }
 
         fn validateDecodedPendingState(self: *Self) error{ProgramContractViolation}!void {
             const pending = switch (self.pending orelse {
-                if (self.unwinding_after != null) return error.ProgramContractViolation;
+                if (self.unwinding_after != null) try self.validateDecodedAfterUnwind();
                 return;
             }) {
                 .op => |pending_op| {
@@ -5947,6 +6013,7 @@ pub fn ExecutableSessionForPlan(
             };
             try self.validateDecodedPendingTurnIndex(pending.turn_index);
             if (pending.remaining == 0) return error.ProgramContractViolation;
+            try self.validateDecodedAfterUnwind();
             const unwind = self.unwinding_after orelse return error.ProgramContractViolation;
             if (unwind.function_index != pending.function_index or
                 unwind.remaining != pending.remaining or
@@ -5969,8 +6036,34 @@ pub fn ExecutableSessionForPlan(
             }
         }
 
+        fn validateDecodedAfterUnwind(self: *Self) error{ProgramContractViolation}!void {
+            const unwind = self.unwinding_after orelse return error.ProgramContractViolation;
+            if (!valueMatchesRef(unwind.current_ref, unwind.value)) return error.ProgramContractViolation;
+            if (unwind.function_index >= compiled_plan.functions.len) return error.ProgramContractViolation;
+            const function = compiled_plan.functions[unwind.function_index];
+            if (!unwind.final_ref.eql(program_plan.functionResultRef(function))) return error.ProgramContractViolation;
+            if (self.frames.len() == 0) return error.ProgramContractViolation;
+            const active = self.frames.top();
+            if (active.function_index != unwind.function_index or active.waiting_helper_dst != null) {
+                return error.ProgramContractViolation;
+            }
+            const after_stack = self.scratch.frameAfterStack(active.frame);
+            if (unwind.remaining > after_stack.len) return error.ProgramContractViolation;
+            if (unwind.remaining != 0) {
+                const entry_value = after_stack[unwind.remaining - 1];
+                if (entry_value.after_site_index >= after_yield_sites.len) return error.ProgramContractViolation;
+                const site = after_yield_sites[entry_value.after_site_index];
+                if (site.source_function_index != unwind.function_index or
+                    site.source_operation_site_index != entry_value.operation_site_index or
+                    site.original_op_index != entry_value.op_index)
+                {
+                    return error.ProgramContractViolation;
+                }
+            }
+        }
+
         fn validateDecodedPendingTurnIndex(self: *const Self, turn_index: usize) error{ProgramContractViolation}!void {
-            if (self.next_turn_index > max_interpreter_steps) return error.ProgramContractViolation;
+            if (self.next_turn_index > maximum_turn_count) return error.ProgramContractViolation;
             if (turn_index == std.math.maxInt(usize)) return error.ProgramContractViolation;
             if (self.next_turn_index != turn_index + 1) return error.ProgramContractViolation;
         }
@@ -6007,9 +6100,11 @@ pub fn ExecutableSessionForPlan(
             return null;
         }
 
-        fn nextTurnIndex(self: *Self) usize {
+        fn nextTurnIndex(self: *Self) error{ProgramContractViolation}!usize {
+            if (self.next_turn_index >= maximum_turn_count) return error.ProgramContractViolation;
             const turn_index = self.next_turn_index;
-            self.next_turn_index += 1;
+            self.next_turn_index = std.math.add(usize, self.next_turn_index, 1) catch
+                return error.ProgramContractViolation;
             return turn_index;
         }
 
@@ -6686,6 +6781,17 @@ pub fn ExecutableSessionForPlan(
             return cloneExecutableValueForRefWithContext(ref, &clone_context, value);
         }
 
+        fn encodeOwnedRuntimeValueForRef(
+            self: *Self,
+            ref: program_plan.ValueRef,
+            value: anytype,
+        ) anyerror!ExecutableValue {
+            var clone_context = CloneContext.init(&self.scratch);
+            defer clone_context.deinit();
+            const cloned = try cloneTypedRuntimeValueForRef(ref, &clone_context, value);
+            return encodeRuntimeValueForRuntimeRef(schema_types, ref, &self.scratch, cloned);
+        }
+
         fn cloneExecutableValueByIdentityWithContext(
             clone_context: *CloneContext,
             value: ExecutableValue,
@@ -6808,6 +6914,9 @@ pub fn ExecutableSessionForPlan(
         }
 
         pub fn next(self: *Self) anyerror!Step {
+            if (self.terminal_failure_instruction_index) |instruction_index| {
+                return mappedReturnErrorForInstruction(ErrorSet, compiled_plan, instruction_index);
+            }
             if (self.pending != null) return error.ProgramContractViolation;
             if (self.unwinding_after != null) {
                 if (try self.continueAfterUnwind()) |step| return step;
@@ -6948,7 +7057,10 @@ pub fn ExecutableSessionForPlan(
                                 .word_u64 = std.fmt.parseUnsigned(u64, instruction.string_literal, 0) catch return error.ProgramContractViolation,
                             };
                         },
-                        .return_error => return mappedReturnErrorForInstruction(ErrorSet, compiled_plan, instruction_index),
+                        .return_error => {
+                            self.terminal_failure_instruction_index = instruction_index;
+                            return mappedReturnErrorForInstruction(ErrorSet, compiled_plan, instruction_index);
+                        },
                         .return_value => active.last_return = locals[instruction.operand],
                         .sub_one => {
                             const operand_ref = localRefForFunctionIndex(compiled_plan, active.function_index, instruction.operand) orelse return error.ProgramContractViolation;
@@ -7010,10 +7122,16 @@ pub fn ExecutableSessionForPlan(
             self.remaining_steps = allowance;
 
             const step = self.next() catch |err| {
+                const exhausted_temporary_allowance = self.remaining_steps == 0 and allowance < cumulative_remaining;
                 const consumed = allowance - self.remaining_steps;
                 self.remaining_steps = cumulative_remaining - consumed;
                 fuel.* -= consumed;
-                if (err == error.ExecutionBudgetExceeded) return .yielded_fuel;
+                if (err == error.ExecutionBudgetExceeded and
+                    self.terminal_failure_instruction_index == null and
+                    exhausted_temporary_allowance)
+                {
+                    return .yielded_fuel;
+                }
                 return err;
             };
             const consumed = allowance - self.remaining_steps;
@@ -7025,11 +7143,11 @@ pub fn ExecutableSessionForPlan(
         pub fn @"resume"(self: *Self, request: Request, value: anytype) anyerror!void {
             const pending = try self.checkedPending(request);
             if (pending.mode == .abort) return error.ProgramContractViolation;
-            const encoded = try encodeRuntimeValueForRuntimeRef(schema_types, pending.resume_ref, &self.scratch, value);
-            if (!valueMatchesRef(pending.resume_ref, encoded)) return error.ProgramContractViolation;
             if (self.frames.len() == 0) return error.ProgramContractViolation;
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
+            const encoded = try self.encodeOwnedRuntimeValueForRef(pending.resume_ref, value);
+            if (!valueMatchesRef(pending.resume_ref, encoded)) return error.ProgramContractViolation;
             var locals = self.scratch.frameLocals(active.frame);
             if (pending.has_after) try self.scratch.pushAfter(pending.after_stack_entry);
             if (pending.resume_ref.codec == .unit) {
@@ -7044,8 +7162,6 @@ pub fn ExecutableSessionForPlan(
 
         pub fn resumeAfter(self: *Self, request: AfterRequest, value: anytype) anyerror!void {
             const pending = try self.checkedPendingAfter(request);
-            const encoded = try encodeRuntimeValueForRuntimeRef(schema_types, pending.output_ref, &self.scratch, value);
-            if (!valueMatchesRef(pending.output_ref, encoded)) return error.ProgramContractViolation;
             if (self.unwinding_after) |*unwind| {
                 if (unwind.function_index != pending.function_index or
                     unwind.remaining != pending.remaining or
@@ -7054,6 +7170,8 @@ pub fn ExecutableSessionForPlan(
                 {
                     return error.ProgramContractViolation;
                 }
+                const encoded = try self.encodeOwnedRuntimeValueForRef(pending.output_ref, value);
+                if (!valueMatchesRef(pending.output_ref, encoded)) return error.ProgramContractViolation;
                 unwind.value = encoded;
                 unwind.current_ref = pending.output_ref;
                 unwind.remaining -= 1;
@@ -7067,7 +7185,7 @@ pub fn ExecutableSessionForPlan(
             if (self.frames.len() == 0) return error.ProgramContractViolation;
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
-            const encoded = try encodeRuntimeValueForRuntimeRef(schema_types, pending.result_ref, &self.scratch, value);
+            const encoded = try self.encodeOwnedRuntimeValueForRef(pending.result_ref, value);
             if (!valueMatchesRef(pending.result_ref, encoded)) return error.ProgramContractViolation;
             const completed = try completeSessionFunctionValueByIndex(
                 compiled_plan,
@@ -7209,7 +7327,7 @@ pub fn ExecutableSessionForPlan(
                         .codec = op.payload_codec,
                         .schema_index = op.payload_schema_index,
                     };
-                    const turn_index = self.nextTurnIndex();
+                    const turn_index = try self.nextTurnIndex();
                     const payload_fingerprint = try Self.fingerprintExecutableValueForRef(payload_ref, payload);
                     const request_fingerprint = Self.operationRequestFingerprint(
                         turn_index,
@@ -7308,7 +7426,7 @@ pub fn ExecutableSessionForPlan(
                     }
                     if (!valueMatchesRef(value_ref, value)) return error.ProgramContractViolation;
                     const requirement = compiled_plan.requirements[op.requirement_index];
-                    const turn_index = self.nextTurnIndex();
+                    const turn_index = try self.nextTurnIndex();
                     const value_fingerprint = try Self.fingerprintExecutableValueForRef(value_ref, value);
                     const request_fingerprint = Self.afterRequestFingerprint(
                         turn_index,
@@ -7647,6 +7765,7 @@ pub fn ExecutableSessionForPlan(
                 .remaining_steps = self.remaining_steps,
                 .next_token = self.next_token,
                 .next_turn_index = self.next_turn_index,
+                .terminal_failure_instruction_index = self.terminal_failure_instruction_index,
                 .done_consumed = self.done_consumed,
             };
             scratch = .{ .allocator = allocator };
@@ -9855,6 +9974,25 @@ test "Program.Session decoded operation pending requires a resumable active fram
         defer top.waiting_helper_dst = null;
         try std.testing.expectError(error.ProgramContractViolation, core.validateDecodedPendingState());
     }
+}
+
+test "Program.Session fuel wrapper keeps cumulative exhaustion terminal" {
+    const compiled_plan = supportOpPlan(.unit, .i32);
+    const Core = ExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "session-cumulative-fuel-classification",
+        compiled_plan,
+        .{},
+        &.{},
+        struct {},
+        struct {},
+    );
+
+    var core = try Core.start(std.testing.allocator, &.{});
+    defer core.deinit();
+    core.remaining_steps = 0;
+    var fuel: u64 = std.math.maxInt(u64);
+    try std.testing.expectError(error.ExecutionBudgetExceeded, core.nextWithFuel(&fuel));
 }
 
 test "boundary.program executable support rejects terminal nested target result mismatches" {

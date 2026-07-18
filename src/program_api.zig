@@ -1271,10 +1271,19 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
     return Program._staticMachine(options);
 }
 
-fn StaticInitialArgs(comptime Body: type) type {
-    if (!hasDeclSafe(Body, "encodeArgs")) return @TypeOf(.{});
-    const function_info = @typeInfo(@TypeOf(Body.encodeArgs)).@"fn";
-    return function_info.return_type orelse @compileError("Boundary Body.encodeArgs must return entry arguments");
+fn StaticInitialArgs(comptime Program: type) type {
+    const plan = Program.compiled_plan;
+    const entry = plan.functions[plan.entry_index];
+    var parameter_types: [entry.parameter_count]type = undefined;
+    for (0..entry.parameter_count) |parameter_index| {
+        const local = plan.locals[entry.first_local + parameter_index];
+        parameter_types[parameter_index] = ProgramValueTypeForRef(
+            plan,
+            Program.value_schema_types,
+            .{ .codec = local.codec, .schema_index = local.schema_index },
+        );
+    }
+    return @Tuple(&parameter_types);
 }
 
 fn StaticMachineFor(
@@ -1283,25 +1292,46 @@ fn StaticMachineFor(
     comptime Core: type,
     comptime options: StaticMachineOptions,
 ) type {
+    if (@typeInfo(BodyErrorSet(Body)).error_set == null) {
+        @compileError("Boundary StaticMachine requires Body.Error to be a closed error set");
+    }
+    if (Core.has_frame_cycle) {
+        @compileError("Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs");
+    }
     if (options.maximum_frames == 0) @compileError("Boundary StaticMachine maximum_frames must be positive");
     if (options.maximum_frames < Core.maximum_frame_depth) {
         @compileError("Boundary StaticMachine maximum_frames is smaller than the reachable helper-frame depth");
     }
     if (options.maximum_state_bytes == 0) @compileError("Boundary StaticMachine maximum_state_bytes must be positive");
+    if (Program.contract.OutputsType != void or
+        hasDeclSafe(Body, "collectOutputs") or
+        hasDeclSafe(Body, "deinitOutputs") or
+        hasDeclSafe(Body, "deinitResult"))
+    {
+        @compileError("Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks");
+    }
 
     return struct {
         const Self = @This();
 
         /// Boundary StaticMachine ABI version consumed by World comptime.
         pub const abi_version: u32 = 1;
-        /// Ephemeral owner for one decoded explicit machine state.
-        pub const State = Core;
+        /// Opaque owner for one decoded explicit machine state.
+        pub const State = struct {
+            _storage: *anyopaque,
+        };
         /// Typed entry arguments accepted by initialState.
-        pub const InitialArgs = StaticInitialArgs(Body);
+        pub const InitialArgs = StaticInitialArgs(Program);
         /// Typed terminal program value.
         pub const Result = Program.contract.ResultType;
-        /// Deterministic program failure set.
-        pub const Failure = Program.Error;
+        /// Program-authored deterministic failures.
+        pub const Failure = BodyErrorSet(Body);
+        /// Closed StaticMachine operation error set.
+        pub const Error = Failure || error{
+            OutOfMemory,
+            ProgramContractViolation,
+            ExecutionBudgetExceeded,
+        };
         /// Static operation and after-continuation site descriptors.
         pub const EffectRow = Program.protocol;
         /// Defunctionalized operation request.
@@ -1329,6 +1359,10 @@ fn StaticMachineFor(
             pub const plan_label = Program.compiled_plan.label;
             /// Deterministic compiled ProgramPlan identity.
             pub const plan_hash = Program.compiled_plan.hash();
+            /// Target-neutral canonical ProgramPlan identity.
+            pub const canonical_plan_fingerprint = Core.canonical_plan_fingerprint;
+            /// Complete reducer contract identity, including nested target resolution.
+            pub const machine_contract_fingerprint = Core.contract_fingerprint;
             /// Canonical state image format version.
             pub const state_image_format_version = Core.state_image_format_version;
             /// Canonical state image fingerprint version.
@@ -1345,6 +1379,8 @@ fn StaticMachineFor(
             pub const maximum_frame_depth = Core.maximum_frame_depth;
             /// Maximum cumulative instruction fuel enforced by Boundary.
             pub const maximum_interpreter_fuel = Core.maximum_interpreter_fuel;
+            /// Maximum deterministic request/after turn ordinal admitted by state validation.
+            pub const maximum_turn_count = Core.maximum_turn_count;
             /// Maximum canonical state image bytes selected by the application.
             pub const maximum_state_bytes = options.maximum_state_bytes;
             /// Whether diagnostic metadata was requested.
@@ -1355,19 +1391,41 @@ fn StaticMachineFor(
             pub const state_is_canonical_v1 = options.state_encoding == .canonical_v1;
         };
 
+        fn stateCore(state: *State) *Core {
+            return @ptrCast(@alignCast(state._storage));
+        }
+
+        fn stateCoreConst(state: *const State) *const Core {
+            return @ptrCast(@alignCast(state._storage));
+        }
+
+        fn ownCore(allocator: std.mem.Allocator, core_value: Core) Error!State {
+            const storage = allocator.create(Core) catch return error.OutOfMemory;
+            storage.* = core_value;
+            return .{ ._storage = storage };
+        }
+
+        fn mapError(err: anyerror) Error {
+            return mapProgramRunError(Error, err);
+        }
+
         /// Construct an initial explicit state from typed entry arguments.
-        pub fn initialState(allocator: std.mem.Allocator, args: InitialArgs) anyerror!State {
-            return Core.start(allocator, args);
+        pub fn initialState(allocator: std.mem.Allocator, args: InitialArgs) Error!State {
+            var core_value = Core.start(allocator, args) catch |err| return mapError(err);
+            errdefer core_value.deinit();
+            return ownCore(allocator, core_value);
         }
 
         /// Construct an initial explicit state from any entry-argument representation accepted by Program.Session.
-        pub fn initialStateWithArgs(allocator: std.mem.Allocator, args: anytype) anyerror!State {
-            return Core.start(allocator, args);
+        pub fn initialStateWithArgs(allocator: std.mem.Allocator, args: anytype) Error!State {
+            var core_value = Core.start(allocator, args) catch |err| return mapError(err);
+            errdefer core_value.deinit();
+            return ownCore(allocator, core_value);
         }
 
         /// Advance to one effect, terminal result, or deterministic fuel boundary.
-        pub fn reduce(state: *State, fuel: *u64) anyerror!Transition {
-            return switch (try state.nextWithFuel(fuel)) {
+        pub fn reduce(state: *State, fuel: *u64) Error!Transition {
+            return switch (stateCore(state).nextWithFuel(fuel) catch |err| return mapError(err)) {
                 .yielded_fuel => .yielded_fuel,
                 .step => |step| switch (step) {
                     .request => |request| .{ .request = request },
@@ -1379,48 +1437,49 @@ fn StaticMachineFor(
 
         /// Return the current parked request without advancing.
         pub fn current(state: *State) error{ProgramContractViolation}!Current {
-            return state.current();
+            return stateCore(state).current();
         }
 
         /// Resume one operation request with a typed value.
-        pub fn @"resume"(state: *State, request: Request, value: anytype) anyerror!void {
-            return state.@"resume"(request, value);
+        pub fn @"resume"(state: *State, request: Request, value: anytype) Error!void {
+            stateCore(state).@"resume"(request, value) catch |err| return mapError(err);
         }
 
         /// Resume one after-continuation request with a typed value.
-        pub fn resumeAfter(state: *State, request: AfterRequest, value: anytype) anyerror!void {
-            return state.resumeAfter(request, value);
+        pub fn resumeAfter(state: *State, request: AfterRequest, value: anytype) Error!void {
+            stateCore(state).resumeAfter(request, value) catch |err| return mapError(err);
         }
 
         /// Complete one choice or abort request immediately.
-        pub fn returnNow(state: *State, request: Request, value: anytype) anyerror!void {
-            return state.returnNow(request, value);
+        pub fn returnNow(state: *State, request: Request, value: anytype) Error!void {
+            stateCore(state).returnNow(request, value) catch |err| return mapError(err);
         }
 
         /// Encode target-neutral authoritative continuation bytes.
-        pub fn encodeState(allocator: std.mem.Allocator, state: *const State) anyerror![]u8 {
-            const bytes = try state.encodeState(allocator);
-            if (bytes.len > options.maximum_state_bytes) {
-                allocator.free(bytes);
-                return error.ProgramContractViolation;
-            }
-            return bytes;
+        pub fn encodeState(allocator: std.mem.Allocator, state: *const State) Error![]u8 {
+            return stateCoreConst(state).encodeStateBounded(allocator, options.maximum_state_bytes) catch |err|
+                return mapError(err);
         }
 
         /// Decode and validate target-neutral continuation bytes.
-        pub fn decodeState(allocator: std.mem.Allocator, bytes: []const u8) anyerror!State {
+        pub fn decodeState(allocator: std.mem.Allocator, bytes: []const u8) Error!State {
             if (bytes.len > options.maximum_state_bytes) return error.ProgramContractViolation;
-            return Core.decodeState(allocator, bytes);
+            var core_value = Core.decodeState(allocator, bytes) catch |err| return mapError(err);
+            errdefer core_value.deinit();
+            return ownCore(allocator, core_value);
         }
 
         /// Validate one live explicit state without advancing it.
         pub fn validateState(state: *State) error{ProgramContractViolation}!void {
-            return state.validateState();
+            return stateCore(state).validateState();
         }
 
         /// Release ephemeral allocations owned by a decoded or initial state.
         pub fn deinitState(state: *State) void {
-            state.deinit();
+            const core = stateCore(state);
+            const allocator = core.allocator;
+            core.deinit();
+            allocator.destroy(core);
         }
 
         comptime {
