@@ -50,13 +50,22 @@ because mutation would make that discarded alias topology observable. Lengths
 and the configured maximum image size are checked during writer growth, before
 additional capacity is allocated.
 
+Canonical `usize` values have a target-neutral 32-bit semantic domain, even
+though the wire slot remains eight bytes. This rule covers bare values,
+structural counts, and `usize` fields nested in product or sum schemas. Concrete
+`u64` schema fields remain full-width. Oversized authored values, reachable
+`const_usize` instructions, responses, reducer-produced values, and decoded
+state all fail closed.
+
 Readers reject a mismatched machine identity, invalid enum or boolean, malformed
 frame topology, an after stack that is not reachable along the decoded control
 path, an unowned root after-stack prefix, a pending operation whose after entry
 is already recorded, an unwitnessed cursor after a non-completing call, any
 after unwind before the function's return boundary, reducer caches that disagree
-with their source locals, an after-unwind current value ref that is not derived
-by folding the consumed suffix of the validated after stack, inconsistent
+with their source locals, a first after-unwind value that differs from the
+completed function value, an after-unwind current value ref that is not derived
+by folding the consumed suffix of the validated after stack, a full after stack
+behind a pending after-producing operation, inconsistent
 pending state, checksum mismatch, and trailing bytes. A live child frame is the
 explicit witness that permits its parent cursor to remain after a non-completing
 helper or provider call. The checksum detects corruption and accidental
@@ -93,4 +102,6 @@ budget exhaustion, and deterministic reduction failures after dispatch begins.
 depth. Recursive frame graphs are rejected in v1. `maximum_state_bytes` is a
 structural writer bound, not merely a post-encoding check. Core interpreter fuel
 and the derived maximum turn count remain independently bounded and are exposed
-through `Machine.Manifest`.
+through `Machine.Manifest`. After-continuation entries share the same logical
+fuel-derived bound but allocate only as they are recorded; unused capacity is
+neither serialized nor semantic.

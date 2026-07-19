@@ -1517,6 +1517,8 @@ fn StaticMachineFor(
             pub const maximum_interpreter_fuel = Core.maximum_interpreter_fuel;
             /// Maximum deterministic request/after turn ordinal admitted by state validation.
             pub const maximum_turn_count = Core.maximum_turn_count;
+            /// Semantic width of every canonical bare and structural usize value.
+            pub const canonical_usize_bits = Core.canonical_usize_bits;
             /// Maximum canonical state image bytes selected by the application.
             pub const maximum_state_bytes = options.maximum_state_bytes;
             /// Whether diagnostic metadata was requested.
@@ -1547,13 +1549,6 @@ fn StaticMachineFor(
 
         /// Construct an initial explicit state from typed entry arguments.
         pub fn initialState(allocator: std.mem.Allocator, args: InitialArgs) Error!State {
-            var core_value = Core.start(allocator, args) catch |err| return mapError(err);
-            errdefer core_value.deinit();
-            return ownCore(allocator, core_value);
-        }
-
-        /// Construct an initial explicit state from any entry-argument representation accepted by Program.Session.
-        pub fn initialStateWithArgs(allocator: std.mem.Allocator, args: anytype) Error!State {
             var core_value = Core.start(allocator, args) catch |err| return mapError(err);
             errdefer core_value.deinit();
             return ownCore(allocator, core_value);

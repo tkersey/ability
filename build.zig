@@ -1001,6 +1001,41 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_static_machine_tests.step);
     const static_machine_step = b.step("check-boundary-static-machine", "Check the Boundary StaticMachine API, state codec, and reducer.");
     static_machine_step.dependOn(&run_static_machine_tests.step);
+    const static_machine_wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const static_machine_wasm_core = addCoreModules(b, static_machine_wasm_target, .ReleaseSmall);
+    const static_machine_wasm_shared = b.createModule(.{
+        .root_source_file = b.path("src/boundary_shared.zig"),
+        .target = static_machine_wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wireBoundaryImports(static_machine_wasm_shared, static_machine_wasm_core);
+    const static_machine_wasm_boundary = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = static_machine_wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    static_machine_wasm_boundary.addImport("boundary_shared", static_machine_wasm_shared);
+    const static_machine_wasm_smoke_mod = b.createModule(.{
+        .root_source_file = b.path("test/static_machine_wasm32_compile.zig"),
+        .target = static_machine_wasm_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "boundary", .module = static_machine_wasm_boundary }},
+    });
+    const static_machine_wasm_smoke = b.addExecutable(.{
+        .name = "boundary-static-machine-wasm32-smoke",
+        .root_module = static_machine_wasm_smoke_mod,
+    });
+    static_machine_wasm_smoke.entry = .disabled;
+    static_machine_wasm_smoke.rdynamic = true;
+    static_machine_wasm_smoke.export_memory = true;
+    const static_machine_wasm_step = b.step("check-boundary-static-machine-wasm32", "Compile a Boundary StaticMachine for wasm32-freestanding.");
+    static_machine_wasm_step.dependOn(&static_machine_wasm_smoke.step);
+    static_machine_step.dependOn(static_machine_wasm_step);
+    check_step.dependOn(static_machine_wasm_step);
     const static_machine_parity_step = b.step("check-boundary-static-machine-parity", "Check Program.Session and StaticMachine semantic parity.");
     static_machine_parity_step.dependOn(&run_static_machine_tests.step);
     const static_agent_step = b.step("check-boundary-static-agent", "Check the StaticMachine agent fixture.");
@@ -1060,6 +1095,10 @@ pub fn build(b: *std.Build) void {
         .{
             .path = "test/compile_fail/static_machine_cleanup_unsupported.zig",
             .expected_error = "Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_oversized_usize_constant.zig",
+            .expected_error = "Boundary StaticMachine v1 requires const_usize values to fit the canonical u32 domain",
         },
         .{
             .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",

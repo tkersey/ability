@@ -793,6 +793,8 @@ pub fn authoredBoundProgramPlan(
 }
 
 const max_interpreter_steps = 10_000;
+const static_usize_bits: u8 = 32;
+const static_usize_max: u64 = std.math.maxInt(u32);
 
 /// Stable version tag mixed into Program.Session trace fingerprints.
 pub const trace_fingerprint_version: u32 = 2;
@@ -2097,15 +2099,28 @@ fn SchemaDestroyer(comptime T: type) type {
     };
 }
 
-fn InterpreterScratch(comptime after_stack_capacity: usize) type {
+const InterpreterAfterStorage = enum { embedded, lazy };
+
+fn InterpreterScratch(
+    comptime after_stack_capacity: usize,
+    comptime after_storage: InterpreterAfterStorage,
+) type {
     return struct {
+        const AfterStackStorage = if (after_storage == .lazy)
+            std.ArrayList(SessionAfterStackEntry)
+        else
+            [after_stack_capacity]SessionAfterStackEntry;
+
         allocator: std.mem.Allocator,
         locals: std.ArrayList(ExecutableValue) = .empty,
         call_args: std.ArrayList(ExecutableValue) = .empty,
         owned_schema_values: std.ArrayList(OwnedSchemaValue) = .empty,
         owned_strings: std.ArrayList([]u8) = .empty,
         owned_string_lists: std.ArrayList([][]const u8) = .empty,
-        after_stack: [after_stack_capacity]SessionAfterStackEntry = [_]SessionAfterStackEntry{.{ .op_index = 0 }} ** after_stack_capacity,
+        after_stack: AfterStackStorage = if (after_storage == .lazy)
+            .empty
+        else
+            [_]SessionAfterStackEntry{.{ .op_index = 0 }} ** after_stack_capacity,
         after_stack_len: usize = 0,
 
         const OwnershipCheckpoint = struct {
@@ -2133,6 +2148,7 @@ fn InterpreterScratch(comptime after_stack_capacity: usize) type {
             self.owned_string_lists.deinit(self.allocator);
             for (self.owned_strings.items) |owned| self.allocator.free(owned);
             self.owned_strings.deinit(self.allocator);
+            if (comptime after_storage == .lazy) self.after_stack.deinit(self.allocator);
             self.call_args.deinit(self.allocator);
             self.locals.deinit(self.allocator);
         }
@@ -2218,7 +2234,7 @@ fn InterpreterScratch(comptime after_stack_capacity: usize) type {
                 .locals_start = self.locals.items.len,
                 .locals_len = local_count,
                 .call_args_start = self.call_args.items.len,
-                .after_start = self.after_stack_len,
+                .after_start = self.afterEntries().len,
             };
             try self.locals.resize(self.allocator, frame.locals_start + local_count);
             @memset(self.locals.items[frame.locals_start..][0..local_count], .none);
@@ -2226,7 +2242,11 @@ fn InterpreterScratch(comptime after_stack_capacity: usize) type {
         }
 
         fn popFrame(self: *@This(), frame: InterpreterFrame) void {
-            self.after_stack_len = frame.after_start;
+            if (comptime after_storage == .lazy) {
+                self.after_stack.shrinkRetainingCapacity(frame.after_start);
+            } else {
+                self.after_stack_len = frame.after_start;
+            }
             self.call_args.shrinkRetainingCapacity(frame.call_args_start);
             self.locals.shrinkRetainingCapacity(frame.locals_start);
         }
@@ -2249,14 +2269,64 @@ fn InterpreterScratch(comptime after_stack_capacity: usize) type {
             self.call_args.shrinkRetainingCapacity(self.call_args.items.len - args.len);
         }
 
-        fn pushAfter(self: *@This(), entry: SessionAfterStackEntry) error{ExecutionBudgetExceeded}!void {
-            if (self.after_stack_len >= self.after_stack.len) return error.ExecutionBudgetExceeded;
-            self.after_stack[self.after_stack_len] = entry;
-            self.after_stack_len += 1;
+        fn reserveAfterSlot(self: *@This()) (std.mem.Allocator.Error || error{ExecutionBudgetExceeded})!void {
+            const len = self.afterEntries().len;
+            if (len >= after_stack_capacity) return error.ExecutionBudgetExceeded;
+            if (comptime after_storage == .lazy) {
+                const required = len + 1;
+                if (self.after_stack.capacity < required) {
+                    const doubled = if (self.after_stack.capacity == 0)
+                        @min(@as(usize, 8), after_stack_capacity)
+                    else
+                        @min(self.after_stack.capacity * 2, after_stack_capacity);
+                    try self.after_stack.ensureTotalCapacityPrecise(self.allocator, @max(required, doubled));
+                }
+            }
+        }
+
+        fn appendReservedAfter(self: *@This(), entry: SessionAfterStackEntry) void {
+            const len = self.afterEntries().len;
+            std.debug.assert(len < after_stack_capacity);
+            if (comptime after_storage == .lazy) {
+                std.debug.assert(len < self.after_stack.capacity);
+                self.after_stack.appendAssumeCapacity(entry);
+            } else if (comptime after_stack_capacity == 0) {
+                unreachable;
+            } else {
+                self.after_stack[len] = entry;
+                self.after_stack_len = len + 1;
+            }
         }
 
         fn frameAfterStack(self: *@This(), frame: InterpreterFrame) []const SessionAfterStackEntry {
-            return self.after_stack[frame.after_start..self.after_stack_len];
+            return self.afterEntries()[frame.after_start..];
+        }
+
+        fn afterEntries(self: *const @This()) []const SessionAfterStackEntry {
+            if (comptime after_storage == .lazy) return self.after_stack.items;
+            return self.after_stack[0..self.after_stack_len];
+        }
+
+        fn prepareAfterEntries(
+            self: *@This(),
+            len: usize,
+        ) (std.mem.Allocator.Error || error{ExecutionBudgetExceeded})![]SessionAfterStackEntry {
+            if (len > after_stack_capacity) return error.ExecutionBudgetExceeded;
+            if (comptime after_storage == .lazy) {
+                try self.after_stack.ensureTotalCapacityPrecise(self.allocator, len);
+                self.after_stack.items.len = len;
+                return self.after_stack.items;
+            }
+            self.after_stack_len = len;
+            return self.after_stack[0..len];
+        }
+
+        fn copyAfterEntries(
+            self: *@This(),
+            entries: []const SessionAfterStackEntry,
+        ) (std.mem.Allocator.Error || error{ExecutionBudgetExceeded})!void {
+            const destination = try self.prepareAfterEntries(entries.len);
+            @memcpy(destination, entries);
         }
     };
 }
@@ -3369,6 +3439,7 @@ fn executeKnownFunction(
                     if (instruction.operand >= compiled_plan.ops.len) return error.ProgramContractViolation;
                     const op = compiled_plan.ops[instruction.operand];
                     const payload = if (op.payload_codec == .unit) .none else locals[instruction.aux];
+                    if (op.has_after) try scratch.reserveAfterSlot();
                     const op_result = try callOpByIndex(
                         compiled_plan,
                         schema_types,
@@ -3397,7 +3468,7 @@ fn executeKnownFunction(
                         };
                     }
                     if (!valueMatchesRef(.{ .codec = op.resume_codec, .schema_index = op.resume_schema_index }, op_result.value)) return error.ProgramContractViolation;
-                    if (op.has_after) try scratch.pushAfter(.{ .op_index = instruction.operand });
+                    if (op.has_after) scratch.appendReservedAfter(.{ .op_index = instruction.operand });
                     if (op.resume_codec == .unit) {
                         last_return = op_result.value;
                     } else if (instruction.dst != std.math.maxInt(u16)) {
@@ -3847,6 +3918,7 @@ fn executeFunctionWithFrameStack(
                     if (instruction.operand >= compiled_plan.ops.len) return error.ProgramContractViolation;
                     const op = compiled_plan.ops[instruction.operand];
                     const payload = if (op.payload_codec == .unit) .none else locals[instruction.aux];
+                    if (op.has_after) try scratch.reserveAfterSlot();
                     const op_result = try callOpByIndexForFunctionIndex(
                         compiled_plan,
                         schema_types,
@@ -3873,7 +3945,7 @@ fn executeFunctionWithFrameStack(
                         if (try returnFromActiveFrame(compiled_plan, schema_types, handlers, scratch, &frames, .{ .value = completed, .terminal = true })) |result| return result;
                     } else {
                         if (!valueMatchesRef(.{ .codec = op.resume_codec, .schema_index = op.resume_schema_index }, op_result.value)) return error.ProgramContractViolation;
-                        if (op.has_after) try scratch.pushAfter(.{ .op_index = instruction.operand });
+                        if (op.has_after) scratch.appendReservedAfter(.{ .op_index = instruction.operand });
                         if (op.resume_codec == .unit) {
                             active.last_return = op_result.value;
                         } else if (instruction.dst != std.math.maxInt(u16)) {
@@ -4107,6 +4179,7 @@ fn staticMachineContractFingerprint(
     var hasher = std.hash.Wyhash.init(0);
     sessionSiteHashBytes(&hasher, "boundary.static-machine.contract.v1");
     sessionSiteHashBytes(&hasher, program_label);
+    sessionSiteHashU8(&hasher, static_usize_bits);
     sessionSiteHashU64(&hasher, staticPlanFingerprint(compiled_plan));
     sessionSiteHashUsize(&hasher, nested_with_targets.len);
     inline for (nested_with_targets) |target| {
@@ -4242,10 +4315,25 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
     const ResultValue = ValueTypeForRef(compiled_plan, schema_types, program_plan.functionResultRef(entry));
     const session_after_stack_capacity = if (analysis.reachable_after_count == 0) 0 else max_interpreter_steps;
     const canonical_request_identity = request_identity == .canonical_static_machine;
+    const Scratch = InterpreterScratch(
+        session_after_stack_capacity,
+        if (canonical_request_identity) .lazy else .embedded,
+    );
     const plan_hash = if (canonical_request_identity)
         canonical_plan_identity
     else
         compiled_plan.hash();
+
+    if (canonical_request_identity) comptime {
+        for (compiled_plan.instructions, 0..) |instruction, instruction_index| {
+            if (!analysis.reachable_instructions[instruction_index] or instruction.kind != .const_usize) continue;
+            const value = std.fmt.parseUnsigned(u64, instruction.string_literal, 0) catch
+                @compileError("Boundary StaticMachine const_usize literal is not a valid u64");
+            if (value > static_usize_max) {
+                @compileError("Boundary StaticMachine v1 requires const_usize values to fit the canonical u32 domain");
+            }
+        }
+    };
 
     return struct {
         const Self = @This();
@@ -4254,7 +4342,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         /// Owned storage that keeps detached session result values alive after the session core closes.
         pub const ResultStorage = struct {
-            scratch: InterpreterScratch(session_after_stack_capacity),
+            scratch: Scratch,
 
             /// Release detached session result storage.
             pub fn deinit(self: *@This()) void {
@@ -4473,7 +4561,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         // zlinter-enable declaration_naming
 
         allocator: std.mem.Allocator,
-        scratch: InterpreterScratch(session_after_stack_capacity),
+        scratch: Scratch,
         frames: ActiveFrameStack,
         session_id: usize,
         remaining_steps: usize = max_interpreter_steps,
@@ -5131,6 +5219,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         pub const maximum_frame_depth: usize = analysis.max_active_frame_depth;
         pub const maximum_interpreter_fuel: usize = max_interpreter_steps;
         pub const maximum_turn_count: usize = max_interpreter_steps * 2;
+        pub const canonical_usize_bits: u8 = static_usize_bits;
         pub const has_frame_cycle: bool = analysis.helper_cycle;
         pub const canonical_plan_fingerprint: u64 = canonical_plan_identity;
         pub const contract_fingerprint: u64 = static_contract_identity;
@@ -5217,6 +5306,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             }
 
             fn writeUsize(self: *@This(), value: usize) WriteError!void {
+                if (self.canonical_values and @as(u64, @intCast(value)) > static_usize_max) {
+                    return error.ProgramContractViolation;
+                }
                 try self.writeU64(@intCast(value));
             }
 
@@ -5290,6 +5382,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
             fn readUsize(self: *@This()) error{ProgramContractViolation}!usize {
                 const value = try self.readU64();
+                if (self.canonical_values and value > static_usize_max) {
+                    return error.ProgramContractViolation;
+                }
                 if (value > std.math.maxInt(usize)) return error.ProgramContractViolation;
                 return @intCast(value);
             }
@@ -5431,7 +5526,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readImageString(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
         ) anyerror![]const u8 {
             return switch (try reader.readU8()) {
@@ -5470,7 +5565,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readImageStringList(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
         ) anyerror![]const []const u8 {
             return switch (try reader.readU8()) {
@@ -5663,7 +5758,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readTypedValue(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             comptime ref: program_plan.ValueRef,
         ) anyerror!ValueTypeForRef(compiled_plan, schema_types, ref) {
@@ -5687,7 +5782,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readProductValue(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             comptime schema_index: usize,
             comptime T: type,
@@ -5722,7 +5817,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readSumValue(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             comptime schema_index: usize,
             comptime T: type,
@@ -5802,7 +5897,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 .unit => {},
                 .bool => try writer.writeBool(try decodeArg(.bool, value)),
                 .i32 => try writer.writeI32(try decodeArg(.i32, value)),
-                .usize => try writer.writeU64(try executableWordU64(value)),
+                .usize => {
+                    const word = try executableWordU64(value);
+                    if (writer.canonical_values and word > static_usize_max) {
+                        return error.ProgramContractViolation;
+                    }
+                    try writer.writeU64(word);
+                },
                 .string => try writeImageString(writer, context, try decodeArg(.string, value)),
                 .string_list => try writeImageStringList(writer, context, try decodeArg(.string_list, value)),
                 .product, .sum => switch (value) {
@@ -5829,7 +5930,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readExecutableValueForRef(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             ref: program_plan.ValueRef,
         ) anyerror!ExecutableValue {
@@ -5837,7 +5938,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 .unit => .none,
                 .bool => .{ .bool = try reader.readBool() },
                 .i32 => .{ .i32 = try reader.readI32() },
-                .usize => .{ .word_u64 = try reader.readU64() },
+                .usize => blk: {
+                    const word = try reader.readU64();
+                    if (reader.canonical_values and word > static_usize_max) {
+                        return error.ProgramContractViolation;
+                    }
+                    break :blk .{ .word_u64 = word };
+                },
                 .string => .{ .string = try readImageString(reader, scratch, context) },
                 .string_list => .{ .string_list = try readImageStringList(reader, scratch, context) },
                 .product, .sum => blk: {
@@ -5880,7 +5987,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readExecutableImageValueForRef(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             ref: program_plan.ValueRef,
             decoded_locals: []const ExecutableValue,
@@ -5921,7 +6028,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readMaybeExecutableValueForRef(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             ref: program_plan.ValueRef,
         ) anyerror!ExecutableValue {
@@ -5956,7 +6063,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readMaybeExecutableImageValueForRef(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             ref: program_plan.ValueRef,
             decoded_locals: []const ExecutableValue,
@@ -6128,7 +6235,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readPending(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             frames: *const ActiveFrameStack,
             session_id: usize,
@@ -6412,7 +6519,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readFrameLastReturn(
             reader: *DurableReader,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             context: *DurableValueImageContext,
             ref: program_plan.ValueRef,
             locals: []const ExecutableValue,
@@ -6440,8 +6547,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             try writer.writeUsize(self.remaining_steps);
             try writer.writeUsize(self.next_turn_index);
             try writer.writeBool(self.done_consumed);
-            try writer.writeUsize(self.scratch.after_stack_len);
-            for (self.scratch.after_stack[0..self.scratch.after_stack_len]) |entry_value| {
+            const after_entries = self.scratch.afterEntries();
+            try writer.writeUsize(after_entries.len);
+            for (after_entries) |entry_value| {
                 try writeSessionAfterEntry(writer, entry_value);
             }
 
@@ -6493,7 +6601,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn readCoreImage(allocator: std.mem.Allocator, reader: *DurableReader) anyerror!Self {
             if (reader.canonical_values != canonical_request_identity) return error.ProgramContractViolation;
-            var scratch = try InterpreterScratch(session_after_stack_capacity).init(
+            var scratch = try Scratch.init(
                 allocator,
                 analysis.max_active_local_slots,
                 analysis.max_active_call_arg_slots,
@@ -6524,9 +6632,12 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             defer context.deinit();
 
             const after_stack_len = try reader.readUsize();
-            if (after_stack_len > core.scratch.after_stack.len) return error.ProgramContractViolation;
-            core.scratch.after_stack_len = after_stack_len;
-            for (core.scratch.after_stack[0..after_stack_len]) |*entry_value| {
+            if (after_stack_len > session_after_stack_capacity) return error.ProgramContractViolation;
+            const after_stack_bytes = std.math.mul(usize, after_stack_len, 3 * @sizeOf(u16)) catch
+                return error.ProgramContractViolation;
+            if (reader.remaining() < after_stack_bytes) return error.ProgramContractViolation;
+            const after_entries = try core.scratch.prepareAfterEntries(after_stack_len);
+            for (after_entries) |*entry_value| {
                 entry_value.* = try readSessionAfterEntry(reader);
                 try validateSessionAfterEntry(entry_value.*);
             }
@@ -6549,7 +6660,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 const bounds = try blockInstructionBounds(compiled_plan, function_index, block_index);
                 if (instruction_end != bounds.end or instruction_index < bounds.first or instruction_index > instruction_end) return error.ProgramContractViolation;
                 if (call_args_start > core.scratch.call_args.items.len) return error.ProgramContractViolation;
-                if (after_start > core.scratch.after_stack_len) return error.ProgramContractViolation;
+                if (after_start > core.scratch.afterEntries().len) return error.ProgramContractViolation;
                 if (waiting_helper_dst) |dst| {
                     if (dst != std.math.maxInt(u16) and dst >= expected_local_count) return error.ProgramContractViolation;
                 }
@@ -6652,7 +6763,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     return error.ProgramContractViolation;
                 if (expected_locals_start > self.scratch.locals.items.len) return error.ProgramContractViolation;
                 if (frame.frame.call_args_start > self.scratch.call_args.items.len) return error.ProgramContractViolation;
-                if (frame.frame.after_start > self.scratch.after_stack_len) return error.ProgramContractViolation;
+                if (frame.frame.after_start > self.scratch.afterEntries().len) return error.ProgramContractViolation;
 
                 if (frame_index == 0) {
                     if (frame.function_index != compiled_plan.entry_index or frame.frame.after_start != 0) {
@@ -6962,11 +7073,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 const after_end = if (frame_index + 1 < self.frames.len()) blk: {
                     const child = self.frames.at(frame_index + 1) orelse return error.ProgramContractViolation;
                     break :blk child.frame.after_start;
-                } else self.scratch.after_stack_len;
-                if (frame.frame.after_start > after_end or after_end > self.scratch.after_stack_len) {
+                } else self.scratch.afterEntries().len;
+                if (frame.frame.after_start > after_end or after_end > self.scratch.afterEntries().len) {
                     return error.ProgramContractViolation;
                 }
-                const entries = self.scratch.after_stack[frame.frame.after_start..after_end];
+                const entries = self.scratch.afterEntries()[frame.frame.after_start..after_end];
                 for (entries) |entry_value| {
                     try validateSessionAfterEntry(entry_value);
                     const after_site = afterSiteAt(entry_value.after_site_index) orelse
@@ -7042,6 +7153,14 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn validateDecodedPendingState(self: *Self) error{ProgramContractViolation}!void {
             if (comptime canonical_request_identity) {
+                if (self.pending) |pending| switch (pending) {
+                    .op => |pending_op| if (pending_op.has_after and
+                        self.scratch.afterEntries().len >= session_after_stack_capacity)
+                    {
+                        return error.ProgramContractViolation;
+                    },
+                    .after => {},
+                };
                 try self.validateDecodedAfterStackReachability();
             }
             const pending = switch (self.pending orelse {
@@ -7114,6 +7233,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     ) catch return error.ProgramContractViolation;
                 }
                 if (!unwind.current_ref.eql(expected_current_ref)) return error.ProgramContractViolation;
+                if (unwind.remaining == after_stack.len) {
+                    try validateDecodedArgumentValue(unwind.current_ref, active.last_return, unwind.value);
+                }
                 const bounds = try blockInstructionBounds(compiled_plan, active.function_index, active.block_index);
                 if (active.instruction_index != bounds.end or active.instruction_end != bounds.end) {
                     return error.ProgramContractViolation;
@@ -7161,6 +7283,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             if (self.frames.len() == 0) return error.ProgramContractViolation;
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
+            if (pending.has_after and self.scratch.afterEntries().len >= session_after_stack_capacity) {
+                return error.ProgramContractViolation;
+            }
         }
 
         fn validateActiveOperationFrame(active: ActiveInterpreterFrame, pending: PendingRequest) error{ProgramContractViolation}!void {
@@ -7445,8 +7570,18 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     else => return error.ProgramContractViolation,
                 },
                 .usize => switch (value) {
-                    .usize => |typed| traceHashUsize(hasher, typed),
-                    .word_u64 => |typed| traceHashU64(hasher, typed),
+                    .usize => |typed| {
+                        if (comptime canonical_request_identity) {
+                            if (@as(u64, @intCast(typed)) > static_usize_max) return error.ProgramContractViolation;
+                        }
+                        traceHashUsize(hasher, typed);
+                    },
+                    .word_u64 => |typed| {
+                        if (comptime canonical_request_identity) {
+                            if (typed > static_usize_max) return error.ProgramContractViolation;
+                        }
+                        traceHashU64(hasher, typed);
+                    },
                     else => return error.ProgramContractViolation,
                 },
                 .string => switch (value) {
@@ -7515,6 +7650,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 },
                 usize => {
                     if (!ref.eql(.{ .codec = .usize })) return error.ProgramContractViolation;
+                    if (comptime canonical_request_identity) {
+                        if (@as(u64, @intCast(value)) > static_usize_max) return error.ProgramContractViolation;
+                    }
                     traceHashUsize(hasher, value);
                 },
                 []const u8 => {
@@ -7669,11 +7807,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         };
 
         const CloneContext = struct {
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             strings: std.ArrayList(ClonedString) = .empty,
             string_lists: std.ArrayList(ClonedStringList) = .empty,
 
-            fn init(scratch: *InterpreterScratch(session_after_stack_capacity)) @This() {
+            fn init(scratch: *Scratch) @This() {
                 return .{ .scratch = scratch };
             }
 
@@ -7883,7 +8021,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn cloneExecutableValueForRef(
             ref: program_plan.ValueRef,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             value: ExecutableValue,
         ) anyerror!ExecutableValue {
             var clone_context = CloneContext.init(scratch);
@@ -7896,6 +8034,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             ref: program_plan.ValueRef,
             value: anytype,
         ) anyerror!ExecutableValue {
+            if (comptime canonical_request_identity) {
+                _ = try fingerprintTypedValueForRef(ref, value);
+            }
             const ownership_checkpoint = self.scratch.ownershipCheckpoint();
             errdefer self.scratch.rollbackOwned(ownership_checkpoint);
             var clone_context = CloneContext.init(&self.scratch);
@@ -7915,7 +8056,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn cloneExecutableValueByIdentity(
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             value: ExecutableValue,
         ) anyerror!ExecutableValue {
             var clone_context = CloneContext.init(scratch);
@@ -7924,7 +8065,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn cloneEntryArgs(
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             values: []ExecutableValue,
         ) anyerror!void {
             if (comptime entry.parameter_count == 0) return;
@@ -7953,7 +8094,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 @compileError("Program.Session.start failed executable support validation: " ++ @errorName(err));
             comptime validateSessionPlanSupportWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
                 @compileError("Program.Session.start unsupported: " ++ @errorName(err));
-            var scratch = try InterpreterScratch(session_after_stack_capacity).init(
+            var scratch = try Scratch.init(
                 allocator,
                 analysis.max_active_local_slots,
                 analysis.max_active_call_arg_slots,
@@ -7975,6 +8116,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
             var entry_args: [entry.parameter_count]ExecutableValue = undefined;
             try encodeEntryArgs(compiled_plan, schema_types, &self.scratch, entry_args[0..], args);
+            if (comptime canonical_request_identity) {
+                for (entry_args, 0..) |value, index| {
+                    const local = compiled_plan.locals[entry.first_local + index];
+                    const ref: program_plan.ValueRef = .{ .codec = local.codec, .schema_index = local.schema_index };
+                    _ = try fingerprintExecutableValueForRef(ref, value);
+                }
+            }
             try cloneEntryArgs(&self.scratch, entry_args[0..]);
             try pushActiveInterpreterFrame(allocator, compiled_plan, &self.scratch, &self.frames, compiled_plan.entry_index, entry_args[0..]);
             return self;
@@ -8156,20 +8304,24 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                             const dst_ref = localRefForFunctionIndex(compiled_plan, active.function_index, instruction.dst) orelse return error.ProgramContractViolation;
                             const extracted = try extractVariantPayloadForExecutable(schema_types, dst_ref, &self.scratch, locals[instruction.operand], instruction.aux);
                             if (!valueMatchesRef(dst_ref, extracted.value)) return error.ProgramContractViolation;
+                            if (comptime canonical_request_identity) _ = try fingerprintExecutableValueForRef(dst_ref, extracted.value);
                             locals[instruction.dst] = extracted.value;
                         },
                         .product_extract_field => {
                             const dst_ref = localRefForFunctionIndex(compiled_plan, active.function_index, instruction.dst) orelse return error.ProgramContractViolation;
                             const extracted = try extractProductFieldForExecutable(schema_types, dst_ref, &self.scratch, locals[instruction.operand], instruction.aux);
                             if (!valueMatchesRef(dst_ref, extracted.value)) return error.ProgramContractViolation;
+                            if (comptime canonical_request_identity) _ = try fingerprintExecutableValueForRef(dst_ref, extracted.value);
                             locals[instruction.dst] = extracted.value;
                         },
                         .const_i32 => locals[instruction.dst] = .{ .i32 = try constI32Value(instruction) },
                         .const_string => locals[instruction.dst] = .{ .string = instruction.string_literal },
                         .const_usize => {
-                            locals[instruction.dst] = .{
-                                .word_u64 = std.fmt.parseUnsigned(u64, instruction.string_literal, 0) catch return error.ProgramContractViolation,
-                            };
+                            const word = std.fmt.parseUnsigned(u64, instruction.string_literal, 0) catch return error.ProgramContractViolation;
+                            if (comptime canonical_request_identity) {
+                                if (word > static_usize_max) return error.ProgramContractViolation;
+                            }
+                            locals[instruction.dst] = .{ .word_u64 = word };
                         },
                         .return_error => {
                             self.terminal_failure_instruction_index = instruction_index;
@@ -8266,10 +8418,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             if (self.frames.len() == 0) return error.ProgramContractViolation;
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
+            if (pending.has_after) try self.scratch.reserveAfterSlot();
             const encoded = try self.encodeOwnedRuntimeValueForRef(pending.resume_ref, value);
             if (!valueMatchesRef(pending.resume_ref, encoded)) return error.ProgramContractViolation;
             var locals = self.scratch.frameLocals(active.frame);
-            if (pending.has_after) try self.scratch.pushAfter(pending.after_stack_entry);
+            if (pending.has_after) self.scratch.appendReservedAfter(pending.after_stack_entry);
             if (pending.resume_ref.codec == .unit) {
                 active.last_return = encoded;
             } else if (pending.dst != std.math.maxInt(u16)) {
@@ -8746,6 +8899,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn detachExecutionResultValue(self: *Self, result: ExecutionResult) anyerror!DetachedResult {
             const result_ref = comptime program_plan.functionResultRef(entry);
+            if (comptime canonical_request_identity) {
+                _ = try fingerprintExecutableValueForRef(result_ref, result.value);
+            }
             if (comptime !typeMayBorrowRuntimeStorage(ResultValue)) {
                 return .{
                     .value = try decodeTypedValue(compiled_plan, schema_types, result_ref, result.value),
@@ -8756,7 +8912,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     .value = try decodeTypedValue(compiled_plan, schema_types, result_ref, result.value),
                 };
             }
-            var scratch = try InterpreterScratch(session_after_stack_capacity).init(self.allocator, 0, 0);
+            var scratch = try Scratch.init(self.allocator, 0, 0);
             errdefer scratch.deinit();
             const cloned = try cloneExecutableValueForRef(result_ref, &scratch, result.value);
             const decoded = try decodeTypedValue(compiled_plan, schema_types, result_ref, cloned);
@@ -8786,7 +8942,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn clonedLocalForPendingPayload(
             self: *const Self,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             op: PendingRequest,
         ) ?ExecutableValue {
             if (op.payload_local_id == std.math.maxInt(u16)) return null;
@@ -8803,7 +8959,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn clonedScratchValueForOriginalIdentity(
             self: *const Self,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             original: ExecutableValue,
         ) ?ExecutableValue {
             for (self.scratch.locals.items, 0..) |value, index| {
@@ -8817,7 +8973,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn clonedPriorScratchValueForOriginalIdentity(
             self: *const Self,
-            scratch: *InterpreterScratch(session_after_stack_capacity),
+            scratch: *Scratch,
             original: ExecutableValue,
             local_limit: usize,
             call_arg_limit: usize,
@@ -8879,8 +9035,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     try cloneExecutableValueByIdentityWithContext(clone_context, value);
             }
 
-            scratch.after_stack = self.scratch.after_stack;
-            scratch.after_stack_len = self.scratch.after_stack_len;
+            try scratch.copyAfterEntries(self.scratch.afterEntries());
         }
 
         fn cloneFrames(
@@ -8901,7 +9056,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn cloneState(self: *const Self, allocator: std.mem.Allocator) anyerror!Self {
-            var scratch = try InterpreterScratch(session_after_stack_capacity).init(
+            var scratch = try Scratch.init(
                 allocator,
                 self.scratch.locals.items.len,
                 self.scratch.call_args.items.len,
@@ -9125,7 +9280,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         .current_operation_site_index = pending.operation_site_index,
                         .result_ref = pending.result_ref,
                         .frame_count = frame_count,
-                        .pending_after_count = self.scratch.after_stack_len,
+                        .pending_after_count = self.scratch.afterEntries().len,
                         .function_index = pending.function_index,
                         .block_index = pending.block_index,
                         .instruction_index = pending.instruction_index,
@@ -9140,7 +9295,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     .source_operation_site_index = pending.source_operation_site_index,
                     .result_ref = pending.result_ref,
                     .frame_count = frame_count,
-                    .pending_after_count = self.scratch.after_stack_len,
+                    .pending_after_count = self.scratch.afterEntries().len,
                     .function_index = pending.function_index,
                     .block_index = pending.block_index,
                     .instruction_index = pending.instruction_index,
@@ -9226,7 +9381,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 try traceHashMaybeExecutableValueForRef(hasher, local_ref, value);
             }
 
-            const after_stack = self.scratch.after_stack[frame.frame.after_start..self.scratch.after_stack_len];
+            const after_stack = self.scratch.afterEntries()[frame.frame.after_start..];
             traceHashUsize(hasher, after_stack.len);
             for (after_stack) |after_entry| {
                 traceHashU16(hasher, after_entry.op_index);
@@ -9301,8 +9456,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 try traceHashFrame(&hasher, self, self.frames.at(frame_index) orelse return error.ProgramContractViolation);
             }
 
-            traceHashUsize(&hasher, self.scratch.after_stack_len);
-            for (self.scratch.after_stack[0..self.scratch.after_stack_len]) |after_entry| {
+            const after_entries = self.scratch.afterEntries();
+            traceHashUsize(&hasher, after_entries.len);
+            for (after_entries) |after_entry| {
                 traceHashU16(&hasher, after_entry.op_index);
                 traceHashU16(&hasher, after_entry.operation_site_index);
                 traceHashU16(&hasher, after_entry.after_site_index);
@@ -9359,7 +9515,7 @@ fn runExecutablePlanWithArgsForErrorSetUnchecked(
         @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
     const after_stack_capacity = if (analysis.reachable_after_count == 0) 0 else max_interpreter_steps;
     var remaining_steps: usize = max_interpreter_steps;
-    var scratch = try InterpreterScratch(after_stack_capacity).init(
+    var scratch = try InterpreterScratch(after_stack_capacity, .embedded).init(
         lowered_machine.runtimeAllocator(runtime),
         analysis.max_active_local_slots,
         analysis.max_active_call_arg_slots,
@@ -9519,7 +9675,7 @@ fn runExecutablePlanWithTypedArgsForErrorSetAndNestedTargetsUnchecked(
         @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
     const after_stack_capacity = if (analysis.reachable_after_count == 0) 0 else max_interpreter_steps;
     var remaining_steps: usize = max_interpreter_steps;
-    var scratch = try InterpreterScratch(after_stack_capacity).init(
+    var scratch = try InterpreterScratch(after_stack_capacity, .embedded).init(
         lowered_machine.runtimeAllocator(runtime),
         analysis.max_active_local_slots,
         analysis.max_active_call_arg_slots,
@@ -11395,7 +11551,7 @@ test "Program.Session terminal precheck preserves frames on caller result mismat
         .instructions = &.{},
     };
 
-    var scratch = try InterpreterScratch(0).init(std.testing.allocator, 0, 0);
+    var scratch = try InterpreterScratch(0, .embedded).init(std.testing.allocator, 0, 0);
     defer scratch.deinit();
     var frames = try ActiveFrameStack.init(std.testing.allocator, 2);
     defer frames.deinit(std.testing.allocator);

@@ -71,14 +71,25 @@ World requires a closed static effect contract. Those restrictions keep the
 first portable-state and completion contracts exact; a later ABI revision may
 expand support.
 
+StaticMachine v1 gives every bare `usize` and every `usize` nested in a product
+or sum schema a 32-bit semantic domain. The canonical image retains its fixed
+eight-byte little-endian slot, but values above `maxInt(u32)` reject before
+state mutation. Concrete `u64` fields inside product and sum schemas remain
+full-width. `Machine.Manifest.canonical_usize_bits` publishes this contract,
+and the complete machine fingerprint binds it. Legacy `Program.Session` keeps
+its native-width `usize` behavior.
+
 ## Authority boundary
 
 The live `State` handle owns allocator-backed working storage because Zig
 values such as strings and structured payloads require transient memory.
 Accepted response values are cloned into this opaque storage before they can
 affect continuation state. Failed cloning leaves the request pending and the
-owned storage valid. The storage is not portable or authoritative. Only bytes
-returned by `encodeState` represent continuation state across a process,
+owned storage valid. After-continuation storage is allocated lazily and
+reserved before response ownership or handler dispatch can commit; allocation
+failure likewise leaves the request pending. The storage is not portable or
+authoritative. Only bytes returned by `encodeState` represent continuation
+state across a process,
 allocator, or WASM-instance boundary.
 
 `Request` and `AfterRequest` are borrowed projections into their owning

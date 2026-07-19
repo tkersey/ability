@@ -15,6 +15,11 @@ fuel, the two backends must agree on:
 - deterministic failure;
 - the point at which caller fuel yields and cumulative fuel fails.
 
+Canonical StaticMachine additionally constrains `usize` to the explicit 32-bit
+portable domain published by its manifest. Legacy Session remains the oracle
+inside that shared domain and deliberately retains native-width behavior above
+it.
+
 Session-local request tokens, legacy provenance-sensitive site fingerprints,
 StaticMachine canonical site fingerprints, and raw continuation bytes are
 intentionally excluded. `Program.protocol` and `Program.Session` retain the
@@ -36,12 +41,15 @@ The broader StaticMachine gates cover canonical state round trips,
 provenance-only interoperability, nested helper suspension, malformed images,
 active non-completing helper and provider children, control-path-valid after
 stacks, derived-frame cache coherence, response and completed-result ownership
-under allocation failure, handler-derived after contracts, explicit fuel yield,
-terminal failure, nominal state handles, authentic Program construction, agent
-fixtures, and provider fixtures:
+under allocation failure, lazy after-stack reservation, handler-derived after
+contracts, portable numeric bounds, explicit fuel yield, terminal failure,
+nominal state handles, authentic Program construction, the complete fixture
+agent read/write flow, provider read/write completion, and direct compilation of
+the generated reducer for `wasm32-freestanding`:
 
 ```text
 zig build check-boundary-static-machine
+zig build check-boundary-static-machine-wasm32
 zig build check-boundary-static-agent
 zig build check-boundary-static-provider
 ```

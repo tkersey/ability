@@ -48,6 +48,107 @@ fn purePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn usizeIdentityPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const value = boundary.ir.builder.local(root, 0);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .usize,
+        .result_codec = .usize,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 1,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_value }};
+
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 20,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{.{ .codec = .usize }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
+const PortableWordProduct = struct {
+    wide: u64,
+    portable: usize,
+};
+const PortableWordSchemas = boundary.ir.schema.Registry(.{PortableWordProduct});
+
+fn portableWordProductPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const value = boundary.ir.builder.local(root, 0);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .product,
+        .value_schema_index = 0,
+        .result_codec = .product,
+        .result_schema_index = 0,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 1,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_value }};
+
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 21,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .value_schemas = &PortableWordSchemas.value_schemas,
+        .value_fields = &PortableWordSchemas.value_fields,
+        .value_variants = &PortableWordSchemas.value_variants,
+        .locals = &.{.{ .codec = .product, .schema_index = 0 }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn branchCachePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -950,6 +1051,23 @@ const PureBody = struct {
 const PureProgram = boundary.program("static-machine-pure", struct {}, PureBody);
 const PureMachine = boundary.staticMachine(PureProgram, .{});
 
+const UsizeIdentityBody = struct {
+    pub const compiled_plan = usizeIdentityPlan("static-machine-usize-identity");
+};
+const UsizeIdentityProgram = boundary.program("static-machine-usize-identity", struct {}, UsizeIdentityBody);
+const UsizeIdentityMachine = boundary.staticMachine(UsizeIdentityProgram, .{});
+
+const PortableWordProductBody = struct {
+    pub const value_schema_types = .{PortableWordProduct};
+    pub const compiled_plan = portableWordProductPlan("static-machine-portable-word-product");
+};
+const PortableWordProductProgram = boundary.program(
+    "static-machine-portable-word-product",
+    struct {},
+    PortableWordProductBody,
+);
+const PortableWordProductMachine = boundary.staticMachine(PortableWordProductProgram, .{});
+
 const BranchCacheBody = struct {
     pub const compiled_plan = branchCachePlan("static-machine-branch-cache");
 };
@@ -1181,6 +1299,91 @@ test "StaticMachine executes a pure scalar program" {
     };
     defer result.deinit();
     try std.testing.expectEqual(@as(i32, 7), result.value());
+}
+
+test "StaticMachine after storage is allocated lazily" {
+    var storage: [16 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const state = try AfterMachine.initialState(fixed.allocator(), .{});
+    defer AfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    _ = switch (try AfterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+}
+
+test "StaticMachine canonical usize domain is portable across native and wasm32" {
+    comptime {
+        if (UsizeIdentityMachine.Manifest.canonical_usize_bits != 32) {
+            @compileError("StaticMachine canonical usize width must be explicit in its manifest");
+        }
+    }
+
+    const maximum = @as(usize, std.math.maxInt(u32));
+    const state = try UsizeIdentityMachine.initialState(std.testing.allocator, .{maximum});
+    defer UsizeIdentityMachine.deinitState(state);
+    const encoded = try UsizeIdentityMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try UsizeIdentityMachine.decodeState(std.testing.allocator, encoded);
+    defer UsizeIdentityMachine.deinitState(restored);
+    var fuel: u64 = 100;
+    var result = switch (try UsizeIdentityMachine.reduce(restored, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(maximum, result.value());
+}
+
+test "StaticMachine rejects native usize values outside its canonical domain without changing Session" {
+    if (@bitSizeOf(usize) <= 32) return;
+    const oversized = @as(usize, std.math.maxInt(u32)) + 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        UsizeIdentityMachine.initialState(std.testing.allocator, .{oversized}),
+    );
+
+    var runtime = boundary.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var session = try UsizeIdentityProgram.Session.startWithArgs(&runtime, .{}, .{oversized});
+    defer session.deinit();
+    var result = switch (try session.next()) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(oversized, result.value);
+}
+
+test "StaticMachine preserves full u64 schema fields while bounding nested usize fields" {
+    const value: PortableWordProduct = .{
+        .wide = std.math.maxInt(u64),
+        .portable = std.math.maxInt(u32),
+    };
+    const state = try PortableWordProductMachine.initialState(std.testing.allocator, .{value});
+    defer PortableWordProductMachine.deinitState(state);
+    const encoded = try PortableWordProductMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try PortableWordProductMachine.decodeState(std.testing.allocator, encoded);
+    defer PortableWordProductMachine.deinitState(restored);
+    var fuel: u64 = 100;
+    var result = switch (try PortableWordProductMachine.reduce(restored, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(value, result.value());
+
+    if (@bitSizeOf(usize) > 32) {
+        try std.testing.expectError(
+            error.ProgramContractViolation,
+            PortableWordProductMachine.initialState(std.testing.allocator, .{PortableWordProduct{
+                .wide = std.math.maxInt(u64),
+                .portable = @as(usize, std.math.maxInt(u32)) + 1,
+            }}),
+        );
+    }
 }
 
 test "StaticMachine state survives a canonical parked-state round trip" {
@@ -1706,7 +1909,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 6920645909099374944), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 18379451883384257174), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
@@ -1901,6 +2104,32 @@ fn afterContractPendingOffset(payload: []const u8, expected_after_count: usize) 
     return pending_offset;
 }
 
+test "StaticMachine rejects a forged bare usize outside the canonical domain" {
+    if (@bitSizeOf(usize) <= 32) return;
+    const state = try UsizeIdentityMachine.initialState(std.testing.allocator, .{@as(usize, std.math.maxInt(u32))});
+    defer UsizeIdentityMachine.deinitState(state);
+    const encoded = try UsizeIdentityMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, forged[locals_count_offset..][0..8], .little));
+    const local_value_offset = locals_count_offset + 8 + 2 + 1;
+    try std.testing.expectEqual(
+        @as(u64, std.math.maxInt(u32)),
+        std.mem.readInt(u64, forged[local_value_offset..][0..8], .little),
+    );
+    std.mem.writeInt(u64, forged[local_value_offset..][0..8], @as(u64, std.math.maxInt(u32)) + 1, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        UsizeIdentityMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
 test "StaticMachine rejects a globally valid but control-unreachable after stack" {
     const state = try AfterMachine.initialState(std.testing.allocator, .{});
     defer AfterMachine.deinitState(state);
@@ -1960,6 +2189,37 @@ test "StaticMachine rejects a pending operation whose after entry is already rec
     defer std.testing.allocator.free(encoded);
     const forged = try insertSingleAfterEntry(encoded, .{ 0, 0, 0, 0, 0, 0 });
     defer std.testing.allocator.free(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a pending after-producing operation with a full after stack" {
+    const state = try AfterMachine.initialState(std.testing.allocator, .{});
+    defer AfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    _ = switch (try AfterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    const encoded = try AfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const old_payload = encoded[0 .. encoded.len - 8];
+    const core_offset = try stateCoreOffset(old_payload);
+    const after_count_offset = core_offset + 8 + 8 + 1;
+    const entries_offset = after_count_offset + 8;
+    const entry_count = AfterMachine.Manifest.maximum_interpreter_fuel;
+    const entry_bytes = try std.math.mul(usize, entry_count, 6);
+    const forged = try std.testing.allocator.alloc(u8, encoded.len + entry_bytes);
+    defer std.testing.allocator.free(forged);
+    @memcpy(forged[0..entries_offset], old_payload[0..entries_offset]);
+    std.mem.writeInt(u64, forged[after_count_offset..][0..8], @intCast(entry_count), .little);
+    @memset(forged[entries_offset..][0..entry_bytes], 0);
+    @memcpy(forged[entries_offset + entry_bytes .. forged.len - 8], old_payload[entries_offset..]);
+    refreshStateChecksum(forged);
 
     try std.testing.expectError(
         error.ProgramContractViolation,
@@ -2181,6 +2441,47 @@ test "StaticMachine rejects divergent pending and unwind after values" {
     );
 }
 
+test "StaticMachine binds the first unwind value to the completed function value" {
+    const state = try AfterContractMachineA.initialState(std.testing.allocator, .{});
+    defer AfterContractMachineA.deinitState(state);
+    var fuel: u64 = 100;
+    const outer = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, outer, @as(i32, 1));
+    const inner = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, inner, @as(i32, 7));
+    _ = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+
+    const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 2);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    const locals_offset = locals_count_offset + 8;
+    const encoded_i32_local_size = 2 + 1 + 4;
+    const second_local_value = locals_offset + encoded_i32_local_size + 2 + 1;
+    const last_return_value = locals_offset + 2 * encoded_i32_local_size + 1;
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, forged[second_local_value..][0..4], .little));
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, forged[last_return_value..][0..4], .little));
+    std.mem.writeInt(i32, forged[second_local_value..][0..4], 8, .little);
+    std.mem.writeInt(i32, forged[last_return_value..][0..4], 8, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterContractMachineA.decodeState(std.testing.allocator, forged),
+    );
+}
+
 test "StaticMachine rejects an unwind ref not produced by the consumed after suffix" {
     const state = try HandlerlessOuterMachine.initialState(std.testing.allocator, .{});
     defer HandlerlessOuterMachine.deinitState(state);
@@ -2345,6 +2646,45 @@ const OwnedAllocationDelta = struct {
     bytes: usize,
     allocations: usize,
 };
+
+test "StaticMachine after reservation failure leaves the request retryable" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const state = try AfterMachine.initialState(failing.allocator(), .{});
+    defer AfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try AfterMachine.reduce(state, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    const before = try AfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+
+    failing.fail_index = failing.allocations;
+    try std.testing.expectError(error.OutOfMemory, AfterMachine.@"resume"(state, request, @as(i32, 10)));
+    try AfterMachine.validateState(state);
+    const current = switch (try AfterMachine.current(state)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(request.fingerprint(), current.fingerprint());
+    const after_failure = try AfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after_failure);
+    try std.testing.expectEqualSlices(u8, before, after_failure);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try AfterMachine.@"resume"(state, request, @as(i32, 10));
+    const after = switch (try AfterMachine.reduce(state, &fuel)) {
+        .after => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterMachine.resumeAfter(state, after, @as(i32, 15));
+    var result = switch (try AfterMachine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(@as(i32, 15), result.value());
+}
 
 fn stringListResumeOwnedDelta() !OwnedAllocationDelta {
     var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
