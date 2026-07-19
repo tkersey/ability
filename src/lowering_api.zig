@@ -2093,6 +2093,12 @@ fn InterpreterScratch(comptime after_stack_capacity: usize) type {
         after_stack: [after_stack_capacity]SessionAfterStackEntry = [_]SessionAfterStackEntry{.{ .op_index = 0 }} ** after_stack_capacity,
         after_stack_len: usize = 0,
 
+        const OwnershipCheckpoint = struct {
+            schema_values: usize,
+            string_lists: usize,
+            strings: usize,
+        };
+
         fn init(
             allocator: std.mem.Allocator,
             max_active_local_slots: usize,
@@ -2114,6 +2120,42 @@ fn InterpreterScratch(comptime after_stack_capacity: usize) type {
             self.owned_strings.deinit(self.allocator);
             self.call_args.deinit(self.allocator);
             self.locals.deinit(self.allocator);
+        }
+
+        fn ownershipCheckpoint(self: *const @This()) OwnershipCheckpoint {
+            return .{
+                .schema_values = self.owned_schema_values.items.len,
+                .string_lists = self.owned_string_lists.items.len,
+                .strings = self.owned_strings.items.len,
+            };
+        }
+
+        fn rollbackOwned(self: *@This(), checkpoint: OwnershipCheckpoint) void {
+            std.debug.assert(checkpoint.schema_values <= self.owned_schema_values.items.len);
+            std.debug.assert(checkpoint.string_lists <= self.owned_string_lists.items.len);
+            std.debug.assert(checkpoint.strings <= self.owned_strings.items.len);
+
+            var schema_index = self.owned_schema_values.items.len;
+            while (schema_index > checkpoint.schema_values) {
+                schema_index -= 1;
+                const owned = self.owned_schema_values.items[schema_index];
+                owned.destroy(self.allocator, owned.ptr);
+            }
+            self.owned_schema_values.shrinkRetainingCapacity(checkpoint.schema_values);
+
+            var list_index = self.owned_string_lists.items.len;
+            while (list_index > checkpoint.string_lists) {
+                list_index -= 1;
+                self.allocator.free(self.owned_string_lists.items[list_index]);
+            }
+            self.owned_string_lists.shrinkRetainingCapacity(checkpoint.string_lists);
+
+            var string_index = self.owned_strings.items.len;
+            while (string_index > checkpoint.strings) {
+                string_index -= 1;
+                self.allocator.free(self.owned_strings.items[string_index]);
+            }
+            self.owned_strings.shrinkRetainingCapacity(checkpoint.strings);
         }
 
         fn storeOwnedString(self: *@This(), value: []const u8) std.mem.Allocator.Error![]const u8 {
@@ -2778,23 +2820,25 @@ fn sessionAfterOutputRefByIndex(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime schema_types: anytype,
     comptime HandlersType: type,
+    comptime validate_final_input_contract: bool,
     op_index: u16,
     current_ref: program_plan.ValueRef,
     remaining: usize,
     final_ref: program_plan.ValueRef,
 ) anyerror!program_plan.ValueRef {
-    if (remaining == 1) return final_ref;
-    return switch (current_ref.codec) {
+    if (remaining == 0) return error.ProgramContractViolation;
+    if (!validate_final_input_contract and remaining == 1) return final_ref;
+    const output_ref = try switch (current_ref.codec) {
         .unit => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .unit }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
         .bool => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .bool }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
         .i32 => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .i32 }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
         .usize => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .usize }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
         .string => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .string }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
         .string_list => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .string_list }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
-        .product => {
+        .product => blk: {
             inline for (schema_types, 0..) |_, schema_index| {
                 if (current_ref.schema_index == @as(u16, @intCast(schema_index))) {
-                    return sessionIntermediateAfterOutputRefByIndexForRef(
+                    break :blk sessionIntermediateAfterOutputRefByIndexForRef(
                         .{ .codec = .product, .schema_index = @intCast(schema_index) },
                         compiled_plan,
                         schema_types,
@@ -2806,10 +2850,10 @@ fn sessionAfterOutputRefByIndex(
             }
             return error.ProgramContractViolation;
         },
-        .sum => {
+        .sum => blk: {
             inline for (schema_types, 0..) |_, schema_index| {
                 if (current_ref.schema_index == @as(u16, @intCast(schema_index))) {
-                    return sessionIntermediateAfterOutputRefByIndexForRef(
+                    break :blk sessionIntermediateAfterOutputRefByIndexForRef(
                         .{ .codec = .sum, .schema_index = @intCast(schema_index) },
                         compiled_plan,
                         schema_types,
@@ -2822,6 +2866,8 @@ fn sessionAfterOutputRefByIndex(
             return error.ProgramContractViolation;
         },
     };
+    if (remaining == 1 and !output_ref.eql(final_ref)) return error.ProgramContractViolation;
+    return output_ref;
 }
 
 fn sessionIntermediateAfterOutputRefByIndexForRef(
@@ -5898,6 +5944,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 compiled_plan,
                                 schema_types,
                                 HandlersType,
+                                canonical_request_identity,
                                 op_index,
                                 value_ref,
                                 remaining,
@@ -5925,6 +5972,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 value_fingerprint,
                                 output_ref,
                                 result_ref,
+                                remaining,
                             );
                             if (stored_request_fingerprint) |stored| {
                                 if (stored != request_fingerprint) return error.ProgramContractViolation;
@@ -6342,6 +6390,19 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     const instruction = compiled_plan.instructions[node];
                     switch (instruction.kind) {
                         .return_error => continue,
+                        .call_helper => {
+                            if (instruction.operand >= compiled_plan.functions.len) return error.ProgramContractViolation;
+                            if (!analysis.completion_functions[instruction.operand]) continue;
+                        },
+                        .call_nested_with => {
+                            const target_index = nestedWithTargetIndexForMetadata(
+                                compiled_plan,
+                                nested_with_targets,
+                                instruction.string_literal,
+                            ) orelse return error.ProgramContractViolation;
+                            if (target_index >= compiled_plan.functions.len) return error.ProgramContractViolation;
+                            if (!analysis.completion_functions[target_index]) continue;
+                        },
                         .call_op => {
                             if (instruction.operand >= compiled_plan.ops.len) return error.ProgramContractViolation;
                             const op = compiled_plan.ops[instruction.operand];
@@ -6495,6 +6556,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             {
                 return error.ProgramContractViolation;
             }
+            try validateDecodedArgumentValue(pending.value_ref, pending.value, unwind.value);
             if (self.frames.len() == 0) return error.ProgramContractViolation;
             const active = self.frames.top();
             if (active.function_index != pending.function_index or active.waiting_helper_dst != null) return error.ProgramContractViolation;
@@ -6532,6 +6594,16 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 {
                     return error.ProgramContractViolation;
                 }
+                _ = sessionAfterOutputRefByIndex(
+                    compiled_plan,
+                    schema_types,
+                    HandlersType,
+                    canonical_request_identity,
+                    entry_value.op_index,
+                    unwind.current_ref,
+                    unwind.remaining,
+                    unwind.final_ref,
+                ) catch return error.ProgramContractViolation;
             }
         }
 
@@ -6666,7 +6738,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             traceHashU32(hasher, trace_fingerprint_version);
             traceHashBytes(hasher, program_label);
             traceHashBytes(hasher, compiled_plan.label);
-            traceHashU64(hasher, if (canonical_identity) canonical_plan_fingerprint else plan_hash);
+            traceHashU64(hasher, if (canonical_identity) contract_fingerprint else plan_hash);
             traceHashUsize(hasher, turn_index);
             traceHashRequestKind(hasher, kind);
         }
@@ -6728,6 +6800,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             value_fingerprint: u64,
             output_ref: program_plan.ValueRef,
             result_ref: program_plan.ValueRef,
+            remaining: usize,
         ) u64 {
             var hasher = std.hash.Wyhash.init(0);
             traceHashCommonRequestPrefix(&hasher, turn_index, .after, canonical_identity);
@@ -6746,6 +6819,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             traceHashU64(&hasher, value_fingerprint);
             traceHashValueRef(&hasher, output_ref);
             traceHashValueRef(&hasher, result_ref);
+            if (canonical_identity) traceHashUsize(&hasher, remaining);
             return hasher.final();
         }
 
@@ -7278,6 +7352,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             ref: program_plan.ValueRef,
             value: anytype,
         ) anyerror!ExecutableValue {
+            const ownership_checkpoint = self.scratch.ownershipCheckpoint();
+            errdefer self.scratch.rollbackOwned(ownership_checkpoint);
             var clone_context = CloneContext.init(&self.scratch);
             defer clone_context.deinit();
             const cloned = try cloneTypedRuntimeValueForRef(ref, &clone_context, value);
@@ -7759,6 +7835,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 compiled_plan,
                 schema_types,
                 HandlersType,
+                canonical_request_identity,
                 op_index,
                 unwind.current_ref,
                 unwind.remaining,
@@ -7904,7 +7981,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         ._turn_index = turn_index,
                         ._payload_value_fingerprint = payload_fingerprint,
                         ._fingerprint = request_fingerprint,
-                        ._plan_fingerprint = if (canonical_request_identity) canonical_plan_fingerprint else plan_hash,
+                        ._plan_fingerprint = if (canonical_request_identity) contract_fingerprint else plan_hash,
                     };
                     try request.setPayload(payload);
                     return request;
@@ -7960,6 +8037,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         value_fingerprint,
                         output_ref,
                         result_ref,
+                        remaining,
                     );
                     const token = self.next_token;
                     self.next_token +%= 1;
@@ -8009,7 +8087,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         ._turn_index = turn_index,
                         ._value_fingerprint = value_fingerprint,
                         ._fingerprint = request_fingerprint,
-                        ._plan_fingerprint = if (canonical_request_identity) canonical_plan_fingerprint else plan_hash,
+                        ._plan_fingerprint = if (canonical_request_identity) contract_fingerprint else plan_hash,
                     };
                     try request.setValue(value);
                     return request;
@@ -8400,7 +8478,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         ._turn_index = pending.turn_index,
                         ._payload_value_fingerprint = snapshot.payload_value_fingerprint,
                         ._fingerprint = snapshot.request_fingerprint,
-                        ._plan_fingerprint = if (canonical_request_identity) canonical_plan_fingerprint else plan_hash,
+                        ._plan_fingerprint = if (canonical_request_identity) contract_fingerprint else plan_hash,
                     };
                     try request.setPayload(snapshot.payload);
                     return request;
@@ -8465,7 +8543,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         ._turn_index = pending.turn_index,
                         ._value_fingerprint = pending.value_fingerprint,
                         ._fingerprint = pending.request_fingerprint,
-                        ._plan_fingerprint = if (canonical_request_identity) canonical_plan_fingerprint else plan_hash,
+                        ._plan_fingerprint = if (canonical_request_identity) contract_fingerprint else plan_hash,
                     };
                     if (!valueMatchesRef(pending.value_ref, pending.value)) return error.ProgramContractViolation;
                     try request.setValue(pending.value);

@@ -557,6 +557,71 @@ fn loopPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn nonCompletingHelperPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const helper = boundary.ir.builder.function(1);
+    const root_value = boundary.ir.builder.local(root, 0);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        boundary.ir.builder.callHelper(root, root_value, helper, null) catch unreachable,
+        boundary.ir.builder.returnValue(root, root_value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{
+        .{
+            .symbol_name = "run",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 1,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 0,
+            .instruction_count = @intCast(instructions.len),
+        },
+        .{
+            .symbol_name = "never",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 1,
+            .local_count = 0,
+            .first_block = 1,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = @intCast(instructions.len),
+            .instruction_count = 0,
+        },
+    };
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = @intCast(instructions.len), .terminator_index = 0 },
+        .{ .first_instruction = @intCast(instructions.len), .instruction_count = 0, .terminator_index = 1 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .return_value },
+        .{ .kind = .jump, .primary = 1 },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 15,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{.{ .codec = .i32 }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn overflowPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const value = boundary.ir.builder.local(root, 0);
@@ -777,6 +842,16 @@ const LoopBody = struct {
 };
 const LoopProgram = boundary.program("static-machine-cumulative-budget", struct {}, LoopBody);
 const LoopMachine = boundary.staticMachine(LoopProgram, .{});
+
+const NonCompletingHelperBody = struct {
+    pub const compiled_plan = nonCompletingHelperPlan("static-machine-noncompleting-helper");
+};
+const NonCompletingHelperProgram = boundary.program(
+    "static-machine-noncompleting-helper",
+    struct {},
+    NonCompletingHelperBody,
+);
+const NonCompletingHelperMachine = boundary.staticMachine(NonCompletingHelperProgram, .{});
 
 const OverflowBody = struct {
     pub const compiled_plan = overflowPlan("static-machine-post-dispatch-overflow");
@@ -1204,6 +1279,14 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
             AfterContractMachineB.EffectRow.afterSite("inner", "inner", 0).Output,
     );
 
+    const state_b = try AfterContractMachineB.initialState(std.testing.allocator, .{});
+    defer AfterContractMachineB.deinitState(state_b);
+    var fuel_b: u64 = 100;
+    const outer_b = switch (try AfterContractMachineB.reduce(state_b, &fuel_b)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+
     const state = try AfterContractMachineA.initialState(std.testing.allocator, .{});
     defer AfterContractMachineA.deinitState(state);
     var fuel: u64 = 100;
@@ -1211,6 +1294,13 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .request => |request| request,
         else => return error.UnexpectedTransition,
     };
+    try std.testing.expectEqual(
+        outer.canonical_operation_site_fingerprint,
+        outer_b.canonical_operation_site_fingerprint,
+    );
+    try std.testing.expect(outer.fingerprint() != outer_b.fingerprint());
+    try std.testing.expectEqual(AfterContractMachineA.Manifest.machine_contract_fingerprint, outer.trace().plan_hash);
+    try std.testing.expectEqual(AfterContractMachineB.Manifest.machine_contract_fingerprint, outer_b.trace().plan_hash);
     try AfterContractMachineA.@"resume"(state, outer, @as(i32, 1));
     const inner = switch (try AfterContractMachineA.reduce(state, &fuel)) {
         .request => |request| request,
@@ -1221,6 +1311,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
+    try std.testing.expectEqual(@as(u64, 3944129044712982596), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
@@ -1278,6 +1369,41 @@ fn stateCoreOffset(bytes: []const u8) !usize {
     return index;
 }
 
+fn refreshStateChecksum(bytes: []u8) void {
+    std.mem.writeInt(
+        u64,
+        bytes[bytes.len - 8 ..][0..8],
+        stateImageChecksum(bytes[0 .. bytes.len - 8]),
+        .little,
+    );
+}
+
+fn afterContractPendingOffset(payload: []const u8, expected_after_count: usize) !usize {
+    const core_offset = try stateCoreOffset(payload);
+    const after_count_offset = core_offset + 8 + 8 + 1;
+    if (after_count_offset + 8 > payload.len) return error.BadLength;
+    try std.testing.expectEqual(
+        @as(u64, @intCast(expected_after_count)),
+        std.mem.readInt(u64, payload[after_count_offset..][0..8], .little),
+    );
+    const frame_count_offset = after_count_offset + 8 + expected_after_count * 6;
+    if (frame_count_offset + 8 > payload.len) return error.BadLength;
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, payload[frame_count_offset..][0..8], .little));
+    const frame_offset = frame_count_offset + 8;
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    if (locals_count_offset + 8 > payload.len) return error.BadLength;
+    try std.testing.expectEqual(@as(u8, 0), payload[frame_offset + 49]);
+    try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, payload[locals_count_offset..][0..8], .little));
+    const locals_offset = locals_count_offset + 8;
+    const encoded_i32_local_size = 2 + 1 + 4;
+    const frame_last_return_size = 1 + 4;
+    const pending_offset = locals_offset + 2 * encoded_i32_local_size + frame_last_return_size;
+    if (pending_offset + 2 > payload.len) return error.BadLength;
+    try std.testing.expectEqual(@as(u8, 1), payload[pending_offset]);
+    try std.testing.expectEqual(@as(u8, 1), payload[pending_offset + 1]);
+    return pending_offset;
+}
+
 test "StaticMachine rejects a globally valid but control-unreachable after stack" {
     const state = try AfterMachine.initialState(std.testing.allocator, .{});
     defer AfterMachine.deinitState(state);
@@ -1307,6 +1433,121 @@ test "StaticMachine rejects a globally valid but control-unreachable after stack
     );
 }
 
+test "StaticMachine rejects a cursor after a non-completing helper call" {
+    const state = try NonCompletingHelperMachine.initialState(std.testing.allocator, .{});
+    defer NonCompletingHelperMachine.deinitState(state);
+    const encoded = try NonCompletingHelperMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const core_offset = try stateCoreOffset(forged[0 .. forged.len - 8]);
+    const after_count_offset = core_offset + 8 + 8 + 1;
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, forged[after_count_offset..][0..8], .little));
+    const frame_offset = after_count_offset + 8 + 8;
+    const instruction_index_offset = frame_offset + 2 * 8;
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, forged[instruction_index_offset..][0..8], .little));
+    std.mem.writeInt(u64, forged[instruction_index_offset..][0..8], 1, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        NonCompletingHelperMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects divergent pending and unwind after values" {
+    const state = try AfterContractMachineA.initialState(std.testing.allocator, .{});
+    defer AfterContractMachineA.deinitState(state);
+    var fuel: u64 = 100;
+    const outer = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, outer, @as(i32, 1));
+    const inner = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, inner, @as(i32, 7));
+    _ = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+
+    const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    const pending_offset = try afterContractPendingOffset(forged[0 .. forged.len - 8], 2);
+    const pending_value_offset = pending_offset + 55;
+    const unwind_value_offset = pending_offset + 91;
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, forged[pending_value_offset..][0..4], .little));
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, forged[unwind_value_offset..][0..4], .little));
+    std.mem.writeInt(i32, forged[unwind_value_offset..][0..4], 8, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterContractMachineA.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine validates the final after handler input contract" {
+    const state = try AfterContractMachineA.initialState(std.testing.allocator, .{});
+    defer AfterContractMachineA.deinitState(state);
+    var fuel: u64 = 100;
+    const outer = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, outer, @as(i32, 1));
+    const inner = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, inner, @as(i32, 7));
+    const inner_after = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.resumeAfter(state, inner_after, true);
+    _ = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+
+    const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const old_payload = encoded[0 .. encoded.len - 8];
+    const core_offset = try stateCoreOffset(old_payload);
+    const after_count_offset = core_offset + 8 + 8 + 1;
+    const entries_offset = after_count_offset + 8;
+    try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, old_payload[after_count_offset..][0..8], .little));
+
+    const forged = try std.testing.allocator.alloc(u8, encoded.len - 6);
+    defer std.testing.allocator.free(forged);
+    @memcpy(forged[0..entries_offset], old_payload[0..entries_offset]);
+    std.mem.writeInt(u64, forged[after_count_offset..][0..8], 1, .little);
+    @memcpy(forged[entries_offset..][0..6], old_payload[entries_offset + 6 ..][0..6]);
+    @memcpy(
+        forged[entries_offset + 6 .. forged.len - 8],
+        old_payload[entries_offset + 12 ..],
+    );
+
+    const pending_offset = try afterContractPendingOffset(forged[0 .. forged.len - 8], 1);
+    std.mem.writeInt(u64, forged[pending_offset + 18 ..][0..8], 1, .little);
+    std.mem.writeInt(u16, forged[pending_offset + 26 ..][0..2], 1, .little);
+    std.mem.writeInt(u64, forged[pending_offset + 28 ..][0..8], 1, .little);
+    std.mem.writeInt(u64, forged[pending_offset + 36 ..][0..8], 1, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterContractMachineA.decodeState(std.testing.allocator, forged),
+    );
+}
+
 test "StaticMachine cumulative budget exhaustion is terminal" {
     const state = try LoopMachine.initialState(std.testing.allocator, .{});
     defer LoopMachine.deinitState(state);
@@ -1333,22 +1574,49 @@ test "StaticMachine post-dispatch reduction failures are terminal" {
     );
 }
 
-fn stringListResumeInducesOutOfMemory(fail_index: usize) !bool {
+const OwnedAllocationDelta = struct {
+    bytes: usize,
+    allocations: usize,
+};
+
+fn stringListResumeOwnedDelta() !OwnedAllocationDelta {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const state = try StringListMachine.initialState(counting.allocator(), .{});
+    defer StringListMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const parked = switch (try StringListMachine.reduce(state, &fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    const outstanding_bytes_before = counting.allocated_bytes - counting.freed_bytes;
+    const outstanding_allocations_before = counting.allocations - counting.deallocations;
+    try StringListMachine.@"resume"(state, parked, @as([]const []const u8, &.{ "alpha", "beta" }));
+    return .{
+        .bytes = counting.allocated_bytes - counting.freed_bytes - outstanding_bytes_before,
+        .allocations = counting.allocations - counting.deallocations - outstanding_allocations_before,
+    };
+}
+
+fn stringListResumeOutcome(fail_index: usize, expected_delta: OwnedAllocationDelta) !?bool {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
     const state = StringListMachine.initialState(failing.allocator(), .{}) catch |err| switch (err) {
-        error.OutOfMemory => return false,
+        error.OutOfMemory => return null,
         else => return err,
     };
     defer StringListMachine.deinitState(state);
     var fuel: u64 = 100;
     const transition = StringListMachine.reduce(state, &fuel) catch |err| switch (err) {
-        error.OutOfMemory => return false,
+        error.OutOfMemory => return null,
         else => return err,
     };
     const parked = switch (transition) {
         .request => |value| value,
         else => return error.UnexpectedTransition,
     };
+    const before = try StringListMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    const outstanding_bytes_before = failing.allocated_bytes - failing.freed_bytes;
+    const outstanding_allocations_before = failing.allocations - failing.deallocations;
     StringListMachine.@"resume"(state, parked, @as([]const []const u8, &.{ "alpha", "beta" })) catch |err| switch (err) {
         error.OutOfMemory => {
             try std.testing.expect(failing.has_induced_failure);
@@ -1358,22 +1626,48 @@ fn stringListResumeInducesOutOfMemory(fail_index: usize) !bool {
                 else => return error.UnexpectedTransition,
             };
             try std.testing.expectEqual(parked.fingerprint(), current.fingerprint());
-            const encoded = try StringListMachine.encodeState(std.testing.allocator, state);
-            std.testing.allocator.free(encoded);
+            const after = try StringListMachine.encodeState(std.testing.allocator, state);
+            defer std.testing.allocator.free(after);
+            try std.testing.expectEqualSlices(u8, before, after);
+            failing.fail_index = std.math.maxInt(usize);
+            try StringListMachine.@"resume"(state, parked, @as([]const []const u8, &.{ "alpha", "beta" }));
+            try std.testing.expectEqual(
+                expected_delta.bytes,
+                failing.allocated_bytes - failing.freed_bytes - outstanding_bytes_before,
+            );
+            try std.testing.expectEqual(
+                expected_delta.allocations,
+                failing.allocations - failing.deallocations - outstanding_allocations_before,
+            );
             return true;
         },
         else => return err,
     };
+    try std.testing.expectEqual(
+        expected_delta.bytes,
+        failing.allocated_bytes - failing.freed_bytes - outstanding_bytes_before,
+    );
+    try std.testing.expectEqual(
+        expected_delta.allocations,
+        failing.allocations - failing.deallocations - outstanding_allocations_before,
+    );
     return false;
 }
 
 test "StaticMachine string-list resume keeps ownership valid across allocation failure" {
+    const expected_delta = try stringListResumeOwnedDelta();
     var observed_resume_failure = false;
-    for (0..128) |fail_index| {
-        if (try stringListResumeInducesOutOfMemory(fail_index)) {
-            observed_resume_failure = true;
-            break;
+    var observed_success = false;
+    for (0..256) |fail_index| {
+        if (try stringListResumeOutcome(fail_index, expected_delta)) |resume_failed| {
+            if (resume_failed) {
+                observed_resume_failure = true;
+            } else {
+                observed_success = true;
+                break;
+            }
         }
     }
     try std.testing.expect(observed_resume_failure);
+    try std.testing.expect(observed_success);
 }

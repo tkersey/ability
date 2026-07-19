@@ -2611,6 +2611,7 @@ pub fn EntryExecutionAnalysis(comptime plan: ProgramPlan) type {
         reachable_functions: [plan.functions.len]bool,
         reachable_blocks: [plan.blocks.len]bool,
         reachable_instructions: [plan.instructions.len]bool,
+        completion_functions: [plan.functions.len]bool,
         terminal_functions: [plan.functions.len]bool,
         after_result_functions: [plan.functions.len]bool,
         helper_cycle: bool,
@@ -2643,6 +2644,7 @@ pub fn entryExecutionAnalysisWithNestedTargets(
             .reachable_functions = [_]bool{false} ** plan.functions.len,
             .reachable_blocks = [_]bool{false} ** plan.blocks.len,
             .reachable_instructions = [_]bool{false} ** plan.instructions.len,
+            .completion_functions = [_]bool{false} ** plan.functions.len,
             .terminal_functions = [_]bool{false} ** plan.functions.len,
             .after_result_functions = [_]bool{false} ** plan.functions.len,
             .helper_cycle = false,
@@ -2719,6 +2721,7 @@ pub fn entryExecutionAnalysisWithNestedTargets(
         }
 
         for (plan.functions, 0..) |function, function_index| {
+            analysis.completion_functions[function_index] = completion_reachability[function_index];
             analysis.terminal_functions[function_index] = terminal_reachability[function_index];
             const completion_codecs = try functionCompletionCodecReachability(plan, function, &completion_reachability, nested_with_targets);
             analysis.after_result_functions[function_index] = completion_codecs.result_codec;
