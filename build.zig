@@ -1062,12 +1062,20 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks",
         },
         .{
+            .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
+        },
+        .{
             .path = "test/compile_fail/static_machine_mutable_string_list_schema.zig",
             .expected_error = "Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas",
         },
         .{
             .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",
             .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_invalid_after_handler_shape.zig",
+            .expected_error = "Boundary StaticMachine v1 requires afterDispatch to have a receiver, one value parameter, and a return value",
         },
         .{
             .path = "test/compile_fail/static_machine_forged_program.zig",

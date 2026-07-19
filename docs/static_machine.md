@@ -41,6 +41,11 @@ resumable. Cumulative machine-budget exhaustion, program-authored failures, and
 deterministic reduction failures after dispatch begins are terminal errors.
 Terminal states cannot be validated or encoded as resumable state.
 
+Transferring a completed string or structured value into `OwnedResult` may
+allocate. If that detachment reports `OutOfMemory`, the completed value remains
+owned by the live State and the caller may retry `reduce`; completion is marked
+consumed only after the transfer succeeds.
+
 `boundary.staticMachine` accepts only the authentic type returned by
 `boundary.program`. Live `State` handles are branded by that Program and the
 StaticMachine options, so one machine cannot consume another machine's handle.
@@ -53,8 +58,14 @@ with output collection or result/output cleanup hooks. It also rejects product
 or sum schemas containing `[][]const u8`: mutation of that outer string-list
 carrier would make alias topology observable, while canonical state deliberately
 does not preserve pointer identity. Immutable `[]const []const u8` carriers
-remain supported. Those restrictions keep the first portable-state and
-completion contracts exact; a later ABI revision may expand support.
+remain supported. An authored `afterDispatch` must also have the runtime shape
+used by the static after-site contract: a valid receiver, one value parameter,
+and a return value. If an after site can be the outermost continuation on any
+reachable path, that return value must match the owning function result.
+Legacy `Program.Session` retains its dynamic final-output behavior; StaticMachine
+rejects that shape because World requires a closed static effect contract. Those
+restrictions keep the first portable-state and completion contracts exact; a
+later ABI revision may expand support.
 
 ## Authority boundary
 

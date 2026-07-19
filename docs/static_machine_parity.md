@@ -7,6 +7,7 @@ For the same Boundary program, entry arguments, responses, and deterministic
 fuel, the two backends must agree on:
 
 - operation and after-site semantic coordinates;
+- handler-derived after input and output refs, including the final after site;
 - payload semantic values;
 - response acceptance and rejection;
 - helper suspension and resumption;
@@ -34,9 +35,10 @@ zig build check-boundary-static-machine-parity
 The broader StaticMachine gates cover canonical state round trips,
 provenance-only interoperability, nested helper suspension, malformed images,
 active non-completing helper and provider children, control-path-valid after
-stacks, response ownership under allocation failure, handler-derived after
-contracts, explicit fuel yield, terminal failure, nominal state handles,
-authentic Program construction, agent fixtures, and provider fixtures:
+stacks, derived-frame cache coherence, response and completed-result ownership
+under allocation failure, handler-derived after contracts, explicit fuel yield,
+terminal failure, nominal state handles, authentic Program construction, agent
+fixtures, and provider fixtures:
 
 ```text
 zig build check-boundary-static-machine

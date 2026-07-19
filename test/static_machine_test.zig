@@ -48,6 +48,60 @@ fn purePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn branchCachePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const result = boundary.ir.builder.local(root, 2);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        .{ .kind = .const_i32, .dst = result.index, .operand = 1 },
+        boundary.ir.builder.returnValue(root, result) catch unreachable,
+        .{ .kind = .const_i32, .dst = result.index, .operand = 2 },
+        boundary.ir.builder.returnValue(root, result) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 3,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 3,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 2, .terminator_index = 1 },
+        .{ .first_instruction = 3, .instruction_count = 2, .terminator_index = 2 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 19,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .bool }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const payload = boundary.ir.builder.local(root, 0);
@@ -809,6 +863,12 @@ const PureBody = struct {
 const PureProgram = boundary.program("static-machine-pure", struct {}, PureBody);
 const PureMachine = boundary.staticMachine(PureProgram, .{});
 
+const BranchCacheBody = struct {
+    pub const compiled_plan = branchCachePlan("static-machine-branch-cache");
+};
+const BranchCacheProgram = boundary.program("static-machine-branch-cache", struct {}, BranchCacheBody);
+const BranchCacheMachine = boundary.staticMachine(BranchCacheProgram, .{});
+
 const HelperBody = struct {
     pub const compiled_plan = helperEffectPlan("static-machine-helper");
 };
@@ -924,6 +984,21 @@ const AfterContractProgramA = boundary.program("static-machine-after-contract", 
 const AfterContractProgramB = boundary.program("static-machine-after-contract", AfterHandlersB, AfterContractBody);
 const AfterContractMachineA = boundary.staticMachine(AfterContractProgramA, .{});
 const AfterContractMachineB = boundary.staticMachine(AfterContractProgramB, .{});
+
+const AfterHandlersHandlerlessOuter = struct {
+    outer: struct {},
+    inner: struct {
+        pub fn afterDispatch(_: *const @This(), value: i32) !bool {
+            return value != 0;
+        }
+    },
+};
+const HandlerlessOuterProgram = boundary.program(
+    "static-machine-handlerless-outer-after",
+    AfterHandlersHandlerlessOuter,
+    AfterContractBody,
+);
+const HandlerlessOuterMachine = boundary.staticMachine(HandlerlessOuterProgram, .{});
 
 const LoopBody = struct {
     pub const compiled_plan = loopPlan("static-machine-cumulative-budget");
@@ -1512,6 +1587,45 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
     try std.testing.expectEqualStrings("true", result.value);
 }
 
+test "StaticMachine preserves a handlerless dynamic outer after contract" {
+    const state = try HandlerlessOuterMachine.initialState(std.testing.allocator, .{});
+    defer HandlerlessOuterMachine.deinitState(state);
+    var fuel: u64 = 100;
+
+    const outer = switch (try HandlerlessOuterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try HandlerlessOuterMachine.@"resume"(state, outer, @as(i32, 1));
+    const inner = switch (try HandlerlessOuterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try HandlerlessOuterMachine.@"resume"(state, inner, @as(i32, 7));
+    const inner_after = switch (try HandlerlessOuterMachine.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try HandlerlessOuterMachine.resumeAfter(state, inner_after, true);
+
+    const outer_after = switch (try HandlerlessOuterMachine.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    const OuterSite = HandlerlessOuterMachine.EffectRow.afterSite("outer", "outer", 0);
+    try std.testing.expect(!OuterSite.has_static_input_ref);
+    try std.testing.expect(outer_after.output_ref.eql(OuterSite.output_ref));
+    try std.testing.expectEqual(true, try outer_after.value(bool));
+    try HandlerlessOuterMachine.resumeAfter(state, outer_after, @as([]const u8, "outer:true"));
+
+    var result = switch (try HandlerlessOuterMachine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("outer:true", result.value);
+}
+
 fn hashLengthPrefixedBytes(hasher: *std.hash.Wyhash, bytes: []const u8) void {
     var length_bytes = [_]u8{0} ** 8;
     std.mem.writeInt(u64, &length_bytes, bytes.len, .little);
@@ -1546,6 +1660,36 @@ fn refreshStateChecksum(bytes: []u8) void {
         stateImageChecksum(bytes[0 .. bytes.len - 8]),
         .little,
     );
+}
+
+fn singleFrameOffset(payload: []const u8, expected_after_count: usize) !usize {
+    const core_offset = try stateCoreOffset(payload);
+    const after_count_offset = core_offset + 8 + 8 + 1;
+    if (after_count_offset + 8 > payload.len) return error.BadLength;
+    try std.testing.expectEqual(
+        @as(u64, @intCast(expected_after_count)),
+        std.mem.readInt(u64, payload[after_count_offset..][0..8], .little),
+    );
+    const frame_count_offset = after_count_offset + 8 + expected_after_count * 6;
+    if (frame_count_offset + 8 > payload.len) return error.BadLength;
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, payload[frame_count_offset..][0..8], .little));
+    return frame_count_offset + 8;
+}
+
+fn insertSingleAfterEntry(encoded: []const u8, entry: [6]u8) ![]u8 {
+    const old_payload = encoded[0 .. encoded.len - 8];
+    const core_offset = try stateCoreOffset(old_payload);
+    const after_count_offset = core_offset + 8 + 8 + 1;
+    const insertion_offset = after_count_offset + 8;
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, old_payload[after_count_offset..][0..8], .little));
+
+    const forged = try std.testing.allocator.alloc(u8, encoded.len + entry.len);
+    @memcpy(forged[0..insertion_offset], old_payload[0..insertion_offset]);
+    std.mem.writeInt(u64, forged[after_count_offset..][0..8], 1, .little);
+    @memcpy(forged[insertion_offset..][0..entry.len], &entry);
+    @memcpy(forged[insertion_offset + entry.len .. forged.len - 8], old_payload[insertion_offset..]);
+    refreshStateChecksum(forged);
+    return forged;
 }
 
 fn afterContractPendingOffset(payload: []const u8, expected_after_count: usize) !usize {
@@ -1596,6 +1740,43 @@ test "StaticMachine rejects a globally valid but control-unreachable after stack
         stateImageChecksum(forged[0 .. forged.len - 8]),
         .little,
     );
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects an unowned root after-stack prefix" {
+    const state = try AfterMachine.initialState(std.testing.allocator, .{});
+    defer AfterMachine.deinitState(state);
+    const encoded = try AfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try insertSingleAfterEntry(encoded, .{ 0, 0, 0, 0, 0, 0 });
+    defer std.testing.allocator.free(forged);
+
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 1);
+    std.mem.writeInt(u64, forged[frame_offset + 5 * 8 ..][0..8], 1, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a pending operation whose after entry is already recorded" {
+    const state = try AfterMachine.initialState(std.testing.allocator, .{});
+    defer AfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    _ = switch (try AfterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    const encoded = try AfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try insertSingleAfterEntry(encoded, .{ 0, 0, 0, 0, 0, 0 });
+    defer std.testing.allocator.free(forged);
 
     try std.testing.expectError(
         error.ProgramContractViolation,
@@ -1683,6 +1864,100 @@ test "StaticMachine rejects a fabricated zero-depth unwind before return" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         PureMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a positive-depth unwind before return" {
+    const state = try AfterMachine.initialState(std.testing.allocator, .{});
+    defer AfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try AfterMachine.reduce(state, &fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterMachine.@"resume"(state, request, @as(i32, 7));
+    const encoded = try AfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const old_payload = encoded[0 .. encoded.len - 8];
+    try std.testing.expectEqual(@as(u8, 0), old_payload[old_payload.len - 1]);
+    const forged = try std.testing.allocator.alloc(u8, encoded.len + 24);
+    defer std.testing.allocator.free(forged);
+    @memcpy(forged[0..old_payload.len], old_payload);
+    forged[old_payload.len - 1] = 1;
+
+    var cursor = old_payload.len;
+    std.mem.writeInt(u64, forged[cursor..][0..8], 0, .little);
+    cursor += 8;
+    forged[cursor] = @intFromEnum(boundary.ir.ValueCodec.i32);
+    forged[cursor + 1] = 0;
+    cursor += 2;
+    std.mem.writeInt(i32, forged[cursor..][0..4], 7, .little);
+    cursor += 4;
+    forged[cursor] = @intFromEnum(boundary.ir.ValueCodec.i32);
+    forged[cursor + 1] = 0;
+    cursor += 2;
+    std.mem.writeInt(u64, forged[cursor..][0..8], 1, .little);
+    cursor += 8;
+    try std.testing.expectEqual(forged.len - 8, cursor);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a last-return cache that differs from its source local" {
+    const state = try PureMachine.initialState(std.testing.allocator, .{});
+    defer PureMachine.deinitState(state);
+    var fuel: u64 = 2;
+    switch (try PureMachine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try PureMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, forged[locals_count_offset..][0..8], .little));
+    const last_return_offset = locals_count_offset + 8 + 2 + 1 + 4;
+    try std.testing.expectEqual(@as(u8, 1), forged[last_return_offset]);
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, forged[last_return_offset + 1 ..][0..4], .little));
+    std.mem.writeInt(i32, forged[last_return_offset + 1 ..][0..4], 8, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        PureMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a last-condition cache that differs from its source local" {
+    const state = try BranchCacheMachine.initialState(std.testing.allocator, .{@as(i32, 0)});
+    defer BranchCacheMachine.deinitState(state);
+    var fuel: u64 = 1;
+    switch (try BranchCacheMachine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try BranchCacheMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 0);
+    const last_condition_offset = frame_offset + 6 * 8;
+    try std.testing.expectEqual(@as(u8, 1), forged[last_condition_offset]);
+    forged[last_condition_offset] = 0;
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        BranchCacheMachine.decodeState(std.testing.allocator, forged),
     );
 }
 
@@ -1900,4 +2175,61 @@ test "StaticMachine string-list resume keeps ownership valid across allocation f
     }
     try std.testing.expect(observed_resume_failure);
     try std.testing.expect(observed_success);
+}
+
+fn stringResultDetachOutcome(fail_index: usize) !?bool {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+    const state = StringMachine.initialState(failing.allocator(), .{}) catch |err| switch (err) {
+        error.OutOfMemory => return null,
+        else => return err,
+    };
+    defer StringMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const transition = StringMachine.reduce(state, &fuel) catch |err| switch (err) {
+        error.OutOfMemory => return null,
+        else => return err,
+    };
+    const request = switch (transition) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    StringMachine.@"resume"(state, request, @as([]const u8, "detached")) catch |err| switch (err) {
+        error.OutOfMemory => return null,
+        else => return err,
+    };
+
+    const completed = StringMachine.reduce(state, &fuel) catch |err| switch (err) {
+        error.OutOfMemory => {
+            try std.testing.expect(failing.has_induced_failure);
+            failing.fail_index = std.math.maxInt(usize);
+            var retried = switch (try StringMachine.reduce(state, &fuel)) {
+                .done => |done| done,
+                else => return error.UnexpectedTransition,
+            };
+            defer retried.deinit();
+            try std.testing.expectEqualStrings("detached", retried.value);
+            return true;
+        },
+        else => return err,
+    };
+    var done = switch (completed) {
+        .done => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    defer done.deinit();
+    try std.testing.expectEqualStrings("detached", done.value);
+    return false;
+}
+
+test "StaticMachine retries terminal result detachment after allocation failure" {
+    var observed_detach_failure = false;
+    for (0..256) |fail_index| {
+        if (try stringResultDetachOutcome(fail_index)) |detach_failed| {
+            if (detach_failed) {
+                observed_detach_failure = true;
+                break;
+            }
+        }
+    }
+    try std.testing.expect(observed_detach_failure);
 }

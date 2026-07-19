@@ -50,8 +50,10 @@ additional capacity is allocated.
 
 Readers reject a mismatched machine identity, invalid enum or boolean, malformed
 frame topology, an after stack that is not reachable along the decoded control
-path, an unwitnessed cursor after a non-completing call, an unwind before the
-function's return boundary, inconsistent pending state, checksum mismatch, and
+path, an unowned root after-stack prefix, a pending operation whose after entry
+is already recorded, an unwitnessed cursor after a non-completing call, any
+after unwind before the function's return boundary, reducer caches that disagree
+with their source locals, inconsistent pending state, checksum mismatch, and
 trailing bytes. A live child frame is the explicit witness that permits its
 parent cursor to remain after a non-completing helper or provider call. The
 checksum detects corruption and accidental mismatches. It is not a signature
