@@ -58,9 +58,10 @@ additional capacity is allocated.
 Canonical `usize` values have a target-neutral 32-bit semantic domain, even
 though the wire slot remains eight bytes. This rule covers bare values,
 structural counts, and `usize` fields nested in product or sum schemas. Concrete
-`u64` schema fields remain full-width. Oversized authored values, reachable
-`const_usize` instructions, responses, reducer-produced values, and decoded
-state all fail closed.
+`u64` schema fields remain full-width while schema-typed; extracting one into a
+ProgramPlan `.usize` local applies the canonical 32-bit domain. Oversized
+authored values, reachable `const_usize` instructions, responses,
+reducer-produced values, and decoded state all fail closed.
 
 Readers reject a mismatched machine identity, invalid enum or boolean, malformed
 frame topology, an after stack that is not reachable along the decoded control

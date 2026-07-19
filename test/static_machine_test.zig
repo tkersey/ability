@@ -149,6 +149,59 @@ fn portableWordProductPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn extractedPortableWordPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const value = boundary.ir.builder.local(root, 0);
+    const wide = boundary.ir.builder.local(root, 1);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .product_extract_field, .dst = wide.index, .operand = value.index, .aux = 0 },
+        boundary.ir.builder.returnValue(root, wide) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .usize,
+        .result_codec = .usize,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 2,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_value }};
+
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 22,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .value_schemas = &PortableWordSchemas.value_schemas,
+        .value_fields = &PortableWordSchemas.value_fields,
+        .value_variants = &PortableWordSchemas.value_variants,
+        .locals = &.{
+            .{ .codec = .product, .schema_index = 0 },
+            .{ .codec = .usize },
+        },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn branchCachePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -1102,6 +1155,17 @@ const PortableWordProductProgram = boundary.program(
 );
 const PortableWordProductMachine = boundary.staticMachine(PortableWordProductProgram, .{});
 
+const ExtractedPortableWordBody = struct {
+    pub const value_schema_types = .{PortableWordProduct};
+    pub const compiled_plan = extractedPortableWordPlan("static-machine-extracted-portable-word");
+};
+const ExtractedPortableWordProgram = boundary.program(
+    "static-machine-extracted-portable-word",
+    struct {},
+    ExtractedPortableWordBody,
+);
+const ExtractedPortableWordMachine = boundary.staticMachine(ExtractedPortableWordProgram, .{});
+
 const BranchCacheBody = struct {
     pub const compiled_plan = branchCachePlan("static-machine-branch-cache");
 };
@@ -1144,19 +1208,12 @@ const UnitLocalBody = struct {
 const UnitLocalProgram = boundary.program("static-machine-unit-local", struct {}, UnitLocalBody);
 const UnitLocalMachine = boundary.staticMachine(UnitLocalProgram, .{});
 
-const AuthoredBudgetBody = struct {
-    pub const Error = error{ExecutionBudgetExceeded};
-    pub const compiled_plan = returnErrorPlan("static-machine-authored-budget", "ExecutionBudgetExceeded");
+const AuthoredRejectedBody = struct {
+    pub const Error = error{Rejected};
+    pub const compiled_plan = returnErrorPlan("static-machine-authored-rejected", "Rejected");
 };
-const AuthoredBudgetProgram = boundary.program("static-machine-authored-budget", struct {}, AuthoredBudgetBody);
-const AuthoredBudgetMachine = boundary.staticMachine(AuthoredBudgetProgram, .{});
-
-const AuthoredOutOfMemoryBody = struct {
-    pub const Error = error{OutOfMemory};
-    pub const compiled_plan = returnErrorPlan("static-machine-authored-oom", "OutOfMemory");
-};
-const AuthoredOutOfMemoryProgram = boundary.program("static-machine-authored-oom", struct {}, AuthoredOutOfMemoryBody);
-const AuthoredOutOfMemoryMachine = boundary.staticMachine(AuthoredOutOfMemoryProgram, .{});
+const AuthoredRejectedProgram = boundary.program("static-machine-authored-rejected", struct {}, AuthoredRejectedBody);
+const AuthoredRejectedMachine = boundary.staticMachine(AuthoredRejectedProgram, .{});
 
 const NestedFirstBody = struct {
     pub const compiled_plan = alternateNestedTargetPlan("static-machine-nested-identity");
@@ -1459,6 +1516,32 @@ test "StaticMachine preserves full u64 schema fields while bounding nested usize
             }}),
         );
     }
+}
+
+test "StaticMachine applies its canonical usize domain after extracting a u64 schema field" {
+    if (@bitSizeOf(usize) <= 32) return;
+    const value: PortableWordProduct = .{
+        .wide = std.math.maxInt(u64),
+        .portable = 0,
+    };
+    const state = try ExtractedPortableWordMachine.initialState(std.testing.allocator, .{value});
+    defer ExtractedPortableWordMachine.deinitState(state);
+    var fuel: u64 = 100;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        ExtractedPortableWordMachine.reduce(state, &fuel),
+    );
+
+    var runtime = boundary.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var session = try ExtractedPortableWordProgram.Session.startWithArgs(&runtime, .{}, .{value});
+    defer session.deinit();
+    var result = switch (try session.next()) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, std.math.maxInt(u64)), result.value);
 }
 
 test "StaticMachine state survives a canonical parked-state round trip" {
@@ -1813,27 +1896,15 @@ test "StaticMachine rejects an oversized after response without consuming its re
     try std.testing.expectEqualStrings("true", result.value());
 }
 
-test "StaticMachine authored budget failure is terminal and never a fuel yield" {
-    const state = try AuthoredBudgetMachine.initialState(std.testing.allocator, .{});
-    defer AuthoredBudgetMachine.deinitState(state);
+test "StaticMachine authored failure is terminal and never a fuel yield" {
+    const state = try AuthoredRejectedMachine.initialState(std.testing.allocator, .{});
+    defer AuthoredRejectedMachine.deinitState(state);
     var fuel: u64 = 100;
-    try std.testing.expectError(error.ExecutionBudgetExceeded, AuthoredBudgetMachine.reduce(state, &fuel));
-    try std.testing.expectError(error.ExecutionBudgetExceeded, AuthoredBudgetMachine.reduce(state, &fuel));
+    try std.testing.expectError(error.Rejected, AuthoredRejectedMachine.reduce(state, &fuel));
+    try std.testing.expectError(error.Rejected, AuthoredRejectedMachine.reduce(state, &fuel));
     try std.testing.expectError(
         error.ProgramContractViolation,
-        AuthoredBudgetMachine.encodeState(std.testing.allocator, state),
-    );
-}
-
-test "StaticMachine authored OutOfMemory remains terminal" {
-    const state = try AuthoredOutOfMemoryMachine.initialState(std.testing.allocator, .{});
-    defer AuthoredOutOfMemoryMachine.deinitState(state);
-    var fuel: u64 = 100;
-    try std.testing.expectError(error.OutOfMemory, AuthoredOutOfMemoryMachine.reduce(state, &fuel));
-    try std.testing.expectError(error.OutOfMemory, AuthoredOutOfMemoryMachine.reduce(state, &fuel));
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        AuthoredOutOfMemoryMachine.encodeState(std.testing.allocator, state),
+        AuthoredRejectedMachine.encodeState(std.testing.allocator, state),
     );
 }
 
@@ -2015,13 +2086,14 @@ test "StaticMachine state binds the complete nested target contract" {
 
 test "StaticMachine exposes a closed authored failure surface" {
     comptime {
-        if (AuthoredBudgetMachine.Failure != error{ExecutionBudgetExceeded}) {
+        if (AuthoredRejectedMachine.Failure != error{Rejected}) {
             @compileError("StaticMachine Failure must contain only Body.Error");
         }
-        if (AuthoredBudgetMachine.Error != error{
+        if (AuthoredRejectedMachine.Error != error{
             ExecutionBudgetExceeded,
             OutOfMemory,
             ProgramContractViolation,
+            Rejected,
         }) {
             @compileError("StaticMachine Error must be a closed machine operation error set");
         }

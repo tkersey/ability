@@ -40,6 +40,10 @@ completion, or an explicit caller-fuel yield. Caller-fuel exhaustion is
 resumable. Cumulative machine-budget exhaustion, program-authored failures, and
 deterministic reduction failures after dispatch begins are terminal errors.
 Terminal states cannot be validated or encoded as resumable state.
+`Body.Error` therefore may not reuse the reserved operational names
+`OutOfMemory`, `ProgramContractViolation`, or `ExecutionBudgetExceeded`; World
+can distinguish authored terminal failure from retryable or supervisory
+failure directly from the closed error value.
 
 Transferring a completed string or structured value into `OwnedResult` may
 allocate. If that detachment reports `OutOfMemory`, the public reduction
@@ -84,7 +88,9 @@ full-width. `Machine.Manifest.canonical_usize_bits` publishes this contract,
 and the complete machine fingerprint recursively binds each concrete schema
 carrier. Consequently, replacing a full-width `u64` field with canonical
 `usize` changes the machine contract even though both fields occupy the
-ProgramPlan `.usize` codec. Nominally distinct Zig types with the same admitted
+ProgramPlan `.usize` codec. Extracting a `u64` schema field into a ProgramPlan
+`.usize` local crosses that boundary: the extracted value must fit the same
+32-bit canonical domain. Nominally distinct Zig types with the same admitted
 carrier semantics remain contract-compatible. Legacy `Program.Session` keeps
 its native-width `usize` behavior.
 

@@ -16,9 +16,10 @@ fuel, the two backends must agree on:
 - the point at which caller fuel yields and cumulative fuel fails.
 
 Canonical StaticMachine additionally constrains `usize` to the explicit 32-bit
-portable domain published by its manifest. Legacy Session remains the oracle
-inside that shared domain and deliberately retains native-width behavior above
-it.
+portable domain published by its manifest, including a concrete `u64` schema
+field after extraction into a ProgramPlan `.usize` local. Legacy Session
+remains the oracle inside that shared domain and deliberately retains
+native-width behavior above it.
 
 Session-local request tokens, legacy provenance-sensitive site fingerprints,
 StaticMachine canonical site fingerprints, and raw continuation bytes are

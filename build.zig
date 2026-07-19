@@ -1097,6 +1097,18 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks",
         },
         .{
+            .path = "test/compile_fail/static_machine_reserved_out_of_memory.zig",
+            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: OutOfMemory",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_reserved_program_contract_violation.zig",
+            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: ProgramContractViolation",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_reserved_execution_budget_exceeded.zig",
+            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: ExecutionBudgetExceeded",
+        },
+        .{
             .path = "test/compile_fail/static_machine_oversized_usize_constant.zig",
             .expected_error = "Boundary StaticMachine v1 requires const_usize values to fit the canonical u32 domain",
         },

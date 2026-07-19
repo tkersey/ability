@@ -1416,8 +1416,14 @@ fn StaticMachineFor(
     comptime StaticProtocol: type,
     comptime options: StaticMachineOptions,
 ) type {
-    if (@typeInfo(BodyErrorSet(Body)).error_set == null) {
+    const FailureSet = BodyErrorSet(Body);
+    if (@typeInfo(FailureSet).error_set == null) {
         @compileError("Boundary StaticMachine requires Body.Error to be a closed error set");
+    }
+    inline for (.{ "OutOfMemory", "ProgramContractViolation", "ExecutionBudgetExceeded" }) |reserved_error| {
+        if (errorSetContains(FailureSet, reserved_error)) {
+            @compileError("Boundary StaticMachine Body.Error must not contain reserved operational error: " ++ reserved_error);
+        }
     }
     if (Core.has_frame_cycle) {
         @compileError("Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs");
@@ -1452,7 +1458,7 @@ fn StaticMachineFor(
         /// Terminal value owner whose `value()` projection remains valid until `deinit`.
         pub const OwnedResult = Core.OpaqueResult;
         /// Program-authored deterministic failures.
-        pub const Failure = BodyErrorSet(Body);
+        pub const Failure = FailureSet;
         /// Closed StaticMachine operation error set.
         pub const Error = Failure || error{
             OutOfMemory,
@@ -1593,9 +1599,7 @@ fn StaticMachineFor(
             defer if (candidate_owned) candidate.deinit();
             var candidate_fuel = fuel.*;
             const outcome = candidate.nextWithFuel(&candidate_fuel) catch |err| {
-                if (err == error.OutOfMemory and !candidate.hasAuthoredTerminalFailure()) {
-                    return error.OutOfMemory;
-                }
+                if (err == error.OutOfMemory) return error.OutOfMemory;
                 commitCandidate(state, &candidate);
                 candidate_owned = false;
                 fuel.* = candidate_fuel;
