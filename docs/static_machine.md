@@ -56,7 +56,9 @@ machine contract rather than the live Zig handle type.
 StaticMachine v1 rejects recursive helper/provider frame graphs and programs
 with output collection or result/output cleanup hooks. It also rejects control
 graphs containing more than 8,192 combined instructions and blocks so canonical
-state validation retains a fixed WASM-suitable stack bound. Product or sum
+state validation retains a fixed WASM-suitable stack bound. Generated direct
+instruction metadata and one shared 1,048,576-unit work budget also bound CPU
+across repeated after-continuation reachability checks. Product or sum
 schemas containing `[][]const u8` reject as well: mutation of that outer
 string-list carrier would make alias topology observable, while canonical state
 deliberately does not preserve pointer identity. Immutable

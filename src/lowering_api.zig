@@ -3265,81 +3265,42 @@ fn sessionAfterOutputRefByIndex(
 ) anyerror!program_plan.ValueRef {
     if (remaining == 0) return error.ProgramContractViolation;
     if (!validate_final_input_contract and remaining == 1) return final_ref;
-    if (validate_final_input_contract and remaining == 1) {
-        inline for (compiled_plan.ops, 0..) |op, index| {
-            if (op_index == index) {
-                if (!op.has_after) return error.ProgramContractViolation;
-                const contract = comptime sessionAfterHandlerContractForOp(compiled_plan, schema_types, HandlersType, op);
-                if (!contract.has_handler) return final_ref;
+    if (op_index >= compiled_plan.ops.len) return error.ProgramContractViolation;
+    const op = compiled_plan.ops[op_index];
+    if (!op.has_after) return error.ProgramContractViolation;
+    const contracts = comptime blk: {
+        var values: [compiled_plan.ops.len]SessionAfterHandlerContract = undefined;
+        for (compiled_plan.ops, 0..) |candidate, index| {
+            if (candidate.has_after) {
+                values[index] = sessionAfterHandlerContractForOp(
+                    compiled_plan,
+                    schema_types,
+                    HandlersType,
+                    candidate,
+                );
+            } else {
+                values[index] = .{
+                    .has_handler = false,
+                    .has_runtime_shape = false,
+                    .input_ref = null,
+                    .output_ref = null,
+                };
             }
         }
-    }
-    const output_ref = try switch (current_ref.codec) {
-        .unit => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .unit }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
-        .bool => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .bool }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
-        .i32 => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .i32 }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
-        .usize => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .usize }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
-        .string => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .string }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
-        .string_list => sessionIntermediateAfterOutputRefByIndexForRef(.{ .codec = .string_list }, compiled_plan, schema_types, HandlersType, op_index, final_ref),
-        .product => blk: {
-            inline for (schema_types, 0..) |_, schema_index| {
-                if (current_ref.schema_index == @as(u16, @intCast(schema_index))) {
-                    break :blk sessionIntermediateAfterOutputRefByIndexForRef(
-                        .{ .codec = .product, .schema_index = @intCast(schema_index) },
-                        compiled_plan,
-                        schema_types,
-                        HandlersType,
-                        op_index,
-                        final_ref,
-                    );
-                }
-            }
-            return error.ProgramContractViolation;
-        },
-        .sum => blk: {
-            inline for (schema_types, 0..) |_, schema_index| {
-                if (current_ref.schema_index == @as(u16, @intCast(schema_index))) {
-                    break :blk sessionIntermediateAfterOutputRefByIndexForRef(
-                        .{ .codec = .sum, .schema_index = @intCast(schema_index) },
-                        compiled_plan,
-                        schema_types,
-                        HandlersType,
-                        op_index,
-                        final_ref,
-                    );
-                }
-            }
-            return error.ProgramContractViolation;
-        },
+        break :blk values;
     };
+    const contract = contracts[op_index];
+    if (validate_final_input_contract and remaining == 1 and !contract.has_handler) return final_ref;
+    if (!contract.has_handler) {
+        if (current_ref.eql(final_ref)) return final_ref;
+        return error.ProgramContractViolation;
+    }
+    if (!contract.has_runtime_shape) return error.ProgramContractViolation;
+    const expected_input_ref = contract.input_ref orelse return error.ProgramContractViolation;
+    if (!current_ref.eql(expected_input_ref)) return error.ProgramContractViolation;
+    const output_ref = contract.output_ref orelse return error.ProgramContractViolation;
     if (remaining == 1 and !output_ref.eql(final_ref)) return error.ProgramContractViolation;
     return output_ref;
-}
-
-fn sessionIntermediateAfterOutputRefByIndexForRef(
-    comptime input_ref: program_plan.ValueRef,
-    comptime compiled_plan: program_plan.ProgramPlan,
-    comptime schema_types: anytype,
-    comptime HandlersType: type,
-    op_index: u16,
-    final_ref: program_plan.ValueRef,
-) anyerror!program_plan.ValueRef {
-    inline for (compiled_plan.ops, 0..) |op, index| {
-        if (op_index == index) {
-            if (!op.has_after) return error.ProgramContractViolation;
-            const contract = comptime sessionAfterHandlerContractForOp(compiled_plan, schema_types, HandlersType, op);
-            if (!contract.has_handler) {
-                if (input_ref.eql(final_ref)) return final_ref;
-                return error.ProgramContractViolation;
-            }
-            if (!contract.has_runtime_shape) return error.ProgramContractViolation;
-            const expected_input_ref = contract.input_ref orelse return error.ProgramContractViolation;
-            const output_ref = contract.output_ref orelse return error.ProgramContractViolation;
-            if (!input_ref.eql(expected_input_ref)) return error.ProgramContractViolation;
-            return output_ref;
-        }
-    }
-    return error.ProgramContractViolation;
 }
 
 fn completeFunctionValue(
@@ -4216,6 +4177,8 @@ fn BodySiteMetadata(comptime Body: type) type {
     };
 }
 
+const static_max_control_work_units: usize = 1 << 20;
+
 fn staticMachineContractFingerprint(
     comptime program_label: []const u8,
     comptime compiled_plan: program_plan.ProgramPlan,
@@ -4267,6 +4230,7 @@ fn staticMachineContractFingerprint(
         );
     }
     sessionSiteHashUsize(&hasher, max_interpreter_steps);
+    sessionSiteHashUsize(&hasher, static_max_control_work_units);
     return hasher.final();
 }
 
@@ -5323,6 +5287,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             control_path_state_capacity * @sizeOf(ControlPathStateIndex) + @sizeOf(ControlPathVisited);
         pub const maximum_control_validation_scratch_bytes: usize =
             static_max_path_scratch_bytes;
+        pub const maximum_control_validation_steps: usize =
+            static_max_control_work_units;
+        pub const control_instruction_metadata_bytes: usize =
+            compiled_plan.instructions.len * @sizeOf(ControlInstructionMetadata);
         // zlinter-enable declaration_naming
 
         const capsule_image_magic = "ABL_CAP1";
@@ -5335,6 +5303,51 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             control_node_capacity * 2;
         const ControlPathStateIndex = std.math.IntFittingRange(0, control_path_state_capacity - 1);
         const ControlPathVisited = std.StaticBitSet(control_path_state_capacity);
+        const invalid_control_metadata_index = std.math.maxInt(u16);
+
+        const ControlInstructionMetadata = struct {
+            block_index: u16 = invalid_control_metadata_index,
+            nested_target_index: u16 = invalid_control_metadata_index,
+        };
+
+        const control_instruction_metadata = blk: {
+            var values = [_]ControlInstructionMetadata{.{}} ** compiled_plan.instructions.len;
+            for (compiled_plan.blocks, 0..) |block, block_index| {
+                if (block_index >= invalid_control_metadata_index) {
+                    @compileError("Boundary StaticMachine control metadata requires block indexes to fit u16");
+                }
+                const first: usize = block.first_instruction;
+                const end = first + block.instruction_count;
+                if (end > values.len) {
+                    @compileError("Boundary StaticMachine control metadata observed an invalid block instruction range");
+                }
+                for (first..end) |instruction_index| {
+                    values[instruction_index].block_index = @intCast(block_index);
+                }
+            }
+            for (compiled_plan.instructions, 0..) |instruction, instruction_index| {
+                if (instruction.kind != .call_nested_with) continue;
+                const target_index = nestedWithTargetIndexForMetadata(
+                    compiled_plan,
+                    nested_with_targets,
+                    instruction.string_literal,
+                ) orelse continue;
+                if (target_index >= invalid_control_metadata_index) {
+                    @compileError("Boundary StaticMachine control metadata requires nested target indexes to fit u16");
+                }
+                values[instruction_index].nested_target_index = @intCast(target_index);
+            }
+            break :blk values;
+        };
+
+        const ControlValidationBudget = struct {
+            remaining: usize = static_max_control_work_units,
+
+            fn consume(self: *@This()) error{ProgramContractViolation}!void {
+                if (self.remaining == 0) return error.ProgramContractViolation;
+                self.remaining -= 1;
+            }
+        };
 
         const ControlPathState = struct {
             node: usize,
@@ -6859,7 +6872,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     };
                 }
             }
-            try core.validateDecodedPendingState();
+            if (comptime !canonical_request_identity) try core.validateDecodedPendingState();
 
             return core;
         }
@@ -7001,7 +7014,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     }
                 },
                 .call_nested_with => {
-                    const target_index = nestedWithTargetIndexForMetadata(compiled_plan, nested_with_targets, instruction.string_literal) orelse
+                    const target_index = nestedTargetIndexForInstruction(call_instruction_index) orelse
                         return error.ProgramContractViolation;
                     if (child.function_index != target_index) return error.ProgramContractViolation;
                     const target = compiled_plan.functions[target_index];
@@ -7011,6 +7024,26 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 },
                 else => return error.ProgramContractViolation,
             }
+        }
+
+        fn nestedTargetIndexForInstruction(instruction_index: usize) ?usize {
+            if (instruction_index >= compiled_plan.instructions.len) return null;
+            if (comptime canonical_request_identity) {
+                if (instruction_index >= control_instruction_metadata.len) return null;
+                const encoded_target_index =
+                    control_instruction_metadata[instruction_index].nested_target_index;
+                if (encoded_target_index == invalid_control_metadata_index) return null;
+                const target_index: usize = encoded_target_index;
+                if (target_index >= compiled_plan.functions.len) return null;
+                return target_index;
+            }
+            const instruction = compiled_plan.instructions[instruction_index];
+            if (instruction.kind != .call_nested_with) return null;
+            return nestedWithTargetIndexForMetadata(
+                compiled_plan,
+                nested_with_targets,
+                instruction.string_literal,
+            );
         }
 
         fn controlNodeForBlockStart(block_index: usize) error{ProgramContractViolation}!usize {
@@ -7038,18 +7071,18 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn blockIndexForInstruction(function_index: usize, instruction_index: usize) ?usize {
-            if (function_index >= compiled_plan.functions.len) return null;
+            if (function_index >= compiled_plan.functions.len or
+                instruction_index >= control_instruction_metadata.len)
+            {
+                return null;
+            }
             const function = compiled_plan.functions[function_index];
             const block_end = @as(usize, function.first_block) + function.block_count;
-            var block_index: usize = function.first_block;
-            while (block_index < block_end) : (block_index += 1) {
-                const block = compiled_plan.blocks[block_index];
-                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
-                if (instruction_index >= block.first_instruction and instruction_index < instruction_end) {
-                    return block_index;
-                }
-            }
-            return null;
+            const encoded_block_index = control_instruction_metadata[instruction_index].block_index;
+            if (encoded_block_index == invalid_control_metadata_index) return null;
+            const block_index: usize = encoded_block_index;
+            if (block_index < function.first_block or block_index >= block_end) return null;
+            return block_index;
         }
 
         fn enqueueControlPathState(
@@ -7068,6 +7101,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn validateControlPathWithoutUnrecordedAfter(
+            budget: *ControlValidationBudget,
             function_index: usize,
             start_node: usize,
             target_node: usize,
@@ -7090,6 +7124,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             });
 
             while (queue_index < queue_len) : (queue_index += 1) {
+                try budget.consume();
                 const state_index: usize = @intCast(queue[queue_index]);
                 const state: ControlPathState = .{
                     .node = state_index / 2,
@@ -7111,12 +7146,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                             if (!is_allowed_suspension and !analysis.completion_functions[instruction.operand]) continue;
                         },
                         .call_nested_with => {
-                            const target_index = nestedWithTargetIndexForMetadata(
-                                compiled_plan,
-                                nested_with_targets,
-                                instruction.string_literal,
-                            ) orelse return error.ProgramContractViolation;
-                            if (target_index >= compiled_plan.functions.len) return error.ProgramContractViolation;
+                            const target_index = nestedTargetIndexForInstruction(node) orelse
+                                return error.ProgramContractViolation;
                             if (!is_allowed_suspension and !analysis.completion_functions[target_index]) continue;
                         },
                         .call_op => {
@@ -7181,7 +7212,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             return error.ProgramContractViolation;
         }
 
-        fn validateDecodedAfterStackReachability(self: *Self) error{ProgramContractViolation}!void {
+        fn validateDecodedAfterStackReachability(
+            self: *Self,
+            budget: *ControlValidationBudget,
+        ) error{ProgramContractViolation}!void {
             var frame_index: usize = 0;
             while (frame_index < self.frames.len()) : (frame_index += 1) {
                 const frame = self.frames.at(frame_index) orelse return error.ProgramContractViolation;
@@ -7210,6 +7244,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         after_site.source_instruction_index,
                     );
                     try validateControlPathWithoutUnrecordedAfter(
+                        budget,
                         frame.function_index,
                         segment_start,
                         site_node,
@@ -7242,6 +7277,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     frame.instruction_index,
                 );
                 try validateControlPathWithoutUnrecordedAfter(
+                    budget,
                     frame.function_index,
                     segment_start,
                     cursor_node,
@@ -7277,6 +7313,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn validateDecodedPendingState(self: *Self) error{ProgramContractViolation}!void {
+            var control_validation_budget: ControlValidationBudget = .{};
             if (comptime canonical_request_identity) {
                 if (self.pending) |pending| switch (pending) {
                     .op => |pending_op| if (pending_op.has_after and
@@ -7286,10 +7323,14 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     },
                     .after => {},
                 };
-                try self.validateDecodedAfterStackReachability();
+                try self.validateDecodedAfterStackReachability(&control_validation_budget);
             }
             const pending = switch (self.pending orelse {
-                if (self.unwinding_after != null) try self.validateDecodedAfterUnwind();
+                if (self.unwinding_after != null) {
+                    try self.validateDecodedAfterUnwind(
+                        if (comptime canonical_request_identity) &control_validation_budget else null,
+                    );
+                }
                 return;
             }) {
                 .op => |pending_op| {
@@ -7302,7 +7343,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             };
             try self.validateDecodedPendingTurnIndex(pending.turn_index);
             if (pending.remaining == 0) return error.ProgramContractViolation;
-            try self.validateDecodedAfterUnwind();
+            try self.validateDecodedAfterUnwind(
+                if (comptime canonical_request_identity) &control_validation_budget else null,
+            );
             const unwind = self.unwinding_after orelse return error.ProgramContractViolation;
             if (unwind.function_index != pending.function_index or
                 unwind.remaining != pending.remaining or
@@ -7326,7 +7369,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             }
         }
 
-        fn validateDecodedAfterUnwind(self: *Self) error{ProgramContractViolation}!void {
+        fn validateDecodedAfterUnwind(
+            self: *Self,
+            control_validation_budget: ?*ControlValidationBudget,
+        ) error{ProgramContractViolation}!void {
             const unwind = self.unwinding_after orelse return error.ProgramContractViolation;
             if (!valueMatchesRef(unwind.current_ref, unwind.value)) return error.ProgramContractViolation;
             if (unwind.function_index >= compiled_plan.functions.len) return error.ProgramContractViolation;
@@ -7345,6 +7391,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 var remaining_before_step = after_stack.len;
                 const validate_final_input_contract = true;
                 while (remaining_before_step > unwind.remaining) : (remaining_before_step -= 1) {
+                    const budget = control_validation_budget orelse
+                        return error.ProgramContractViolation;
+                    try budget.consume();
                     const consumed_entry = after_stack[remaining_before_step - 1];
                     expected_current_ref = sessionAfterOutputRefByIndex(
                         compiled_plan,
@@ -7440,10 +7489,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn afterSiteAt(after_site_index: usize) ?SessionAfterYieldSite {
-            inline for (after_yield_sites, 0..) |site, site_index| {
-                if (after_site_index == site_index) return site;
-            }
-            return null;
+            if (after_site_index >= after_yield_sites.len) return null;
+            const site = after_yield_sites[after_site_index];
+            if (site.index != after_site_index) return null;
+            return site;
         }
 
         fn nextTurnIndex(self: *Self) error{ProgramContractViolation}!usize {
@@ -8567,7 +8616,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                             args_popped = true;
                         },
                         .call_nested_with => {
-                            const target_index = nestedWithTargetIndexForMetadata(compiled_plan, nested_with_targets, instruction.string_literal) orelse return error.ProgramContractViolation;
+                            const target_index = nestedTargetIndexForInstruction(instruction_index) orelse
+                                return error.ProgramContractViolation;
                             const target = compiled_plan.functions[target_index];
                             if (target.parameter_count != 0) return error.ProgramContractViolation;
                             const result_codec = program_plan.valueCodecFromInstructionAux(instruction.aux) catch return error.ProgramContractViolation;
@@ -11763,6 +11813,93 @@ test "StaticMachine control-path capacity has a fixed compact scratch bound" {
         staticMachineControlPathStateCapacity(static_max_control_nodes + 1, 0),
     );
     try std.testing.expectEqual(@as(usize, 34_816), static_max_path_scratch_bytes);
+    try std.testing.expectEqual(
+        @as(usize, 1_048_576),
+        static_max_control_work_units,
+    );
+    try std.testing.expectEqual(
+        static_max_control_work_units,
+        static_max_path_states * 64,
+    );
+}
+
+test "StaticMachine control-path searches share one exact work budget" {
+    const compiled_plan = supportUsizeLiteralPlan("7");
+    const Core = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-control-validation-budget",
+        compiled_plan,
+        .{},
+        &.{},
+        struct {},
+        struct {},
+        1 << 20,
+    );
+    const terminal_block_node = compiled_plan.instructions.len;
+
+    try std.testing.expectEqual(@as(?usize, 0), Core.blockIndexForInstruction(0, 0));
+    try std.testing.expectEqual(@as(?usize, null), Core.blockIndexForInstruction(1, 0));
+
+    var budget: Core.ControlValidationBudget = .{ .remaining = 5 };
+    try Core.validateControlPathWithoutUnrecordedAfter(
+        &budget,
+        0,
+        0,
+        terminal_block_node,
+        null,
+    );
+    try std.testing.expectEqual(@as(usize, 2), budget.remaining);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        Core.validateControlPathWithoutUnrecordedAfter(
+            &budget,
+            0,
+            0,
+            terminal_block_node,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), budget.remaining);
+}
+
+test "StaticMachine child-frame validation uses generated nested-target metadata" {
+    const compiled_plan = supportNestedWithStringListTargetPlan();
+    const targets = [_]NestedWithTarget{.{
+        .metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi",
+        .function_index = 1,
+    }};
+    const StaticCore = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-nested-target-metadata",
+        compiled_plan,
+        .{},
+        &targets,
+        struct {},
+        struct {},
+        1 << 20,
+    );
+    const LegacyCore = ExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "legacy-nested-target-metadata",
+        compiled_plan,
+        .{},
+        &targets,
+        struct {},
+        struct {},
+    );
+
+    try std.testing.expectEqual(@as(?usize, 1), StaticCore.nestedTargetIndexForInstruction(0));
+    try std.testing.expectEqual(@as(?usize, null), StaticCore.nestedTargetIndexForInstruction(1));
+    try std.testing.expectEqual(@as(?usize, 1), LegacyCore.nestedTargetIndexForInstruction(0));
+
+    var core = try StaticCore.start(std.testing.allocator, &.{});
+    defer core.deinit();
+    _ = switch (try core.next()) {
+        .request => |request| request,
+        else => return error.ProgramContractViolation,
+    };
+    try std.testing.expectEqual(@as(usize, 2), core.frames.len());
+    try core.validateState();
 }
 
 test "StaticMachine canonical coherence compares exact structured values" {

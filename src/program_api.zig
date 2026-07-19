@@ -1526,6 +1526,10 @@ fn StaticMachineFor(
             pub const control_validation_scratch_bytes = Core.control_validation_scratch_bytes;
             /// StaticMachine v1 ceiling for control-path validator local scratch bytes.
             pub const maximum_control_validation_scratch_bytes = Core.maximum_control_validation_scratch_bytes;
+            /// Maximum control-path states dequeued by one canonical state validation.
+            pub const maximum_control_validation_steps = Core.maximum_control_validation_steps;
+            /// Immutable generated instruction-ownership and nested-target metadata bytes.
+            pub const control_instruction_metadata_bytes = Core.control_instruction_metadata_bytes;
             /// Semantic width of every canonical bare and structural usize value.
             pub const canonical_usize_bits = Core.canonical_usize_bits;
             /// Maximum canonical state image bytes selected by the application.

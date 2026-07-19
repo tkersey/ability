@@ -43,7 +43,8 @@ active non-completing helper and provider children, control-path-valid after
 stacks, exact typed coherence for duplicated decoded values, derived-frame cache
 coherence, response and completed-result ownership under allocation failure,
 atomic state-size admission, allocation-free bounded validation, compact
-control-path scratch limits, lazy after-stack reservation, handler-derived
+control-path scratch and work limits, direct instruction ownership, lazy
+after-stack reservation, handler-derived
 after contracts, concrete schema-carrier identity, deterministic state-limit
 identity, portable numeric bounds, explicit fuel yield, terminal failure,
 nominal state handles, authentic Program construction, the complete fixture

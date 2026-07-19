@@ -1353,6 +1353,14 @@ test "StaticMachine publishes a fixed control-path validation scratch bound" {
         @as(usize, 34_816),
         OneEffectMachine.Manifest.maximum_control_validation_scratch_bytes,
     );
+    try std.testing.expectEqual(
+        @as(usize, 1_048_576),
+        OneEffectMachine.Manifest.maximum_control_validation_steps,
+    );
+    try std.testing.expect(
+        OneEffectMachine.Manifest.control_instruction_metadata_bytes <=
+            OneEffectMachine.Manifest.control_path_state_count * 2,
+    );
 }
 
 test "StaticMachine rejects native usize values outside its canonical domain without changing Session" {
@@ -2076,7 +2084,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 8081023094848702326), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 8833600878773862189), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);

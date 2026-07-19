@@ -32,7 +32,7 @@ The machine contract fingerprint binds the authored program label, a
 target-neutral canonical ProgramPlan identity, the recursive concrete carrier
 semantics of every product and sum schema, every nested-provider target mapping,
 handler-derived after-continuation input and output refs, and the deterministic
-maximum state-image byte limit. The legacy
+maximum state-image byte and control-validation work limits. The legacy
 `ProgramPlan.hash` and legacy session-site fingerprints remain diagnostic v0
 provenance; neither is a portable StaticMachine state identity. A plan-local
 `ValueRef` becomes portable only when paired with this complete machine
@@ -129,3 +129,9 @@ StaticMachine v1 admits at most 16,384 `(control node, suspension traversed)`
 states—8,192 combined instructions and blocks—and therefore reserves at most
 34,816 bytes of allocation-free local scratch. `Machine.Manifest` publishes the
 actual path-state count and scratch bytes together with both v1 ceilings.
+Comptime-generated `u16` metadata maps each instruction directly to its owning
+block and any nested target. Every path-state dequeue consumes one shared
+call-wide work unit across all after entries and frame cursors. One validation
+may consume at most 1,048,576 units; exhaustion rejects with
+`ProgramContractViolation`. This work limit is part of the complete machine
+contract and is also published through `Machine.Manifest`.
