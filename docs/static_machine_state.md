@@ -123,3 +123,9 @@ maximum turn count remain independently bounded and are exposed through
 `Machine.Manifest`. After-continuation entries share the same logical
 fuel-derived bound but allocate only as they are recorded; unused capacity is
 neither serialized nor semantic.
+
+Control-path reachability validation uses a compact `u16` queue and a bitset.
+StaticMachine v1 admits at most 16,384 `(control node, suspension traversed)`
+states—8,192 combined instructions and blocks—and therefore reserves at most
+34,816 bytes of allocation-free local scratch. `Machine.Manifest` publishes the
+actual path-state count and scratch bytes together with both v1 ceilings.

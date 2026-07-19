@@ -4275,6 +4275,21 @@ const ExecutableRequestIdentity = enum {
     canonical_static_machine,
 };
 
+const static_max_path_states: usize = 16 * 1024;
+const static_max_control_nodes: usize = static_max_path_states / 2;
+const StaticMaxPathVisited = std.StaticBitSet(static_max_path_states);
+const static_max_path_scratch_bytes =
+    static_max_path_states * @sizeOf(u16) +
+    @sizeOf(StaticMaxPathVisited);
+
+fn staticMachineControlPathStateCapacity(instruction_count: usize, block_count: usize) ?usize {
+    const node_count = std.math.add(usize, instruction_count, block_count) catch return null;
+    const node_capacity = if (node_count == 0) 1 else node_count;
+    const state_capacity = std.math.mul(usize, node_capacity, 2) catch return null;
+    if (state_capacity > static_max_path_states) return null;
+    return state_capacity;
+}
+
 pub fn ExecutableSessionForPlan(
     comptime ErrorSet: type,
     comptime program_label: []const u8,
@@ -4300,6 +4315,7 @@ pub fn ExecutableSessionForPlan(
         after_yield_sites,
         0,
         0,
+        0,
     );
 }
 
@@ -4323,6 +4339,10 @@ pub fn StaticExecutableSessionForPlan(
         operation_yield_sites,
     );
     const after_yield_sites = staticMachineAfterYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
+    const control_path_state_capacity = staticMachineControlPathStateCapacity(
+        compiled_plan.instructions.len,
+        compiled_plan.blocks.len,
+    ) orelse @compileError("Boundary StaticMachine v1 supports at most 8192 combined control instructions and blocks");
     const canonical_plan_identity = staticPlanFingerprint(compiled_plan);
     const static_contract_identity = staticMachineContractFingerprint(
         program_label,
@@ -4346,6 +4366,7 @@ pub fn StaticExecutableSessionForPlan(
         after_yield_sites,
         canonical_plan_identity,
         static_contract_identity,
+        control_path_state_capacity,
     );
 }
 
@@ -4362,6 +4383,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
     comptime after_yield_sites: anytype,
     comptime canonical_plan_identity: u64,
     comptime static_contract_identity: u64,
+    comptime static_control_path_state_capacity: usize,
 ) type {
     const entry = compiled_plan.functions[compiled_plan.entry_index];
     const analysis = comptime program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
@@ -5295,13 +5317,24 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         pub const has_frame_cycle: bool = analysis.helper_cycle;
         pub const canonical_plan_fingerprint: u64 = canonical_plan_identity;
         pub const contract_fingerprint: u64 = static_contract_identity;
+        pub const control_path_state_count: usize = control_path_state_capacity;
+        pub const maximum_control_path_states: usize = static_max_path_states;
+        pub const control_validation_scratch_bytes: usize =
+            control_path_state_capacity * @sizeOf(ControlPathStateIndex) + @sizeOf(ControlPathVisited);
+        pub const maximum_control_validation_scratch_bytes: usize =
+            static_max_path_scratch_bytes;
         // zlinter-enable declaration_naming
 
         const capsule_image_magic = "ABL_CAP1";
         const state_image_magic = "ABL_STM1";
         const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
         const control_node_capacity = if (control_node_count == 0) 1 else control_node_count;
-        const control_path_state_capacity = control_node_capacity * 2;
+        const control_path_state_capacity = if (canonical_request_identity)
+            static_control_path_state_capacity
+        else
+            control_node_capacity * 2;
+        const ControlPathStateIndex = std.math.IntFittingRange(0, control_path_state_capacity - 1);
+        const ControlPathVisited = std.StaticBitSet(control_path_state_capacity);
 
         const ControlPathState = struct {
             node: usize,
@@ -7020,17 +7053,17 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn enqueueControlPathState(
-            queue: *[control_path_state_capacity]ControlPathState,
+            queue: *[control_path_state_capacity]ControlPathStateIndex,
             queue_len: *usize,
-            visited: *[control_path_state_capacity]bool,
+            visited: *ControlPathVisited,
             state: ControlPathState,
         ) error{ProgramContractViolation}!void {
             if (state.node >= control_node_count) return error.ProgramContractViolation;
             const state_index = state.node * 2 + @intFromBool(state.traversed_allowed_suspension);
-            if (visited[state_index]) return;
+            if (visited.isSet(state_index)) return;
             if (queue_len.* >= queue.len) return error.ProgramContractViolation;
-            visited[state_index] = true;
-            queue[queue_len.*] = state;
+            visited.set(state_index);
+            queue[queue_len.*] = @intCast(state_index);
             queue_len.* += 1;
         }
 
@@ -7047,8 +7080,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             const function = compiled_plan.functions[function_index];
             const function_block_end = @as(usize, function.first_block) + function.block_count;
 
-            var queue: [control_path_state_capacity]ControlPathState = undefined;
-            var visited = [_]bool{false} ** control_path_state_capacity;
+            var queue: [control_path_state_capacity]ControlPathStateIndex = undefined;
+            var visited = ControlPathVisited.initEmpty();
             var queue_len: usize = 0;
             var queue_index: usize = 0;
             try enqueueControlPathState(&queue, &queue_len, &visited, .{
@@ -7057,7 +7090,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             });
 
             while (queue_index < queue_len) : (queue_index += 1) {
-                const state = queue[queue_index];
+                const state_index: usize = @intCast(queue[queue_index]);
+                const state: ControlPathState = .{
+                    .node = state_index / 2,
+                    .traversed_allowed_suspension = state_index % 2 != 0,
+                };
                 const node = state.node;
                 if (node == target_node and state.traversed_allowed_suspension) return;
 
@@ -11710,6 +11747,22 @@ test "Program.Session validation rejects equal helper arguments with different i
     first.scratch.frameLocals(first_child.frame)[0] = replacement;
 
     try std.testing.expectError(error.ProgramContractViolation, first.validateState());
+}
+
+test "StaticMachine control-path capacity has a fixed compact scratch bound" {
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        staticMachineControlPathStateCapacity(0, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, static_max_path_states),
+        staticMachineControlPathStateCapacity(static_max_control_nodes, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        staticMachineControlPathStateCapacity(static_max_control_nodes + 1, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 34_816), static_max_path_scratch_bytes);
 }
 
 test "StaticMachine canonical coherence compares exact structured values" {

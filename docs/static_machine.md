@@ -54,13 +54,16 @@ Contract-equivalent machines may still exchange canonical state bytes through
 machine contract rather than the live Zig handle type.
 
 StaticMachine v1 rejects recursive helper/provider frame graphs and programs
-with output collection or result/output cleanup hooks. It also rejects product
-or sum schemas containing `[][]const u8`: mutation of that outer string-list
-carrier would make alias topology observable, while canonical state deliberately
-does not preserve pointer identity. Immutable `[]const []const u8` carriers
-remain supported. An authored `afterDispatch` must also have the runtime shape
-used by the static after-site contract: a valid receiver, one value parameter,
-and a return value. Every reachable authored after chain must close: a
+with output collection or result/output cleanup hooks. It also rejects control
+graphs containing more than 8,192 combined instructions and blocks so canonical
+state validation retains a fixed WASM-suitable stack bound. Product or sum
+schemas containing `[][]const u8` reject as well: mutation of that outer
+string-list carrier would make alias topology observable, while canonical state
+deliberately does not preserve pointer identity. Immutable
+`[]const []const u8` carriers remain supported. An authored `afterDispatch`
+must also have the runtime shape used by the static after-site contract: a valid
+receiver, one value parameter, and a return value. Every reachable authored
+after chain must close: a
 potentially innermost handler input matches the owning function value, each
 inner handler output matches the adjacent outer handler input, and a potentially
 outermost handler output matches the function result. Terminal aborts and

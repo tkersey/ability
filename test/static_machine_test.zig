@@ -1340,6 +1340,21 @@ test "StaticMachine canonical usize domain is portable across native and wasm32"
     try std.testing.expectEqual(maximum, result.value());
 }
 
+test "StaticMachine publishes a fixed control-path validation scratch bound" {
+    try std.testing.expect(
+        OneEffectMachine.Manifest.control_path_state_count <=
+            OneEffectMachine.Manifest.maximum_control_path_states,
+    );
+    try std.testing.expect(
+        OneEffectMachine.Manifest.control_validation_scratch_bytes <=
+            OneEffectMachine.Manifest.maximum_control_validation_scratch_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 34_816),
+        OneEffectMachine.Manifest.maximum_control_validation_scratch_bytes,
+    );
+}
+
 test "StaticMachine rejects native usize values outside its canonical domain without changing Session" {
     if (@bitSizeOf(usize) <= 32) return;
     const oversized = @as(usize, std.math.maxInt(u32)) + 1;

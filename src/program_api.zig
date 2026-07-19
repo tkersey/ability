@@ -1518,6 +1518,14 @@ fn StaticMachineFor(
             pub const maximum_interpreter_fuel = Core.maximum_interpreter_fuel;
             /// Maximum deterministic request/after turn ordinal admitted by state validation.
             pub const maximum_turn_count = Core.maximum_turn_count;
+            /// Reachable control-path states represented by the generated state validator.
+            pub const control_path_state_count = Core.control_path_state_count;
+            /// StaticMachine v1 compile-time ceiling for control-path validator states.
+            pub const maximum_control_path_states = Core.maximum_control_path_states;
+            /// Exact local scratch bytes used by this machine's control-path validator.
+            pub const control_validation_scratch_bytes = Core.control_validation_scratch_bytes;
+            /// StaticMachine v1 ceiling for control-path validator local scratch bytes.
+            pub const maximum_control_validation_scratch_bytes = Core.maximum_control_validation_scratch_bytes;
             /// Semantic width of every canonical bare and structural usize value.
             pub const canonical_usize_bits = Core.canonical_usize_bits;
             /// Maximum canonical state image bytes selected by the application.
