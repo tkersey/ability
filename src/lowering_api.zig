@@ -4885,6 +4885,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             pub fn matches(self: @This(), comptime Site: type) bool {
                 comptime requireAfterProtocolSite(Site);
                 const input_matches = if (comptime Site.has_static_input_ref) self.value_ref.eql(Site.input_ref.?) else true;
+                const output_matches = if (canonical_request_identity) self.output_ref.eql(Site.output_ref) else true;
                 const expected_after_fingerprint = if (canonical_request_identity)
                     Site.canonical_fingerprint
                 else
@@ -4900,6 +4901,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     self.source_operation_site_fingerprint == expected_source_fingerprint and
                     self.source_operation_site_canonical_fingerprint == Site.source_operation_site_canonical_fingerprint and
                     input_matches and
+                    output_matches and
                     self.result_ref.eql(Site.result_ref);
             }
 
@@ -5229,6 +5231,19 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         /// Clone one canonical state for a transactional StaticMachine mutation.
         pub fn cloneExplicitState(self: *const Self) anyerror!Self {
             return self.cloneState(self.allocator);
+        }
+
+        /// Clone one canonical state into caller-selected transient ownership.
+        pub fn cloneExplicitStateWithAllocator(self: *const Self, allocator: std.mem.Allocator) anyerror!Self {
+            var cloned = try self.cloneState(allocator);
+            errdefer cloned.deinit();
+            cloned.reidentifyClone();
+            return cloned;
+        }
+
+        /// Whether the current terminal error was authored by the Boundary program.
+        pub fn hasAuthoredTerminalFailure(self: *const Self) bool {
+            return self.terminal_failure_instruction_index != null;
         }
 
         /// Decode and validate one canonical generated-machine state image.
@@ -6201,7 +6216,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             decoded_locals: []const ExecutableValue,
         ) anyerror!ExecutableValue {
             return switch (try reader.readU8()) {
-                0 => .none,
+                0 => blk: {
+                    if (reader.canonical_values and ref.codec == .unit) return error.ProgramContractViolation;
+                    break :blk .none;
+                },
                 1 => try readExecutableValueForRef(reader, scratch, context, ref),
                 2 => blk: {
                     if (reader.canonical_values) return error.ProgramContractViolation;
@@ -6658,7 +6676,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             locals: []const ExecutableValue,
         ) anyerror!ExecutableValue {
             return switch (try reader.readU8()) {
-                0 => .none,
+                0 => blk: {
+                    if (reader.canonical_values and ref.codec == .unit) return error.ProgramContractViolation;
+                    break :blk .none;
+                },
                 1 => try readExecutableValueForRef(reader, scratch, context, ref),
                 2 => blk: {
                     if (reader.canonical_values) return error.ProgramContractViolation;
@@ -9483,7 +9504,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             return core;
         }
 
-        fn retokenizePending(self: *Self) error{ProgramContractViolation}!void {
+        fn reidentifyClone(self: *Self) void {
             const token = self.next_token;
             self.next_token +%= 1;
             self.session_id = nextSessionId();
@@ -9498,9 +9519,12 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         pending.token = token;
                     },
                 }
-            } else {
-                return error.ProgramContractViolation;
             }
+        }
+
+        fn retokenizePending(self: *Self) error{ProgramContractViolation}!void {
+            if (self.pending == null) return error.ProgramContractViolation;
+            self.reidentifyClone();
         }
 
         fn activeLocalSliceConst(self: *const Self, frame: InterpreterFrame) error{ProgramContractViolation}![]const ExecutableValue {

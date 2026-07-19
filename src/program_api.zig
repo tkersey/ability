@@ -1440,17 +1440,11 @@ fn StaticMachineFor(
 
         /// Boundary StaticMachine ABI version consumed by World comptime.
         pub const abi_version: u32 = 1;
-        const StateStorage = opaque {};
-        /// Machine-branded owner handle for one decoded explicit state backed by opaque storage.
-        pub const State = struct {
-            _storage: *StateStorage,
-            _program_brand: [0]*const Program = undefined,
-            _state_encoding_brand: [@as(usize, @intFromEnum(options.state_encoding)) + 1]void = undefined,
-            _world_ports_brand: [@as(usize, @intFromEnum(options.world_ports)) + 1]void = undefined,
-            _debug_metadata_brand: [@as(usize, @intFromBool(options.debug_metadata))]void = undefined,
-            _maximum_frames_brand: [options.maximum_frames]void = undefined,
-            _maximum_state_bytes_brand: [options.maximum_state_bytes]void = undefined,
+        const StateStorage = opaque {
+            const Machine = Self;
         };
+        /// Machine-branded opaque owner handle for one decoded explicit state.
+        pub const State = *StateStorage;
         /// Typed entry arguments accepted by initialState.
         pub const InitialArgs = StaticInitialArgs(Program);
         /// Typed terminal program value borrowed from an OwnedResult until that owner is deinitialized.
@@ -1473,6 +1467,11 @@ fn StaticMachineFor(
         pub const AfterRequest = Core.AfterRequest;
         /// Current parked request projection.
         pub const Current = Core.Current;
+        /// Optional application-inspectable diagnostic metadata.
+        pub const DebugMetadata = struct {
+            operation_sites: @TypeOf(StaticProtocol.operation_site_metadata),
+            after_sites: @TypeOf(StaticProtocol.after_site_metadata),
+        };
 
         /// One reduction boundary exposed to World.
         pub const Transition = union(enum) {
@@ -1534,8 +1533,13 @@ fn StaticMachineFor(
             pub const canonical_usize_bits = Core.canonical_usize_bits;
             /// Maximum canonical state image bytes selected by the application.
             pub const maximum_state_bytes = options.maximum_state_bytes;
-            /// Whether diagnostic metadata was requested.
-            pub const includes_debug_metadata = options.debug_metadata;
+            /// Optional diagnostic metadata requested by the application.
+            pub const debug_metadata: ?DebugMetadata = if (options.debug_metadata) .{
+                .operation_sites = StaticProtocol.operation_site_metadata,
+                .after_sites = StaticProtocol.after_site_metadata,
+            } else null;
+            /// Whether inspectable diagnostic metadata is present.
+            pub const includes_debug_metadata = debug_metadata != null;
             /// Whether every residual world port must be explicit.
             pub const ports_are_explicit = options.world_ports == .explicit;
             /// Whether the machine uses canonical state image v1.
@@ -1543,17 +1547,17 @@ fn StaticMachineFor(
         };
 
         fn stateCore(state: State) *Core {
-            return @ptrCast(@alignCast(state._storage));
+            return @ptrCast(@alignCast(state));
         }
 
         fn stateCoreConst(state: State) *const Core {
-            return @ptrCast(@alignCast(state._storage));
+            return @ptrCast(@alignCast(state));
         }
 
         fn ownCore(allocator: std.mem.Allocator, core_value: Core) Error!State {
             const storage = allocator.create(Core) catch return error.OutOfMemory;
             storage.* = core_value;
-            return .{ ._storage = @ptrCast(storage) };
+            return @ptrCast(storage);
         }
 
         fn commitCandidate(state: State, candidate: *Core) void {
@@ -1574,6 +1578,14 @@ fn StaticMachineFor(
             return ownCore(allocator, core_value);
         }
 
+        /// Construct an independent live owner with the same canonical continuation state.
+        pub fn cloneState(allocator: std.mem.Allocator, state: State) Error!State {
+            var core_value = stateCoreConst(state).cloneExplicitStateWithAllocator(allocator) catch |err| return mapError(err);
+            errdefer core_value.deinit();
+            core_value.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
+            return ownCore(allocator, core_value);
+        }
+
         /// Advance to one effect, terminal result, or deterministic fuel boundary.
         pub fn reduce(state: State, fuel: *u64) Error!Transition {
             var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
@@ -1581,6 +1593,9 @@ fn StaticMachineFor(
             defer if (candidate_owned) candidate.deinit();
             var candidate_fuel = fuel.*;
             const outcome = candidate.nextWithFuel(&candidate_fuel) catch |err| {
+                if (err == error.OutOfMemory and !candidate.hasAuthoredTerminalFailure()) {
+                    return error.OutOfMemory;
+                }
                 commitCandidate(state, &candidate);
                 candidate_owned = false;
                 fuel.* = candidate_fuel;

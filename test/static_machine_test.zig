@@ -519,6 +519,40 @@ fn zeroInstructionPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn unitLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .parameter_count = 0,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 1,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = 0,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{ .first_instruction = 0, .instruction_count = 0, .terminator_index = 0 }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_unit }};
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 22,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{.{ .codec = .unit }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &.{},
+    }) catch unreachable;
+}
+
 fn returnErrorPlan(comptime label: []const u8, comptime error_name: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const instructions = [_]boundary.ir.plan.Instruction{.{ .kind = .return_error, .string_literal = error_name }};
@@ -1104,12 +1138,25 @@ const ZeroBody = struct {
 const ZeroProgram = boundary.program("static-machine-zero-instruction", struct {}, ZeroBody);
 const ZeroMachine = boundary.staticMachine(ZeroProgram, .{});
 
+const UnitLocalBody = struct {
+    pub const compiled_plan = unitLocalPlan("static-machine-unit-local");
+};
+const UnitLocalProgram = boundary.program("static-machine-unit-local", struct {}, UnitLocalBody);
+const UnitLocalMachine = boundary.staticMachine(UnitLocalProgram, .{});
+
 const AuthoredBudgetBody = struct {
     pub const Error = error{ExecutionBudgetExceeded};
     pub const compiled_plan = returnErrorPlan("static-machine-authored-budget", "ExecutionBudgetExceeded");
 };
 const AuthoredBudgetProgram = boundary.program("static-machine-authored-budget", struct {}, AuthoredBudgetBody);
 const AuthoredBudgetMachine = boundary.staticMachine(AuthoredBudgetProgram, .{});
+
+const AuthoredOutOfMemoryBody = struct {
+    pub const Error = error{OutOfMemory};
+    pub const compiled_plan = returnErrorPlan("static-machine-authored-oom", "OutOfMemory");
+};
+const AuthoredOutOfMemoryProgram = boundary.program("static-machine-authored-oom", struct {}, AuthoredOutOfMemoryBody);
+const AuthoredOutOfMemoryMachine = boundary.staticMachine(AuthoredOutOfMemoryProgram, .{});
 
 const NestedFirstBody = struct {
     pub const compiled_plan = alternateNestedTargetPlan("static-machine-nested-identity");
@@ -1287,6 +1334,7 @@ const TightParkMachine = boundary.staticMachine(OneEffectProgram, .{ .maximum_st
 const BoundedStringMachine = boundary.staticMachine(StringProgram, .{ .maximum_state_bytes = 2048 });
 const WideBoundedStringMachine = boundary.staticMachine(StringProgram, .{ .maximum_state_bytes = 4096 });
 const BoundedAfterMachine = boundary.staticMachine(AfterContractProgramA, .{ .maximum_state_bytes = 2048 });
+const DebugOneEffectMachine = boundary.staticMachine(OneEffectProgram, .{ .debug_metadata = true });
 
 test "StaticMachine executes a pure scalar program" {
     comptime {
@@ -1777,14 +1825,89 @@ test "StaticMachine authored budget failure is terminal and never a fuel yield" 
     );
 }
 
+test "StaticMachine authored OutOfMemory remains terminal" {
+    const state = try AuthoredOutOfMemoryMachine.initialState(std.testing.allocator, .{});
+    defer AuthoredOutOfMemoryMachine.deinitState(state);
+    var fuel: u64 = 100;
+    try std.testing.expectError(error.OutOfMemory, AuthoredOutOfMemoryMachine.reduce(state, &fuel));
+    try std.testing.expectError(error.OutOfMemory, AuthoredOutOfMemoryMachine.reduce(state, &fuel));
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AuthoredOutOfMemoryMachine.encodeState(std.testing.allocator, state),
+    );
+}
+
 test "StaticMachine state surface does not expose the session core" {
-    const storage_field = @typeInfo(OneEffectMachine.State).@"struct".fields[0];
-    const StateStorage = @typeInfo(storage_field.type).pointer.child;
+    try std.testing.expect(@typeInfo(OneEffectMachine.State) == .pointer);
+    const StateStorage = @typeInfo(OneEffectMachine.State).pointer.child;
     try std.testing.expect(@typeInfo(StateStorage) == .@"opaque");
     try std.testing.expect(!@hasDecl(StateStorage, "next"));
     try std.testing.expect(!@hasDecl(StateStorage, "nextWithFuel"));
     try std.testing.expect(!@hasDecl(StateStorage, "encodeState"));
     try std.testing.expect(!@hasDecl(StateStorage, "decodeState"));
+}
+
+test "StaticMachine cloneState creates independent live ownership" {
+    const state = try OneEffectMachine.initialState(std.testing.allocator, .{});
+    defer OneEffectMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try OneEffectMachine.reduce(state, &fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    const cloned = try OneEffectMachine.cloneState(std.testing.allocator, state);
+    defer OneEffectMachine.deinitState(cloned);
+
+    const original_bytes = try OneEffectMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(original_bytes);
+    const cloned_bytes = try OneEffectMachine.encodeState(std.testing.allocator, cloned);
+    defer std.testing.allocator.free(cloned_bytes);
+    try std.testing.expectEqualSlices(u8, original_bytes, cloned_bytes);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(cloned, request, @as(i32, 41)),
+    );
+    try OneEffectMachine.@"resume"(state, request, @as(i32, 41));
+    const cloned_request = switch (try OneEffectMachine.current(cloned)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(request.fingerprint(), cloned_request.fingerprint());
+    try OneEffectMachine.@"resume"(cloned, cloned_request, @as(i32, 42));
+}
+
+test "StaticMachine cloneState reidentifies runnable ownership" {
+    const state = try OneEffectMachine.initialState(std.testing.allocator, .{});
+    defer OneEffectMachine.deinitState(state);
+    const cloned = try OneEffectMachine.cloneState(std.testing.allocator, state);
+    defer OneEffectMachine.deinitState(cloned);
+
+    var original_fuel: u64 = 100;
+    const original_request = switch (try OneEffectMachine.reduce(state, &original_fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    var cloned_fuel: u64 = 100;
+    const cloned_request = switch (try OneEffectMachine.reduce(cloned, &cloned_fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(original_request.fingerprint(), cloned_request.fingerprint());
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(cloned, original_request, @as(i32, 41)),
+    );
+    try OneEffectMachine.@"resume"(cloned, cloned_request, @as(i32, 42));
+}
+
+test "StaticMachine debug metadata manifest claim is inspectable" {
+    try std.testing.expect(!OneEffectMachine.Manifest.includes_debug_metadata);
+    try std.testing.expect(OneEffectMachine.Manifest.debug_metadata == null);
+    try std.testing.expect(DebugOneEffectMachine.Manifest.includes_debug_metadata);
+    const metadata = DebugOneEffectMachine.Manifest.debug_metadata orelse return error.MissingDebugMetadata;
+    try std.testing.expectEqual(DebugOneEffectMachine.Manifest.operation_site_count, metadata.operation_sites.len);
+    try std.testing.expectEqual(DebugOneEffectMachine.Manifest.after_site_count, metadata.after_sites.len);
 }
 
 test "StaticMachine rejects an initial state above its byte limit" {
@@ -2115,6 +2238,38 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
     try std.testing.expectEqualStrings("true", result.value());
 }
 
+test "StaticMachine after site witness binds the handler-derived output ref" {
+    const state = try AfterContractMachineA.initialState(std.testing.allocator, .{});
+    defer AfterContractMachineA.deinitState(state);
+    var fuel: u64 = 100;
+    const outer = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, outer, @as(i32, 1));
+    const inner = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterContractMachineA.@"resume"(state, inner, @as(i32, 7));
+    const after = switch (try AfterContractMachineA.reduce(state, &fuel)) {
+        .after => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    const Site = AfterContractMachineA.EffectRow.afterSite("inner", "inner", 0);
+    try after.expectSite(Site);
+
+    var forged = after;
+    forged.output_ref = .{ .codec = .i32 };
+    try std.testing.expect(!forged.matches(Site));
+    try std.testing.expectError(error.ProgramContractViolation, forged.expectSite(Site));
+    try std.testing.expectError(error.ProgramContractViolation, forged.as(Site));
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        forged.responseTraceFor(Site, @as(i32, 1)),
+    );
+}
+
 test "StaticMachine preserves a handlerless dynamic outer after contract" {
     const state = try HandlerlessOuterMachine.initialState(std.testing.allocator, .{});
     defer HandlerlessOuterMachine.deinitState(state);
@@ -2277,6 +2432,38 @@ fn afterContractPendingOffset(payload: []const u8, expected_after_count: usize) 
     try std.testing.expectEqual(@as(u8, 1), payload[pending_offset]);
     try std.testing.expectEqual(@as(u8, 1), payload[pending_offset + 1]);
     return pending_offset;
+}
+
+test "StaticMachine rejects alternate canonical unit presence tags" {
+    const state = try UnitLocalMachine.initialState(std.testing.allocator, .{});
+    defer UnitLocalMachine.deinitState(state);
+    const encoded = try UnitLocalMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const frame_offset = try singleFrameOffset(encoded[0 .. encoded.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, encoded[locals_count_offset..][0..8], .little));
+    const local_tag_offset = locals_count_offset + 8 + 2;
+    const last_return_tag_offset = local_tag_offset + 1;
+    try std.testing.expectEqual(@as(u8, 1), encoded[local_tag_offset]);
+    try std.testing.expectEqual(@as(u8, 1), encoded[last_return_tag_offset]);
+
+    const forged_local = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged_local);
+    forged_local[local_tag_offset] = 0;
+    refreshStateChecksum(forged_local);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        UnitLocalMachine.decodeState(std.testing.allocator, forged_local),
+    );
+
+    const forged_last_return = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged_last_return);
+    forged_last_return[last_return_tag_offset] = 0;
+    refreshStateChecksum(forged_last_return);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        UnitLocalMachine.decodeState(std.testing.allocator, forged_last_return),
+    );
 }
 
 test "StaticMachine rejects a forged bare usize outside the canonical domain" {
@@ -2992,9 +3179,17 @@ fn stringResultDetachOutcome(fail_index: usize) !?bool {
         else => return err,
     };
 
+    const before = try StringMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    const fuel_before = fuel;
     const completed = StringMachine.reduce(state, &fuel) catch |err| switch (err) {
         error.OutOfMemory => {
             try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(fuel_before, fuel);
+            try StringMachine.validateState(state);
+            const after = try StringMachine.encodeState(std.testing.allocator, state);
+            defer std.testing.allocator.free(after);
+            try std.testing.expectEqualSlices(u8, before, after);
             failing.fail_index = std.math.maxInt(usize);
             var retried = switch (try StringMachine.reduce(state, &fuel)) {
                 .done => |done| done,

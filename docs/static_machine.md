@@ -26,13 +26,13 @@ interpret an arbitrary serialized module at runtime.
 
 The generated type exposes:
 
-- `State`, a machine-branded owner handle backed by opaque state storage;
+- `State`, a machine-branded opaque pointer handle backed by private state storage;
 - `InitialArgs`, derived from the entry function parameter tuple;
 - `Result`, a terminal value view that borrows from `OwnedResult`, its storage owner,
   application-authored `Failure`, and the closed machine `Error` set;
 - `EffectRow`, the program's static protocol and site descriptors;
 - `Manifest`, compile-time identity, format, site, and limit metadata;
-- `initialState`, `reduce`, `current`, `resume`, `resumeAfter`, and `returnNow`;
+- `initialState`, `cloneState`, `reduce`, `current`, `resume`, `resumeAfter`, and `returnNow`;
 - `encodeState`, `decodeState`, `validateState`, and `deinitState`.
 
 `reduce` stops at an operation request, an after-continuation request, terminal
@@ -42,9 +42,9 @@ deterministic reduction failures after dispatch begins are terminal errors.
 Terminal states cannot be validated or encoded as resumable state.
 
 Transferring a completed string or structured value into `OwnedResult` may
-allocate. If that detachment reports `OutOfMemory`, the completed value remains
-owned by the live State and the caller may retry `reduce`; completion is marked
-consumed only after the transfer succeeds.
+allocate. If that detachment reports `OutOfMemory`, the public reduction
+transaction preserves its input State and caller fuel, and the caller may retry
+`reduce`; completion is marked consumed only after the transfer succeeds.
 
 `boundary.staticMachine` accepts only the authentic type returned by
 `boundary.program`. Live `State` handles are branded by that Program and the
@@ -92,6 +92,9 @@ its native-width `usize` behavior.
 
 The live `State` handle owns allocator-backed working storage because Zig
 values such as strings and structured payloads require transient memory.
+It follows Zig's single-owner pointer convention: copying the pointer creates an
+alias, not a second owner, and exactly one alias may be passed to `deinitState`.
+Use `cloneState` when two independently releasable live states are required.
 Each nonterminal mutation runs against a cloned candidate state. The candidate
 commits only after exact validation proves that its complete canonical image
 fits `maximum_state_bytes`. Failed cloning, response validation, or size
@@ -108,6 +111,11 @@ WASM-instance boundary.
 `State`. Their structured payload or current-value fields remain valid only
 until the next mutation or deinitialization of that State. A host must encode or
 copy the request data it needs before mutating or releasing the State.
+
+When `.debug_metadata = true`, `Manifest.debug_metadata` contains the generated
+operation and after-site tables and `Manifest.includes_debug_metadata` is true.
+When disabled, the optional metadata is null. This diagnostic projection does
+not affect machine identity or canonical state bytes.
 
 The `.done` transition carries `*OwnedResult`, a pointer to an opaque owner. Its
 `value()` projection returns `Machine.Result` and borrows any backing storage

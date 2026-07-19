@@ -2,8 +2,9 @@
 
 StaticMachine state has two representations with different ownership:
 
-1. `Machine.State` is a machine-branded owner handle over opaque transient
-   working storage.
+1. `Machine.State` is a machine-branded opaque pointer owner over transient
+   working storage. Pointer copies are aliases; `Machine.cloneState` creates an
+   independent owner.
 2. `Machine.encodeState` returns the canonical portable continuation image.
 
 Only the second representation crosses process, storage, repository, or WASM
@@ -118,9 +119,10 @@ structural writer and admission bound, not merely a post-encoding check and not
 a heap budget. Bounded validation reuses the canonical encoder traversal in a
 count-only mode: it performs checked length arithmetic without allocating or
 copying a second image. Nonterminal mutation may temporarily clone one live
-state so rejection remains atomic. Core interpreter fuel and the derived
-maximum turn count remain independently bounded and are exposed through
-`Machine.Manifest`. After-continuation entries share the same logical
+state so rejection and allocator-dependent failure remain atomic. Core
+interpreter fuel and the derived maximum turn count remain independently
+bounded and are exposed through `Machine.Manifest`. After-continuation entries
+share the same logical
 fuel-derived bound but allocate only as they are recorded; unused capacity is
 neither serialized nor semantic.
 
