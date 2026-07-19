@@ -60,12 +60,16 @@ carrier would make alias topology observable, while canonical state deliberately
 does not preserve pointer identity. Immutable `[]const []const u8` carriers
 remain supported. An authored `afterDispatch` must also have the runtime shape
 used by the static after-site contract: a valid receiver, one value parameter,
-and a return value. If an after site can be the outermost continuation on any
-reachable path, that return value must match the owning function result.
-Legacy `Program.Session` retains its dynamic final-output behavior; StaticMachine
-rejects that shape because World requires a closed static effect contract. Those
-restrictions keep the first portable-state and completion contracts exact; a
-later ABI revision may expand support.
+and a return value. Every reachable authored after chain must close: a
+potentially innermost handler input matches the owning function value, each
+inner handler output matches the adjacent outer handler input, and a potentially
+outermost handler output matches the function result. Terminal aborts and
+non-completing helper or provider calls end after-chain reachability; they do
+not connect a site to a syntactic successor. Legacy `Program.Session` retains
+its dynamic final-output behavior; StaticMachine rejects that shape because
+World requires a closed static effect contract. Those restrictions keep the
+first portable-state and completion contracts exact; a later ABI revision may
+expand support.
 
 ## Authority boundary
 
@@ -82,10 +86,12 @@ allocator, or WASM-instance boundary.
 until the next mutation or deinitialization of that State. A host must encode or
 copy the request data it needs before mutating or releasing the State.
 
-The `.done` transition carries `OwnedResult`. Its `value` field has type
-`Machine.Result` and borrows any backing storage attached to the owner. Keep the
-`OwnedResult` alive until the value has been consumed or copied, then call
-`deinit` on the owner.
+The `.done` transition carries `*OwnedResult`, a pointer to an opaque owner. Its
+`value()` projection returns `Machine.Result` and borrows any backing storage
+attached to that owner. Keep the owner alive until the value has been consumed
+or copied, then call `deinit`. `deinit` is the only public operation that releases
+the backing storage; StaticMachine exposes neither typed storage nor a
+storage-detachment operation.
 
 Encoded state contains no implicit allocator identity, native address, function
 pointer, session token, runtime handle, or host authority. Application values

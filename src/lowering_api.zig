@@ -2679,33 +2679,78 @@ fn validateStaticMachineAfterHandlerContracts(
             @compileError("Boundary StaticMachine v1 requires afterDispatch to have a receiver, one value parameter, and a return value");
         }
         if (contract.has_handler and
+            staticMachineAfterSiteMayBeInnermost(compiled_plan, nested_with_targets, site) and
+            !contract.input_ref.?.eql(functionValueRef(compiled_plan.functions[site.function_index])))
+        {
+            @compileError("Boundary StaticMachine v1 requires every potentially innermost afterDispatch input to match its function value");
+        }
+        if (contract.has_handler and
             staticMachineAfterSiteMayBeOutermost(compiled_plan, nested_with_targets, site) and
             !contract.output_ref.?.eql(site.result_ref))
         {
             @compileError("Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result");
         }
+        if (!contract.has_handler and
+            staticMachineAfterSiteMayBeNested(compiled_plan, nested_with_targets, operation_yield_sites, site) and
+            staticMachineAfterSiteMayBeInnermost(compiled_plan, nested_with_targets, site) and
+            !functionValueRef(compiled_plan.functions[site.function_index]).eql(site.result_ref))
+        {
+            @compileError("Boundary StaticMachine v1 requires every nested handlerless innermost after continuation to receive its function result type");
+        }
+    }
+
+    outer_sites: inline for (operation_yield_sites) |outer_site| {
+        if (!outer_site.has_after) continue :outer_sites;
+        const outer_op = compiled_plan.ops[outer_site.op_index];
+        const outer_contract = sessionAfterHandlerContractForOp(compiled_plan, schema_types, HandlersType, outer_op);
+        inner_sites: inline for (operation_yield_sites) |inner_site| {
+            if (!inner_site.has_after or inner_site.function_index != outer_site.function_index) continue :inner_sites;
+            if (!staticMachineAfterSitesMayBeAdjacent(
+                compiled_plan,
+                nested_with_targets,
+                outer_site,
+                inner_site,
+            )) continue :inner_sites;
+
+            const inner_op = compiled_plan.ops[inner_site.op_index];
+            const inner_contract = sessionAfterHandlerContractForOp(compiled_plan, schema_types, HandlersType, inner_op);
+            const inner_output_ref = inner_contract.output_ref orelse inner_site.result_ref;
+            if (outer_contract.has_handler) {
+                if (!inner_output_ref.eql(outer_contract.input_ref.?)) {
+                    @compileError("Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input");
+                }
+            } else if (staticMachineAfterSiteMayBeNested(
+                compiled_plan,
+                nested_with_targets,
+                operation_yield_sites,
+                outer_site,
+            ) and !inner_output_ref.eql(outer_site.result_ref)) {
+                @compileError("Boundary StaticMachine v1 requires every nested handlerless after continuation to receive its function result type");
+            }
+        }
     }
 }
 
-fn staticMachineAfterSiteMayBeOutermost(
+const StaticMachineAfterPathGoal = union(enum) {
+    instruction: usize,
+    function_return,
+};
+
+fn staticMachineAfterFreePathExists(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
-    comptime target_site: SessionOperationYieldSite,
+    comptime function_index: usize,
+    comptime start_node: usize,
+    comptime goal: StaticMachineAfterPathGoal,
 ) bool {
     @setEvalBranchQuota(1_000_000);
     const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
     if (comptime control_node_count == 0) return false;
-    if (target_site.function_index >= compiled_plan.functions.len) return false;
+    if (function_index >= compiled_plan.functions.len or start_node >= control_node_count) return false;
     const analysis = comptime program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch
         return false;
-    const function = compiled_plan.functions[target_site.function_index];
+    const function = compiled_plan.functions[function_index];
     const function_block_end = @as(usize, function.first_block) + function.block_count;
-    const entry_block_index = @as(usize, function.first_block) + function.entry_block;
-    const entry_block = compiled_plan.blocks[entry_block_index];
-    const start_node = if (entry_block.instruction_count == 0)
-        compiled_plan.instructions.len + entry_block_index
-    else
-        entry_block.first_instruction;
 
     var queue: [control_node_count]usize = undefined;
     var visited = [_]bool{false} ** control_node_count;
@@ -2716,7 +2761,10 @@ fn staticMachineAfterSiteMayBeOutermost(
 
     while (queue_index < queue_len) : (queue_index += 1) {
         const node = queue[queue_index];
-        if (node == target_site.instruction_index) return true;
+        switch (goal) {
+            .instruction => |target| if (node == target) return true,
+            .function_return => {},
+        }
 
         if (node < compiled_plan.instructions.len) {
             var block_index: usize = function.first_block;
@@ -2745,7 +2793,8 @@ fn staticMachineAfterSiteMayBeOutermost(
                 },
                 .call_op => {
                     if (instruction.operand >= compiled_plan.ops.len) return false;
-                    if (compiled_plan.ops[instruction.operand].has_after) continue;
+                    const op = compiled_plan.ops[instruction.operand];
+                    if (op.mode == .abort or op.has_after) continue;
                 },
                 else => {},
             }
@@ -2766,6 +2815,12 @@ fn staticMachineAfterSiteMayBeOutermost(
         const block_index = node - compiled_plan.instructions.len;
         if (block_index < function.first_block or block_index >= function_block_end) return false;
         const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+        switch (goal) {
+            .instruction => {},
+            .function_return => if (terminator.kind == .return_unit or terminator.kind == .return_value) {
+                return true;
+            },
+        }
         const targets = switch (terminator.kind) {
             .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
             .jump => [2]?u16{ terminator.primary, null },
@@ -2784,6 +2839,97 @@ fn staticMachineAfterSiteMayBeOutermost(
                 queue[queue_len] = next_node;
                 queue_len += 1;
             }
+        }
+    }
+    return false;
+}
+
+fn staticMachineFunctionEntryNode(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime function_index: usize,
+) ?usize {
+    if (function_index >= compiled_plan.functions.len) return null;
+    const function = compiled_plan.functions[function_index];
+    const entry_block_index = @as(usize, function.first_block) + function.entry_block;
+    if (entry_block_index >= compiled_plan.blocks.len) return null;
+    const entry_block = compiled_plan.blocks[entry_block_index];
+    return if (entry_block.instruction_count == 0)
+        compiled_plan.instructions.len + entry_block_index
+    else
+        entry_block.first_instruction;
+}
+
+fn staticMachineNodeAfterSite(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime site: SessionOperationYieldSite,
+) ?usize {
+    if (site.block_index >= compiled_plan.blocks.len or site.instruction_index >= compiled_plan.instructions.len) return null;
+    const block = compiled_plan.blocks[site.block_index];
+    const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+    if (site.instruction_index < block.first_instruction or site.instruction_index >= instruction_end) return null;
+    return if (site.instruction_index + 1 == instruction_end)
+        compiled_plan.instructions.len + site.block_index
+    else
+        site.instruction_index + 1;
+}
+
+fn staticMachineAfterSiteMayBeOutermost(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime target_site: SessionOperationYieldSite,
+) bool {
+    const start_node = staticMachineFunctionEntryNode(compiled_plan, target_site.function_index) orelse return false;
+    return staticMachineAfterFreePathExists(
+        compiled_plan,
+        nested_with_targets,
+        target_site.function_index,
+        start_node,
+        .{ .instruction = target_site.instruction_index },
+    );
+}
+
+fn staticMachineAfterSiteMayBeInnermost(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime target_site: SessionOperationYieldSite,
+) bool {
+    const start_node = staticMachineNodeAfterSite(compiled_plan, target_site) orelse return false;
+    return staticMachineAfterFreePathExists(
+        compiled_plan,
+        nested_with_targets,
+        target_site.function_index,
+        start_node,
+        .function_return,
+    );
+}
+
+fn staticMachineAfterSitesMayBeAdjacent(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime outer_site: SessionOperationYieldSite,
+    comptime inner_site: SessionOperationYieldSite,
+) bool {
+    if (outer_site.function_index != inner_site.function_index) return false;
+    const start_node = staticMachineNodeAfterSite(compiled_plan, outer_site) orelse return false;
+    return staticMachineAfterFreePathExists(
+        compiled_plan,
+        nested_with_targets,
+        outer_site.function_index,
+        start_node,
+        .{ .instruction = inner_site.instruction_index },
+    );
+}
+
+fn staticMachineAfterSiteMayBeNested(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime operation_yield_sites: anytype,
+    comptime target_site: SessionOperationYieldSite,
+) bool {
+    inline for (operation_yield_sites) |outer_site| {
+        if (!outer_site.has_after or outer_site.function_index != target_site.function_index) continue;
+        if (staticMachineAfterSitesMayBeAdjacent(compiled_plan, nested_with_targets, outer_site, target_site)) {
+            return true;
         }
     }
     return false;
@@ -3003,6 +3149,7 @@ fn sessionAfterOutputRefByIndex(
     if (validate_final_input_contract and remaining == 1) {
         inline for (compiled_plan.ops, 0..) |op, index| {
             if (op_index == index) {
+                if (!op.has_after) return error.ProgramContractViolation;
                 const contract = comptime sessionAfterHandlerContractForOp(compiled_plan, schema_types, HandlersType, op);
                 if (!contract.has_handler) return final_ref;
             }
@@ -3949,6 +4096,7 @@ fn BodySiteMetadata(comptime Body: type) type {
 }
 
 fn staticMachineContractFingerprint(
+    comptime program_label: []const u8,
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
     comptime schema_types: anytype,
@@ -3958,6 +4106,7 @@ fn staticMachineContractFingerprint(
     @setEvalBranchQuota(1_000_000);
     var hasher = std.hash.Wyhash.init(0);
     sessionSiteHashBytes(&hasher, "boundary.static-machine.contract.v1");
+    sessionSiteHashBytes(&hasher, program_label);
     sessionSiteHashU64(&hasher, staticPlanFingerprint(compiled_plan));
     sessionSiteHashUsize(&hasher, nested_with_targets.len);
     inline for (nested_with_targets) |target| {
@@ -4050,6 +4199,7 @@ pub fn StaticExecutableSessionForPlan(
     const after_yield_sites = staticMachineAfterYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
     const canonical_plan_identity = staticPlanFingerprint(compiled_plan);
     const static_contract_identity = staticMachineContractFingerprint(
+        program_label,
         compiled_plan,
         nested_with_targets,
         schema_types,
@@ -4113,7 +4263,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         };
 
         /// Terminal session result plus any storage needed by borrowed scalar or schema fields.
-        pub const RawResult = struct {
+        const DetachedResult = struct {
             value: ResultValue,
             _storage: ?ResultStorage = null,
 
@@ -4130,6 +4280,38 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 return storage;
             }
         };
+
+        const OpaqueResultOwner = struct {
+            allocator: std.mem.Allocator,
+            detached: DetachedResult,
+        };
+
+        /// Opaque terminal result owner used by the StaticMachine backend.
+        pub const OpaqueResult = opaque {
+            /// Borrow the typed terminal value from this owner.
+            pub fn value(self: *const @This()) ResultValue {
+                return Self.opaqueResultOwnerConst(self).detached.value;
+            }
+
+            /// Release this terminal result and its backing storage.
+            pub fn deinit(self: *@This()) void {
+                const owner = Self.opaqueResultOwner(self);
+                owner.detached.deinit();
+                const allocator = owner.allocator;
+                allocator.destroy(owner);
+            }
+        };
+
+        /// Backend-selected terminal result representation.
+        pub const RawResult = if (canonical_request_identity) *OpaqueResult else DetachedResult;
+
+        fn opaqueResultOwner(result: *OpaqueResult) *OpaqueResultOwner {
+            return @ptrCast(@alignCast(result));
+        }
+
+        fn opaqueResultOwnerConst(result: *const OpaqueResult) *const OpaqueResultOwner {
+            return @ptrCast(@alignCast(result));
+        }
 
         const PendingRequest = struct {
             session_id: usize,
@@ -6413,6 +6595,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
             core.pending = try readPending(reader, &core.scratch, &context, &core.frames, core.session_id);
             if (try reader.readBool()) {
+                const unwind_ownership_checkpoint = core.scratch.ownershipCheckpoint();
                 const function_index = try reader.readUsize();
                 const current_ref = try readValueRef(reader);
                 const value = try readExecutableImageValueForRef(reader, &core.scratch, &context, current_ref, core.scratch.locals.items);
@@ -6423,6 +6606,31 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     .final_ref = try readValueRef(reader),
                     .remaining = try reader.readUsize(),
                 };
+                if (comptime !canonical_request_identity) {
+                    // Legacy v1 preserves string/list roots through the value-image context, but has
+                    // no schema-root backreference for the pending/unwind copies of one product or sum.
+                    if (core.pending) |pending| switch (pending) {
+                        .op => {},
+                        .after => |pending_after| if (core.unwinding_after) |*unwind| {
+                            if ((pending_after.value_ref.codec == .product or pending_after.value_ref.codec == .sum) and
+                                unwind.current_ref.eql(pending_after.value_ref))
+                            {
+                                const pending_fingerprint = try Self.fingerprintExecutableValueForRef(
+                                    pending_after.value_ref,
+                                    pending_after.value,
+                                );
+                                const unwind_fingerprint = try Self.fingerprintExecutableValueForRef(
+                                    unwind.current_ref,
+                                    unwind.value,
+                                );
+                                if (pending_fingerprint == unwind_fingerprint) {
+                                    core.scratch.rollbackOwned(unwind_ownership_checkpoint);
+                                    unwind.value = pending_after.value;
+                                }
+                            }
+                        },
+                    };
+                }
             }
             try core.validateDecodedPendingState();
 
@@ -6889,6 +7097,23 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             if (unwind.remaining > after_stack.len) return error.ProgramContractViolation;
             if (comptime canonical_request_identity) {
                 if (after_stack.len == 0) return error.ProgramContractViolation;
+                var expected_current_ref = functionValueRef(function);
+                var remaining_before_step = after_stack.len;
+                const validate_final_input_contract = true;
+                while (remaining_before_step > unwind.remaining) : (remaining_before_step -= 1) {
+                    const consumed_entry = after_stack[remaining_before_step - 1];
+                    expected_current_ref = sessionAfterOutputRefByIndex(
+                        compiled_plan,
+                        schema_types,
+                        HandlersType,
+                        validate_final_input_contract,
+                        consumed_entry.op_index,
+                        expected_current_ref,
+                        remaining_before_step,
+                        unwind.final_ref,
+                    ) catch return error.ProgramContractViolation;
+                }
+                if (!unwind.current_ref.eql(expected_current_ref)) return error.ProgramContractViolation;
                 const bounds = try blockInstructionBounds(compiled_plan, active.function_index, active.block_index);
                 if (active.instruction_index != bounds.end or active.instruction_end != bounds.end) {
                     return error.ProgramContractViolation;
@@ -8506,6 +8731,20 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         fn detachExecutionResult(self: *Self, result: ExecutionResult) anyerror!RawResult {
+            var detached = try self.detachExecutionResultValue(result);
+            if (comptime canonical_request_identity) {
+                errdefer detached.deinit();
+                const owner = try self.allocator.create(OpaqueResultOwner);
+                owner.* = .{
+                    .allocator = self.allocator,
+                    .detached = detached,
+                };
+                return @ptrCast(owner);
+            }
+            return detached;
+        }
+
+        fn detachExecutionResultValue(self: *Self, result: ExecutionResult) anyerror!DetachedResult {
             const result_ref = comptime program_plan.functionResultRef(entry);
             if (comptime !typeMayBorrowRuntimeStorage(ResultValue)) {
                 return .{

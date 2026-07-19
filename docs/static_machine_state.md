@@ -28,16 +28,18 @@ pending operation, after continuation, or runnable after-unwind state
 image checksum
 ```
 
-The machine contract fingerprint binds a target-neutral canonical ProgramPlan
-identity, every nested-provider target mapping, and handler-derived
-after-continuation input and output refs. The legacy `ProgramPlan.hash` and
-legacy session-site fingerprints remain diagnostic v0 provenance; neither is a
-portable StaticMachine state identity.
+The machine contract fingerprint binds the authored program label, a
+target-neutral canonical ProgramPlan identity, every nested-provider target
+mapping, and handler-derived after-continuation input and output refs. The legacy
+`ProgramPlan.hash` and legacy session-site fingerprints remain diagnostic v0
+provenance; neither is a portable StaticMachine state identity.
 
 StaticMachine request and after-site identities use a target-neutral canonical
 domain. Provenance-only changes such as `ir_hash` do not change canonical
-requests or state bytes. Contract-equivalent machines may therefore decode each
-other's state even though their live Zig `State` handle types remain distinct.
+requests or state bytes. The authored program label is not provenance-only:
+changing it changes machine identity and prevents cross-decoding.
+Machines with identical complete contract identities may decode each other's
+state even though their live Zig `State` handle types remain distinct.
 
 Integers use fixed little-endian encodings. Value encoding is independent of
 transient pointer aliasing for the admitted v1 value surface: semantically equal
@@ -53,11 +55,12 @@ frame topology, an after stack that is not reachable along the decoded control
 path, an unowned root after-stack prefix, a pending operation whose after entry
 is already recorded, an unwitnessed cursor after a non-completing call, any
 after unwind before the function's return boundary, reducer caches that disagree
-with their source locals, inconsistent pending state, checksum mismatch, and
-trailing bytes. A live child frame is the explicit witness that permits its
-parent cursor to remain after a non-completing helper or provider call. The
-checksum detects corruption and accidental mismatches. It is not a signature
-and grants no trust.
+with their source locals, an after-unwind current value ref that is not derived
+by folding the consumed suffix of the validated after stack, inconsistent
+pending state, checksum mismatch, and trailing bytes. A live child frame is the
+explicit witness that permits its parent cursor to remain after a non-completing
+helper or provider call. The checksum detects corruption and accidental
+mismatches. It is not a signature and grants no trust.
 
 ## State law
 

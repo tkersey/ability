@@ -1750,7 +1750,7 @@ test "agent StaticMachine root parks on the model decision site" {
         else => return error.UnexpectedTransition,
     };
     defer result.deinit();
-    try std.testing.expectEqualStrings("final=actuate skeleton complete", result.value);
+    try std.testing.expectEqualStrings("final=actuate skeleton complete", result.value());
 }
 
 test "agent StaticMachine toolbox provider parks on a file effect" {

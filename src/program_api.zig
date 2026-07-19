@@ -1454,8 +1454,8 @@ fn StaticMachineFor(
         pub const InitialArgs = StaticInitialArgs(Program);
         /// Typed terminal program value borrowed from an OwnedResult until that owner is deinitialized.
         pub const Result = Program.contract.ResultType;
-        /// Terminal value owner whose `value` field remains valid until `deinit`.
-        pub const OwnedResult = Core.RawResult;
+        /// Terminal value owner whose `value()` projection remains valid until `deinit`.
+        pub const OwnedResult = Core.OpaqueResult;
         /// Program-authored deterministic failures.
         pub const Failure = BodyErrorSet(Body);
         /// Closed StaticMachine operation error set.
@@ -1477,7 +1477,7 @@ fn StaticMachineFor(
         pub const Transition = union(enum) {
             request: Request,
             after: AfterRequest,
-            done: OwnedResult,
+            done: *OwnedResult,
             yielded_fuel,
         };
 

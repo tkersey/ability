@@ -1066,6 +1066,10 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
         },
         .{
+            .path = "test/compile_fail/static_machine_after_chain_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
+        },
+        .{
             .path = "test/compile_fail/static_machine_mutable_string_list_schema.zig",
             .expected_error = "Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas",
         },
@@ -1076,6 +1080,10 @@ pub fn build(b: *std.Build) void {
         .{
             .path = "test/compile_fail/static_machine_invalid_after_handler_shape.zig",
             .expected_error = "Boundary StaticMachine v1 requires afterDispatch to have a receiver, one value parameter, and a return value",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_innermost_after_input_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every potentially innermost afterDispatch input to match its function value",
         },
         .{
             .path = "test/compile_fail/static_machine_forged_program.zig",
