@@ -1285,6 +1285,7 @@ const StringListMachine = boundary.staticMachine(StringListProgram, .{});
 const TinyStateMachine = boundary.staticMachine(OneEffectProgram, .{ .maximum_state_bytes = 32 });
 const TightParkMachine = boundary.staticMachine(OneEffectProgram, .{ .maximum_state_bytes = 250 });
 const BoundedStringMachine = boundary.staticMachine(StringProgram, .{ .maximum_state_bytes = 2048 });
+const WideBoundedStringMachine = boundary.staticMachine(StringProgram, .{ .maximum_state_bytes = 4096 });
 const BoundedAfterMachine = boundary.staticMachine(AfterContractProgramA, .{ .maximum_state_bytes = 2048 });
 
 test "StaticMachine executes a pure scalar program" {
@@ -1642,6 +1643,51 @@ test "StaticMachine rejects an oversized response without consuming its request"
     };
     defer result.deinit();
     try std.testing.expectEqualStrings("small", result.value());
+}
+
+test "StaticMachine contract identity binds the deterministic state byte limit" {
+    try std.testing.expect(
+        BoundedStringMachine.Manifest.machine_contract_fingerprint !=
+            WideBoundedStringMachine.Manifest.machine_contract_fingerprint,
+    );
+
+    const narrow_state = try BoundedStringMachine.initialState(std.testing.allocator, .{});
+    defer BoundedStringMachine.deinitState(narrow_state);
+    const wide_state = try WideBoundedStringMachine.initialState(std.testing.allocator, .{});
+    defer WideBoundedStringMachine.deinitState(wide_state);
+    var narrow_fuel: u64 = 100;
+    var wide_fuel: u64 = 100;
+    const narrow_request = switch (try BoundedStringMachine.reduce(narrow_state, &narrow_fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    const wide_request = switch (try WideBoundedStringMachine.reduce(wide_state, &wide_fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expect(narrow_request.fingerprint() != wide_request.fingerprint());
+
+    const narrow_image = try BoundedStringMachine.encodeState(std.testing.allocator, narrow_state);
+    defer std.testing.allocator.free(narrow_image);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        WideBoundedStringMachine.decodeState(std.testing.allocator, narrow_image),
+    );
+
+    const response = try std.testing.allocator.alloc(u8, 2500);
+    defer std.testing.allocator.free(response);
+    @memset(response, 'x');
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        BoundedStringMachine.@"resume"(narrow_state, narrow_request, @as([]const u8, response)),
+    );
+    try WideBoundedStringMachine.@"resume"(wide_state, wide_request, @as([]const u8, response));
+    var result = switch (try WideBoundedStringMachine.reduce(wide_state, &wide_fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualSlices(u8, response, result.value());
 }
 
 test "StaticMachine rejects an oversized after response without consuming its request" {
@@ -2015,7 +2061,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 4687941558002590012), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 8081023094848702326), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);

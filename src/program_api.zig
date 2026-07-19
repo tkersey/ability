@@ -1389,6 +1389,7 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
         nested_targets,
         Program.Handlers,
         Body,
+        options.maximum_state_bytes,
     );
     return StaticMachineFor(Program, Body, StaticCore, StaticProtocol, options);
 }

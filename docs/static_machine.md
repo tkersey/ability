@@ -126,8 +126,9 @@ implement capabilities.
 ProgramPlan identity and preserve site coordinates across contract-compatible
 carrier implementations. `legacy_plan_hash` retains the provenance-sensitive
 Program.Session identity. `request_trace_plan_hash` identifies the complete
-machine contract, including concrete schema-carrier semantics, and is the value
-carried by StaticMachine request traces.
+machine contract, including concrete schema-carrier semantics and the
+deterministic `maximum_state_bytes` admission limit, and is the value carried by
+StaticMachine request traces.
 
 ## Compatibility
 

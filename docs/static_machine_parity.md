@@ -44,10 +44,11 @@ stacks, exact typed coherence for duplicated decoded values, derived-frame cache
 coherence, response and completed-result ownership under allocation failure,
 atomic state-size admission, allocation-free bounded validation, lazy
 after-stack reservation, handler-derived after contracts, concrete
-schema-carrier identity, portable numeric bounds, explicit fuel yield, terminal
-failure, nominal state handles, authentic Program construction, the complete
-fixture agent read/write flow, provider read/write completion, and direct
-compilation of the generated reducer for `wasm32-freestanding`:
+schema-carrier identity, deterministic state-limit identity, portable numeric
+bounds, explicit fuel yield, terminal failure, nominal state handles, authentic
+Program construction, the complete fixture agent read/write flow, provider
+read/write completion, and direct compilation of the generated reducer for
+`wasm32-freestanding`:
 
 ```text
 zig build check-boundary-static-machine

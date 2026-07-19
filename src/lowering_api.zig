@@ -4223,6 +4223,7 @@ fn staticMachineContractFingerprint(
     comptime schema_types: anytype,
     comptime HandlersType: type,
     comptime operation_yield_sites: anytype,
+    comptime maximum_state_bytes: usize,
 ) u64 {
     @setEvalBranchQuota(1_000_000);
     var hasher = std.hash.Wyhash.init(0);
@@ -4231,6 +4232,7 @@ fn staticMachineContractFingerprint(
     sessionSiteHashU8(&hasher, static_usize_bits);
     sessionSiteHashU64(&hasher, staticPlanFingerprint(compiled_plan));
     sessionSiteHashStaticSchemaCarriers(&hasher, schema_types);
+    sessionSiteHashUsize(&hasher, maximum_state_bytes);
     sessionSiteHashUsize(&hasher, nested_with_targets.len);
     inline for (nested_with_targets) |target| {
         sessionSiteHashBytes(&hasher, target.metadata);
@@ -4309,6 +4311,7 @@ pub fn StaticExecutableSessionForPlan(
     comptime nested_with_targets: anytype,
     comptime HandlersType: type,
     comptime ProtocolOwner: type,
+    comptime maximum_state_bytes: usize,
 ) type {
     const site_metadata = BodySiteMetadata(ProtocolOwner).values;
     const operation_yield_sites = staticMachineOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
@@ -4328,6 +4331,7 @@ pub fn StaticExecutableSessionForPlan(
         schema_types,
         HandlersType,
         operation_yield_sites,
+        maximum_state_bytes,
     );
     return ExecutableSessionForPlanWithSelectedIdentity(
         ErrorSet,
@@ -11721,6 +11725,7 @@ test "StaticMachine canonical coherence compares exact structured values" {
         &.{},
         struct {},
         struct {},
+        1 << 20,
     );
     const ref: program_plan.ValueRef = .{ .codec = .product, .schema_index = 0 };
 
@@ -11769,6 +11774,7 @@ test "StaticMachine contract identity binds concrete schema carriers" {
         &.{},
         struct {},
         struct {},
+        1 << 20,
     );
     const CanonicalWidthCore = StaticExecutableSessionForPlan(
         error{ProgramContractViolation},
@@ -11778,6 +11784,7 @@ test "StaticMachine contract identity binds concrete schema carriers" {
         &.{},
         struct {},
         struct {},
+        1 << 20,
     );
     const EquivalentFullWidthCore = StaticExecutableSessionForPlan(
         error{ProgramContractViolation},
@@ -11787,6 +11794,7 @@ test "StaticMachine contract identity binds concrete schema carriers" {
         &.{},
         struct {},
         struct {},
+        1 << 20,
     );
 
     try std.testing.expectEqual(
@@ -11820,6 +11828,7 @@ test "StaticMachine canonical coherence compares exact sum variants" {
         &.{},
         struct {},
         struct {},
+        1 << 20,
     );
     const ref: program_plan.ValueRef = .{ .codec = .sum, .schema_index = 0 };
 

@@ -31,7 +31,8 @@ image checksum
 The machine contract fingerprint binds the authored program label, a
 target-neutral canonical ProgramPlan identity, the recursive concrete carrier
 semantics of every product and sum schema, every nested-provider target mapping,
-and handler-derived after-continuation input and output refs. The legacy
+handler-derived after-continuation input and output refs, and the deterministic
+maximum state-image byte limit. The legacy
 `ProgramPlan.hash` and legacy session-site fingerprints remain diagnostic v0
 provenance; neither is a portable StaticMachine state identity. A plan-local
 `ValueRef` becomes portable only when paired with this complete machine
