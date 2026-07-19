@@ -8402,14 +8402,15 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             return cloneExecutableValueForRefWithContext(ref, &clone_context, value);
         }
 
-        fn encodeOwnedRuntimeValueForRef(
+        fn encodeResponseRuntimeValueForRef(
             self: *Self,
             ref: program_plan.ValueRef,
             value: anytype,
         ) anyerror!ExecutableValue {
-            if (comptime canonical_request_identity) {
-                _ = try fingerprintTypedValueForRef(ref, value);
+            if (comptime !canonical_request_identity) {
+                return encodeRuntimeValueForRuntimeRef(schema_types, ref, &self.scratch, value);
             }
+            _ = try fingerprintTypedValueForRef(ref, value);
             const ownership_checkpoint = self.scratch.ownershipCheckpoint();
             errdefer self.scratch.rollbackOwned(ownership_checkpoint);
             var clone_context = CloneContext.init(&self.scratch);
@@ -8793,7 +8794,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
             if (pending.has_after) try self.scratch.reserveAfterSlot();
-            const encoded = try self.encodeOwnedRuntimeValueForRef(pending.resume_ref, value);
+            const encoded = try self.encodeResponseRuntimeValueForRef(pending.resume_ref, value);
             if (!valueMatchesRef(pending.resume_ref, encoded)) return error.ProgramContractViolation;
             var locals = self.scratch.frameLocals(active.frame);
             if (pending.has_after) self.scratch.appendReservedAfter(pending.after_stack_entry);
@@ -8817,7 +8818,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 {
                     return error.ProgramContractViolation;
                 }
-                const encoded = try self.encodeOwnedRuntimeValueForRef(pending.output_ref, value);
+                const encoded = try self.encodeResponseRuntimeValueForRef(pending.output_ref, value);
                 if (!valueMatchesRef(pending.output_ref, encoded)) return error.ProgramContractViolation;
                 unwind.value = encoded;
                 unwind.current_ref = pending.output_ref;
@@ -8832,7 +8833,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             if (self.frames.len() == 0) return error.ProgramContractViolation;
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
-            const encoded = try self.encodeOwnedRuntimeValueForRef(pending.result_ref, value);
+            const encoded = try self.encodeResponseRuntimeValueForRef(pending.result_ref, value);
             if (!valueMatchesRef(pending.result_ref, encoded)) return error.ProgramContractViolation;
             const completed = try completeSessionFunctionValueByIndex(
                 compiled_plan,
@@ -10609,6 +10610,54 @@ fn supportOpPlan(comptime payload_codec: program_plan.ValueCodec, comptime resum
     }) catch |err| supportPlanError(err);
 }
 
+fn supportStringResumeResultPlan() program_plan.ProgramPlan {
+    const root = program_plan.program_plan_builder.function(0);
+    const resumed = program_plan.program_plan_builder.local(root, 0);
+    const instructions = [_]program_plan.Instruction{
+        program_plan.program_plan_builder.callOp(root, resumed, program_plan.program_plan_builder.op(root, 0), null) catch |err| supportPlanError(err),
+        program_plan.program_plan_builder.returnValue(root, resumed) catch |err| supportPlanError(err),
+    };
+    const functions = [_]program_plan.FunctionPlan{.{
+        .symbol_name = "run",
+        .value_codec = .string,
+        .parameter_count = 0,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 1,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]program_plan.RequirementPlan{.{ .label = "string", .first_op = 0, .op_count = 1 }};
+    const ops = [_]program_plan.OpPlan{.{
+        .requirement_index = 0,
+        .op_name = "string",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .string,
+    }};
+    const blocks = [_]program_plan.BlockPlan{.{ .first_instruction = 0, .instruction_count = @intCast(instructions.len), .terminator_index = 0 }};
+    const terminators = [_]program_plan.Terminator{.{ .kind = .return_value }};
+    return program_plan.program_plan_builder.finish(.{
+        .label = "string-resume-result",
+        .ir_hash = 127,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{.{ .codec = .string }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch |err| supportPlanError(err);
+}
+
 fn supportStandaloneUsizeOpPlan() program_plan.ProgramPlan {
     const root = program_plan.program_plan_builder.function(0);
     const payload = program_plan.program_plan_builder.local(root, 0);
@@ -12071,6 +12120,43 @@ test "Program.Session rejects u64 typed access to standalone usize sites" {
     _ = try request.responseTrace(.@"resume", @as(usize, 11));
     try std.testing.expectError(error.ProgramContractViolation, request.responseTrace(.@"resume", @as(u64, 11)));
     try core.@"resume"(request, @as(usize, 11));
+}
+
+test "Program.Session string resume preserves legacy borrowed response semantics" {
+    const Core = ExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "session-string-response-borrowing",
+        supportStringResumeResultPlan(),
+        .{},
+        &.{},
+        struct {},
+        struct {},
+    );
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var core = try Core.start(failing.allocator(), &.{});
+    defer core.deinit();
+    const request = switch (try core.next()) {
+        .request => |request| request,
+        .done => return error.UnexpectedDone,
+        .after => return error.UnexpectedAfter,
+    };
+
+    var response = "borrowed".*;
+    const allocations_before = failing.allocations;
+    failing.fail_index = allocations_before;
+    try core.@"resume"(request, response[0..]);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(allocations_before, failing.allocations);
+
+    response[0] = 'B';
+    failing.fail_index = std.math.maxInt(usize);
+    var result = switch (try core.next()) {
+        .done => |done| done,
+        .request => return error.UnexpectedRequest,
+        .after => return error.UnexpectedAfter,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("Borrowed", result.value);
 }
 
 test "Program.Session decoded operation pending requires a resumable active frame" {
