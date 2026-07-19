@@ -1543,6 +1543,12 @@ fn StaticMachineFor(
             return .{ ._storage = @ptrCast(storage) };
         }
 
+        fn commitCandidate(state: State, candidate: *Core) void {
+            const current_core = stateCore(state);
+            current_core.deinit();
+            current_core.* = candidate.*;
+        }
+
         fn mapError(err: anyerror) Error {
             return mapProgramRunError(Error, err);
         }
@@ -1551,12 +1557,33 @@ fn StaticMachineFor(
         pub fn initialState(allocator: std.mem.Allocator, args: InitialArgs) Error!State {
             var core_value = Core.start(allocator, args) catch |err| return mapError(err);
             errdefer core_value.deinit();
+            core_value.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
             return ownCore(allocator, core_value);
         }
 
         /// Advance to one effect, terminal result, or deterministic fuel boundary.
         pub fn reduce(state: State, fuel: *u64) Error!Transition {
-            return switch (stateCore(state).nextWithFuel(fuel) catch |err| return mapError(err)) {
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            var candidate_fuel = fuel.*;
+            const outcome = candidate.nextWithFuel(&candidate_fuel) catch |err| {
+                commitCandidate(state, &candidate);
+                candidate_owned = false;
+                fuel.* = candidate_fuel;
+                return mapError(err);
+            };
+            switch (outcome) {
+                .yielded_fuel => candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err),
+                .step => |step| switch (step) {
+                    .request, .after => candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err),
+                    .done => {},
+                },
+            }
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
+            fuel.* = candidate_fuel;
+            return switch (outcome) {
                 .yielded_fuel => .yielded_fuel,
                 .step => |step| switch (step) {
                     .request => |request| .{ .request = request },
@@ -1573,17 +1600,34 @@ fn StaticMachineFor(
 
         /// Resume one operation request with a typed value.
         pub fn @"resume"(state: State, request: Request, value: anytype) Error!void {
-            stateCore(state).@"resume"(request, value) catch |err| return mapError(err);
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            candidate.@"resume"(request, value) catch |err| return mapError(err);
+            candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
         }
 
         /// Resume one after-continuation request with a typed value.
         pub fn resumeAfter(state: State, request: AfterRequest, value: anytype) Error!void {
-            stateCore(state).resumeAfter(request, value) catch |err| return mapError(err);
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            candidate.resumeAfter(request, value) catch |err| return mapError(err);
+            candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
         }
 
         /// Complete one choice or abort request immediately.
         pub fn returnNow(state: State, request: Request, value: anytype) Error!void {
-            stateCore(state).returnNow(request, value) catch |err| return mapError(err);
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            candidate.returnNow(request, value) catch |err| return mapError(err);
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
         }
 
         /// Encode target-neutral authoritative continuation bytes.
@@ -1602,7 +1646,7 @@ fn StaticMachineFor(
 
         /// Validate one live explicit state without advancing it.
         pub fn validateState(state: State) error{ProgramContractViolation}!void {
-            return stateCore(state).validateState();
+            return stateCore(state).validateStateBounded(options.maximum_state_bytes);
         }
 
         /// Release ephemeral allocations owned by a decoded or initial state.

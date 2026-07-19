@@ -29,10 +29,13 @@ image checksum
 ```
 
 The machine contract fingerprint binds the authored program label, a
-target-neutral canonical ProgramPlan identity, every nested-provider target
-mapping, and handler-derived after-continuation input and output refs. The legacy
+target-neutral canonical ProgramPlan identity, the recursive concrete carrier
+semantics of every product and sum schema, every nested-provider target mapping,
+and handler-derived after-continuation input and output refs. The legacy
 `ProgramPlan.hash` and legacy session-site fingerprints remain diagnostic v0
-provenance; neither is a portable StaticMachine state identity.
+provenance; neither is a portable StaticMachine state identity. A plan-local
+`ValueRef` becomes portable only when paired with this complete machine
+contract.
 
 StaticMachine request and after-site identities use a target-neutral canonical
 domain. Provenance-only changes such as `ir_hash` do not change canonical
@@ -65,11 +68,13 @@ after unwind before the function's return boundary, reducer caches that disagree
 with their source locals, a first after-unwind value that differs from the
 completed function value, an after-unwind current value ref that is not derived
 by folding the consumed suffix of the validated after stack, a full after stack
-behind a pending after-producing operation, inconsistent
-pending state, checksum mismatch, and trailing bytes. A live child frame is the
-explicit witness that permits its parent cursor to remain after a non-completing
-helper or provider call. The checksum detects corruption and accidental
-mismatches. It is not a signature and grants no trust.
+behind a pending after-producing operation, inconsistent pending state,
+checksum mismatch, and trailing bytes. Every duplicated canonical value is
+compared exactly by its typed semantic structure; 64-bit trace fingerprints are
+never accepted as equality witnesses. A live child frame is the explicit
+witness that permits its parent cursor to remain after a non-completing helper
+or provider call. The checksum detects corruption and accidental mismatches. It
+is not a signature and grants no trust.
 
 ## State law
 
@@ -92,6 +97,14 @@ Encoding does not advance the machine. Decoding creates fresh working
 ownership, so live request tokens may change; semantic site identity, payload,
 and continuation behavior may not.
 
+Every successful constructor or public mutation that leaves a runnable or
+parked state proves this law before commit. `initialState`, `reduce`, `resume`,
+and `resumeAfter` therefore cannot return an opaque live state that later fails
+`validateState` or `encodeState` solely because it exceeds
+`maximum_state_bytes`. A rejected response or parked transition leaves the
+prior canonical bytes and pending request unchanged. Terminal completion and
+terminal failure remain outside this resumable-state law.
+
 Completed and terminally failed states are not encoded as runnable continuation
 state. Terminal failures include program-authored failures, cumulative machine
 budget exhaustion, and deterministic reduction failures after dispatch begins.
@@ -100,8 +113,12 @@ budget exhaustion, and deterministic reduction failures after dispatch begins.
 
 `maximum_frames` must cover the finite statically reachable helper/provider
 depth. Recursive frame graphs are rejected in v1. `maximum_state_bytes` is a
-structural writer bound, not merely a post-encoding check. Core interpreter fuel
-and the derived maximum turn count remain independently bounded and are exposed
-through `Machine.Manifest`. After-continuation entries share the same logical
+structural writer and admission bound, not merely a post-encoding check and not
+a heap budget. Bounded validation reuses the canonical encoder traversal in a
+count-only mode: it performs checked length arithmetic without allocating or
+copying a second image. Nonterminal mutation may temporarily clone one live
+state so rejection remains atomic. Core interpreter fuel and the derived
+maximum turn count remain independently bounded and are exposed through
+`Machine.Manifest`. After-continuation entries share the same logical
 fuel-derived bound but allocate only as they are recorded; unused capacity is
 neither serialized nor semantic.

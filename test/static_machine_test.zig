@@ -1283,6 +1283,9 @@ const StringListProgram = boundary.program("static-machine-string-list-oom", str
 const StringListMachine = boundary.staticMachine(StringListProgram, .{});
 
 const TinyStateMachine = boundary.staticMachine(OneEffectProgram, .{ .maximum_state_bytes = 32 });
+const TightParkMachine = boundary.staticMachine(OneEffectProgram, .{ .maximum_state_bytes = 250 });
+const BoundedStringMachine = boundary.staticMachine(StringProgram, .{ .maximum_state_bytes = 2048 });
+const BoundedAfterMachine = boundary.staticMachine(AfterContractProgramA, .{ .maximum_state_bytes = 2048 });
 
 test "StaticMachine executes a pure scalar program" {
     comptime {
@@ -1604,6 +1607,95 @@ test "StaticMachine owns accepted response bytes" {
     try std.testing.expectEqualStrings("owned response", result.value());
 }
 
+test "StaticMachine rejects an oversized response without consuming its request" {
+    const state = try BoundedStringMachine.initialState(std.testing.allocator, .{});
+    defer BoundedStringMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try BoundedStringMachine.reduce(state, &fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    const before = try BoundedStringMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    const oversized = try std.testing.allocator.alloc(u8, 4096);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'x');
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        BoundedStringMachine.@"resume"(state, request, @as([]const u8, oversized)),
+    );
+    try BoundedStringMachine.validateState(state);
+    const current = switch (try BoundedStringMachine.current(state)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(request.fingerprint(), current.fingerprint());
+    const after = try BoundedStringMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+
+    try BoundedStringMachine.@"resume"(state, request, @as([]const u8, "small"));
+    var result = switch (try BoundedStringMachine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("small", result.value());
+}
+
+test "StaticMachine rejects an oversized after response without consuming its request" {
+    const state = try BoundedAfterMachine.initialState(std.testing.allocator, .{});
+    defer BoundedAfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const outer = switch (try BoundedAfterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try BoundedAfterMachine.@"resume"(state, outer, @as(i32, 1));
+    const inner = switch (try BoundedAfterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try BoundedAfterMachine.@"resume"(state, inner, @as(i32, 7));
+    const inner_after = switch (try BoundedAfterMachine.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try BoundedAfterMachine.resumeAfter(state, inner_after, true);
+    const outer_after = switch (try BoundedAfterMachine.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    const before = try BoundedAfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    const oversized = try std.testing.allocator.alloc(u8, 4096);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'x');
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        BoundedAfterMachine.resumeAfter(state, outer_after, @as([]const u8, oversized)),
+    );
+    try BoundedAfterMachine.validateState(state);
+    const current = switch (try BoundedAfterMachine.current(state)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(outer_after.fingerprint(), current.fingerprint());
+    const after = try BoundedAfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+
+    try BoundedAfterMachine.resumeAfter(state, outer_after, @as([]const u8, "true"));
+    var result = switch (try BoundedAfterMachine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("true", result.value());
+}
+
 test "StaticMachine authored budget failure is terminal and never a fuel yield" {
     const state = try AuthoredBudgetMachine.initialState(std.testing.allocator, .{});
     defer AuthoredBudgetMachine.deinitState(state);
@@ -1626,13 +1718,27 @@ test "StaticMachine state surface does not expose the session core" {
     try std.testing.expect(!@hasDecl(StateStorage, "decodeState"));
 }
 
-test "StaticMachine enforces the state byte limit during encoding" {
-    const state = try TinyStateMachine.initialState(std.testing.allocator, .{});
-    defer TinyStateMachine.deinitState(state);
+test "StaticMachine rejects an initial state above its byte limit" {
     try std.testing.expectError(
         error.ProgramContractViolation,
-        TinyStateMachine.encodeState(std.testing.allocator, state),
+        TinyStateMachine.initialState(std.testing.allocator, .{}),
     );
+}
+
+test "StaticMachine rejects an oversized parked transition atomically" {
+    const state = try TightParkMachine.initialState(std.testing.allocator, .{});
+    defer TightParkMachine.deinitState(state);
+    const before = try TightParkMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    var fuel: u64 = 100;
+    const original_fuel = fuel;
+
+    try std.testing.expectError(error.ProgramContractViolation, TightParkMachine.reduce(state, &fuel));
+    try std.testing.expectEqual(original_fuel, fuel);
+    try TightParkMachine.validateState(state);
+    const after = try TightParkMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 test "StaticMachine canonical state ignores equal-value alias topology" {
@@ -1909,7 +2015,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 18379451883384257174), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 4687941558002590012), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
@@ -2646,6 +2752,23 @@ const OwnedAllocationDelta = struct {
     bytes: usize,
     allocations: usize,
 };
+
+test "StaticMachine bounded validation does not allocate" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const state = try OneEffectMachine.initialState(failing.allocator(), .{});
+    defer OneEffectMachine.deinitState(state);
+    var fuel: u64 = 100;
+    _ = switch (try OneEffectMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+
+    const allocations_before = failing.allocations;
+    failing.fail_index = allocations_before;
+    try OneEffectMachine.validateState(state);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(allocations_before, failing.allocations);
+}
 
 test "StaticMachine after reservation failure leaves the request retryable" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});

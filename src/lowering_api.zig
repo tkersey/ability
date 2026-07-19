@@ -899,6 +899,55 @@ fn sessionSiteHashValueRef(hasher: *std.hash.Wyhash, ref: program_plan.ValueRef)
     sessionSiteHashOptionalU16(hasher, ref.schema_index);
 }
 
+fn sessionSiteHashStaticCarrierType(hasher: *std.hash.Wyhash, comptime T: type) void {
+    if (T == void) return sessionSiteHashBytes(hasher, "unit");
+    if (T == noreturn) return sessionSiteHashBytes(hasher, "noreturn");
+    if (T == bool) return sessionSiteHashBytes(hasher, "bool");
+    if (T == i32) return sessionSiteHashBytes(hasher, "i32");
+    if (T == u64) return sessionSiteHashBytes(hasher, "u64");
+    if (T == usize) return sessionSiteHashBytes(hasher, "usize32");
+    if (T == []const u8) return sessionSiteHashBytes(hasher, "string");
+    if (T == []const []const u8) return sessionSiteHashBytes(hasher, "string-list");
+    if (T == [][]const u8) return sessionSiteHashBytes(hasher, "mutable-string-list");
+
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| {
+            sessionSiteHashBytes(hasher, "product");
+            sessionSiteHashUsize(hasher, info.fields.len);
+            inline for (info.fields) |field| {
+                sessionSiteHashBytes(hasher, field.name);
+                sessionSiteHashStaticCarrierType(hasher, field.type);
+            }
+        },
+        .@"enum" => |info| {
+            sessionSiteHashBytes(hasher, "sum-enum");
+            sessionSiteHashUsize(hasher, info.fields.len);
+            inline for (info.fields) |field| sessionSiteHashBytes(hasher, field.name);
+        },
+        .optional => |info| {
+            sessionSiteHashBytes(hasher, "sum-optional");
+            sessionSiteHashStaticCarrierType(hasher, info.child);
+        },
+        .@"union" => |info| {
+            sessionSiteHashBytes(hasher, "sum-union");
+            sessionSiteHashUsize(hasher, info.fields.len);
+            inline for (info.fields) |field| {
+                sessionSiteHashBytes(hasher, field.name);
+                sessionSiteHashStaticCarrierType(hasher, field.type);
+            }
+        },
+        else => @compileError("unsupported Boundary StaticMachine schema carrier type: " ++ @typeName(T)),
+    }
+}
+
+fn sessionSiteHashStaticSchemaCarriers(hasher: *std.hash.Wyhash, comptime schema_types: anytype) void {
+    sessionSiteHashUsize(hasher, schema_types.len);
+    inline for (schema_types, 0..) |SchemaType, schema_index| {
+        sessionSiteHashUsize(hasher, schema_index);
+        sessionSiteHashStaticCarrierType(hasher, SchemaType);
+    }
+}
+
 fn sessionHostMayResume(mode: program_plan.ControlMode) bool {
     return mode != .abort;
 }
@@ -4181,6 +4230,7 @@ fn staticMachineContractFingerprint(
     sessionSiteHashBytes(&hasher, program_label);
     sessionSiteHashU8(&hasher, static_usize_bits);
     sessionSiteHashU64(&hasher, staticPlanFingerprint(compiled_plan));
+    sessionSiteHashStaticSchemaCarriers(&hasher, schema_types);
     sessionSiteHashUsize(&hasher, nested_with_targets.len);
     inline for (nested_with_targets) |target| {
         sessionSiteHashBytes(&hasher, target.metadata);
@@ -5161,16 +5211,34 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             try @constCast(self).validateState();
             var writer = DurableWriter.initBounded(allocator, maximum_bytes);
             errdefer writer.deinit();
+            try writeStateImagePayload(&writer, self);
+            const payload = writer.bytes.items;
+            try writer.writeU64(stateImageFingerprint(payload));
+            return writer.toOwnedSlice();
+        }
+
+        fn writeStateImagePayload(writer: *DurableWriter, self: *const Self) anyerror!void {
             try writer.writeBytes(state_image_magic);
             try writer.writeU32(state_image_format_version);
             try writer.writeU32(state_image_fingerprint_version);
             try writer.writeLenBytes(program_label);
             try writer.writeLenBytes(compiled_plan.label);
             try writer.writeU64(contract_fingerprint);
-            try writeCoreImage(&writer, self);
-            const payload = writer.bytes.items;
-            try writer.writeU64(stateImageFingerprint(payload));
-            return writer.toOwnedSlice();
+            try writeCoreImage(writer, self);
+        }
+
+        /// Validate one runnable or parked state and its complete bounded canonical image shape.
+        pub fn validateStateBounded(self: *Self, maximum_bytes: usize) error{ProgramContractViolation}!void {
+            try self.validateState();
+            var writer = DurableWriter.initCounting(self.allocator, maximum_bytes);
+            defer writer.deinit();
+            writeStateImagePayload(&writer, self) catch return error.ProgramContractViolation;
+            writer.writeU64(0) catch return error.ProgramContractViolation;
+        }
+
+        /// Clone one canonical state for a transactional StaticMachine mutation.
+        pub fn cloneExplicitState(self: *const Self) anyerror!Self {
+            return self.cloneState(self.allocator);
         }
 
         /// Decode and validate one canonical generated-machine state image.
@@ -5239,8 +5307,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         const DurableWriter = struct {
             allocator: std.mem.Allocator,
             bytes: std.ArrayList(u8) = .empty,
+            length: usize = 0,
             maximum_bytes: ?usize = null,
             canonical_values: bool = false,
+            count_only: bool = false,
 
             const WriteError = std.mem.Allocator.Error || error{ProgramContractViolation};
 
@@ -5256,20 +5326,32 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 };
             }
 
+            fn initCounting(allocator: std.mem.Allocator, maximum_bytes: usize) @This() {
+                return .{
+                    .allocator = allocator,
+                    .maximum_bytes = maximum_bytes,
+                    .canonical_values = true,
+                    .count_only = true,
+                };
+            }
+
             fn deinit(self: *@This()) void {
                 self.bytes.deinit(self.allocator);
             }
 
             fn toOwnedSlice(self: *@This()) std.mem.Allocator.Error![]u8 {
+                std.debug.assert(!self.count_only);
                 return self.bytes.toOwnedSlice(self.allocator);
             }
 
             fn writeBytes(self: *@This(), value: []const u8) WriteError!void {
-                const next_len = std.math.add(usize, self.bytes.items.len, value.len) catch
+                const next_len = std.math.add(usize, self.length, value.len) catch
                     return error.ProgramContractViolation;
                 if (self.maximum_bytes) |maximum| {
                     if (next_len > maximum) return error.ProgramContractViolation;
                 }
+                self.length = next_len;
+                if (self.count_only) return;
                 try self.bytes.ensureUnusedCapacity(self.allocator, value.len);
                 self.bytes.appendSliceAssumeCapacity(value);
             }
@@ -6318,8 +6400,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 const locals = scratch.frameLocals(active_frame.frame);
                                 if (payload_local_id >= locals.len) return error.ProgramContractViolation;
                                 const local_payload = locals[payload_local_id];
-                                const local_payload_fingerprint = try Self.fingerprintExecutableValueForRef(payload_ref, local_payload);
-                                if (local_payload_fingerprint != decoded_payload_fingerprint) return error.ProgramContractViolation;
+                                if (!(try Self.executableValuesEqualForRef(payload_ref, local_payload, payload))) {
+                                    return error.ProgramContractViolation;
+                                }
                                 payload = local_payload;
                             }
                             const payload_value_fingerprint = decoded_payload_fingerprint;
@@ -6726,15 +6809,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                             if ((pending_after.value_ref.codec == .product or pending_after.value_ref.codec == .sum) and
                                 unwind.current_ref.eql(pending_after.value_ref))
                             {
-                                const pending_fingerprint = try Self.fingerprintExecutableValueForRef(
+                                if (try Self.executableValuesEqualForRef(
                                     pending_after.value_ref,
                                     pending_after.value,
-                                );
-                                const unwind_fingerprint = try Self.fingerprintExecutableValueForRef(
-                                    unwind.current_ref,
                                     unwind.value,
-                                );
-                                if (pending_fingerprint == unwind_fingerprint) {
+                                )) {
                                     core.scratch.rollbackOwned(unwind_ownership_checkpoint);
                                     unwind.value = pending_after.value;
                                 }
@@ -6841,12 +6920,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         return error.ProgramContractViolation;
                     }
                     const value_ref = functionValueRef(compiled_plan.functions[frame.function_index]);
-                    const local_fingerprint = try Self.fingerprintExecutableValueForRef(
+                    if (!(try Self.executableValuesEqualForRef(
                         value_ref,
                         locals[instruction.operand],
-                    );
-                    const cached_fingerprint = try Self.fingerprintExecutableValueForRef(value_ref, frame.last_return);
-                    if (local_fingerprint != cached_fingerprint) return error.ProgramContractViolation;
+                        frame.last_return,
+                    ))) return error.ProgramContractViolation;
                 },
                 .jump, .return_unit => {},
             }
@@ -7136,6 +7214,12 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             parent_value: ExecutableValue,
             child_value: ExecutableValue,
         ) error{ProgramContractViolation}!void {
+            if (comptime canonical_request_identity) {
+                if (!(try Self.executableValuesEqualForRef(ref, parent_value, child_value))) {
+                    return error.ProgramContractViolation;
+                }
+                return;
+            }
             const parent_fingerprint = try Self.fingerprintExecutableValueForRef(ref, parent_value);
             const child_fingerprint = try Self.fingerprintExecutableValueForRef(ref, child_value);
             if (parent_fingerprint != child_fingerprint) return error.ProgramContractViolation;
@@ -7549,6 +7633,205 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             traceHashValueRef(&hasher, ref);
             try traceHashExecutableValuePayload(&hasher, ref, value);
             return hasher.final();
+        }
+
+        fn executableValuesEqualForRef(
+            ref: program_plan.ValueRef,
+            left: ExecutableValue,
+            right: ExecutableValue,
+        ) error{ProgramContractViolation}!bool {
+            if (!valueMatchesRef(ref, left) or !valueMatchesRef(ref, right)) {
+                return error.ProgramContractViolation;
+            }
+            return switch (ref.codec) {
+                .unit => true,
+                .bool => (try decodeArg(.bool, left)) == (try decodeArg(.bool, right)),
+                .i32 => (try decodeArg(.i32, left)) == (try decodeArg(.i32, right)),
+                .usize => blk: {
+                    const left_word = try executableWordU64(left);
+                    const right_word = try executableWordU64(right);
+                    if (comptime canonical_request_identity) {
+                        if (left_word > static_usize_max or right_word > static_usize_max) {
+                            return error.ProgramContractViolation;
+                        }
+                    }
+                    break :blk left_word == right_word;
+                },
+                .string => std.mem.eql(u8, try decodeArg(.string, left), try decodeArg(.string, right)),
+                .string_list => blk: {
+                    const left_items = try decodeArg(.string_list, left);
+                    const right_items = try decodeArg(.string_list, right);
+                    if (left_items.len != right_items.len) break :blk false;
+                    for (left_items, right_items) |left_item, right_item| {
+                        if (!std.mem.eql(u8, left_item, right_item)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                .product, .sum => switch (left) {
+                    .schema => |left_schema| switch (right) {
+                        .schema => |right_schema| blk: {
+                            const schema_index = ref.schema_index orelse return error.ProgramContractViolation;
+                            if (left_schema.schema_index != schema_index or right_schema.schema_index != schema_index) {
+                                return error.ProgramContractViolation;
+                            }
+                            inline for (schema_types, 0..) |SchemaType, index| {
+                                if (schema_index == index) {
+                                    const left_typed: *const SchemaType = @ptrCast(@alignCast(left_schema.ptr));
+                                    const right_typed: *const SchemaType = @ptrCast(@alignCast(right_schema.ptr));
+                                    break :blk try typedValuesEqualForRef(
+                                        ref,
+                                        SchemaType,
+                                        left_typed.*,
+                                        right_typed.*,
+                                        .strict,
+                                    );
+                                }
+                            }
+                            return error.ProgramContractViolation;
+                        },
+                        else => return error.ProgramContractViolation,
+                    },
+                    else => return error.ProgramContractViolation,
+                },
+            };
+        }
+
+        fn typedValuesEqualForRef(
+            ref: program_plan.ValueRef,
+            comptime T: type,
+            left: T,
+            right: T,
+            comptime match_mode: RuntimeRefMatchMode,
+        ) error{ProgramContractViolation}!bool {
+            const matches_ref = switch (match_mode) {
+                .strict => typeMatchesRuntimeRef(schema_types, ref, T),
+                .schema_field => typeMatchesSchemaFieldRuntimeRef(schema_types, ref, T),
+            };
+            if (!matches_ref) return error.ProgramContractViolation;
+
+            if (comptime isStringListCarrier(T)) {
+                if (left.len != right.len) return false;
+                for (left, right) |left_item, right_item| {
+                    if (!std.mem.eql(u8, left_item, right_item)) return false;
+                }
+                return true;
+            }
+            if (T == void) return true;
+            if (T == bool or T == i32 or T == u64) return left == right;
+            if (T == usize) {
+                if (comptime canonical_request_identity) {
+                    if (@as(u64, @intCast(left)) > static_usize_max or
+                        @as(u64, @intCast(right)) > static_usize_max)
+                    {
+                        return error.ProgramContractViolation;
+                    }
+                }
+                return left == right;
+            }
+            if (T == []const u8) return std.mem.eql(u8, left, right);
+
+            const schema_index = ref.schema_index orelse return error.ProgramContractViolation;
+            inline for (schema_types, 0..) |SchemaType, index| {
+                if (schema_index == index) {
+                    if (SchemaType != T) return error.ProgramContractViolation;
+                    const schema = compiled_plan.value_schemas[index];
+                    if (schema.codec != ref.codec) return error.ProgramContractViolation;
+                    return switch (schema.codec) {
+                        .product => typedProductValuesEqual(index, T, left, right),
+                        .sum => typedSumValuesEqual(index, T, left, right),
+                        else => error.ProgramContractViolation,
+                    };
+                }
+            }
+            return error.ProgramContractViolation;
+        }
+
+        fn typedProductValuesEqual(
+            comptime schema_index: usize,
+            comptime T: type,
+            left: T,
+            right: T,
+        ) error{ProgramContractViolation}!bool {
+            const schema = compiled_plan.value_schemas[schema_index];
+            if (schema.codec != .product) return error.ProgramContractViolation;
+            const fields = std.meta.fields(T);
+            if (fields.len != schema.field_count) return error.ProgramContractViolation;
+            inline for (0..schema.field_count) |field_offset| {
+                const field = compiled_plan.value_fields[@as(usize, schema.first_field) + field_offset];
+                const typed_field = fields[field_offset];
+                if (!std.mem.eql(u8, typed_field.name, field.name)) return error.ProgramContractViolation;
+                const field_ref: program_plan.ValueRef = .{
+                    .codec = field.codec,
+                    .schema_index = field.schema_index,
+                };
+                if (!(try typedValuesEqualForRef(
+                    field_ref,
+                    typed_field.type,
+                    @field(left, field.name),
+                    @field(right, field.name),
+                    .schema_field,
+                ))) return false;
+            }
+            return true;
+        }
+
+        fn typedSumValuesEqual(
+            comptime schema_index: usize,
+            comptime T: type,
+            left: T,
+            right: T,
+        ) error{ProgramContractViolation}!bool {
+            const schema = compiled_plan.value_schemas[schema_index];
+            if (schema.codec != .sum) return error.ProgramContractViolation;
+            const left_active = try activeVariantOrdinalForTyped(T, left);
+            const right_active = try activeVariantOrdinalForTyped(T, right);
+            if (left_active != right_active) return false;
+            if (left_active >= schema.variant_count) return error.ProgramContractViolation;
+
+            inline for (0..schema.variant_count) |variant_offset| {
+                if (left_active == variant_offset) {
+                    const variant = compiled_plan.value_variants[@as(usize, schema.first_variant) + variant_offset];
+                    const variant_ref: program_plan.ValueRef = .{
+                        .codec = variant.codec,
+                        .schema_index = variant.schema_index,
+                    };
+                    return switch (@typeInfo(T)) {
+                        .@"enum" => true,
+                        .optional => if (variant_offset == 0)
+                            true
+                        else blk: {
+                            break :blk try typedValuesEqualForRef(
+                                variant_ref,
+                                @TypeOf(left.?),
+                                left.?,
+                                right.?,
+                                .schema_field,
+                            );
+                        },
+                        .@"union" => |union_info| blk: {
+                            const Tag = union_info.tag_type orelse return error.ProgramContractViolation;
+                            const left_tag = std.meta.activeTag(left);
+                            const right_tag = std.meta.activeTag(right);
+                            if (left_tag != right_tag) break :blk false;
+                            inline for (union_info.fields, 0..) |field, field_index| {
+                                if (variant_offset == field_index and left_tag == @field(Tag, field.name)) {
+                                    if (field.type == void) break :blk true;
+                                    break :blk try typedValuesEqualForRef(
+                                        variant_ref,
+                                        field.type,
+                                        @field(left, field.name),
+                                        @field(right, field.name),
+                                        .schema_field,
+                                    );
+                                }
+                            }
+                            return error.ProgramContractViolation;
+                        },
+                        else => error.ProgramContractViolation,
+                    };
+                }
+            }
+            return error.ProgramContractViolation;
         }
 
         fn traceHashExecutableValuePayload(
@@ -10005,6 +10288,62 @@ fn supportLastReturnSumPayloadPlan(comptime Payload: type) program_plan.ProgramP
     }) catch |err| supportPlanError(err);
 }
 
+fn supportSchemaCarrierIdentityPlan() program_plan.ProgramPlan {
+    const root = program_plan.program_plan_builder.function(0);
+    const value = program_plan.program_plan_builder.local(root, 0);
+    const instructions = [_]program_plan.Instruction{
+        program_plan.program_plan_builder.returnValue(root, value) catch |err| supportPlanError(err),
+    };
+    const functions = [_]program_plan.FunctionPlan{.{
+        .symbol_name = "run",
+        .value_codec = .product,
+        .value_schema_index = 0,
+        .result_codec = .product,
+        .result_schema_index = 0,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 1,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const value_schemas = [_]program_plan.ValueSchemaPlan{.{
+        .label = "word-carrier-v1",
+        .codec = .product,
+        .first_field = 0,
+        .field_count = 1,
+    }};
+    const value_fields = [_]program_plan.ValueFieldPlan{.{ .name = "word", .codec = .usize }};
+    const blocks = [_]program_plan.BlockPlan{.{
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+        .terminator_index = 0,
+    }};
+    const terminators = [_]program_plan.Terminator{.{ .kind = .return_value }};
+    return program_plan.program_plan_builder.finish(.{
+        .label = "static-machine-schema-carrier-identity",
+        .ir_hash = 126,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .value_schemas = &value_schemas,
+        .value_fields = &value_fields,
+        .value_variants = &.{},
+        .locals = &.{.{ .codec = .product, .schema_index = 0 }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch |err| supportPlanError(err);
+}
+
 fn supportUnitPlan(comptime label: []const u8) program_plan.ProgramPlan {
     const root = program_plan.program_plan_builder.function(0);
     const functions = [_]program_plan.FunctionPlan{.{
@@ -11367,6 +11706,144 @@ test "Program.Session validation rejects equal helper arguments with different i
     first.scratch.frameLocals(first_child.frame)[0] = replacement;
 
     try std.testing.expectError(error.ProgramContractViolation, first.validateState());
+}
+
+test "StaticMachine canonical coherence compares exact structured values" {
+    const Payload = struct {
+        items: []const []const u8,
+    };
+    const compiled_plan = supportLastReturnAliasedPayloadPlan(Payload);
+    const Core = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "session-last-return-aliased-payload",
+        compiled_plan,
+        .{Payload},
+        &.{},
+        struct {},
+        struct {},
+    );
+    const ref: program_plan.ValueRef = .{ .codec = .product, .schema_index = 0 };
+
+    const first_items = [_][]const u8{ "left", "right" };
+    var first = try Core.start(std.testing.allocator, .{Payload{ .items = &first_items }});
+    defer first.deinit();
+    const first_frame = first.frames.at(0) orelse return error.ProgramContractViolation;
+    const first_value = first.scratch.frameLocalsConst(first_frame.frame)[0];
+
+    const equal_items = [_][]const u8{ "left", "right" };
+    var equal = try Core.start(std.testing.allocator, .{Payload{ .items = &equal_items }});
+    defer equal.deinit();
+    const equal_frame = equal.frames.at(0) orelse return error.ProgramContractViolation;
+    const equal_value = equal.scratch.frameLocalsConst(equal_frame.frame)[0];
+
+    const different_items = [_][]const u8{ "left", "different" };
+    var different = try Core.start(std.testing.allocator, .{Payload{ .items = &different_items }});
+    defer different.deinit();
+    const different_frame = different.frames.at(0) orelse return error.ProgramContractViolation;
+    const different_value = different.scratch.frameLocalsConst(different_frame.frame)[0];
+
+    try std.testing.expect(try Core.executableValuesEqualForRef(ref, first_value, equal_value));
+    try std.testing.expect(!(try Core.executableValuesEqualForRef(ref, first_value, different_value)));
+    try std.testing.expect(try Core.executableValuesEqualForRef(
+        .{ .codec = .usize },
+        .{ .usize = 7 },
+        .{ .word_u64 = 7 },
+    ));
+    try std.testing.expect(!(try Core.executableValuesEqualForRef(
+        .{ .codec = .usize },
+        .{ .usize = 7 },
+        .{ .word_u64 = 8 },
+    )));
+}
+
+test "StaticMachine contract identity binds concrete schema carriers" {
+    const FullWidth = struct { word: u64 };
+    const CanonicalWidth = struct { word: usize };
+    const EquivalentFullWidth = struct { word: u64 };
+    const compiled_plan = supportSchemaCarrierIdentityPlan();
+    const FullWidthCore = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-machine-schema-carrier-identity",
+        compiled_plan,
+        .{FullWidth},
+        &.{},
+        struct {},
+        struct {},
+    );
+    const CanonicalWidthCore = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-machine-schema-carrier-identity",
+        compiled_plan,
+        .{CanonicalWidth},
+        &.{},
+        struct {},
+        struct {},
+    );
+    const EquivalentFullWidthCore = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-machine-schema-carrier-identity",
+        compiled_plan,
+        .{EquivalentFullWidth},
+        &.{},
+        struct {},
+        struct {},
+    );
+
+    try std.testing.expectEqual(
+        FullWidthCore.canonical_plan_fingerprint,
+        CanonicalWidthCore.canonical_plan_fingerprint,
+    );
+    try std.testing.expect(FullWidthCore.contract_fingerprint != CanonicalWidthCore.contract_fingerprint);
+    try std.testing.expectEqual(FullWidthCore.contract_fingerprint, EquivalentFullWidthCore.contract_fingerprint);
+
+    var state = try FullWidthCore.start(std.testing.allocator, .{FullWidth{ .word = std.math.maxInt(u64) }});
+    defer state.deinit();
+    const encoded = try state.encodeState(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        CanonicalWidthCore.decodeState(std.testing.allocator, encoded),
+    );
+}
+
+test "StaticMachine canonical coherence compares exact sum variants" {
+    const Payload = union(enum) {
+        text: []const u8,
+        count: u64,
+    };
+    const compiled_plan = supportLastReturnSumPayloadPlan(Payload);
+    const Core = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "session-last-return-sum-payload",
+        compiled_plan,
+        .{Payload},
+        &.{},
+        struct {},
+        struct {},
+    );
+    const ref: program_plan.ValueRef = .{ .codec = .sum, .schema_index = 0 };
+
+    var first = try Core.start(std.testing.allocator, .{Payload{ .text = "same" }});
+    defer first.deinit();
+    var equal = try Core.start(std.testing.allocator, .{Payload{ .text = "same" }});
+    defer equal.deinit();
+    var different_payload = try Core.start(std.testing.allocator, .{Payload{ .text = "different" }});
+    defer different_payload.deinit();
+    var different_variant = try Core.start(std.testing.allocator, .{Payload{ .count = 1 }});
+    defer different_variant.deinit();
+
+    const first_frame = first.frames.at(0) orelse return error.ProgramContractViolation;
+    const equal_frame = equal.frames.at(0) orelse return error.ProgramContractViolation;
+    const different_payload_frame = different_payload.frames.at(0) orelse return error.ProgramContractViolation;
+    const different_variant_frame = different_variant.frames.at(0) orelse return error.ProgramContractViolation;
+    const first_value = first.scratch.frameLocalsConst(first_frame.frame)[0];
+    const equal_value = equal.scratch.frameLocalsConst(equal_frame.frame)[0];
+    const different_payload_value = different_payload.scratch.frameLocalsConst(different_payload_frame.frame)[0];
+    const different_variant_value = different_variant.scratch.frameLocalsConst(different_variant_frame.frame)[0];
+
+    try std.testing.expect(try Core.executableValuesEqualForRef(ref, first_value, equal_value));
+    try std.testing.expect(!(try Core.executableValuesEqualForRef(ref, first_value, different_payload_value)));
+    try std.testing.expect(!(try Core.executableValuesEqualForRef(ref, first_value, different_variant_value)));
 }
 
 test "Program.Session rejects u64 typed access to standalone usize sites" {
