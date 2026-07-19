@@ -713,12 +713,17 @@ fn ProgramProtocolForSites(
     comptime after_sites: anytype,
     comptime identity: ProgramProtocolIdentity,
 ) type {
-    const plan_hash = plan.hash();
+    const legacy_plan_hash = plan.hash();
+    const plan_hash = if (identity == .static_machine)
+        lowering_api.staticPlanFingerprint(plan)
+    else
+        legacy_plan_hash;
 
     return struct {
         pub const Owner = ProtocolOwner;
         pub const label = program_label;
         pub const hash = plan_hash;
+        pub const legacy_hash = legacy_plan_hash;
         pub const OwnerHandlers = HandlersType;
         pub const operation_site_count = operation_sites.len;
         pub const after_site_count = after_sites.len;
@@ -743,6 +748,7 @@ fn ProgramProtocolForSites(
                 pub const index = site.index;
                 pub const fingerprint = site.fingerprint;
                 pub const canonical_fingerprint = site.canonical_fingerprint;
+                pub const legacy_fingerprint = site.legacy_fingerprint;
                 pub const semantic_label = site.semantic_label;
                 pub const function_index = site.function_index;
                 pub const function_symbol_name = site.function_symbol_name;
@@ -785,10 +791,12 @@ fn ProgramProtocolForSites(
                     pub const index = site.index;
                     pub const fingerprint = site.fingerprint;
                     pub const canonical_fingerprint = site.canonical_fingerprint;
+                    pub const legacy_fingerprint = site.legacy_fingerprint;
                     pub const semantic_label = site.semantic_label;
                     pub const source_operation_site_index = site.source_operation_site_index;
                     pub const source_operation_site_fingerprint = site.source_operation_site_fingerprint;
                     pub const source_operation_site_canonical_fingerprint = site.source_operation_site_canonical_fingerprint;
+                    pub const source_operation_site_legacy_fingerprint = site.source_operation_site_legacy_fingerprint;
                     pub const source_function_index = site.source_function_index;
                     pub const source_block_index = site.source_block_index;
                     pub const source_instruction_index = site.source_instruction_index;
@@ -815,10 +823,12 @@ fn ProgramProtocolForSites(
                 pub const index = site.index;
                 pub const fingerprint = site.fingerprint;
                 pub const canonical_fingerprint = site.canonical_fingerprint;
+                pub const legacy_fingerprint = site.legacy_fingerprint;
                 pub const semantic_label = site.semantic_label;
                 pub const source_operation_site_index = site.source_operation_site_index;
                 pub const source_operation_site_fingerprint = site.source_operation_site_fingerprint;
                 pub const source_operation_site_canonical_fingerprint = site.source_operation_site_canonical_fingerprint;
+                pub const source_operation_site_legacy_fingerprint = site.source_operation_site_legacy_fingerprint;
                 pub const source_function_index = site.source_function_index;
                 pub const source_block_index = site.source_block_index;
                 pub const source_instruction_index = site.source_instruction_index;
@@ -1325,6 +1335,26 @@ pub const StaticMachineOptions = struct {
 
 const StaticMachineProgramAuthenticityToken = opaque {};
 
+fn staticMachineTypeContainsMutableStringList(comptime ValueType: type) bool {
+    if (ValueType == [][]const u8) return true;
+    return switch (@typeInfo(ValueType)) {
+        .optional => |optional| staticMachineTypeContainsMutableStringList(optional.child),
+        .@"struct" => |info| {
+            inline for (info.fields) |field| {
+                if (staticMachineTypeContainsMutableStringList(field.type)) return true;
+            }
+            return false;
+        },
+        .@"union" => |info| {
+            inline for (info.fields) |field| {
+                if (staticMachineTypeContainsMutableStringList(field.type)) return true;
+            }
+            return false;
+        },
+        else => false,
+    };
+}
+
 /// Generate a typed static reducer for one Boundary Program.
 pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOptions) type {
     if (!hasDeclSafe(Program, "StaticMachineProgramAuthenticity")) {
@@ -1332,6 +1362,11 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
     }
     if (Program.StaticMachineProgramAuthenticity != StaticMachineProgramAuthenticityToken) {
         @compileError("boundary.staticMachine expects a type returned by boundary.program");
+    }
+    inline for (Program.value_schema_types) |SchemaType| {
+        if (staticMachineTypeContainsMutableStringList(SchemaType)) {
+            @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas");
+        }
     }
     const Body = Program.StaticMachineBody;
     const nested_targets = BodyNestedWithTargets(Body).values;
@@ -1417,8 +1452,10 @@ fn StaticMachineFor(
         };
         /// Typed entry arguments accepted by initialState.
         pub const InitialArgs = StaticInitialArgs(Program);
-        /// Typed terminal program value.
+        /// Typed terminal program value borrowed from an OwnedResult until that owner is deinitialized.
         pub const Result = Program.contract.ResultType;
+        /// Terminal value owner whose `value` field remains valid until `deinit`.
+        pub const OwnedResult = Core.RawResult;
         /// Program-authored deterministic failures.
         pub const Failure = BodyErrorSet(Body);
         /// Closed StaticMachine operation error set.
@@ -1429,9 +1466,9 @@ fn StaticMachineFor(
         };
         /// Static operation and after-continuation site descriptors.
         pub const EffectRow = StaticProtocol;
-        /// Defunctionalized operation request.
+        /// Defunctionalized operation request borrowing State storage until mutation or deinit.
         pub const Request = Core.Request;
-        /// Defunctionalized after-continuation request.
+        /// Defunctionalized after request borrowing State storage until mutation or deinit.
         pub const AfterRequest = Core.AfterRequest;
         /// Current parked request projection.
         pub const Current = Core.Current;
@@ -1440,7 +1477,7 @@ fn StaticMachineFor(
         pub const Transition = union(enum) {
             request: Request,
             after: AfterRequest,
-            done: Core.RawResult,
+            done: OwnedResult,
             yielded_fuel,
         };
 
@@ -1452,12 +1489,16 @@ fn StaticMachineFor(
             pub const program_label = Program.contract.label;
             /// Compiled ProgramPlan identity label.
             pub const plan_label = Program.compiled_plan.label;
-            /// Deterministic compiled ProgramPlan identity.
-            pub const plan_hash = Program.compiled_plan.hash();
+            /// Target-neutral canonical ProgramPlan identity.
+            pub const plan_hash = Core.canonical_plan_fingerprint;
+            /// Provenance-sensitive ProgramPlan identity retained for Program.Session compatibility.
+            pub const legacy_plan_hash = Program.compiled_plan.hash();
             /// Target-neutral canonical ProgramPlan identity.
             pub const canonical_plan_fingerprint = Core.canonical_plan_fingerprint;
             /// Complete reducer contract identity, including nested target resolution.
             pub const machine_contract_fingerprint = Core.contract_fingerprint;
+            /// Plan identity carried by StaticMachine request traces.
+            pub const request_trace_plan_hash = Core.contract_fingerprint;
             /// Canonical state image format version.
             pub const state_image_format_version = Core.state_image_format_version;
             /// Canonical state image fingerprint version.

@@ -768,7 +768,8 @@ fn StaticPlanIdentity(comptime compiled_plan: program_plan.ProgramPlan) type {
     };
 }
 
-fn staticPlanFingerprint(comptime compiled_plan: program_plan.ProgramPlan) u64 {
+/// Target-neutral ProgramPlan identity used by Boundary StaticMachine v1.
+pub fn staticPlanFingerprint(comptime compiled_plan: program_plan.ProgramPlan) u64 {
     return StaticPlanIdentity(compiled_plan).fingerprint;
 }
 
@@ -801,6 +802,7 @@ pub const SessionOperationYieldSite = struct {
     index: usize,
     fingerprint: u64,
     canonical_fingerprint: u64,
+    legacy_fingerprint: u64,
     semantic_label: ?[]const u8 = null,
     function_index: usize,
     function_symbol_name: []const u8,
@@ -825,10 +827,12 @@ pub const SessionAfterYieldSite = struct {
     index: usize,
     fingerprint: u64,
     canonical_fingerprint: u64,
+    legacy_fingerprint: u64,
     semantic_label: ?[]const u8 = null,
     source_operation_site_index: usize,
     source_operation_site_fingerprint: u64,
     source_operation_site_canonical_fingerprint: u64,
+    source_operation_site_legacy_fingerprint: u64,
     source_function_index: usize,
     source_block_index: usize,
     source_instruction_index: usize,
@@ -1070,6 +1074,7 @@ fn fillSessionOperationYieldSites(
                     .index = next_site,
                     .fingerprint = 0,
                     .canonical_fingerprint = 0,
+                    .legacy_fingerprint = 0,
                     .semantic_label = siteLabelForInstruction(site_metadata, instruction_index),
                     .function_index = function_index,
                     .function_symbol_name = function.symbol_name,
@@ -1089,6 +1094,7 @@ fn fillSessionOperationYieldSites(
                     .can_yield_after = op.has_after,
                 };
                 site.fingerprint = sessionOperationSiteFingerprint(compiled_plan, site);
+                site.legacy_fingerprint = site.fingerprint;
                 sites[next_site] = site;
                 next_site += 1;
             }
@@ -1126,6 +1132,7 @@ pub fn staticMachineOperationYieldSitesForPlanWithMetadata(
     const canonical_plan_fingerprint = staticPlanFingerprint(compiled_plan);
     inline for (&sites) |*site| {
         site.canonical_fingerprint = staticMachineOperationSiteFingerprint(canonical_plan_fingerprint, site.*);
+        site.fingerprint = site.canonical_fingerprint;
     }
     return sites;
 }
@@ -1157,12 +1164,17 @@ pub fn staticMachineAfterYieldSitesForPlanWithMetadata(
     comptime nested_with_targets: anytype,
     comptime site_metadata: anytype,
 ) [sessionAfterYieldSiteCount(compiled_plan, nested_with_targets)]SessionAfterYieldSite {
+    const legacy_operation_sites = sessionOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
     const operation_sites = staticMachineOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
     var sites: [sessionAfterYieldSiteCount(compiled_plan, nested_with_targets)]SessionAfterYieldSite = undefined;
-    fillSessionAfterYieldSites(compiled_plan, operation_sites, &sites);
+    fillSessionAfterYieldSites(compiled_plan, legacy_operation_sites, &sites);
     const canonical_plan_fingerprint = staticPlanFingerprint(compiled_plan);
     inline for (&sites) |*site| {
+        const operation_site = operation_sites[site.source_operation_site_index];
+        site.source_operation_site_fingerprint = operation_site.fingerprint;
+        site.source_operation_site_canonical_fingerprint = operation_site.canonical_fingerprint;
         site.canonical_fingerprint = staticMachineAfterSiteFingerprint(canonical_plan_fingerprint, site.*);
+        site.fingerprint = site.canonical_fingerprint;
     }
     return sites;
 }
@@ -1179,10 +1191,12 @@ fn fillSessionAfterYieldSites(
             .index = next_after_site,
             .fingerprint = 0,
             .canonical_fingerprint = 0,
+            .legacy_fingerprint = 0,
             .semantic_label = operation_site.semantic_label,
             .source_operation_site_index = operation_site.index,
             .source_operation_site_fingerprint = operation_site.fingerprint,
             .source_operation_site_canonical_fingerprint = operation_site.canonical_fingerprint,
+            .source_operation_site_legacy_fingerprint = operation_site.legacy_fingerprint,
             .source_function_index = operation_site.function_index,
             .source_block_index = operation_site.block_index,
             .source_instruction_index = operation_site.instruction_index,
@@ -1193,6 +1207,7 @@ fn fillSessionAfterYieldSites(
             .result_ref = operation_site.result_ref,
         };
         site.fingerprint = sessionAfterSiteFingerprint(compiled_plan, site);
+        site.legacy_fingerprint = site.fingerprint;
         sites[next_after_site] = site;
         next_after_site += 1;
     }
@@ -3902,8 +3917,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
     const ResultValue = ValueTypeForRef(compiled_plan, schema_types, program_plan.functionResultRef(entry));
     const session_after_stack_capacity = if (analysis.reachable_after_count == 0) 0 else max_interpreter_steps;
-    const plan_hash = compiled_plan.hash();
     const canonical_request_identity = request_identity == .canonical_static_machine;
+    const plan_hash = if (canonical_request_identity)
+        canonical_plan_identity
+    else
+        compiled_plan.hash();
 
     return struct {
         const Self = @This();
@@ -6365,7 +6383,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             function_index: usize,
             start_node: usize,
             target_node: usize,
-            allowed_unpushed_instruction: ?usize,
+            allowed_suspended_instruction: ?usize,
         ) error{ProgramContractViolation}!void {
             if (control_node_count == 0 or start_node >= control_node_count or target_node >= control_node_count) {
                 return error.ProgramContractViolation;
@@ -6388,11 +6406,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     const block_index = blockIndexForInstruction(function_index, node) orelse
                         return error.ProgramContractViolation;
                     const instruction = compiled_plan.instructions[node];
+                    const is_allowed_suspension = allowed_suspended_instruction != null and
+                        allowed_suspended_instruction.? == node;
                     switch (instruction.kind) {
                         .return_error => continue,
                         .call_helper => {
                             if (instruction.operand >= compiled_plan.functions.len) return error.ProgramContractViolation;
-                            if (!analysis.completion_functions[instruction.operand]) continue;
+                            if (!is_allowed_suspension and !analysis.completion_functions[instruction.operand]) continue;
                         },
                         .call_nested_with => {
                             const target_index = nestedWithTargetIndexForMetadata(
@@ -6401,14 +6421,12 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 instruction.string_literal,
                             ) orelse return error.ProgramContractViolation;
                             if (target_index >= compiled_plan.functions.len) return error.ProgramContractViolation;
-                            if (!analysis.completion_functions[target_index]) continue;
+                            if (!is_allowed_suspension and !analysis.completion_functions[target_index]) continue;
                         },
                         .call_op => {
                             if (instruction.operand >= compiled_plan.ops.len) return error.ProgramContractViolation;
                             const op = compiled_plan.ops[instruction.operand];
-                            const is_allowed_unpushed = allowed_unpushed_instruction != null and
-                                allowed_unpushed_instruction.? == node;
-                            if (!is_allowed_unpushed and (op.has_after or op.mode == .abort)) continue;
+                            if (!is_allowed_suspension and (op.has_after or op.mode == .abort)) continue;
                         },
                         else => {},
                     }
@@ -6498,10 +6516,15 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 }
 
                 const is_active_frame = frame_index + 1 == self.frames.len();
-                var allowed_unpushed_instruction: ?usize = null;
-                if (is_active_frame) {
+                var allowed_suspended_instruction: ?usize = null;
+                if (!is_active_frame) {
+                    if (frame.instruction_index == 0 or frame.waiting_helper_dst == null) {
+                        return error.ProgramContractViolation;
+                    }
+                    allowed_suspended_instruction = frame.instruction_index - 1;
+                } else {
                     if (self.pending) |pending| switch (pending) {
-                        .op => |pending_op| allowed_unpushed_instruction = pending_op.instruction_index,
+                        .op => |pending_op| allowed_suspended_instruction = pending_op.instruction_index,
                         .after => {},
                     };
                 }
@@ -6514,7 +6537,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     frame.function_index,
                     segment_start,
                     cursor_node,
-                    allowed_unpushed_instruction,
+                    allowed_suspended_instruction,
                 );
             }
         }
@@ -6527,6 +6550,16 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             const parent_fingerprint = try Self.fingerprintExecutableValueForRef(ref, parent_value);
             const child_fingerprint = try Self.fingerprintExecutableValueForRef(ref, child_value);
             if (parent_fingerprint != child_fingerprint) return error.ProgramContractViolation;
+            if (comptime !canonical_request_identity) {
+                switch (ref.codec) {
+                    .unit, .bool, .i32, .usize => {},
+                    .string, .string_list, .product, .sum => {
+                        if (!executableValuesShareIdentity(parent_value, child_value)) {
+                            return error.ProgramContractViolation;
+                        }
+                    },
+                }
+            }
         }
 
         fn validateDecodedPendingState(self: *Self) error{ProgramContractViolation}!void {
@@ -6584,7 +6617,22 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             }
             const after_stack = self.scratch.frameAfterStack(active.frame);
             if (unwind.remaining > after_stack.len) return error.ProgramContractViolation;
-            if (unwind.remaining != 0) {
+            if (unwind.remaining == 0) {
+                if (comptime canonical_request_identity) {
+                    if (after_stack.len == 0 or !unwind.current_ref.eql(unwind.final_ref)) {
+                        return error.ProgramContractViolation;
+                    }
+                    const bounds = try blockInstructionBounds(compiled_plan, active.function_index, active.block_index);
+                    if (active.instruction_index != bounds.end or active.instruction_end != bounds.end) {
+                        return error.ProgramContractViolation;
+                    }
+                    const block = compiled_plan.blocks[active.block_index];
+                    switch (compiled_plan.terminators[block.terminator_index].kind) {
+                        .return_unit, .return_value => {},
+                        .jump, .branch_if => return error.ProgramContractViolation,
+                    }
+                }
+            } else {
                 const entry_value = after_stack[unwind.remaining - 1];
                 if (entry_value.after_site_index >= after_yield_sites.len) return error.ProgramContractViolation;
                 const site = after_yield_sites[entry_value.after_site_index];
@@ -9125,6 +9173,108 @@ fn supportLastReturnAliasedPayloadPlan(comptime Payload: type) program_plan.Prog
     }) catch |err| supportPlanError(err);
 }
 
+fn supportHelperArgumentAliasedPayloadPlan(comptime Payload: type) program_plan.ProgramPlan {
+    const root = program_plan.program_plan_builder.function(0);
+    const helper = program_plan.program_plan_builder.function(1);
+    const root_payload = program_plan.program_plan_builder.local(root, 0);
+    const root_result = program_plan.program_plan_builder.local(root, 1);
+    const helper_payload = program_plan.program_plan_builder.local(helper, 0);
+    const helper_result = program_plan.program_plan_builder.local(helper, 1);
+    const instructions = [_]program_plan.Instruction{
+        program_plan.program_plan_builder.callHelper(root, root_result, helper, 0) catch |err| supportPlanError(err),
+        program_plan.program_plan_builder.returnValue(root, root_result) catch |err| supportPlanError(err),
+        program_plan.program_plan_builder.callOp(
+            helper,
+            helper_result,
+            program_plan.program_plan_builder.op(helper, 0),
+            helper_payload,
+        ) catch |err| supportPlanError(err),
+        program_plan.program_plan_builder.returnValue(helper, helper_result) catch |err| supportPlanError(err),
+    };
+    const functions = [_]program_plan.FunctionPlan{
+        .{
+            .symbol_name = "run",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .parameter_count = 1,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 2,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 0,
+            .instruction_count = 2,
+        },
+        .{
+            .symbol_name = "helper",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .parameter_count = 1,
+            .first_requirement = 0,
+            .requirement_count = 1,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 2,
+            .local_count = 2,
+            .first_block = 1,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 2,
+            .instruction_count = 2,
+        },
+    };
+    const requirements = [_]program_plan.RequirementPlan{.{ .label = "mutable", .first_op = 0, .op_count = 1 }};
+    const ops = [_]program_plan.OpPlan{.{
+        .requirement_index = 0,
+        .op_name = "payload",
+        .mode = .transform,
+        .payload_codec = .product,
+        .payload_schema_index = 0,
+        .resume_codec = .i32,
+    }};
+    const value_schemas = [_]program_plan.ValueSchemaPlan{.{
+        .label = @typeName(Payload),
+        .codec = .product,
+        .first_field = 0,
+        .field_count = 1,
+    }};
+    const value_fields = [_]program_plan.ValueFieldPlan{.{ .name = "items", .codec = .string_list }};
+    const blocks = [_]program_plan.BlockPlan{
+        .{ .first_instruction = 0, .instruction_count = 2, .terminator_index = 0 },
+        .{ .first_instruction = 2, .instruction_count = 2, .terminator_index = 1 },
+    };
+    const terminators = [_]program_plan.Terminator{
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return program_plan.program_plan_builder.finish(.{
+        .label = "session-helper-argument-aliased-payload",
+        .ir_hash = 125,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .value_schemas = &value_schemas,
+        .value_fields = &value_fields,
+        .value_variants = &.{},
+        .locals = &.{
+            .{ .codec = .product, .schema_index = 0 },
+            .{ .codec = .i32 },
+            .{ .codec = .product, .schema_index = 0 },
+            .{ .codec = .i32 },
+        },
+        .call_args = &.{root_payload.index},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch |err| supportPlanError(err);
+}
+
 fn supportLastReturnSumPayloadPlan(comptime Payload: type) program_plan.ProgramPlan {
     const root = program_plan.program_plan_builder.function(0);
     const payload = program_plan.program_plan_builder.local(root, 0);
@@ -10508,6 +10658,47 @@ test "Program.Session cloneState preserves last_return aliases into cloned scrat
         frame.last_return,
     );
     try std.testing.expectEqualStrings("restored", last_return.items[0]);
+}
+
+test "Program.Session validation rejects equal helper arguments with different identity" {
+    const Payload = struct {
+        items: [][]const u8,
+    };
+    const compiled_plan = supportHelperArgumentAliasedPayloadPlan(Payload);
+    const Core = ExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "session-helper-argument-aliased-payload",
+        compiled_plan,
+        .{Payload},
+        &.{},
+        struct {},
+        struct {},
+    );
+
+    var first_items = [_][]const u8{ "left", "right" };
+    var first = try Core.start(std.testing.allocator, .{Payload{ .items = first_items[0..] }});
+    defer first.deinit();
+    _ = switch (try first.next()) {
+        .request => |request| request,
+        .done => return error.UnexpectedDone,
+        .after => return error.UnexpectedAfter,
+    };
+
+    var second_items = [_][]const u8{ "left", "right" };
+    var second = try Core.start(std.testing.allocator, .{Payload{ .items = second_items[0..] }});
+    defer second.deinit();
+    _ = switch (try second.next()) {
+        .request => |request| request,
+        .done => return error.UnexpectedDone,
+        .after => return error.UnexpectedAfter,
+    };
+
+    const first_child = first.frames.at(1) orelse return error.ProgramContractViolation;
+    const second_child = second.frames.at(1) orelse return error.ProgramContractViolation;
+    const replacement = second.scratch.frameLocalsConst(second_child.frame)[0];
+    first.scratch.frameLocals(first_child.frame)[0] = replacement;
+
+    try std.testing.expectError(error.ProgramContractViolation, first.validateState());
 }
 
 test "Program.Session rejects u64 typed access to standalone usize sites" {

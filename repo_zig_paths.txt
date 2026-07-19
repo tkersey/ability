@@ -202,6 +202,7 @@ test/compile_fail/semantic_schema_registry_duplicate_tables.zig
 test/compile_fail/static_machine_cleanup_unsupported.zig
 test/compile_fail/static_machine_cross_machine_state.zig
 test/compile_fail/static_machine_forged_program.zig
+test/compile_fail/static_machine_mutable_string_list_schema.zig
 test/compile_fail/static_machine_recursive_frame_graph.zig
 test/compile_fail/value_schema_variant_mismatch.zig
 test/evidence_kernel_test.zig

@@ -18,10 +18,12 @@ Session-local request tokens, legacy provenance-sensitive site fingerprints,
 StaticMachine canonical site fingerprints, and raw continuation bytes are
 intentionally excluded. `Program.protocol` and `Program.Session` retain the
 legacy identity domain. `Machine.EffectRow` and StaticMachine requests use the
-target-neutral canonical domain. Parity compares their shared semantic
-coordinates and values rather than equating those distinct identities. A
-decoded StaticMachine state receives fresh transient ownership, and the v1
-state image is not the legacy capsule format.
+target-neutral canonical domain in their primary fingerprint fields; legacy
+fingerprints remain explicit sidecars for diagnostics and adapters. Parity
+compares the two backends' shared semantic coordinates and values rather than
+equating their distinct identity domains. A decoded StaticMachine state receives
+fresh transient ownership, and the v1 state image is not the legacy capsule
+format.
 
 The focused parity gate is:
 
@@ -31,10 +33,10 @@ zig build check-boundary-static-machine-parity
 
 The broader StaticMachine gates cover canonical state round trips,
 provenance-only interoperability, nested helper suspension, malformed images,
-control-path-valid after stacks, response ownership under allocation failure,
-handler-derived after contracts, explicit fuel yield, terminal failure, nominal
-state handles, authentic Program construction, agent fixtures, and provider
-fixtures:
+active non-completing helper and provider children, control-path-valid after
+stacks, response ownership under allocation failure, handler-derived after
+contracts, explicit fuel yield, terminal failure, nominal state handles,
+authentic Program construction, agent fixtures, and provider fixtures:
 
 ```text
 zig build check-boundary-static-machine

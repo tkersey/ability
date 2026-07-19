@@ -449,6 +449,12 @@ fn provenanceVariantPlan(comptime hash: u64) boundary.ir.ProgramPlan {
     return plan;
 }
 
+fn afterProvenanceVariantPlan(comptime hash: u64) boundary.ir.ProgramPlan {
+    var plan = afterEffectPlan("static-machine-after-provenance-identity");
+    plan.ir_hash = hash;
+    return plan;
+}
+
 fn stackedAfterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const outer_resume = boundary.ir.builder.local(root, 0);
@@ -622,6 +628,77 @@ fn nonCompletingHelperPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn nonCompletingNestedPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const provider = boundary.ir.builder.function(1);
+    const root_value = boundary.ir.builder.local(root, 0);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{
+            .kind = .call_nested_with,
+            .dst = root_value.index,
+            .aux = @intFromEnum(boundary.ir.ValueCodec.i32),
+            .string_literal = nested_metadata,
+        },
+        boundary.ir.builder.returnValue(root, root_value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{
+        .{
+            .symbol_name = "run",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 1,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 0,
+            .instruction_count = @intCast(instructions.len),
+        },
+        .{
+            .symbol_name = "provider",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 1,
+            .local_count = 0,
+            .first_block = 1,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = @intCast(instructions.len),
+            .instruction_count = 0,
+        },
+    };
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = @intCast(instructions.len), .terminator_index = 0 },
+        .{ .first_instruction = @intCast(instructions.len), .instruction_count = 0, .terminator_index = 1 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .return_value },
+        .{ .kind = .jump, .primary = 1 },
+    };
+    const targets = .{boundary.ir.NestedWithTarget{ .metadata = nested_metadata, .function_index = provider.index }};
+    return boundary.ir.builder.finishWithNestedTargets(.{
+        .label = label,
+        .ir_hash = 16,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{.{ .codec = .i32 }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }, targets) catch unreachable;
+}
+
 fn overflowPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const value = boundary.ir.builder.local(root, 0);
@@ -793,6 +870,17 @@ const ProvenanceProgramB = boundary.program("static-machine-provenance-identity"
 const ProvenanceMachineA = boundary.staticMachine(ProvenanceProgramA, .{});
 const ProvenanceMachineB = boundary.staticMachine(ProvenanceProgramB, .{});
 
+const AfterProvenanceBodyA = struct {
+    pub const compiled_plan = afterProvenanceVariantPlan(17);
+};
+const AfterProvenanceBodyB = struct {
+    pub const compiled_plan = afterProvenanceVariantPlan(18);
+};
+const AfterProvenanceProgramA = boundary.program("static-machine-after-provenance-identity", struct {}, AfterProvenanceBodyA);
+const AfterProvenanceProgramB = boundary.program("static-machine-after-provenance-identity", struct {}, AfterProvenanceBodyB);
+const AfterProvenanceMachineA = boundary.staticMachine(AfterProvenanceProgramA, .{});
+const AfterProvenanceMachineB = boundary.staticMachine(AfterProvenanceProgramB, .{});
+
 const AfterHandlersA = struct {
     outer: struct {
         pub fn dispatch(_: *const @This()) !i32 {
@@ -852,6 +940,17 @@ const NonCompletingHelperProgram = boundary.program(
     NonCompletingHelperBody,
 );
 const NonCompletingHelperMachine = boundary.staticMachine(NonCompletingHelperProgram, .{});
+
+const NonCompletingNestedBody = struct {
+    pub const compiled_plan = nonCompletingNestedPlan("static-machine-noncompleting-nested");
+    pub const nested_with_targets = .{boundary.ir.NestedWithTarget{ .metadata = nested_metadata, .function_index = 1 }};
+};
+const NonCompletingNestedProgram = boundary.program(
+    "static-machine-noncompleting-nested",
+    struct {},
+    NonCompletingNestedBody,
+);
+const NonCompletingNestedMachine = boundary.staticMachine(NonCompletingNestedProgram, .{});
 
 const OverflowBody = struct {
     pub const compiled_plan = overflowPlan("static-machine-post-dispatch-overflow");
@@ -1224,6 +1323,10 @@ test "StaticMachine exposes a closed authored failure surface" {
 }
 
 test "StaticMachine canonical identity ignores provenance-only ProgramPlan fields" {
+    const SiteA = ProvenanceMachineA.EffectRow.operationSite("test", "decide", 0);
+    const SiteB = ProvenanceMachineB.EffectRow.operationSite("test", "decide", 0);
+    const LegacySiteA = ProvenanceProgramA.protocol.operationSite("test", "decide", 0);
+    const LegacySiteB = ProvenanceProgramB.protocol.operationSite("test", "decide", 0);
     try std.testing.expectEqual(
         ProvenanceMachineA.Manifest.canonical_plan_fingerprint,
         ProvenanceMachineB.Manifest.canonical_plan_fingerprint,
@@ -1232,6 +1335,15 @@ test "StaticMachine canonical identity ignores provenance-only ProgramPlan field
         ProvenanceMachineA.Manifest.machine_contract_fingerprint,
         ProvenanceMachineB.Manifest.machine_contract_fingerprint,
     );
+    try std.testing.expectEqual(ProvenanceMachineA.Manifest.canonical_plan_fingerprint, ProvenanceMachineA.Manifest.plan_hash);
+    try std.testing.expectEqual(ProvenanceMachineA.Manifest.plan_hash, ProvenanceMachineA.EffectRow.hash);
+    try std.testing.expect(ProvenanceMachineA.Manifest.legacy_plan_hash != ProvenanceMachineB.Manifest.legacy_plan_hash);
+    try std.testing.expectEqual(ProvenanceMachineA.Manifest.legacy_plan_hash, ProvenanceProgramA.protocol.hash);
+    try std.testing.expectEqual(LegacySiteA.fingerprint, SiteA.legacy_fingerprint);
+    try std.testing.expectEqual(LegacySiteB.fingerprint, SiteB.legacy_fingerprint);
+    try std.testing.expect(SiteA.legacy_fingerprint != SiteB.legacy_fingerprint);
+    try std.testing.expectEqual(SiteA.fingerprint, SiteA.canonical_fingerprint);
+    try std.testing.expectEqual(SiteA.fingerprint, SiteB.fingerprint);
 
     const state_a = try ProvenanceMachineA.initialState(std.testing.allocator, .{});
     defer ProvenanceMachineA.deinitState(state_a);
@@ -1247,6 +1359,8 @@ test "StaticMachine canonical identity ignores provenance-only ProgramPlan field
         .request => |request| request,
         else => return error.UnexpectedTransition,
     };
+    try std.testing.expectEqual(SiteA.fingerprint, request_a.operation_site_fingerprint);
+    try std.testing.expectEqual(SiteB.fingerprint, request_b.operation_site_fingerprint);
     try std.testing.expectEqual(request_a.operation_site_fingerprint, request_b.operation_site_fingerprint);
     try std.testing.expectEqual(
         request_a.canonical_operation_site_fingerprint,
@@ -1267,6 +1381,60 @@ test "StaticMachine canonical identity ignores provenance-only ProgramPlan field
         else => return error.UnexpectedTransition,
     };
     try restored_request.expectSite(ProvenanceMachineB.EffectRow.operationSite("test", "decide", 0));
+}
+
+test "StaticMachine after descriptors and requests share canonical primary identity" {
+    const OperationSiteA = AfterProvenanceMachineA.EffectRow.operationSite("test", "after", 0);
+    const OperationSiteB = AfterProvenanceMachineB.EffectRow.operationSite("test", "after", 0);
+    const AfterSiteA = AfterProvenanceMachineA.EffectRow.afterSite("test", "after", 0);
+    const AfterSiteB = AfterProvenanceMachineB.EffectRow.afterSite("test", "after", 0);
+    const LegacyAfterSiteA = AfterProvenanceProgramA.protocol.afterSite("test", "after", 0);
+    const LegacyAfterSiteB = AfterProvenanceProgramB.protocol.afterSite("test", "after", 0);
+
+    try std.testing.expectEqual(OperationSiteA.fingerprint, OperationSiteB.fingerprint);
+    try std.testing.expectEqual(AfterSiteA.fingerprint, AfterSiteB.fingerprint);
+    try std.testing.expectEqual(OperationSiteA.fingerprint, AfterSiteA.source_operation_site_fingerprint);
+    try std.testing.expectEqual(OperationSiteB.fingerprint, AfterSiteB.source_operation_site_fingerprint);
+    try std.testing.expectEqual(AfterSiteA.fingerprint, AfterSiteA.canonical_fingerprint);
+    try std.testing.expectEqual(AfterSiteA.source_operation_site_fingerprint, AfterSiteA.source_operation_site_canonical_fingerprint);
+    try std.testing.expectEqual(LegacyAfterSiteA.fingerprint, AfterSiteA.legacy_fingerprint);
+    try std.testing.expectEqual(LegacyAfterSiteB.fingerprint, AfterSiteB.legacy_fingerprint);
+    try std.testing.expectEqual(
+        LegacyAfterSiteA.source_operation_site_fingerprint,
+        AfterSiteA.source_operation_site_legacy_fingerprint,
+    );
+    try std.testing.expect(AfterSiteA.legacy_fingerprint != AfterSiteB.legacy_fingerprint);
+
+    const state_a = try AfterProvenanceMachineA.initialState(std.testing.allocator, .{});
+    defer AfterProvenanceMachineA.deinitState(state_a);
+    const state_b = try AfterProvenanceMachineB.initialState(std.testing.allocator, .{});
+    defer AfterProvenanceMachineB.deinitState(state_b);
+    var fuel_a: u64 = 100;
+    var fuel_b: u64 = 100;
+    const request_a = switch (try AfterProvenanceMachineA.reduce(state_a, &fuel_a)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    const request_b = switch (try AfterProvenanceMachineB.reduce(state_b, &fuel_b)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(OperationSiteA.fingerprint, request_a.operation_site_fingerprint);
+    try std.testing.expectEqual(OperationSiteB.fingerprint, request_b.operation_site_fingerprint);
+    try AfterProvenanceMachineA.@"resume"(state_a, request_a, @as(i32, 10));
+    try AfterProvenanceMachineB.@"resume"(state_b, request_b, @as(i32, 10));
+    const after_a = switch (try AfterProvenanceMachineA.reduce(state_a, &fuel_a)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    const after_b = switch (try AfterProvenanceMachineB.reduce(state_b, &fuel_b)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(AfterSiteA.fingerprint, after_a.after_site_fingerprint);
+    try std.testing.expectEqual(AfterSiteB.fingerprint, after_b.after_site_fingerprint);
+    try std.testing.expectEqual(AfterSiteA.source_operation_site_fingerprint, after_a.source_operation_site_fingerprint);
+    try std.testing.expectEqual(AfterSiteB.source_operation_site_fingerprint, after_b.source_operation_site_fingerprint);
 }
 
 test "StaticMachine contract binds handler-derived after protocol refs" {
@@ -1301,6 +1469,8 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
     try std.testing.expect(outer.fingerprint() != outer_b.fingerprint());
     try std.testing.expectEqual(AfterContractMachineA.Manifest.machine_contract_fingerprint, outer.trace().plan_hash);
     try std.testing.expectEqual(AfterContractMachineB.Manifest.machine_contract_fingerprint, outer_b.trace().plan_hash);
+    try std.testing.expectEqual(AfterContractMachineA.Manifest.request_trace_plan_hash, outer.trace().plan_hash);
+    try std.testing.expectEqual(AfterContractMachineB.Manifest.request_trace_plan_hash, outer_b.trace().plan_hash);
     try AfterContractMachineA.@"resume"(state, outer, @as(i32, 1));
     const inner = switch (try AfterContractMachineA.reduce(state, &fuel)) {
         .request => |request| request,
@@ -1453,6 +1623,66 @@ test "StaticMachine rejects a cursor after a non-completing helper call" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         NonCompletingHelperMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+fn expectActiveNonCompletingChildRoundTrip(comptime Machine: type) !void {
+    const state = try Machine.initialState(std.testing.allocator, .{});
+    defer Machine.deinitState(state);
+    var fuel: u64 = 1;
+    switch (try Machine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+    try Machine.validateState(state);
+
+    const encoded = try Machine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try Machine.decodeState(std.testing.allocator, encoded);
+    defer Machine.deinitState(restored);
+    try Machine.validateState(restored);
+}
+
+test "StaticMachine round trips an active non-completing helper child" {
+    try expectActiveNonCompletingChildRoundTrip(NonCompletingHelperMachine);
+}
+
+test "StaticMachine round trips an active non-completing nested child" {
+    try expectActiveNonCompletingChildRoundTrip(NonCompletingNestedMachine);
+}
+
+test "StaticMachine rejects a fabricated zero-depth unwind before return" {
+    const state = try PureMachine.initialState(std.testing.allocator, .{});
+    defer PureMachine.deinitState(state);
+    const encoded = try PureMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const old_payload = encoded[0 .. encoded.len - 8];
+    try std.testing.expectEqual(@as(u8, 0), old_payload[old_payload.len - 1]);
+    const forged = try std.testing.allocator.alloc(u8, encoded.len + 24);
+    defer std.testing.allocator.free(forged);
+    @memcpy(forged[0..old_payload.len], old_payload);
+    forged[old_payload.len - 1] = 1;
+
+    var cursor = old_payload.len;
+    std.mem.writeInt(u64, forged[cursor..][0..8], 0, .little);
+    cursor += 8;
+    forged[cursor] = @intFromEnum(boundary.ir.ValueCodec.i32);
+    forged[cursor + 1] = 0;
+    cursor += 2;
+    std.mem.writeInt(i32, forged[cursor..][0..4], 99, .little);
+    cursor += 4;
+    forged[cursor] = @intFromEnum(boundary.ir.ValueCodec.i32);
+    forged[cursor + 1] = 0;
+    cursor += 2;
+    std.mem.writeInt(u64, forged[cursor..][0..8], 0, .little);
+    cursor += 8;
+    try std.testing.expectEqual(forged.len - 8, cursor);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        PureMachine.decodeState(std.testing.allocator, forged),
     );
 }
 

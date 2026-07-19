@@ -40,14 +40,20 @@ requests or state bytes. Contract-equivalent machines may therefore decode each
 other's state even though their live Zig `State` handle types remain distinct.
 
 Integers use fixed little-endian encodings. Value encoding is independent of
-transient pointer aliasing: semantically equal live states produce identical
-bytes whether equal strings or structured values share backing storage. Lengths
+transient pointer aliasing for the admitted v1 value surface: semantically equal
+live states produce identical bytes whether equal immutable strings or
+structured values share backing storage. Product and sum schemas containing a
+mutable outer string-list carrier (`[][]const u8`) are rejected at comptime,
+because mutation would make that discarded alias topology observable. Lengths
 and the configured maximum image size are checked during writer growth, before
 additional capacity is allocated.
 
 Readers reject a mismatched machine identity, invalid enum or boolean, malformed
 frame topology, an after stack that is not reachable along the decoded control
-path, inconsistent pending state, checksum mismatch, and trailing bytes. The
+path, an unwitnessed cursor after a non-completing call, an unwind before the
+function's return boundary, inconsistent pending state, checksum mismatch, and
+trailing bytes. A live child frame is the explicit witness that permits its
+parent cursor to remain after a non-completing helper or provider call. The
 checksum detects corruption and accidental mismatches. It is not a signature
 and grants no trust.
 

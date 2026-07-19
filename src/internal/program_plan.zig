@@ -387,8 +387,7 @@ pub const ProgramPlan = struct {
                     const terminator = self.terminators[block.terminator_index];
                     const block_completes = switch (terminator.kind) {
                         .return_unit, .return_value => true,
-                        .jump => completion_reachability[terminator.primary],
-                        .branch_if => completion_reachability[terminator.primary] or completion_reachability[terminator.secondary],
+                        .jump, .branch_if => false,
                     };
                     if (block_completes) {
                         completion_reachability[function_index] = true;
@@ -2677,8 +2676,7 @@ pub fn entryExecutionAnalysisWithNestedTargets(
                     const terminator = plan.terminators[block.terminator_index];
                     const block_completes = switch (terminator.kind) {
                         .return_unit, .return_value => true,
-                        .jump => completion_reachability[terminator.primary],
-                        .branch_if => completion_reachability[terminator.primary] or completion_reachability[terminator.secondary],
+                        .jump, .branch_if => false,
                     };
                     if (block_completes) {
                         completion_reachability[function_index] = true;
@@ -7245,4 +7243,128 @@ test "ProgramPlan hash includes requirement semantics" {
     provenance_only.ir_hash +%= 1;
     try std.testing.expect(base.hash() != provenance_only.hash());
     try std.testing.expectEqual(base.canonicalHash(), provenance_only.canonicalHash());
+}
+
+test "entry analysis separates function completion from global block indexes" {
+    const root = comptime program_plan_builder.function(0);
+    const completing = comptime program_plan_builder.function(1);
+    const looping = comptime program_plan_builder.function(2);
+    const root_value = comptime program_plan_builder.local(root, 0);
+    const completing_value = comptime program_plan_builder.local(completing, 0);
+    const helper_instructions = comptime [_]Instruction{
+        program_plan_builder.callHelper(root, root_value, looping, null) catch unreachable,
+        program_plan_builder.returnValue(root, root_value) catch unreachable,
+        .{ .kind = .const_i32, .dst = completing_value.index, .operand = 7 },
+        program_plan_builder.returnValue(completing, completing_value) catch unreachable,
+    };
+    const functions = comptime [_]FunctionPlan{
+        .{
+            .symbol_name = "root",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 1,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 2,
+            .first_instruction = 0,
+            .instruction_count = 2,
+        },
+        .{
+            .symbol_name = "completing",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 1,
+            .local_count = 1,
+            .first_block = 2,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 2,
+            .instruction_count = 2,
+        },
+        .{
+            .symbol_name = "looping",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 2,
+            .local_count = 0,
+            .first_block = 3,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 4,
+            .instruction_count = 0,
+        },
+    };
+    const blocks = comptime [_]BlockPlan{
+        .{ .first_instruction = 0, .instruction_count = 0, .terminator_index = 0 },
+        .{ .first_instruction = 0, .instruction_count = 2, .terminator_index = 1 },
+        .{ .first_instruction = 2, .instruction_count = 2, .terminator_index = 2 },
+        .{ .first_instruction = 4, .instruction_count = 0, .terminator_index = 3 },
+    };
+    const terminators = comptime [_]Terminator{
+        .{ .kind = .jump, .primary = 1 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+        .{ .kind = .jump, .primary = 3 },
+    };
+    const helper_plan = comptime ProgramPlan{
+        .label = "completion-namespace-helper",
+        .ir_hash = 1,
+        .entry_index = root.index,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &helper_instructions,
+    };
+    const helper_analysis = comptime entryExecutionAnalysisWithNestedTargets(helper_plan, &.{}) catch unreachable;
+    try std.testing.expect(!helper_analysis.completion_functions[root.index]);
+    try std.testing.expect(helper_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!helper_analysis.completion_functions[looping.index]);
+
+    const metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi";
+    const nested_instructions = comptime [_]Instruction{
+        .{
+            .kind = .call_nested_with,
+            .dst = root_value.index,
+            .aux = @intFromEnum(ValueCodec.i32),
+            .string_literal = metadata,
+        },
+        program_plan_builder.returnValue(root, root_value) catch unreachable,
+        .{ .kind = .const_i32, .dst = completing_value.index, .operand = 7 },
+        program_plan_builder.returnValue(completing, completing_value) catch unreachable,
+    };
+    const nested_plan = comptime ProgramPlan{
+        .label = "completion-namespace-nested",
+        .ir_hash = helper_plan.ir_hash,
+        .entry_index = helper_plan.entry_index,
+        .functions = helper_plan.functions,
+        .requirements = helper_plan.requirements,
+        .ops = helper_plan.ops,
+        .outputs = helper_plan.outputs,
+        .locals = helper_plan.locals,
+        .blocks = helper_plan.blocks,
+        .terminators = helper_plan.terminators,
+        .instructions = &nested_instructions,
+    };
+    const targets = comptime .{.{ .metadata = metadata, .function_index = looping.index }};
+    const nested_analysis = comptime entryExecutionAnalysisWithNestedTargets(nested_plan, targets) catch unreachable;
+    try std.testing.expect(!nested_analysis.completion_functions[root.index]);
+    try std.testing.expect(nested_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!nested_analysis.completion_functions[looping.index]);
 }
