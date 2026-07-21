@@ -58,9 +58,16 @@ Contract-equivalent machines may still exchange canonical state bytes through
 machine contract rather than the live Zig handle type.
 
 StaticMachine v1 rejects recursive helper/provider frame graphs and programs
-with output collection or result/output cleanup hooks. It also rejects control
-graphs containing more than 8,192 combined instructions and blocks so canonical
-state validation retains a fixed WASM-suitable stack bound. Generated direct
+with output collection or result/output cleanup hooks. Its compact condition
+authority rejects a reachable path that revisits unchanged predicate A after
+evaluating distinct predicate B, and reachable helpers may not write their
+parameter locals. Broader programs remain available through `Program.Session`
+until a future portable representation can validate those histories exactly.
+Control-path validation admits at most 32,768 states: the count is the combined
+instruction-and-block node count multiplied by eight and by one plus the
+maximum distinct-predicate count of any declared function. That permits at
+most 4,096 nodes when no predicate exists, 2,048 nodes when the maximum is one,
+and fewer as the maximum grows. Generated direct
 instruction metadata and one shared 1,048,576-unit work budget also bound CPU
 across repeated after-continuation reachability checks. StaticMachine derives a
 per-machine worst-case validation bound at comptime and rejects a machine whose
@@ -71,7 +78,9 @@ deliberately does not preserve pointer identity. StaticMachine v1 also rejects
 product schemas with comptime fields because its canonical decoder cannot
 reconstruct compile-time-only values at runtime. Non-exhaustive enum carriers
 are also rejected: the v1 ordinal codec cannot represent an unknown runtime
-tag. Immutable
+tag. Enum carriers with target-dependent `usize`, `isize`, or C-ABI integer tag
+types are rejected as well so one source program has one target-neutral
+contract identity. Immutable
 `[]const []const u8` carriers remain supported. An authored `afterDispatch`
 must also have the runtime shape used by the static after-site contract: a valid
 receiver, one value parameter, and a return value. Every reachable authored

@@ -1150,7 +1150,19 @@ pub fn build(b: *std.Build) void {
         },
         .{
             .path = "test/compile_fail/static_machine_target_sized_enum.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support target-sized enum tag types",
+            .expected_error = "Boundary StaticMachine v1 does not support target-dependent enum tag types",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_c_abi_enum_tag.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support target-dependent enum tag types",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_multiple_condition_predicates.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_mutable_helper_parameter.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable helper functions that write parameter locals",
         },
         .{
             .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",

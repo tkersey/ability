@@ -1469,100 +1469,6 @@ fn nonCompletingConditionalParentPlan(comptime label: []const u8) boundary.ir.Pr
     }) catch unreachable;
 }
 
-fn mutableHelperParameterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
-    const root = boundary.ir.builder.function(0);
-    const helper = boundary.ir.builder.function(1);
-    const root_input = boundary.ir.builder.local(root, 0);
-    const root_result = boundary.ir.builder.local(root, 1);
-    const helper_parameter = boundary.ir.builder.local(helper, 0);
-    const instructions = [_]boundary.ir.plan.Instruction{
-        boundary.ir.builder.callHelper(root, root_result, helper, 0) catch unreachable,
-        boundary.ir.builder.returnValue(root, root_result) catch unreachable,
-        boundary.ir.builder.callOp(helper, helper_parameter, boundary.ir.builder.op(helper, 0), null) catch unreachable,
-        boundary.ir.builder.callOp(helper, null, boundary.ir.builder.op(helper, 1), null) catch unreachable,
-        boundary.ir.builder.returnValue(helper, helper_parameter) catch unreachable,
-    };
-    const functions = [_]boundary.ir.plan.Function{
-        .{
-            .symbol_name = "run",
-            .value_codec = .i32,
-            .result_codec = .i32,
-            .parameter_count = 1,
-            .first_requirement = 0,
-            .requirement_count = 0,
-            .first_output = 0,
-            .output_count = 0,
-            .first_local = 0,
-            .local_count = 2,
-            .first_block = 0,
-            .entry_block = 0,
-            .block_count = 1,
-            .first_instruction = 0,
-            .instruction_count = 2,
-        },
-        .{
-            .symbol_name = "helper",
-            .value_codec = .i32,
-            .result_codec = .i32,
-            .parameter_count = 1,
-            .first_requirement = 0,
-            .requirement_count = 1,
-            .first_output = 0,
-            .output_count = 0,
-            .first_local = 2,
-            .local_count = 1,
-            .first_block = 1,
-            .entry_block = 0,
-            .block_count = 1,
-            .first_instruction = 2,
-            .instruction_count = 3,
-        },
-    };
-    const requirements = [_]boundary.ir.plan.Requirement{.{
-        .label = "helper",
-        .first_op = 0,
-        .op_count = 2,
-    }};
-    const ops = [_]boundary.ir.plan.Op{
-        .{
-            .requirement_index = 0,
-            .op_name = "replace",
-            .mode = .transform,
-            .payload_codec = .unit,
-            .resume_codec = .i32,
-        },
-        .{
-            .requirement_index = 0,
-            .op_name = "park",
-            .mode = .transform,
-            .payload_codec = .unit,
-            .resume_codec = .unit,
-        },
-    };
-    const blocks = [_]boundary.ir.plan.Block{
-        .{ .first_instruction = 0, .instruction_count = 2, .terminator_index = 0 },
-        .{ .first_instruction = 2, .instruction_count = 3, .terminator_index = 1 },
-    };
-    const terminators = [_]boundary.ir.plan.Terminator{
-        .{ .kind = .return_value },
-        .{ .kind = .return_value },
-    };
-    return boundary.ir.builder.finish(.{
-        .label = label,
-        .ir_hash = 44,
-        .entry = root,
-        .functions = &functions,
-        .requirements = &requirements,
-        .ops = &ops,
-        .outputs = &.{},
-        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .i32 }, .{ .codec = .i32 } },
-        .call_args = &.{root_input.index},
-        .blocks = &blocks,
-        .terminators = &terminators,
-        .instructions = &instructions,
-    }) catch unreachable;
-}
-
 fn legacyCompletionNamespacePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const completing = boundary.ir.builder.function(1);
@@ -2197,16 +2103,6 @@ const NonCompletingConditionalParentMachine = boundary.staticMachine(
     NonCompletingConditionalParentProgram,
     .{},
 );
-
-const MutableHelperParameterBody = struct {
-    pub const compiled_plan = mutableHelperParameterPlan("static-machine-mutable-helper-parameter");
-};
-const MutableHelperParameterProgram = boundary.program(
-    "static-machine-mutable-helper-parameter",
-    struct {},
-    MutableHelperParameterBody,
-);
-const MutableHelperParameterMachine = boundary.staticMachine(MutableHelperParameterProgram, .{});
 
 const LegacyCompletionNamespaceBody = struct {
     pub const compiled_plan = legacyCompletionNamespacePlan("static-machine-versioned-completion");
@@ -4315,41 +4211,6 @@ test "StaticMachine preserves in-place condition state across fuel yield" {
     };
     defer result.deinit();
     try std.testing.expectEqual(@as(i32, 2), result.value());
-}
-
-test "StaticMachine round trips a parked helper after parameter mutation" {
-    const state = try MutableHelperParameterMachine.initialState(
-        std.testing.allocator,
-        .{@as(i32, 3)},
-    );
-    defer MutableHelperParameterMachine.deinitState(state);
-    var fuel: u64 = 100;
-    const replace = switch (try MutableHelperParameterMachine.reduce(state, &fuel)) {
-        .request => |request| request,
-        else => return error.UnexpectedTransition,
-    };
-    try MutableHelperParameterMachine.@"resume"(state, replace, @as(i32, 9));
-    _ = switch (try MutableHelperParameterMachine.reduce(state, &fuel)) {
-        .request => |request| request,
-        else => return error.UnexpectedTransition,
-    };
-    try MutableHelperParameterMachine.validateState(state);
-
-    const encoded = try MutableHelperParameterMachine.encodeState(std.testing.allocator, state);
-    defer std.testing.allocator.free(encoded);
-    const restored = try MutableHelperParameterMachine.decodeState(std.testing.allocator, encoded);
-    defer MutableHelperParameterMachine.deinitState(restored);
-    const park = switch (try MutableHelperParameterMachine.current(restored)) {
-        .request => |request| request,
-        else => return error.UnexpectedTransition,
-    };
-    try MutableHelperParameterMachine.@"resume"(restored, park, {});
-    var result = switch (try MutableHelperParameterMachine.reduce(restored, &fuel)) {
-        .done => |done| done,
-        else => return error.UnexpectedTransition,
-    };
-    defer result.deinit();
-    try std.testing.expectEqual(@as(i32, 9), result.value());
 }
 
 test "StaticMachine rejects divergent pending and unwind after values" {

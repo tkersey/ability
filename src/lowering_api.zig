@@ -3156,6 +3156,180 @@ fn staticMachineFunctionMayWriteLocal(
     return false;
 }
 
+const PredicateHistoryPhase = enum(u2) {
+    before_candidate,
+    candidate_seen,
+    distinct_seen,
+};
+
+fn staticMachineFunctionHasInterleavedPredicateRevisit(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime analysis: anytype,
+    comptime function_index: usize,
+) bool {
+    @setEvalBranchQuota(10_000_000);
+    const predicate_count = staticMachineFunctionConditionPredicateCount(
+        compiled_plan,
+        function_index,
+    );
+    if (predicate_count < 2) return false;
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    if (control_node_count == 0 or control_node_count > static_max_control_nodes) return false;
+    const state_count = control_node_count * 3;
+    const StateIndex = std.math.IntFittingRange(0, state_count - 1);
+    const StateVisited = std.StaticBitSet(state_count);
+    const function = compiled_plan.functions[function_index];
+    const function_block_end = @as(usize, function.first_block) + function.block_count;
+    const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse
+        return false;
+
+    const State = struct {
+        node: usize,
+        phase: PredicateHistoryPhase,
+    };
+    const encodeState = struct {
+        fn call(state: State) usize {
+            return state.node * 3 + @intFromEnum(state.phase);
+        }
+    }.call;
+    const enqueue = struct {
+        fn call(
+            queue: *[state_count]StateIndex,
+            queue_len: *usize,
+            visited: *StateVisited,
+            state: State,
+        ) void {
+            const encoded = encodeState(state);
+            if (visited.isSet(encoded)) return;
+            visited.set(encoded);
+            queue[queue_len.*] = @intCast(encoded);
+            queue_len.* += 1;
+        }
+    }.call;
+
+    for (0..predicate_count) |candidate_index| {
+        const candidate = staticMachineConditionPredicateForIndex(
+            compiled_plan,
+            function_index,
+            candidate_index,
+        ) orelse return true;
+        var queue: [state_count]StateIndex = undefined;
+        var visited = StateVisited.initEmpty();
+        var queue_len: usize = 0;
+        var queue_index: usize = 0;
+        enqueue(&queue, &queue_len, &visited, .{
+            .node = entry_node,
+            .phase = .before_candidate,
+        });
+
+        predicate_search: while (queue_index < queue_len) : (queue_index += 1) {
+            const encoded: usize = @intCast(queue[queue_index]);
+            var state = State{
+                .node = encoded / 3,
+                .phase = @enumFromInt(encoded % 3),
+            };
+            if (state.node < compiled_plan.instructions.len) {
+                var block_index: usize = function.first_block;
+                const owner_block = while (block_index < function_block_end) : (block_index += 1) {
+                    const block = compiled_plan.blocks[block_index];
+                    const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                    if (state.node >= block.first_instruction and state.node < instruction_end) {
+                        break block_index;
+                    }
+                } else return true;
+                const instruction = compiled_plan.instructions[state.node];
+                switch (instruction.kind) {
+                    .return_error => continue :predicate_search,
+                    .call_helper => if (instruction.operand >= compiled_plan.functions.len or
+                        !analysis.completion_functions[instruction.operand]) continue :predicate_search,
+                    .call_nested_with => {
+                        const target_index = nestedWithTargetIndexForMetadata(
+                            compiled_plan,
+                            nested_with_targets,
+                            instruction.string_literal,
+                        ) orelse continue :predicate_search;
+                        if (!analysis.completion_functions[target_index]) continue :predicate_search;
+                    },
+                    .call_op => {
+                        if (instruction.operand >= compiled_plan.ops.len) return true;
+                        if (compiled_plan.ops[instruction.operand].mode == .abort) continue :predicate_search;
+                    },
+                    else => {},
+                }
+
+                if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
+                    if (predicate.eql(candidate)) {
+                        if (state.phase == .distinct_seen) return true;
+                        state.phase = .candidate_seen;
+                    } else if (state.phase == .candidate_seen) {
+                        state.phase = .distinct_seen;
+                    }
+                }
+                if (staticMachineInstructionMayWriteLocal(instruction, candidate.operand)) {
+                    state.phase = .before_candidate;
+                }
+
+                const block = compiled_plan.blocks[owner_block];
+                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                state.node = if (state.node + 1 == instruction_end)
+                    compiled_plan.instructions.len + owner_block
+                else
+                    state.node + 1;
+                enqueue(&queue, &queue_len, &visited, state);
+                continue :predicate_search;
+            }
+
+            const block_index = state.node - compiled_plan.instructions.len;
+            if (block_index < function.first_block or block_index >= function_block_end) return true;
+            const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+            const targets = switch (terminator.kind) {
+                .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
+                .jump => [2]?u16{ terminator.primary, null },
+                .return_unit, .return_value => [2]?u16{ null, null },
+            };
+            target_search: for (targets) |target_optional| {
+                const target = target_optional orelse continue :target_search;
+                state.node = staticMachineFunctionBlockStartNode(
+                    compiled_plan,
+                    function_index,
+                    target,
+                ) orelse return true;
+                enqueue(&queue, &queue_len, &visited, state);
+            }
+        }
+    }
+    return false;
+}
+
+fn validateStaticMachineRepresentableStateAuthority(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime analysis: anytype,
+) void {
+    for (compiled_plan.functions, 0..) |function, function_index| {
+        if (!analysis.reachable_functions[function_index]) continue;
+        if (staticMachineFunctionHasInterleavedPredicateRevisit(
+            compiled_plan,
+            nested_with_targets,
+            analysis,
+            function_index,
+        )) {
+            @compileError("Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate");
+        }
+        if (function_index == compiled_plan.entry_index) continue;
+        for (0..function.parameter_count) |parameter_index| {
+            if (staticMachineFunctionMayWriteLocal(
+                compiled_plan,
+                function_index,
+                @intCast(parameter_index),
+            )) {
+                @compileError("Boundary StaticMachine v1 does not support reachable helper functions that write parameter locals");
+            }
+        }
+    }
+}
+
 const StaticAfterConditionGoal = union(enum) {
     instruction: SessionOperationYieldSite,
     function_return,
@@ -5017,6 +5191,11 @@ pub fn StaticExecutableSessionForPlan(
     if (analysis.helper_cycle) {
         @compileError("Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs");
     }
+    comptime validateStaticMachineRepresentableStateAuthority(
+        compiled_plan,
+        nested_with_targets,
+        analysis,
+    );
     comptime validateTypedExecutablePlanSupportWithIdentity(
         compiled_plan,
         schema_types,
@@ -7811,17 +7990,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 return error.ProgramContractViolation;
                             if (!parent_ref.eql(child_ref)) return error.ProgramContractViolation;
                             if (local_id >= parent_locals.len or arg_index >= child_locals.len) return error.ProgramContractViolation;
-                            if (!staticMachineFunctionMayWriteLocal(
-                                compiled_plan,
-                                child.function_index,
-                                @intCast(arg_index),
-                            )) {
-                                try validateDecodedArgumentValue(
-                                    parent_ref,
-                                    parent_locals[local_id],
-                                    child_locals[arg_index],
-                                );
-                            }
+                            try validateDecodedArgumentValue(
+                                parent_ref,
+                                parent_locals[local_id],
+                                child_locals[arg_index],
+                            );
                         }
                     }
                 },

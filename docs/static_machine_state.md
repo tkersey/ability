@@ -153,8 +153,16 @@ neither serialized nor semantic.
 
 Control-path reachability validation uses a compact `u16` queue and a bitset.
 StaticMachine v1 admits at most 32,768 `(control node, suspension traversed,
-condition relation)` states—8,192 combined instructions and blocks—and
-therefore reserves at most 69,632 bytes of allocation-free local scratch.
+condition relation)` states and therefore reserves at most 69,632 bytes of
+allocation-free local scratch. The state count is
+`max(1, instructions + blocks) * (maximum distinct condition predicates + 1) * 8`.
+The predicate maximum covers every declared function because decoded function
+indices remain untrusted until validation. The structural ceiling is therefore
+4,096 combined instruction and block nodes when no predicate exists, 2,048
+nodes when the maximum is one, and fewer as the maximum grows. A reachable
+control path may use multiple predicates, but StaticMachine v1 rejects an
+unchanged predicate A revisited after a distinct predicate B because its
+compact validator deliberately retains one predicate relation.
 `Machine.Manifest` publishes the actual path-state count and scratch bytes
 together with both v1 ceilings. Comptime-generated `u16` metadata maps each
 instruction directly to its owning block and any nested target. Every
