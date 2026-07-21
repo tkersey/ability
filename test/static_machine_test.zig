@@ -508,6 +508,82 @@ fn conditionalLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn correlatedAbsentLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const value = boundary.ir.builder.local(root, 2);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        .{ .kind = .const_i32, .dst = value.index, .operand = 7 },
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+        .{ .kind = .const_i32, .dst = value.index, .operand = 9 },
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 3,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 7,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{.{
+        .label = "park",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "wait",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 1, .terminator_index = 1 },
+        .{ .first_instruction = 2, .instruction_count = 0, .terminator_index = 2 },
+        .{ .first_instruction = 2, .instruction_count = 1, .terminator_index = 3 },
+        .{ .first_instruction = 3, .instruction_count = 1, .terminator_index = 4 },
+        .{ .first_instruction = 4, .instruction_count = 1, .terminator_index = 5 },
+        .{ .first_instruction = 5, .instruction_count = 2, .terminator_index = 6 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 4 },
+        .{ .kind = .branch_if, .primary = 5, .secondary = 6 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 44,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .bool }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const payload = boundary.ir.builder.local(root, 0);
@@ -1204,6 +1280,98 @@ fn mutuallyExclusiveAfterPlan(comptime label: []const u8) boundary.ir.ProgramPla
     }) catch unreachable;
 }
 
+fn correlatedOutermostAfterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const outer_resume = boundary.ir.builder.local(root, 2);
+    const inner_resume = boundary.ir.builder.local(root, 3);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        boundary.ir.builder.callOp(root, outer_resume, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        boundary.ir.builder.callOp(root, inner_resume, boundary.ir.builder.op(root, 1), null) catch unreachable,
+        boundary.ir.builder.returnValue(root, inner_resume) catch unreachable,
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 2), null) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .string,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 3,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 4,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 6,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{
+        .{ .label = "outer", .first_op = 0, .op_count = 1 },
+        .{ .label = "inner", .first_op = 1, .op_count = 1 },
+        .{ .label = "abort", .first_op = 2, .op_count = 1 },
+    };
+    const ops = [_]boundary.ir.plan.Op{
+        .{
+            .requirement_index = 0,
+            .op_name = "outer",
+            .mode = .transform,
+            .payload_codec = .unit,
+            .resume_codec = .i32,
+            .has_after = true,
+        },
+        .{
+            .requirement_index = 1,
+            .op_name = "inner",
+            .mode = .transform,
+            .payload_codec = .unit,
+            .resume_codec = .i32,
+            .has_after = true,
+        },
+        .{
+            .requirement_index = 2,
+            .op_name = "abort",
+            .mode = .abort,
+            .payload_codec = .unit,
+            .resume_codec = .unit,
+        },
+    };
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 1, .terminator_index = 1 },
+        .{ .first_instruction = 2, .instruction_count = 0, .terminator_index = 2 },
+        .{ .first_instruction = 2, .instruction_count = 1, .terminator_index = 3 },
+        .{ .first_instruction = 3, .instruction_count = 2, .terminator_index = 4 },
+        .{ .first_instruction = 5, .instruction_count = 1, .terminator_index = 5 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .branch_if, .primary = 4, .secondary = 5 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_unit },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 45,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .bool }, .{ .codec = .i32 }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn abortDelimitedAfterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -1861,6 +2029,16 @@ const ConditionalLocalProgram = boundary.program(
 );
 const ConditionalLocalMachine = boundary.staticMachine(ConditionalLocalProgram, .{});
 
+const CorrelatedAbsentLocalBody = struct {
+    pub const compiled_plan = correlatedAbsentLocalPlan("static-machine-correlated-absent-local");
+};
+const CorrelatedAbsentLocalProgram = boundary.program(
+    "static-machine-correlated-absent-local",
+    struct {},
+    CorrelatedAbsentLocalBody,
+);
+const CorrelatedAbsentLocalMachine = boundary.staticMachine(CorrelatedAbsentLocalProgram, .{});
+
 const HelperBody = struct {
     pub const compiled_plan = helperEffectPlan("static-machine-helper");
 };
@@ -2024,6 +2202,28 @@ const MutuallyExclusiveAfterProgram = boundary.program(
     MutuallyExclusiveAfterBody,
 );
 const MutuallyExclusiveAfterMachine = boundary.staticMachine(MutuallyExclusiveAfterProgram, .{});
+
+const CorrelatedOutermostAfterHandlers = struct {
+    outer: struct {
+        pub fn afterDispatch(_: *const @This(), value: bool) ![]const u8 {
+            return if (value) "matched" else "unexpected";
+        }
+    },
+    inner: struct {
+        pub fn afterDispatch(_: *const @This(), value: i32) !bool {
+            return value != 0;
+        }
+    },
+};
+const CorrelatedOutermostAfterBody = struct {
+    pub const compiled_plan = correlatedOutermostAfterPlan("static-machine-correlated-outermost-after");
+};
+const CorrelatedOutermostAfterProgram = boundary.program(
+    "static-machine-correlated-outermost-after",
+    CorrelatedOutermostAfterHandlers,
+    CorrelatedOutermostAfterBody,
+);
+const CorrelatedOutermostAfterMachine = boundary.staticMachine(CorrelatedOutermostAfterProgram, .{});
 
 const AfterHandlersHandlerlessOuter = struct {
     outer: struct {},
@@ -3490,6 +3690,41 @@ test "StaticMachine after closure preserves repeated-condition correlation" {
     try std.testing.expectEqualStrings("matched", second_result.value());
 }
 
+test "StaticMachine outermost after closure preserves repeated-condition correlation" {
+    const state = try CorrelatedOutermostAfterMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 0)},
+    );
+    defer CorrelatedOutermostAfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const outer_request = switch (try CorrelatedOutermostAfterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try CorrelatedOutermostAfterMachine.@"resume"(state, outer_request, @as(i32, 1));
+    const inner_request = switch (try CorrelatedOutermostAfterMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try CorrelatedOutermostAfterMachine.@"resume"(state, inner_request, @as(i32, 7));
+    const inner_after = switch (try CorrelatedOutermostAfterMachine.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try CorrelatedOutermostAfterMachine.resumeAfter(state, inner_after, true);
+    const outer_after = switch (try CorrelatedOutermostAfterMachine.reduce(state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try CorrelatedOutermostAfterMachine.resumeAfter(state, outer_after, @as([]const u8, "matched"));
+    var result = switch (try CorrelatedOutermostAfterMachine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("matched", result.value());
+}
+
 test "StaticMachine rejects contradictory repeated-condition after segments" {
     const first_state = try MutuallyExclusiveAfterMachine.initialState(
         std.testing.allocator,
@@ -3788,6 +4023,23 @@ test "StaticMachine local presence follows the exact continuation" {
     defer std.testing.allocator.free(other_encoded);
     const other_restored = try ConditionalLocalMachine.decodeState(std.testing.allocator, other_encoded);
     ConditionalLocalMachine.deinitState(other_restored);
+}
+
+test "StaticMachine local presence preserves repeated-condition authority" {
+    const state = try CorrelatedAbsentLocalMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 1)},
+    );
+    defer CorrelatedAbsentLocalMachine.deinitState(state);
+    var fuel: u64 = 100;
+    switch (try CorrelatedAbsentLocalMachine.reduce(state, &fuel)) {
+        .request => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try CorrelatedAbsentLocalMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try CorrelatedAbsentLocalMachine.decodeState(std.testing.allocator, encoded);
+    CorrelatedAbsentLocalMachine.deinitState(restored);
 }
 
 test "StaticMachine rejects a canonical state missing a resumed operation result" {

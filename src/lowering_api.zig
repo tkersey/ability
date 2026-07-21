@@ -2942,11 +2942,6 @@ fn validateStaticMachineAfterHandlerContracts(
     }
 }
 
-const StaticMachineAfterPathGoal = union(enum) {
-    instruction: usize,
-    function_return,
-};
-
 const StaticConditionPredicate = struct {
     kind: program_plan.InstructionKind,
     operand: u16,
@@ -3328,6 +3323,7 @@ fn validateStaticMachineRepresentableStateAuthority(
 }
 
 const StaticAfterConditionGoal = union(enum) {
+    outer_site,
     instruction: SessionOperationYieldSite,
     function_return,
 };
@@ -3344,11 +3340,11 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
     const function_index = outer_site.function_index;
     if (function_index >= compiled_plan.functions.len) return false;
     switch (goal) {
+        .outer_site => {},
         .instruction => |inner_site| if (function_index != inner_site.function_index) return false,
         .function_return => {},
     }
     const predicate_count = staticMachineFunctionConditionPredicateCount(compiled_plan, function_index);
-    if (comptime predicate_count == 0) return true;
     const predicate_slot_count = predicate_count + 1;
     const phase_count = 2;
     const condition_value_count = 3;
@@ -3438,6 +3434,10 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
     while (queue_index < queue_len) : (queue_index += 1) {
         var state = decodeState(@intCast(queue[queue_index]));
         if (!state.after_outer and state.node == outer_site.instruction_index) {
+            switch (goal) {
+                .outer_site => return true,
+                .instruction, .function_return => {},
+            }
             const next_node = staticMachineNodeAfterSite(compiled_plan, outer_site) orelse return false;
             const outer_instruction = compiled_plan.instructions[outer_site.instruction_index];
             if (state.predicate_slot != 0) {
@@ -3457,6 +3457,7 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
             continue;
         }
         if (state.after_outer) switch (goal) {
+            .outer_site => {},
             .instruction => |inner_site| if (state.node == inner_site.instruction_index) return true,
             .function_return => {},
         };
@@ -3484,7 +3485,8 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                 .call_op => {
                     if (instruction.operand >= compiled_plan.ops.len) return false;
                     const op = compiled_plan.ops[instruction.operand];
-                    if (op.mode == .abort or (state.after_outer and op.has_after)) continue;
+                    if (op.mode == .abort or
+                        (op.has_after and (state.after_outer or goal == .outer_site))) continue;
                 },
                 else => {},
             }
@@ -3565,117 +3567,10 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                 enqueue(&queue, &queue_len, &visited, state);
             },
             .return_unit, .return_value => switch (goal) {
+                .outer_site => {},
                 .instruction => {},
                 .function_return => if (state.after_outer) return true,
             },
-        }
-    }
-    return false;
-}
-
-fn staticMachineAfterFreePathExists(
-    comptime compiled_plan: program_plan.ProgramPlan,
-    comptime nested_with_targets: anytype,
-    comptime function_index: usize,
-    comptime start_node: usize,
-    comptime goal: StaticMachineAfterPathGoal,
-) bool {
-    @setEvalBranchQuota(1_000_000);
-    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
-    if (comptime control_node_count == 0) return false;
-    if (function_index >= compiled_plan.functions.len or start_node >= control_node_count) return false;
-    const analysis = comptime program_plan.staticEntryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch
-        return false;
-    const function = compiled_plan.functions[function_index];
-    const function_block_end = @as(usize, function.first_block) + function.block_count;
-
-    var queue: [control_node_count]usize = undefined;
-    var visited = [_]bool{false} ** control_node_count;
-    var queue_len: usize = 1;
-    var queue_index: usize = 0;
-    queue[0] = start_node;
-    visited[start_node] = true;
-
-    while (queue_index < queue_len) : (queue_index += 1) {
-        const node = queue[queue_index];
-        switch (goal) {
-            .instruction => |target| if (node == target) return true,
-            .function_return => {},
-        }
-
-        if (node < compiled_plan.instructions.len) {
-            var block_index: usize = function.first_block;
-            const owner_block = while (block_index < function_block_end) : (block_index += 1) {
-                const candidate = compiled_plan.blocks[block_index];
-                const instruction_end = @as(usize, candidate.first_instruction) + candidate.instruction_count;
-                if (node >= candidate.first_instruction and node < instruction_end) break block_index;
-            } else return false;
-            const instruction = compiled_plan.instructions[node];
-            switch (instruction.kind) {
-                .return_error => continue,
-                .call_helper => {
-                    if (instruction.operand >= compiled_plan.functions.len or
-                        !analysis.completion_functions[instruction.operand])
-                    {
-                        continue;
-                    }
-                },
-                .call_nested_with => {
-                    const target_index = nestedWithTargetIndexForMetadata(
-                        compiled_plan,
-                        nested_with_targets,
-                        instruction.string_literal,
-                    ) orelse continue;
-                    if (!analysis.completion_functions[target_index]) continue;
-                },
-                .call_op => {
-                    if (instruction.operand >= compiled_plan.ops.len) return false;
-                    const op = compiled_plan.ops[instruction.operand];
-                    if (op.mode == .abort or op.has_after) continue;
-                },
-                else => {},
-            }
-            const block = compiled_plan.blocks[owner_block];
-            const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
-            const next_node = if (node + 1 == instruction_end)
-                compiled_plan.instructions.len + owner_block
-            else
-                node + 1;
-            if (!visited[next_node]) {
-                visited[next_node] = true;
-                queue[queue_len] = next_node;
-                queue_len += 1;
-            }
-            continue;
-        }
-
-        const block_index = node - compiled_plan.instructions.len;
-        if (block_index < function.first_block or block_index >= function_block_end) return false;
-        const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
-        switch (goal) {
-            .instruction => {},
-            .function_return => if (terminator.kind == .return_unit or terminator.kind == .return_value) {
-                return true;
-            },
-        }
-        const targets = switch (terminator.kind) {
-            .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
-            .jump => [2]?u16{ terminator.primary, null },
-            .return_unit, .return_value => [2]?u16{ null, null },
-        };
-        target_loop: for (targets) |target_optional| {
-            const target = target_optional orelse continue :target_loop;
-            if (target < function.first_block or target >= function_block_end) return false;
-            const target_block = compiled_plan.blocks[target];
-            const next_node = if (target_block.instruction_count == 0)
-                compiled_plan.instructions.len + target
-            else
-                target_block.first_instruction;
-            if (!visited[next_node]) {
-                visited[next_node] = true;
-                queue[queue_len] = next_node;
-                queue_len += 1;
-            }
         }
     }
     return false;
@@ -3715,13 +3610,11 @@ fn staticMachineAfterSiteMayBeOutermost(
     comptime nested_with_targets: anytype,
     comptime target_site: SessionOperationYieldSite,
 ) bool {
-    const start_node = staticMachineFunctionEntryNode(compiled_plan, target_site.function_index) orelse return false;
-    return staticMachineAfterFreePathExists(
+    return staticMachineAfterSiteHasConditionCompatiblePath(
         compiled_plan,
         nested_with_targets,
-        target_site.function_index,
-        start_node,
-        .{ .instruction = target_site.instruction_index },
+        target_site,
+        .outer_site,
     );
 }
 
@@ -3730,14 +3623,6 @@ fn staticMachineAfterSiteMayBeInnermost(
     comptime nested_with_targets: anytype,
     comptime target_site: SessionOperationYieldSite,
 ) bool {
-    const start_node = staticMachineNodeAfterSite(compiled_plan, target_site) orelse return false;
-    if (!staticMachineAfterFreePathExists(
-        compiled_plan,
-        nested_with_targets,
-        target_site.function_index,
-        start_node,
-        .function_return,
-    )) return false;
     return staticMachineAfterSiteHasConditionCompatiblePath(
         compiled_plan,
         nested_with_targets,
@@ -3753,14 +3638,6 @@ fn staticMachineAfterSitesMayBeAdjacent(
     comptime inner_site: SessionOperationYieldSite,
 ) bool {
     if (outer_site.function_index != inner_site.function_index) return false;
-    const start_node = staticMachineNodeAfterSite(compiled_plan, outer_site) orelse return false;
-    if (!staticMachineAfterFreePathExists(
-        compiled_plan,
-        nested_with_targets,
-        outer_site.function_index,
-        start_node,
-        .{ .instruction = inner_site.instruction_index },
-    )) return false;
     return staticMachineAfterSiteHasConditionCompatiblePath(
         compiled_plan,
         nested_with_targets,
@@ -8116,9 +7993,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 @intFromBool(source_valid);
         }
 
-        fn conditionAuthorityContainsReference(
+        fn conditionAuthorityMatchingReference(
             authority: ControlConditionAuthority,
-        ) bool {
+        ) ControlConditionAuthority {
+            var result = ControlConditionAuthority.initEmpty();
             var predicate_slot: usize = 0;
             while (predicate_slot < control_predicate_slot_count) : (predicate_slot += 1) {
                 var validity_index: usize = 0;
@@ -8126,10 +8004,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     const authority_index =
                         (predicate_slot * 2 + 1) * condition_validity_count +
                         validity_index;
-                    if (authority.isSet(authority_index)) return true;
+                    if (authority.isSet(authority_index)) result.set(authority_index);
                 }
             }
-            return false;
+            return result;
         }
 
         fn advanceConditionAuthority(
@@ -8513,20 +8391,6 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             };
         }
 
-        fn enqueueControlNode(
-            queue: *[control_node_capacity]ControlNodeIndex,
-            queue_len: *usize,
-            visited: *ControlNodeVisited,
-            node: usize,
-        ) error{ProgramContractViolation}!void {
-            if (node >= control_node_count) return error.ProgramContractViolation;
-            if (visited.isSet(node)) return;
-            if (queue_len.* >= queue.len) return error.ProgramContractViolation;
-            visited.set(node);
-            queue[queue_len.*] = @intCast(node);
-            queue_len.* += 1;
-        }
-
         fn pendingSecuresLocal(
             self: *const Self,
             frame_index: usize,
@@ -8561,6 +8425,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             budget: *ControlValidationBudget,
             frame_index: usize,
             local_index: u16,
+            initial_condition_authority: ControlConditionAuthority,
         ) error{ProgramContractViolation}!void {
             if (try self.pendingSecuresLocal(frame_index, local_index)) return;
             const frame = self.frames.at(frame_index) orelse return error.ProgramContractViolation;
@@ -8573,40 +8438,50 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 frame.instruction_index,
             );
 
-            var queue: [control_node_capacity]ControlNodeIndex = undefined;
-            var visited = ControlNodeVisited.initEmpty();
+            var queue: [control_path_state_capacity]ControlPathStateIndex = undefined;
+            var visited = ControlPathVisited.initEmpty();
             var queue_len: usize = 0;
             var queue_index: usize = 0;
-            if (cursor_node < compiled_plan.instructions.len) {
-                try enqueueControlNode(&queue, &queue_len, &visited, cursor_node);
-            } else {
-                const block_index = cursor_node - compiled_plan.instructions.len;
-                if (block_index < function.first_block or block_index >= function_block_end) {
-                    return error.ProgramContractViolation;
-                }
-                const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
-                switch (terminator.kind) {
-                    .branch_if => try enqueueControlNode(
-                        &queue,
-                        &queue_len,
-                        &visited,
-                        try controlNodeForBlockStart(
-                            if (frame.last_condition) terminator.primary else terminator.secondary,
-                        ),
-                    ),
-                    .jump => try enqueueControlNode(
-                        &queue,
-                        &queue_len,
-                        &visited,
-                        try controlNodeForBlockStart(terminator.primary),
-                    ),
-                    .return_unit, .return_value => return,
-                }
+            var authority_index: usize = 0;
+            while (authority_index < condition_authority_count) : (authority_index += 1) {
+                if (!initial_condition_authority.isSet(authority_index)) continue;
+                var encoded_authority = authority_index;
+                const source_valid = if (condition_validity_count == 1)
+                    false
+                else blk: {
+                    const valid = encoded_authority % condition_validity_count != 0;
+                    encoded_authority /= condition_validity_count;
+                    break :blk valid;
+                };
+                try enqueueControlPathState(&queue, &queue_len, &visited, .{
+                    .node = cursor_node,
+                    .traversed_allowed_suspension = true,
+                    .predicate_slot = encoded_authority / 2,
+                    .condition_matches_reference = encoded_authority % 2 != 0,
+                    .source_valid = source_valid,
+                });
             }
 
             while (queue_index < queue_len) : (queue_index += 1) {
                 try budget.consume();
-                const node: usize = @intCast(queue[queue_index]);
+                var encoded_state: usize = @intCast(queue[queue_index]);
+                var encoded_authority = encoded_state % condition_authority_count;
+                encoded_state /= condition_authority_count;
+                const source_valid = if (condition_validity_count == 1)
+                    false
+                else blk: {
+                    const valid = encoded_authority % condition_validity_count != 0;
+                    encoded_authority /= condition_validity_count;
+                    break :blk valid;
+                };
+                var state: ControlPathState = .{
+                    .node = encoded_state / 2,
+                    .traversed_allowed_suspension = true,
+                    .predicate_slot = encoded_authority / 2,
+                    .condition_matches_reference = encoded_authority % 2 != 0,
+                    .source_valid = source_valid,
+                };
+                const node = state.node;
                 if (node < compiled_plan.instructions.len) {
                     const block_index = blockIndexForInstruction(frame.function_index, node) orelse
                         return error.ProgramContractViolation;
@@ -8638,15 +8513,47 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     }
                     const block = compiled_plan.blocks[block_index];
                     const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
-                    try enqueueControlNode(
-                        &queue,
-                        &queue_len,
-                        &visited,
-                        if (node + 1 == instruction_end)
-                            compiled_plan.instructions.len + block_index
-                        else
-                            node + 1,
-                    );
+                    const next_node = if (node + 1 == instruction_end)
+                        compiled_plan.instructions.len + block_index
+                    else
+                        node + 1;
+                    if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
+                        const predicate_index = staticMachineConditionPredicateIndexForRuntimeFunction(
+                            compiled_plan,
+                            frame.function_index,
+                            predicate,
+                        ) orelse return error.ProgramContractViolation;
+                        const predicate_source_valid = !staticMachineInstructionMayWriteLocal(
+                            instruction,
+                            predicate.operand,
+                        );
+                        if (state.predicate_slot == predicate_index + 1 and state.source_valid) {
+                            state.node = next_node;
+                            state.source_valid = predicate_source_valid;
+                            try enqueueControlPathState(&queue, &queue_len, &visited, state);
+                        } else {
+                            state.node = next_node;
+                            state.predicate_slot = predicate_index + 1;
+                            state.condition_matches_reference = false;
+                            state.source_valid = predicate_source_valid;
+                            try enqueueControlPathState(&queue, &queue_len, &visited, state);
+                            state.condition_matches_reference = true;
+                            try enqueueControlPathState(&queue, &queue_len, &visited, state);
+                        }
+                    } else {
+                        state.node = next_node;
+                        if (state.predicate_slot != 0) {
+                            const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
+                                compiled_plan,
+                                frame.function_index,
+                                state.predicate_slot - 1,
+                            ) orelse return error.ProgramContractViolation;
+                            if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
+                                state.source_valid = false;
+                            }
+                        }
+                        try enqueueControlPathState(&queue, &queue_len, &visited, state);
+                    }
                     continue;
                 }
 
@@ -8657,25 +8564,19 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
                 switch (terminator.kind) {
                     .branch_if => {
-                        try enqueueControlNode(
-                            &queue,
-                            &queue_len,
-                            &visited,
-                            try controlNodeForBlockStart(terminator.primary),
+                        const condition = if (state.condition_matches_reference)
+                            frame.last_condition
+                        else
+                            !frame.last_condition;
+                        state.node = try controlNodeForBlockStart(
+                            if (condition) terminator.primary else terminator.secondary,
                         );
-                        try enqueueControlNode(
-                            &queue,
-                            &queue_len,
-                            &visited,
-                            try controlNodeForBlockStart(terminator.secondary),
-                        );
+                        try enqueueControlPathState(&queue, &queue_len, &visited, state);
                     },
-                    .jump => try enqueueControlNode(
-                        &queue,
-                        &queue_len,
-                        &visited,
-                        try controlNodeForBlockStart(terminator.primary),
-                    ),
+                    .jump => {
+                        state.node = try controlNodeForBlockStart(terminator.primary);
+                        try enqueueControlPathState(&queue, &queue_len, &visited, state);
+                    },
                     .return_unit, .return_value => {},
                 }
             }
@@ -8685,7 +8586,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             self: *Self,
             budget: *ControlValidationBudget,
             frame_index: usize,
-        ) error{ProgramContractViolation}!void {
+        ) error{ProgramContractViolation}!ControlConditionAuthority {
             const frame = self.frames.at(frame_index) orelse return error.ProgramContractViolation;
             const function = compiled_plan.functions[frame.function_index];
             const entry_block = @as(usize, function.first_block) + function.entry_block;
@@ -8769,24 +8670,29 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 frame.last_condition,
                 condition_authority,
             );
-            if (!conditionAuthorityContainsReference(condition_authority)) {
-                return error.ProgramContractViolation;
-            }
+            const matching_authority = conditionAuthorityMatchingReference(condition_authority);
+            if (matching_authority.count() == 0) return error.ProgramContractViolation;
+            return matching_authority;
         }
 
         fn validateDecodedAfterStackReachability(
             self: *Self,
             budget: *ControlValidationBudget,
+            cursor_condition_authorities: *[analysis.max_active_frame_depth]ControlConditionAuthority,
         ) error{ProgramContractViolation}!void {
             var frame_index: usize = 0;
             while (frame_index < self.frames.len()) : (frame_index += 1) {
-                try self.validateDecodedFrameControlPath(budget, frame_index);
+                cursor_condition_authorities[frame_index] = try self.validateDecodedFrameControlPath(
+                    budget,
+                    frame_index,
+                );
             }
         }
 
         fn validateDecodedLocalPresence(
             self: *Self,
             budget: *ControlValidationBudget,
+            cursor_condition_authorities: *const [analysis.max_active_frame_depth]ControlConditionAuthority,
         ) error{ProgramContractViolation}!void {
             var frame_index: usize = 0;
             while (frame_index < self.frames.len()) : (frame_index += 1) {
@@ -8806,6 +8712,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         budget,
                         frame_index,
                         @intCast(local_index),
+                        cursor_condition_authorities[frame_index],
                     );
                 }
             }
@@ -8840,6 +8747,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         fn validateDecodedPendingState(self: *Self) error{ProgramContractViolation}!void {
             var control_validation_budget: ControlValidationBudget = .{};
             if (comptime canonical_request_identity) {
+                var cursor_condition_authorities: [analysis.max_active_frame_depth]ControlConditionAuthority = undefined;
                 if (self.pending) |pending| switch (pending) {
                     .op => |pending_op| if (pending_op.has_after and
                         self.scratch.afterEntries().len >= session_after_stack_capacity)
@@ -8848,8 +8756,14 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     },
                     .after => {},
                 };
-                try self.validateDecodedAfterStackReachability(&control_validation_budget);
-                try self.validateDecodedLocalPresence(&control_validation_budget);
+                try self.validateDecodedAfterStackReachability(
+                    &control_validation_budget,
+                    &cursor_condition_authorities,
+                );
+                try self.validateDecodedLocalPresence(
+                    &control_validation_budget,
+                    &cursor_condition_authorities,
+                );
                 try self.validateDecodedPendingAuthority();
             }
             const pending = switch (self.pending orelse {
