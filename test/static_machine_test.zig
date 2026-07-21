@@ -3066,7 +3066,7 @@ test "StaticMachine canonical identity forgets nominal carrier names" {
     try std.testing.expectEqualSlices(u8, encoded_a, encoded_b);
 }
 
-test "StaticMachine contract identity binds enum tag semantics" {
+test "StaticMachine contract identity binds logical enum semantics" {
     try std.testing.expectEqual(
         EnumMachineA.Manifest.canonical_plan_fingerprint,
         EnumMachineB.Manifest.canonical_plan_fingerprint,
@@ -3076,14 +3076,21 @@ test "StaticMachine contract identity binds enum tag semantics" {
         EnumMachineWide.Manifest.canonical_plan_fingerprint,
     );
     try std.testing.expect(EnumMachineA.Manifest.machine_contract_fingerprint != EnumMachineB.Manifest.machine_contract_fingerprint);
-    try std.testing.expect(EnumMachineA.Manifest.machine_contract_fingerprint != EnumMachineWide.Manifest.machine_contract_fingerprint);
+    try std.testing.expectEqual(
+        EnumMachineA.Manifest.machine_contract_fingerprint,
+        EnumMachineWide.Manifest.machine_contract_fingerprint,
+    );
 
     const state = try EnumMachineA.initialState(std.testing.allocator, .{EnumMappingA.ready});
     defer EnumMachineA.deinitState(state);
     const encoded = try EnumMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
     try std.testing.expectError(error.ProgramContractViolation, EnumMachineB.decodeState(std.testing.allocator, encoded));
-    try std.testing.expectError(error.ProgramContractViolation, EnumMachineWide.decodeState(std.testing.allocator, encoded));
+    const wide_state = try EnumMachineWide.decodeState(std.testing.allocator, encoded);
+    defer EnumMachineWide.deinitState(wide_state);
+    const wide_encoded = try EnumMachineWide.encodeState(std.testing.allocator, wide_state);
+    defer std.testing.allocator.free(wide_encoded);
+    try std.testing.expectEqualSlices(u8, encoded, wide_encoded);
 }
 
 test "StaticMachine canonical identity ignores provenance-only ProgramPlan fields" {

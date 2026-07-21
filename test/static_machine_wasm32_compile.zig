@@ -62,6 +62,84 @@ fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn enumIdentityPlan(comptime Status: type) boundary.ir.ProgramPlan {
+    const schemas = boundary.ir.schema.Registry(.{Status});
+    const root = boundary.ir.builder.function(0);
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .parameter_count = 0,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 0,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = 0,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = 0,
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_unit }};
+    return boundary.ir.builder.finish(.{
+        .label = "static-machine-logical-enum-identity",
+        .ir_hash = 2,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .value_schemas = &schemas.value_schemas,
+        .value_fields = &schemas.value_fields,
+        .value_variants = &schemas.value_variants,
+        .locals = &.{},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &.{},
+    }) catch unreachable;
+}
+
+fn EnumIdentityBody(comptime Status: type) type {
+    return struct {
+        pub const value_schema_types = .{Status};
+        pub const compiled_plan = enumIdentityPlan(Status);
+    };
+}
+
+const TargetWcharStatus = enum(std.c.wchar_t) {
+    ready = 1,
+    waiting = 2,
+};
+const LogicalStatus = enum(i64) {
+    ready = 1,
+    waiting = 2,
+};
+const TargetWcharProgram = boundary.program(
+    "static-machine-logical-enum-identity",
+    struct {},
+    EnumIdentityBody(TargetWcharStatus),
+);
+const LogicalProgram = boundary.program(
+    "static-machine-logical-enum-identity",
+    struct {},
+    EnumIdentityBody(LogicalStatus),
+);
+const TargetWcharMachine = boundary.staticMachine(TargetWcharProgram, .{});
+const LogicalMachine = boundary.staticMachine(LogicalProgram, .{});
+
+comptime {
+    if (TargetWcharMachine.Manifest.machine_contract_fingerprint !=
+        LogicalMachine.Manifest.machine_contract_fingerprint)
+    {
+        @compileError("logical enum identity must not depend on target-local tag storage");
+    }
+}
+
 const Body = struct {
     pub const compiled_plan = oneEffectPlan("static-machine-wasm32-smoke");
 };

@@ -1149,14 +1149,6 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support non-exhaustive enum carriers",
         },
         .{
-            .path = "test/compile_fail/static_machine_target_sized_enum.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support target-dependent enum tag types",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_c_abi_enum_tag.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support target-dependent enum tag types",
-        },
-        .{
             .path = "test/compile_fail/static_machine_multiple_condition_predicates.zig",
             .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
         },

@@ -77,10 +77,10 @@ string-list carrier would make alias topology observable, while canonical state
 deliberately does not preserve pointer identity. StaticMachine v1 also rejects
 product schemas with comptime fields because its canonical decoder cannot
 reconstruct compile-time-only values at runtime. Non-exhaustive enum carriers
-are also rejected: the v1 ordinal codec cannot represent an unknown runtime
-tag. Enum carriers with target-dependent `usize`, `isize`, or C-ABI integer tag
-types are rejected as well so one source program has one target-neutral
-contract identity. Immutable
+are also rejected: the v1 tag-name codec cannot represent an unknown runtime
+tag. Exhaustive enum contracts bind their ordered field names and explicit
+discriminants, while target-local integer storage is normalized away because
+the canonical codec represents an enum by its logical tag name. Immutable
 `[]const []const u8` carriers remain supported. An authored `afterDispatch`
 must also have the runtime shape used by the static after-site contract: a valid
 receiver, one value parameter, and a return value. Every reachable authored
@@ -119,10 +119,10 @@ same format on native and wasm32 targets.
 Canonical plan and structured-value identity forget nominal Zig schema labels;
 those labels remain source-admission and diagnostic metadata. Structural
 carrier identity binds the fields that determine encoding and reduction,
-including an enum's tag signedness and width, exhaustiveness, field names, and
-explicit discriminant values. Renaming an otherwise identical carrier therefore
-preserves compatibility, while changing an enum representation or discriminant
-does not.
+including an enum's exhaustiveness, ordered field names, and explicit
+discriminant values. Renaming an otherwise identical carrier or changing only
+its physical tag storage therefore preserves compatibility, while changing a
+logical field or discriminant does not.
 
 ## Authority boundary
 

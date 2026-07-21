@@ -41,9 +41,11 @@ contract.
 
 Canonical schema identity is structural. Nominal Zig schema labels remain
 diagnostic and source-admission metadata but do not distinguish portable state.
-Enum identity includes tag signedness and width, exhaustiveness, field names,
-and explicit discriminant values. StaticMachine v1 rejects non-exhaustive enum
-carriers because the ordinal wire codec cannot reconstruct unknown tags.
+Enum identity includes exhaustiveness, ordered field names, and explicit
+discriminant values. Physical tag signedness and width are not canonical
+observations because the wire codec represents an enum by its logical tag name.
+StaticMachine v1 rejects non-exhaustive enum carriers because the tag-name wire
+codec cannot reconstruct unknown tags.
 
 StaticMachine request and after-site identities use a target-neutral canonical
 domain. Provenance-only changes such as `ir_hash` do not change canonical
@@ -69,9 +71,10 @@ ProgramPlan `.usize` local applies the canonical 32-bit domain. Oversized
 authored values, reachable `const_usize` instructions, responses,
 reducer-produced values, and decoded state all fail closed.
 
-Enums used as StaticMachine schema carriers must declare fixed-width tag types.
-Target-sized `usize` and `isize` enum tags are rejected because their concrete
-carrier identity changes between native 64-bit and wasm32 targets.
+Exhaustive enums may use fixed-width, target-sized, or C-ABI integer tag types.
+The carrier contract normalizes those physical representations, so equal
+ordered field names and explicit discriminants retain one identity across
+native and wasm32 targets.
 
 Readers reject a mismatched machine identity, invalid enum or boolean, malformed
 frame topology, an after stack that is not reachable along the decoded control

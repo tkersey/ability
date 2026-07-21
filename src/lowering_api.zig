@@ -938,9 +938,6 @@ fn sessionSiteHashStaticCarrierType(hasher: *std.hash.Wyhash, comptime T: type) 
         },
         .@"enum" => |info| {
             sessionSiteHashBytes(hasher, "sum-enum");
-            const tag_info = @typeInfo(info.tag_type).int;
-            sessionSiteHashBytes(hasher, @tagName(tag_info.signedness));
-            sessionSiteHashU16(hasher, tag_info.bits);
             sessionSiteHashBool(hasher, info.is_exhaustive);
             sessionSiteHashUsize(hasher, info.fields.len);
             inline for (info.fields) |field| {
@@ -13745,6 +13742,66 @@ test "StaticMachine contract identity binds concrete schema carriers" {
         error.ProgramContractViolation,
         CanonicalWidthCore.decodeState(std.testing.allocator, encoded),
     );
+}
+
+test "StaticMachine enum contract identity forgets physical tag storage" {
+    const Signed = enum(i16) {
+        ready = 1,
+        waiting = 2,
+    };
+    const Unsigned = enum(u64) {
+        ready = 1,
+        waiting = 2,
+    };
+    const DifferentDiscriminant = enum(u64) {
+        ready = 1,
+        waiting = 3,
+    };
+    const SignedCore = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-machine-logical-enum-identity",
+        supportLastReturnSumPayloadPlan(Signed),
+        .{Signed},
+        &.{},
+        struct {},
+        struct {},
+        1 << 20,
+    );
+    const UnsignedCore = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-machine-logical-enum-identity",
+        supportLastReturnSumPayloadPlan(Unsigned),
+        .{Unsigned},
+        &.{},
+        struct {},
+        struct {},
+        1 << 20,
+    );
+    const DifferentDiscriminantCore = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-machine-logical-enum-identity",
+        supportLastReturnSumPayloadPlan(DifferentDiscriminant),
+        .{DifferentDiscriminant},
+        &.{},
+        struct {},
+        struct {},
+        1 << 20,
+    );
+
+    try std.testing.expectEqual(
+        SignedCore.canonical_plan_fingerprint,
+        UnsignedCore.canonical_plan_fingerprint,
+    );
+    try std.testing.expectEqual(SignedCore.contract_fingerprint, UnsignedCore.contract_fingerprint);
+    try std.testing.expect(SignedCore.contract_fingerprint != DifferentDiscriminantCore.contract_fingerprint);
+
+    var state = try SignedCore.start(std.testing.allocator, .{Signed.ready});
+    defer state.deinit();
+    const encoded = try state.encodeState(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    var decoded = try UnsignedCore.decodeState(std.testing.allocator, encoded);
+    defer decoded.deinit();
+    try decoded.validateState();
 }
 
 test "StaticMachine canonical coherence compares exact sum variants" {

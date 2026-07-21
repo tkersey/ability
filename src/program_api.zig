@@ -1352,27 +1352,7 @@ const StaticMachineCarrierBlocker = enum {
     comptime_struct_field,
     mutable_string_list,
     non_exhaustive_enum,
-    target_dependent_enum_tag,
 };
-
-fn staticMachineEnumTagIsTargetDependent(comptime Tag: type) bool {
-    if (Tag == usize or Tag == isize) return true;
-    const tag_name = @typeName(Tag);
-    inline for (.{
-        "c_char",
-        "c_short",
-        "c_ushort",
-        "c_int",
-        "c_uint",
-        "c_long",
-        "c_ulong",
-        "c_longlong",
-        "c_ulonglong",
-    }) |name| {
-        if (std.mem.eql(u8, tag_name, name)) return true;
-    }
-    return false;
-}
 
 fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBlocker {
     if (ValueType == [][]const u8) return .mutable_string_list;
@@ -1380,8 +1360,6 @@ fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBl
         .optional => |optional| staticMachineCarrierBlocker(optional.child),
         .@"enum" => |info| if (!info.is_exhaustive)
             .non_exhaustive_enum
-        else if (staticMachineEnumTagIsTargetDependent(info.tag_type))
-            .target_dependent_enum_tag
         else
             null,
         .@"struct" => |info| {
@@ -1417,7 +1395,6 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
             .comptime_struct_field => @compileError("Boundary StaticMachine v1 does not support comptime fields inside product schemas"),
             .mutable_string_list => @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas"),
             .non_exhaustive_enum => @compileError("Boundary StaticMachine v1 does not support non-exhaustive enum carriers"),
-            .target_dependent_enum_tag => @compileError("Boundary StaticMachine v1 does not support target-dependent enum tag types"),
         };
     }
     const Body = Program.StaticMachineBody;
