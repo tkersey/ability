@@ -584,6 +584,84 @@ fn correlatedAbsentLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan
     }) catch unreachable;
 }
 
+fn rewrittenPredicateAbsentLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const value = boundary.ir.builder.local(root, 2);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        .{ .kind = .const_i32, .dst = value.index, .operand = 7 },
+        .{ .kind = .const_i32, .dst = input.index, .operand = 0 },
+        .{ .kind = .const_i32, .dst = input.index, .operand = 1 },
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+        .{ .kind = .const_i32, .dst = value.index, .operand = 9 },
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 3,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 7,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{.{
+        .label = "park",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "wait",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 2, .terminator_index = 1 },
+        .{ .first_instruction = 3, .instruction_count = 1, .terminator_index = 2 },
+        .{ .first_instruction = 4, .instruction_count = 1, .terminator_index = 3 },
+        .{ .first_instruction = 5, .instruction_count = 1, .terminator_index = 4 },
+        .{ .first_instruction = 6, .instruction_count = 1, .terminator_index = 5 },
+        .{ .first_instruction = 7, .instruction_count = 2, .terminator_index = 6 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 4 },
+        .{ .kind = .branch_if, .primary = 5, .secondary = 6 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 45,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .bool }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn controlValidationLocalWorkPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -2091,6 +2169,21 @@ const CorrelatedAbsentLocalProgram = boundary.program(
     CorrelatedAbsentLocalBody,
 );
 const CorrelatedAbsentLocalMachine = boundary.staticMachine(CorrelatedAbsentLocalProgram, .{});
+
+const RewrittenPredicateAbsentLocalBody = struct {
+    pub const compiled_plan = rewrittenPredicateAbsentLocalPlan(
+        "static-machine-rewritten-predicate-absent-local",
+    );
+};
+const RewrittenPredicateAbsentLocalProgram = boundary.program(
+    "static-machine-rewritten-predicate-absent-local",
+    struct {},
+    RewrittenPredicateAbsentLocalBody,
+);
+const RewrittenPredicateAbsentLocalMachine = boundary.staticMachine(
+    RewrittenPredicateAbsentLocalProgram,
+    .{},
+);
 
 const ControlValidationLocalWorkBody = struct {
     pub const compiled_plan = controlValidationLocalWorkPlan(
@@ -4127,6 +4220,63 @@ test "StaticMachine local presence preserves repeated-condition authority" {
     defer std.testing.allocator.free(encoded);
     const restored = try CorrelatedAbsentLocalMachine.decodeState(std.testing.allocator, encoded);
     CorrelatedAbsentLocalMachine.deinitState(restored);
+}
+
+test "StaticMachine local presence preserves exact predicate rewrite authority" {
+    var runtime = boundary.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var session = try RewrittenPredicateAbsentLocalProgram.Session.startWithArgs(
+        &runtime,
+        .{},
+        .{@as(i32, 1)},
+    );
+    defer session.deinit();
+    const session_request = switch (try session.next()) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+
+    const state = try RewrittenPredicateAbsentLocalMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 1)},
+    );
+    defer RewrittenPredicateAbsentLocalMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try RewrittenPredicateAbsentLocalMachine.reduce(state, &fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(session_request.instruction_index, request.instruction_index);
+
+    const encoded = try RewrittenPredicateAbsentLocalMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const restored = try RewrittenPredicateAbsentLocalMachine.decodeState(
+        std.testing.allocator,
+        encoded,
+    );
+    defer RewrittenPredicateAbsentLocalMachine.deinitState(restored);
+    const restored_request = switch (try RewrittenPredicateAbsentLocalMachine.current(restored)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+
+    try session.@"resume"(session_request, {});
+    try RewrittenPredicateAbsentLocalMachine.@"resume"(restored, restored_request, {});
+    var session_result = switch (try session.next()) {
+        .done => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    defer session_result.deinit();
+    var result = switch (try RewrittenPredicateAbsentLocalMachine.reduce(restored, &fuel)) {
+        .done => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(session_result.value, result.value());
+    try std.testing.expectEqual(@as(i32, 9), result.value());
 }
 
 test "StaticMachine control validation budgets absent locals by path states" {

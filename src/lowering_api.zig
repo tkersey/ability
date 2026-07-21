@@ -3134,6 +3134,68 @@ fn staticMachineInstructionMayWriteLocal(
     };
 }
 
+const StaticPredicateWriteEffect = union(enum) {
+    unchanged,
+    unknown,
+    known: bool,
+};
+
+fn staticMachineInstructionPredicateWriteEffect(
+    instruction: program_plan.Instruction,
+    predicate: StaticConditionPredicate,
+) error{ProgramContractViolation}!StaticPredicateWriteEffect {
+    if (!staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
+        return .unchanged;
+    }
+    return switch (predicate.kind) {
+        .compare_eq_zero => switch (instruction.kind) {
+            .const_i32 => .{ .known = try constI32Value(instruction) == 0 },
+            .const_usize => .{ .known = (std.fmt.parseUnsigned(u64, instruction.string_literal, 0) catch
+                return error.ProgramContractViolation) == 0 },
+            .add_const_i32 => if (instruction.operand == predicate.operand and instruction.aux == 0)
+                .unchanged
+            else
+                .unknown,
+            else => .unknown,
+        },
+        .sum_variant_is => .unknown,
+        else => error.ProgramContractViolation,
+    };
+}
+
+fn staticMachineAdvanceConditionValue(
+    instruction: program_plan.Instruction,
+    predicate: StaticConditionPredicate,
+    value: *StaticMachineConditionValue,
+    source_valid: *bool,
+) error{ProgramContractViolation}!void {
+    switch (try staticMachineInstructionPredicateWriteEffect(instruction, predicate)) {
+        .unchanged => {},
+        .unknown => source_valid.* = false,
+        .known => |known| {
+            value.* = if (known) .true_value else .false_value;
+            source_valid.* = true;
+        },
+    }
+}
+
+fn staticMachineAdvanceConditionRelation(
+    instruction: program_plan.Instruction,
+    predicate: StaticConditionPredicate,
+    condition_reference: bool,
+    condition_matches_reference: *bool,
+    source_valid: *bool,
+) error{ProgramContractViolation}!void {
+    switch (try staticMachineInstructionPredicateWriteEffect(instruction, predicate)) {
+        .unchanged => {},
+        .unknown => source_valid.* = false,
+        .known => |known| {
+            condition_matches_reference.* = known == condition_reference;
+            source_valid.* = true;
+        },
+    }
+}
+
 fn staticMachineFunctionMayWriteLocal(
     comptime compiled_plan: program_plan.ProgramPlan,
     function_index: usize,
@@ -3447,9 +3509,12 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                     function_index,
                     predicate_index,
                 ) orelse return false;
-                if (staticMachineInstructionMayWriteLocal(outer_instruction, predicate.operand)) {
-                    state.source_valid = false;
-                }
+                staticMachineAdvanceConditionValue(
+                    outer_instruction,
+                    predicate,
+                    &state.value,
+                    &state.source_valid,
+                ) catch return false;
             }
             state.node = next_node;
             state.after_outer = true;
@@ -3511,9 +3576,12 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                     function_index,
                     state.predicate_slot - 1,
                 ) orelse return false;
-                if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
-                    state.source_valid = false;
-                }
+                staticMachineAdvanceConditionValue(
+                    instruction,
+                    predicate,
+                    &state.value,
+                    &state.source_valid,
+                ) catch return false;
             }
 
             const block = compiled_plan.blocks[owner_block];
@@ -8085,6 +8153,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         fn advanceConditionAuthority(
             function_index: usize,
             instruction: program_plan.Instruction,
+            condition_reference: bool,
             authority: ControlConditionAuthority,
         ) error{ProgramContractViolation}!ControlConditionAuthority {
             if (comptime !canonical_request_identity) return authority;
@@ -8095,17 +8164,21 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 var encoded_authority = authority_index;
                 var source_valid = encoded_authority % condition_validity_count != 0;
                 encoded_authority /= condition_validity_count;
-                const condition_matches_reference = encoded_authority % 2 != 0;
+                var condition_matches_reference = encoded_authority % 2 != 0;
                 const predicate_slot = encoded_authority / 2;
-                if (predicate_slot != 0 and source_valid) {
+                if (predicate_slot != 0) {
                     const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
                         compiled_plan,
                         function_index,
                         predicate_slot - 1,
                     ) orelse return error.ProgramContractViolation;
-                    if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
-                        source_valid = false;
-                    }
+                    try staticMachineAdvanceConditionRelation(
+                        instruction,
+                        predicate,
+                        condition_reference,
+                        &condition_matches_reference,
+                        &source_valid,
+                    );
                 }
                 result.set(try conditionAuthorityIndex(
                     predicate_slot,
@@ -8267,9 +8340,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                     function_index,
                                     state.predicate_slot - 1,
                                 ) orelse return error.ProgramContractViolation;
-                                if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
-                                    next_state.source_valid = false;
-                                }
+                                try staticMachineAdvanceConditionRelation(
+                                    instruction,
+                                    predicate,
+                                    condition_reference,
+                                    &next_state.condition_matches_reference,
+                                    &next_state.source_valid,
+                                );
                             }
                             try enqueueControlPathState(&queue, &queue_len, &visited, next_state);
                         }
@@ -8620,9 +8697,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 frame.function_index,
                                 state.predicate_slot - 1,
                             ) orelse return error.ProgramContractViolation;
-                            if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
-                                state.source_valid = false;
-                            }
+                            try staticMachineAdvanceConditionRelation(
+                                instruction,
+                                predicate,
+                                frame.last_condition,
+                                &state.condition_matches_reference,
+                                &state.source_valid,
+                            );
                         }
                         try enqueueControlPathState(&queue, &queue_len, &visited, state);
                     }
@@ -8707,6 +8788,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 condition_authority = try advanceConditionAuthority(
                     frame.function_index,
                     site_instruction,
+                    frame.last_condition,
                     condition_authority,
                 );
                 segment_start = site_node + 1;
