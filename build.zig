@@ -1137,6 +1137,18 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
         },
         .{
+            .path = "test/compile_fail/static_machine_effect_row_coverage_omitted.zig",
+            .expected_error = "Program.Interpreter coverage omitted reachable operation site",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_after_coverage_omitted.zig",
+            .expected_error = "Program.Interpreter coverage omitted reachable after site",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_forged_legacy_site.zig",
+            .expected_error = "Program.Interpreter coverage descriptor belongs to another program",
+        },
+        .{
             .path = "test/compile_fail/static_machine_invalid_after_handler_shape.zig",
             .expected_error = "Boundary StaticMachine v1 requires afterDispatch to have a receiver, one value parameter, and a return value",
         },

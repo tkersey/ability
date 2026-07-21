@@ -74,16 +74,19 @@ frame topology, an after stack that is not reachable along the decoded control
 path, an unowned root after-stack prefix, a pending operation whose after entry
 is already recorded, an unwitnessed cursor after a non-completing call, any
 after unwind before the function's return boundary, reducer caches that disagree
-with their source locals, a first after-unwind value that differs from the
-completed function value, an after-unwind current value ref that is not derived
-by folding the consumed suffix of the validated after stack, a full after stack
-behind a pending after-producing operation, inconsistent pending state,
-checksum mismatch, and trailing bytes. Every duplicated canonical value is
-compared exactly by its typed semantic structure; 64-bit trace fingerprints are
-never accepted as equality witnesses. A live child frame is the explicit
-witness that permits its parent cursor to remain after a non-completing helper
-or provider call. The checksum detects corruption and accidental mismatches. It
-is not a signature and grants no trust.
+with their source locals, an absent non-unit parameter, an absent non-unit local
+that the exact continuation can read before defining it or reaching the next
+revalidated suspension boundary, a first after-unwind value that differs from
+the completed function value, an after-unwind current value ref that is not
+derived by folding the consumed
+suffix of the validated after stack, a full after stack behind a pending
+after-producing operation, inconsistent pending state, checksum mismatch, and
+trailing bytes. Every duplicated canonical value is compared exactly by its
+typed semantic structure; 64-bit trace fingerprints are never accepted as
+equality witnesses. A live child frame is the explicit witness that permits its
+parent cursor to remain after a non-completing helper or provider call. The
+checksum detects corruption and accidental mismatches. It is not a signature
+and grants no trust.
 
 ## State law
 
@@ -102,9 +105,10 @@ must preserve:
 - remaining deterministic budget;
 - terminal result or deterministic failure after continuation.
 
-Encoding does not advance the machine. Decoding creates fresh working
-ownership, so live request tokens may change; semantic site identity, payload,
-and continuation behavior may not.
+Encoding does not advance the machine. Decoding creates a fresh live session
+and issues a nonzero token for any parked request; token values may repeat only
+across distinct session identities. Semantic site identity, payload, and
+continuation behavior may not change.
 
 Live session identifiers and `u64` request tokens are intentionally absent from
 the image. Their allocators fail before wrap, and decoding assigns fresh live
@@ -143,13 +147,18 @@ fuel-derived bound but allocate only as they are recorded; unused capacity is
 neither serialized nor semantic.
 
 Control-path reachability validation uses a compact `u16` queue and a bitset.
-StaticMachine v1 admits at most 16,384 `(control node, suspension traversed)`
-states—8,192 combined instructions and blocks—and therefore reserves at most
-34,816 bytes of allocation-free local scratch. `Machine.Manifest` publishes the
-actual path-state count and scratch bytes together with both v1 ceilings.
-Comptime-generated `u16` metadata maps each instruction directly to its owning
-block and any nested target. Every path-state dequeue consumes one shared
-call-wide work unit across all after entries and frame cursors. One validation
-may consume at most 1,048,576 units; exhaustion rejects with
+StaticMachine v1 admits at most 32,768 `(control node, suspension traversed,
+condition relation)` states—8,192 combined instructions and blocks—and
+therefore reserves at most 69,632 bytes of allocation-free local scratch.
+`Machine.Manifest` publishes the actual path-state count and scratch bytes
+together with both v1 ceilings. Comptime-generated `u16` metadata maps each
+instruction directly to its owning block and any nested target. Every
+path-state dequeue consumes one shared call-wide work unit across after entries,
+frame cursors, and forward availability proof for every absent non-unit local.
+Availability starts at the exact cursor, uses the stored condition only for that
+cursor's terminator, and stops at a definition or the next effect or provider
+suspension. Every public resume and parked reduction revalidates the resulting
+state, so admission need not reconstruct discarded execution history. One
+validation may consume at most 1,048,576 units; exhaustion rejects with
 `ProgramContractViolation`. This work limit is part of the complete machine
 contract and is also published through `Machine.Manifest`.

@@ -974,12 +974,21 @@ fn ProgramProtocolForSites(
 
         pub fn assertAllSitesCoveredBy(comptime InterpreterType: type) void {
             if (!hasDeclSafe(InterpreterType, "InterpreterToken") or
-                InterpreterType.InterpreterToken != InterpreterToken or
-                !hasDeclSafe(InterpreterType, "assertCoversAll"))
+                InterpreterType.InterpreterToken != InterpreterToken)
             {
                 @compileError("Program.protocol expected a Program.Interpreter type");
             }
-            InterpreterType.assertCoversAll();
+            if (identity == .static_machine) {
+                if (!hasDeclSafe(InterpreterType, "assertCoversEffectRow")) {
+                    @compileError("Program.protocol expected a Program.Interpreter type");
+                }
+                InterpreterType.assertCoversEffectRow(operation_sites, after_sites);
+            } else {
+                if (!hasDeclSafe(InterpreterType, "assertCoversAll")) {
+                    @compileError("Program.protocol expected a Program.Interpreter type");
+                }
+                InterpreterType.assertCoversAll();
+            }
         }
     };
 }
@@ -22393,6 +22402,17 @@ pub fn program(
                     comptime assertInterpreterCoversAll(entries);
                 }
 
+                fn assertCoversEffectRow(
+                    comptime expected_operation_sites: anytype,
+                    comptime expected_after_sites: anytype,
+                ) void {
+                    comptime assertInterpreterCoversEffectRow(
+                        entries,
+                        expected_operation_sites,
+                        expected_after_sites,
+                    );
+                }
+
                 /// Return static coverage counts for this interpreter.
                 pub fn coverage() struct { operation_sites: usize, after_sites: usize } {
                     comptime var operation_count: usize = 0;
@@ -23174,29 +23194,90 @@ pub fn program(
             return refs;
         }
 
+        fn validateInterpreterCoverageSite(comptime Site: type) void {
+            Handler.validateAnySite(Site);
+            if (!hasDeclSafe(Site, "index")) {
+                @compileError("Program.Interpreter coverage descriptor belongs to another program");
+            }
+            switch (Site.kind) {
+                .operation => {
+                    if (Site.index >= protocol.operation_site_count or
+                        Site != protocol.siteByIndex(Site.index))
+                    {
+                        @compileError("Program.Interpreter coverage descriptor belongs to another program");
+                    }
+                },
+                .after => {
+                    if (Site.index >= protocol.after_site_count or
+                        Site != protocol.afterSiteByIndex(Site.index))
+                    {
+                        @compileError("Program.Interpreter coverage descriptor belongs to another program");
+                    }
+                },
+                else => @compileError("Program.Interpreter entries must be Program.Handler declarations"),
+            }
+        }
+
         fn assertInterpreterCoversAll(comptime entries: anytype) void {
             var operation_covered: [protocol.operation_site_count]bool = [_]bool{false} ** protocol.operation_site_count;
             var after_covered: [protocol.after_site_count]bool = [_]bool{false} ** protocol.after_site_count;
             inline for (entries) |Entry| {
                 switch (Entry.kind) {
-                    .operation, .after => Handler.validateAnySite(Entry.Site),
+                    .operation, .after => validateInterpreterCoverageSite(Entry.Site),
                     .protocol_operation => continue,
                     else => @compileError("Program.Interpreter entries must be Program.Handler declarations"),
                 }
                 switch (Entry.kind) {
                     .operation => {
-                        if (Entry.Site.index >= protocol.operation_site_count or protocol.operation_site_metadata[Entry.Site.index].fingerprint != Entry.Site.fingerprint) {
-                            @compileError("Program.Interpreter coverage descriptor belongs to another program");
-                        }
                         if (operation_covered[Entry.Site.index]) @compileError("Program.Interpreter listed duplicate handler for site");
                         operation_covered[Entry.Site.index] = true;
                     },
                     .after => {
-                        if (Entry.Site.index >= protocol.after_site_count or protocol.after_site_metadata[Entry.Site.index].fingerprint != Entry.Site.fingerprint) {
-                            @compileError("Program.Interpreter coverage descriptor belongs to another program");
-                        }
                         if (after_covered[Entry.Site.index]) @compileError("Program.Interpreter listed duplicate handler for site");
                         after_covered[Entry.Site.index] = true;
+                    },
+                    else => {},
+                }
+            }
+            inline for (operation_covered) |is_covered| {
+                if (!is_covered) @compileError("Program.Interpreter coverage omitted reachable operation site");
+            }
+            inline for (after_covered) |is_covered| {
+                if (!is_covered) @compileError("Program.Interpreter coverage omitted reachable after site");
+            }
+        }
+
+        fn assertInterpreterCoversEffectRow(
+            comptime entries: anytype,
+            comptime expected_operation_sites: anytype,
+            comptime expected_after_sites: anytype,
+        ) void {
+            var operation_covered: [expected_operation_sites.len]bool = [_]bool{false} ** expected_operation_sites.len;
+            var after_covered: [expected_after_sites.len]bool = [_]bool{false} ** expected_after_sites.len;
+            inline for (entries) |Entry| {
+                switch (Entry.kind) {
+                    .operation, .after => validateInterpreterCoverageSite(Entry.Site),
+                    .protocol_operation => continue,
+                    else => @compileError("Program.Interpreter entries must be Program.Handler declarations"),
+                }
+                switch (Entry.kind) {
+                    .operation => inline for (expected_operation_sites, 0..) |site, site_index| {
+                        if (Entry.Site.fingerprint == site.legacy_fingerprint and
+                            Entry.Site.function_index == site.function_index and
+                            Entry.Site.block_index == site.block_index and
+                            Entry.Site.instruction_index == site.instruction_index)
+                        {
+                            operation_covered[site_index] = true;
+                        }
+                    },
+                    .after => inline for (expected_after_sites, 0..) |site, site_index| {
+                        if (Entry.Site.fingerprint == site.legacy_fingerprint and
+                            Entry.Site.source_function_index == site.source_function_index and
+                            Entry.Site.source_block_index == site.source_block_index and
+                            Entry.Site.source_instruction_index == site.source_instruction_index)
+                        {
+                            after_covered[site_index] = true;
+                        }
                     },
                     else => {},
                 }

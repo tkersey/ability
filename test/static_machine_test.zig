@@ -368,6 +368,93 @@ fn branchCachePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn conditionalLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const value = boundary.ir.builder.local(root, 2);
+    const copied_input = boundary.ir.builder.local(root, 3);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .add_const_i32, .dst = copied_input.index, .operand = input.index, .aux = 0 },
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = copied_input.index },
+        .{ .kind = .const_i32, .dst = value.index, .operand = 7 },
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = copied_input.index },
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        .{ .kind = .const_i32, .dst = input.index, .operand = 99 },
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+        .{ .kind = .const_i32, .dst = value.index, .operand = 9 },
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 4,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 8,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{.{
+        .label = "park",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "wait",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 2, .terminator_index = 0 },
+        .{ .first_instruction = 2, .instruction_count = 1, .terminator_index = 1 },
+        .{ .first_instruction = 3, .instruction_count = 0, .terminator_index = 2 },
+        .{ .first_instruction = 3, .instruction_count = 1, .terminator_index = 3 },
+        .{ .first_instruction = 4, .instruction_count = 1, .terminator_index = 4 },
+        .{ .first_instruction = 5, .instruction_count = 1, .terminator_index = 5 },
+        .{ .first_instruction = 6, .instruction_count = 2, .terminator_index = 6 },
+        .{ .first_instruction = 8, .instruction_count = 2, .terminator_index = 7 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .branch_if, .primary = 4, .secondary = 5 },
+        .{ .kind = .jump, .primary = 6 },
+        .{ .kind = .jump, .primary = 7 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 40,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{
+            .{ .codec = .i32 },
+            .{ .codec = .bool },
+            .{ .codec = .i32 },
+            .{ .codec = .i32 },
+        },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const payload = boundary.ir.builder.local(root, 0);
@@ -490,6 +577,88 @@ fn helperEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     return boundary.ir.builder.finish(.{
         .label = label,
         .ir_hash = 2,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
+fn helperValueCompletionPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const helper = boundary.ir.builder.function(1);
+    const root_value = boundary.ir.builder.local(root, 0);
+    const helper_value = boundary.ir.builder.local(helper, 0);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        boundary.ir.builder.callHelper(root, root_value, helper, null) catch unreachable,
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        boundary.ir.builder.returnValue(root, root_value) catch unreachable,
+        .{ .kind = .const_i32, .dst = helper_value.index, .operand = 7 },
+        boundary.ir.builder.returnValue(helper, helper_value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{
+        .{
+            .symbol_name = "run",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 1,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 1,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 0,
+            .instruction_count = 3,
+        },
+        .{
+            .symbol_name = "helper",
+            .value_codec = .i32,
+            .result_codec = .unit,
+            .first_requirement = 1,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 1,
+            .local_count = 1,
+            .first_block = 1,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 3,
+            .instruction_count = 2,
+        },
+    };
+    const requirements = [_]boundary.ir.plan.Requirement{.{
+        .label = "park",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "wait",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 3, .terminator_index = 0 },
+        .{ .first_instruction = 3, .instruction_count = 2, .terminator_index = 1 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 39,
         .entry = root,
         .functions = &functions,
         .requirements = &requirements,
@@ -1441,11 +1610,31 @@ const BranchCacheBody = struct {
 const BranchCacheProgram = boundary.program("static-machine-branch-cache", struct {}, BranchCacheBody);
 const BranchCacheMachine = boundary.staticMachine(BranchCacheProgram, .{});
 
+const ConditionalLocalBody = struct {
+    pub const compiled_plan = conditionalLocalPlan("static-machine-conditional-local");
+};
+const ConditionalLocalProgram = boundary.program(
+    "static-machine-conditional-local",
+    struct {},
+    ConditionalLocalBody,
+);
+const ConditionalLocalMachine = boundary.staticMachine(ConditionalLocalProgram, .{});
+
 const HelperBody = struct {
     pub const compiled_plan = helperEffectPlan("static-machine-helper");
 };
 const HelperProgram = boundary.program("static-machine-helper", struct {}, HelperBody);
 const HelperMachine = boundary.staticMachine(HelperProgram, .{});
+
+const HelperValueCompletionBody = struct {
+    pub const compiled_plan = helperValueCompletionPlan("static-machine-helper-value-completion");
+};
+const HelperValueCompletionProgram = boundary.program(
+    "static-machine-helper-value-completion",
+    struct {},
+    HelperValueCompletionBody,
+);
+const HelperValueCompletionMachine = boundary.staticMachine(HelperValueCompletionProgram, .{});
 
 const StringBody = struct {
     pub const compiled_plan = stringEffectPlan("static-machine-owned-string-response");
@@ -1734,7 +1923,7 @@ test "StaticMachine publishes a fixed control-path validation scratch bound" {
             OneEffectMachine.Manifest.maximum_control_validation_scratch_bytes,
     );
     try std.testing.expectEqual(
-        @as(usize, 34_816),
+        @as(usize, 69_632),
         OneEffectMachine.Manifest.maximum_control_validation_scratch_bytes,
     );
     try std.testing.expectEqual(
@@ -1843,8 +2032,23 @@ test "StaticMachine state survives a canonical parked-state round trip" {
         .request => |current| current,
         else => return error.UnexpectedTransition,
     };
+    try std.testing.expect(restored_request.token != 0);
+    try std.testing.expect(request._session_id != restored_request._session_id);
     try std.testing.expectEqual(request.trace().operation_site_fingerprint, restored_request.trace().operation_site_fingerprint);
     try std.testing.expectEqualStrings("payload", try restored_request.payload([]const u8));
+    const reencoded = try OneEffectMachine.encodeState(std.testing.allocator, restored);
+    defer std.testing.allocator.free(reencoded);
+    try std.testing.expectEqualSlices(u8, encoded, reencoded);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(restored, request, @as(i32, 41)),
+    );
+    var zero_token = restored_request;
+    zero_token.token = 0;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(restored, zero_token, @as(i32, 41)),
+    );
 
     try OneEffectMachine.@"resume"(restored, restored_request, @as(i32, 41));
     var result = switch (try OneEffectMachine.reduce(restored, &fuel)) {
@@ -2475,6 +2679,69 @@ test "StaticMachine completion analysis does not rewrite the legacy Program prot
         else => return error.UnexpectedTransition,
     };
     try request.expectSite(StaticSite);
+    try LegacyCompletionNamespaceMachine.@"resume"(state, request, @as(i32, 7));
+    fuel = 100;
+    switch (try LegacyCompletionNamespaceMachine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+}
+
+test "StaticMachine EffectRow coverage follows the static site catalog" {
+    const ReachableLegacySite = LegacyCompletionNamespaceProgram.protocol.operationSite(
+        "reachable",
+        "request",
+        0,
+    );
+    const ReachableHandler = struct {
+        fn handle(
+            _: anytype,
+            _: anytype,
+            _: LegacyCompletionNamespaceProgram.Handler.Control,
+        ) LegacyCompletionNamespaceProgram.Handler.Outcome(ReachableLegacySite) {
+            return LegacyCompletionNamespaceProgram.Handler.@"resume"(
+                ReachableLegacySite,
+                @as(i32, 7),
+            );
+        }
+    };
+    const Interpreter = LegacyCompletionNamespaceProgram.Interpreter(.{
+        LegacyCompletionNamespaceProgram.Handler.operation(
+            ReachableLegacySite,
+            ReachableHandler.handle,
+        ),
+    });
+
+    comptime LegacyCompletionNamespaceMachine.EffectRow.assertAllSitesCoveredBy(Interpreter);
+}
+
+test "StaticMachine EffectRow coverage includes after sites" {
+    const Operation = AfterProgram.protocol.operationSite("test", "after", 0);
+    const After = AfterProgram.protocol.afterSite("test", "after", 0);
+    const OperationHandler = struct {
+        fn handle(
+            _: anytype,
+            _: anytype,
+            _: AfterProgram.Handler.Control,
+        ) AfterProgram.Handler.Outcome(Operation) {
+            return AfterProgram.Handler.@"resume"(Operation, @as(i32, 10));
+        }
+    };
+    const AfterHandler = struct {
+        fn handle(
+            _: anytype,
+            _: anytype,
+            _: AfterProgram.Handler.Control,
+        ) AfterProgram.Handler.Outcome(After) {
+            return AfterProgram.Handler.resumeAfter(After, @as(i32, 15));
+        }
+    };
+    const Interpreter = AfterProgram.Interpreter(.{
+        AfterProgram.Handler.operation(Operation, OperationHandler.handle),
+        AfterProgram.Handler.after(After, AfterHandler.handle),
+    });
+
+    comptime AfterMachine.EffectRow.assertAllSitesCoveredBy(Interpreter);
 }
 
 test "StaticMachine canonical identity forgets nominal carrier names" {
@@ -2726,7 +2993,22 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
+    try std.testing.expect(restored_inner_after.token != 0);
+    try std.testing.expect(inner_after._session_id != restored_inner_after._session_id);
     try std.testing.expectEqual(inner_after.fingerprint(), restored_inner_after.fingerprint());
+    const reencoded = try AfterContractMachineA.encodeState(std.testing.allocator, restored);
+    defer std.testing.allocator.free(reencoded);
+    try std.testing.expectEqualSlices(u8, encoded, reencoded);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterContractMachineA.resumeAfter(restored, inner_after, true),
+    );
+    var zero_token = restored_inner_after;
+    zero_token.token = 0;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterContractMachineA.resumeAfter(restored, zero_token, true),
+    );
     try AfterContractMachineA.resumeAfter(restored, restored_inner_after, true);
     const outer_after = switch (try AfterContractMachineA.reduce(restored, &fuel)) {
         .after => |after| after,
@@ -2882,6 +3164,24 @@ fn refreshStateChecksum(bytes: []u8) void {
     );
 }
 
+fn omitCanonicalLocalValue(
+    encoded: []const u8,
+    local_tag_offset: usize,
+    value_byte_count: usize,
+) ![]u8 {
+    if (local_tag_offset + 1 + value_byte_count > encoded.len - 8) return error.BadLength;
+    try std.testing.expectEqual(@as(u8, 1), encoded[local_tag_offset]);
+    const forged = try std.testing.allocator.alloc(u8, encoded.len - value_byte_count);
+    @memcpy(forged[0..local_tag_offset], encoded[0..local_tag_offset]);
+    forged[local_tag_offset] = 0;
+    @memcpy(
+        forged[local_tag_offset + 1 .. forged.len - 8],
+        encoded[local_tag_offset + 1 + value_byte_count .. encoded.len - 8],
+    );
+    refreshStateChecksum(forged);
+    return forged;
+}
+
 fn singleFrameOffset(payload: []const u8, expected_after_count: usize) !usize {
     const core_offset = try stateCoreOffset(payload);
     const after_count_offset = core_offset + 8 + 8 + 1;
@@ -2967,6 +3267,166 @@ test "StaticMachine rejects alternate canonical unit presence tags" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         UnitLocalMachine.decodeState(std.testing.allocator, forged_last_return),
+    );
+}
+
+test "StaticMachine rejects a canonical state missing an entry parameter" {
+    const state = try UsizeIdentityMachine.initialState(std.testing.allocator, .{@as(usize, 7)});
+    defer UsizeIdentityMachine.deinitState(state);
+    const encoded = try UsizeIdentityMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const frame_offset = try singleFrameOffset(encoded[0 .. encoded.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    const local_tag_offset = locals_count_offset + 8 + 2;
+    const forged = try omitCanonicalLocalValue(encoded, local_tag_offset, 8);
+    defer std.testing.allocator.free(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        UsizeIdentityMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a canonical state missing an already computed local" {
+    const state = try PureMachine.initialState(std.testing.allocator, .{});
+    defer PureMachine.deinitState(state);
+    var fuel: u64 = 1;
+    switch (try PureMachine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try PureMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const frame_offset = try singleFrameOffset(encoded[0 .. encoded.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    const local_tag_offset = locals_count_offset + 8 + 2;
+    const forged = try omitCanonicalLocalValue(encoded, local_tag_offset, 4);
+    defer std.testing.allocator.free(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        PureMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine local presence follows the exact continuation" {
+    const state = try ConditionalLocalMachine.initialState(std.testing.allocator, .{@as(i32, 0)});
+    defer ConditionalLocalMachine.deinitState(state);
+    var fuel: u64 = 100;
+    switch (try ConditionalLocalMachine.reduce(state, &fuel)) {
+        .request => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try ConditionalLocalMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const frame_offset = try singleFrameOffset(encoded[0 .. encoded.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    const locals_offset = locals_count_offset + 8;
+    const encoded_i32_local_size = 2 + 1 + 4;
+    const encoded_bool_local_size = 2 + 1 + 1;
+    const value_tag_offset = locals_offset + encoded_i32_local_size + encoded_bool_local_size + 2;
+    const forged = try omitCanonicalLocalValue(encoded, value_tag_offset, 4);
+    defer std.testing.allocator.free(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        ConditionalLocalMachine.decodeState(std.testing.allocator, forged),
+    );
+
+    const other_state = try ConditionalLocalMachine.initialState(std.testing.allocator, .{@as(i32, 1)});
+    defer ConditionalLocalMachine.deinitState(other_state);
+    fuel = 100;
+    switch (try ConditionalLocalMachine.reduce(other_state, &fuel)) {
+        .request => {},
+        else => return error.UnexpectedTransition,
+    }
+    const other_encoded = try ConditionalLocalMachine.encodeState(std.testing.allocator, other_state);
+    defer std.testing.allocator.free(other_encoded);
+    const other_restored = try ConditionalLocalMachine.decodeState(std.testing.allocator, other_encoded);
+    ConditionalLocalMachine.deinitState(other_restored);
+}
+
+test "StaticMachine rejects a canonical state missing a resumed operation result" {
+    const state = try AfterMachine.initialState(std.testing.allocator, .{});
+    defer AfterMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try AfterMachine.reduce(state, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try AfterMachine.@"resume"(state, request, @as(i32, 10));
+    const encoded = try AfterMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const frame_offset = try singleFrameOffset(encoded[0 .. encoded.len - 8], 1);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    const local_tag_offset = locals_count_offset + 8 + 2;
+    const forged = try omitCanonicalLocalValue(encoded, local_tag_offset, 4);
+    defer std.testing.allocator.free(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a canonical state missing a returned helper result" {
+    const state = try HelperMachine.initialState(std.testing.allocator, .{});
+    defer HelperMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try HelperMachine.reduce(state, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try HelperMachine.@"resume"(state, request, @as(i32, 41));
+    fuel = 1;
+    switch (try HelperMachine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+    fuel = 1;
+    switch (try HelperMachine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try HelperMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const frame_offset = try singleFrameOffset(encoded[0 .. encoded.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    const local_tag_offset = locals_count_offset + 8 + 2;
+    const forged = try omitCanonicalLocalValue(encoded, local_tag_offset, 4);
+    defer std.testing.allocator.free(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        HelperMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine validates helper locals against the effective completion codec" {
+    const state = try HelperValueCompletionMachine.initialState(std.testing.allocator, .{});
+    defer HelperValueCompletionMachine.deinitState(state);
+    var fuel: u64 = 100;
+    switch (try HelperValueCompletionMachine.reduce(state, &fuel)) {
+        .request => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try HelperValueCompletionMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    const frame_offset = try singleFrameOffset(encoded[0 .. encoded.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    const local_tag_offset = locals_count_offset + 8 + 2;
+    const forged = try omitCanonicalLocalValue(encoded, local_tag_offset, 4);
+    defer std.testing.allocator.free(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        HelperValueCompletionMachine.decodeState(std.testing.allocator, forged),
     );
 }
 
