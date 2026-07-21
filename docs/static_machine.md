@@ -65,7 +65,9 @@ instruction metadata and one shared 1,048,576-unit work budget also bound CPU
 across repeated after-continuation reachability checks. Product or sum
 schemas containing `[][]const u8` reject as well: mutation of that outer
 string-list carrier would make alias topology observable, while canonical state
-deliberately does not preserve pointer identity. Immutable
+deliberately does not preserve pointer identity. StaticMachine v1 also rejects
+product schemas with comptime fields because its canonical decoder cannot
+reconstruct compile-time-only values at runtime. Immutable
 `[]const []const u8` carriers remain supported. An authored `afterDispatch`
 must also have the runtime shape used by the static after-site contract: a valid
 receiver, one value parameter, and a return value. Every reachable authored
@@ -106,7 +108,9 @@ commits only after exact validation proves that its complete canonical image
 fits `maximum_state_bytes`. Failed cloning, response validation, or size
 admission leaves the authoritative state, pending request, and caller fuel
 unchanged. Deterministic reduction failures retain their existing terminal
-semantics. After-continuation storage is allocated lazily and reserved inside
+semantics. A `reduce` call on an already parked State fails before cloning, so
+the issued request borrow remains valid. After-continuation storage is
+allocated lazily and reserved inside
 the candidate before response ownership or handler dispatch can commit. The
 temporary clone is an implementation resource, not portable state, and
 `maximum_state_bytes` is not a heap budget. Only bytes returned by

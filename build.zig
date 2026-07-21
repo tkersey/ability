@@ -1125,6 +1125,10 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas",
         },
         .{
+            .path = "test/compile_fail/static_machine_comptime_product_field.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support comptime fields inside product schemas",
+        },
+        .{
             .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",
             .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
         },

@@ -1720,6 +1720,37 @@ test "StaticMachine rejects malformed, stale, and duplicate responses" {
     );
 }
 
+test "StaticMachine rejected reduce preserves a parked request borrow" {
+    const state = try OneEffectMachine.initialState(std.testing.allocator, .{});
+    defer OneEffectMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const parked = switch (try OneEffectMachine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    const payload_before = try parked.payload([]const u8);
+    const fuel_before = fuel;
+
+    try std.testing.expectError(error.ProgramContractViolation, OneEffectMachine.reduce(state, &fuel));
+    try std.testing.expectEqual(fuel_before, fuel);
+
+    const current = switch (try OneEffectMachine.current(state)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    const payload_after = try current.payload([]const u8);
+    try std.testing.expectEqual(@intFromPtr(payload_before.ptr), @intFromPtr(payload_after.ptr));
+    try std.testing.expectEqualStrings("payload", try parked.payload([]const u8));
+
+    try OneEffectMachine.@"resume"(state, parked, @as(i32, 41));
+    const done = switch (try OneEffectMachine.reduce(state, &fuel)) {
+        .done => |result| result,
+        else => return error.UnexpectedTransition,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(i32, 41), done.value());
+}
+
 test "StaticMachine state codec rejects changed and trailing bytes" {
     const state = try OneEffectMachine.initialState(std.testing.allocator, .{});
     defer OneEffectMachine.deinitState(state);

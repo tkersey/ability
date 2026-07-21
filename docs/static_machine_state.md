@@ -105,7 +105,9 @@ parked state proves this law before commit. `initialState`, `reduce`, `resume`,
 and `resumeAfter` therefore cannot return an opaque live state that later fails
 `validateState` or `encodeState` solely because it exceeds
 `maximum_state_bytes`. A rejected response or parked transition leaves the
-prior canonical bytes and pending request unchanged. Terminal completion and
+prior canonical bytes and pending request unchanged. Rejecting `reduce` on an
+already parked State also preserves the State allocation and its issued request
+borrow. Terminal completion and
 terminal failure remain outside this resumable-state law.
 
 Completed and terminally failed states are not encoded as runnable continuation

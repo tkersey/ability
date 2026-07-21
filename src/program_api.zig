@@ -1335,23 +1335,29 @@ pub const StaticMachineOptions = struct {
 
 const StaticMachineProgramAuthenticityToken = opaque {};
 
-fn staticMachineTypeContainsMutableStringList(comptime ValueType: type) bool {
-    if (ValueType == [][]const u8) return true;
+const StaticMachineCarrierBlocker = enum {
+    comptime_struct_field,
+    mutable_string_list,
+};
+
+fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBlocker {
+    if (ValueType == [][]const u8) return .mutable_string_list;
     return switch (@typeInfo(ValueType)) {
-        .optional => |optional| staticMachineTypeContainsMutableStringList(optional.child),
+        .optional => |optional| staticMachineCarrierBlocker(optional.child),
         .@"struct" => |info| {
             inline for (info.fields) |field| {
-                if (staticMachineTypeContainsMutableStringList(field.type)) return true;
+                if (field.is_comptime) return .comptime_struct_field;
+                if (staticMachineCarrierBlocker(field.type)) |blocker| return blocker;
             }
-            return false;
+            return null;
         },
         .@"union" => |info| {
             inline for (info.fields) |field| {
-                if (staticMachineTypeContainsMutableStringList(field.type)) return true;
+                if (staticMachineCarrierBlocker(field.type)) |blocker| return blocker;
             }
-            return false;
+            return null;
         },
-        else => false,
+        else => null,
     };
 }
 
@@ -1364,9 +1370,10 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
         @compileError("boundary.staticMachine expects a type returned by boundary.program");
     }
     inline for (Program.value_schema_types) |SchemaType| {
-        if (staticMachineTypeContainsMutableStringList(SchemaType)) {
-            @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas");
-        }
+        if (staticMachineCarrierBlocker(SchemaType)) |blocker| switch (blocker) {
+            .comptime_struct_field => @compileError("Boundary StaticMachine v1 does not support comptime fields inside product schemas"),
+            .mutable_string_list => @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas"),
+        };
     }
     const Body = Program.StaticMachineBody;
     const nested_targets = BodyNestedWithTargets(Body).values;
@@ -1594,6 +1601,7 @@ fn StaticMachineFor(
 
         /// Advance to one effect, terminal result, or deterministic fuel boundary.
         pub fn reduce(state: State, fuel: *u64) Error!Transition {
+            if (stateCoreConst(state).hasPendingRequest()) return error.ProgramContractViolation;
             var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
             var candidate_owned = true;
             defer if (candidate_owned) candidate.deinit();
