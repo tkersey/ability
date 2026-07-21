@@ -4915,6 +4915,7 @@ fn staticMachineContractFingerprint(
     comptime HandlersType: type,
     comptime operation_yield_sites: anytype,
     comptime maximum_state_bytes: usize,
+    comptime control_validation_scratch_bytes: usize,
     comptime control_validation_step_bound: usize,
 ) u64 {
     @setEvalBranchQuota(1_000_000);
@@ -4959,6 +4960,8 @@ fn staticMachineContractFingerprint(
         );
     }
     sessionSiteHashUsize(&hasher, max_interpreter_steps);
+    sessionSiteHashUsize(&hasher, max_control_validation_scratch);
+    sessionSiteHashUsize(&hasher, control_validation_scratch_bytes);
     sessionSiteHashUsize(&hasher, static_max_control_work_units);
     sessionSiteHashUsize(&hasher, control_validation_step_bound);
     return hasher.final();
@@ -4975,6 +4978,23 @@ const StaticMaxPathVisited = std.StaticBitSet(static_max_path_states);
 const static_max_path_scratch_bytes =
     static_max_path_states * @sizeOf(u16) +
     @sizeOf(StaticMaxPathVisited);
+// Every reachable function owns at least one control block, so active frame
+// depth cannot exceed the control-node ceiling. One authority has four bits in
+// the zero-predicate worst case but still occupies one canonical 64-bit storage
+// word; 4,096 frames therefore require at most 32 KiB. More predicates reduce
+// the admitted node and frame counts faster than they grow the rounded bitset.
+const max_frame_authority_scratch = static_max_control_nodes * @sizeOf(u64);
+const max_control_validation_scratch =
+    static_max_path_scratch_bytes + max_frame_authority_scratch;
+
+fn staticMachineBitSetScratchBytes(bit_count: usize) ?usize {
+    const word_count = std.math.divCeil(
+        usize,
+        bit_count,
+        @bitSizeOf(u64),
+    ) catch return null;
+    return std.math.mul(usize, word_count, @sizeOf(u64)) catch null;
+}
 
 fn controlPathCapacityForCounts(
     instruction_count: usize,
@@ -5016,6 +5036,44 @@ fn staticMachineControlPathStateCapacity(
     );
 }
 
+fn staticMachineControlValidationScratchBytes(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+    comptime control_path_state_capacity: usize,
+) ?usize {
+    const predicate_slot_count = std.math.add(
+        usize,
+        staticMachineMaximumConditionPredicateCount(compiled_plan),
+        1,
+    ) catch return null;
+    const condition_authority_count = std.math.mul(
+        usize,
+        predicate_slot_count,
+        4,
+    ) catch return null;
+    const ControlPathStateIndex = std.math.IntFittingRange(0, control_path_state_capacity - 1);
+    const queue_bytes = std.math.mul(
+        usize,
+        control_path_state_capacity,
+        @sizeOf(ControlPathStateIndex),
+    ) catch return null;
+    const visited_bytes = staticMachineBitSetScratchBytes(control_path_state_capacity) orelse
+        return null;
+    const path_search_bytes = std.math.add(
+        usize,
+        queue_bytes,
+        visited_bytes,
+    ) catch return null;
+    const condition_authority_bytes = staticMachineBitSetScratchBytes(condition_authority_count) orelse
+        return null;
+    const frame_authority_bytes = std.math.mul(
+        usize,
+        analysis.max_active_frame_depth,
+        condition_authority_bytes,
+    ) catch return null;
+    return std.math.add(usize, path_search_bytes, frame_authority_bytes) catch null;
+}
+
 pub fn ExecutableSessionForPlan(
     comptime ErrorSet: type,
     comptime program_label: []const u8,
@@ -5039,6 +5097,7 @@ pub fn ExecutableSessionForPlan(
         .legacy_session,
         operation_yield_sites,
         after_yield_sites,
+        0,
         0,
         0,
         0,
@@ -5094,6 +5153,14 @@ pub fn StaticExecutableSessionForPlan(
     const after_yield_sites = staticMachineAfterYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
     const control_path_state_capacity = staticMachineControlPathStateCapacity(compiled_plan) orelse
         @compileError("Boundary StaticMachine v1 control-path state space exceeds the v1 limit");
+    const validation_scratch_bytes = staticMachineControlValidationScratchBytes(
+        compiled_plan,
+        analysis,
+        control_path_state_capacity,
+    ) orelse @compileError("Boundary StaticMachine v1 control-validation scratch bound overflowed");
+    if (validation_scratch_bytes > max_control_validation_scratch) {
+        @compileError("Boundary StaticMachine v1 control-validation scratch exceeds the v1 limit");
+    }
     const control_validation_step_bound = staticMachineControlValidationStepBound(
         compiled_plan,
         analysis,
@@ -5111,6 +5178,7 @@ pub fn StaticExecutableSessionForPlan(
         HandlersType,
         operation_yield_sites,
         maximum_state_bytes,
+        validation_scratch_bytes,
         control_validation_step_bound,
     );
     return ExecutableSessionForPlanWithSelectedIdentity(
@@ -5127,6 +5195,7 @@ pub fn StaticExecutableSessionForPlan(
         canonical_plan_identity,
         static_contract_identity,
         control_path_state_capacity,
+        validation_scratch_bytes,
         control_validation_step_bound,
     );
 }
@@ -5145,6 +5214,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
     comptime canonical_plan_identity: u64,
     comptime static_contract_identity: u64,
     comptime static_control_path_state_capacity: usize,
+    comptime static_control_validation_scratch_bytes: usize,
     comptime static_control_validation_step_bound: usize,
 ) type {
     const entry = compiled_plan.functions[compiled_plan.entry_index];
@@ -6100,10 +6170,14 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         pub const contract_fingerprint: u64 = static_contract_identity;
         pub const control_path_state_count: usize = control_path_state_capacity;
         pub const maximum_control_path_states: usize = static_max_path_states;
-        pub const control_validation_scratch_bytes: usize =
-            control_path_state_capacity * @sizeOf(ControlPathStateIndex) + @sizeOf(ControlPathVisited);
+        pub const control_validation_scratch_bytes: usize = if (canonical_request_identity)
+            static_control_validation_scratch_bytes
+        else
+            control_path_state_capacity * @sizeOf(ControlPathStateIndex) +
+                @sizeOf(ControlPathVisited) +
+                analysis.max_active_frame_depth * @sizeOf(ControlConditionAuthority);
         pub const maximum_control_validation_scratch_bytes: usize =
-            static_max_path_scratch_bytes;
+            max_control_validation_scratch;
         pub const maximum_control_validation_steps: usize =
             static_max_control_work_units;
         pub const control_validation_step_bound: usize =
@@ -13375,6 +13449,8 @@ test "StaticMachine control-path capacity has a fixed compact scratch bound" {
         controlPathCapacityForCounts(static_max_control_nodes + 1, 0, 0),
     );
     try std.testing.expectEqual(@as(usize, 69_632), static_max_path_scratch_bytes);
+    try std.testing.expectEqual(@as(usize, 32_768), max_frame_authority_scratch);
+    try std.testing.expectEqual(@as(usize, 102_400), max_control_validation_scratch);
     try std.testing.expectEqual(
         @as(usize, 1_048_576),
         static_max_control_work_units,

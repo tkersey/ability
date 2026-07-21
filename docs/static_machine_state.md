@@ -154,10 +154,14 @@ share the same logical
 fuel-derived bound but allocate only as they are recorded; unused capacity is
 neither serialized nor semantic.
 
-Control-path reachability validation uses a compact `u16` queue and a bitset.
+Control-path reachability validation uses a compact queue and bitset while
+retaining one compact condition-authority bitset for every active frame.
 StaticMachine v1 admits at most 32,768 `(control node, suspension traversed,
-condition relation)` states and therefore reserves at most 69,632 bytes of
-allocation-free local scratch. The state count is
+condition relation)` states. The queue and visited set reserve at most 69,632
+bytes. Canonical 64-bit word rounding makes the zero-predicate, maximum-depth
+case the largest simultaneous frame-authority layout at another 32,768 bytes,
+for a 102,400-byte ceiling on explicit allocation-free validation
+buffers. The state count is
 `max(1, instructions + blocks) * (maximum distinct condition predicates + 1) * 8`.
 The predicate maximum covers every declared function because decoded function
 indices remain untrusted until validation. The structural ceiling is therefore
@@ -166,8 +170,9 @@ nodes when the maximum is one, and fewer as the maximum grows. A reachable
 control path may use multiple predicates, but StaticMachine v1 rejects an
 unchanged predicate A revisited after a distinct predicate B because its
 compact validator deliberately retains one predicate relation.
-`Machine.Manifest` publishes the actual path-state count and scratch bytes
-together with both v1 ceilings. Comptime-generated `u16` metadata maps each
+`Machine.Manifest` publishes the actual path-state count and the combined
+queue, visited-set, and frame-authority scratch bytes together with both v1
+ceilings. Comptime-generated `u16` metadata maps each
 instruction directly to its owning block and any nested target. Every
 path-state dequeue consumes one shared call-wide work unit across after entries,
 frame cursors, and forward availability proof for every absent non-unit local.

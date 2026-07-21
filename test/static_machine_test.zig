@@ -2474,8 +2474,27 @@ test "StaticMachine publishes a fixed control-path validation scratch bound" {
             OneEffectMachine.Manifest.maximum_control_validation_scratch_bytes,
     );
     try std.testing.expectEqual(
-        @as(usize, 69_632),
+        @as(usize, 102_400),
         OneEffectMachine.Manifest.maximum_control_validation_scratch_bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 2), HelperMachine.Manifest.maximum_frame_depth);
+    const HelperPathStateIndex = std.math.IntFittingRange(
+        0,
+        HelperMachine.Manifest.control_path_state_count - 1,
+    );
+    const helper_visited_word_count = try std.math.divCeil(
+        usize,
+        HelperMachine.Manifest.control_path_state_count,
+        @bitSizeOf(u64),
+    );
+    const helper_path_scratch_bytes =
+        HelperMachine.Manifest.control_path_state_count * @sizeOf(HelperPathStateIndex) +
+        helper_visited_word_count * @sizeOf(u64);
+    const helper_frame_authority_scratch_bytes =
+        HelperMachine.Manifest.maximum_frame_depth * @sizeOf(u64);
+    try std.testing.expectEqual(
+        helper_path_scratch_bytes + helper_frame_authority_scratch_bytes,
+        HelperMachine.Manifest.control_validation_scratch_bytes,
     );
     try std.testing.expectEqual(
         @as(usize, 1_048_576),
@@ -3540,7 +3559,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 12321766020519252541), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 9113974118256725148), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
