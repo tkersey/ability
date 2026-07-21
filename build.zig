@@ -1113,11 +1113,23 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 requires const_usize values to fit the canonical u32 domain",
         },
         .{
+            .path = "test/compile_fail/static_machine_maximum_state_bytes_u32.zig",
+            .expected_error = "Boundary StaticMachine maximum_state_bytes must fit the canonical u32 domain",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_control_validation_work_limit.zig",
+            .expected_error = "Boundary StaticMachine v1 control-validation work exceeds the v1 limit",
+        },
+        .{
             .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
             .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
         },
         .{
             .path = "test/compile_fail/static_machine_after_chain_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_after_chain_prefixed_mismatch.zig",
             .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
         },
         .{
@@ -1147,6 +1159,14 @@ pub fn build(b: *std.Build) void {
         .{
             .path = "test/compile_fail/static_machine_effect_row_forged_legacy_site.zig",
             .expected_error = "Program.Interpreter coverage descriptor belongs to another program",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_forged_operation_descriptor.zig",
+            .expected_error = "Program.protocol coverage descriptor belongs to another program",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_forged_after_descriptor.zig",
+            .expected_error = "Program.protocol coverage descriptor belongs to another program",
         },
         .{
             .path = "test/compile_fail/static_machine_invalid_after_handler_shape.zig",

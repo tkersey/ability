@@ -1047,6 +1047,110 @@ fn stackedAfterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn mutuallyExclusiveAfterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    @setEvalBranchQuota(10_000);
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const outer_resume = boundary.ir.builder.local(root, 2);
+    const first_resume = boundary.ir.builder.local(root, 3);
+    const second_resume = boundary.ir.builder.local(root, 4);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .const_i32, .dst = first_resume.index, .operand = 0 },
+        .{ .kind = .const_i32, .dst = second_resume.index, .operand = 0 },
+        boundary.ir.builder.callOp(root, outer_resume, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        boundary.ir.builder.callOp(root, first_resume, boundary.ir.builder.op(root, 1), null) catch unreachable,
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        boundary.ir.builder.returnValue(root, first_resume) catch unreachable,
+        boundary.ir.builder.callOp(root, second_resume, boundary.ir.builder.op(root, 2), null) catch unreachable,
+        boundary.ir.builder.returnValue(root, second_resume) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .string,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 3,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 5,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 6,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{
+        .{ .label = "outer", .first_op = 0, .op_count = 1 },
+        .{ .label = "first", .first_op = 1, .op_count = 1 },
+        .{ .label = "second", .first_op = 2, .op_count = 1 },
+    };
+    const ops = [_]boundary.ir.plan.Op{
+        .{
+            .requirement_index = 0,
+            .op_name = "outer",
+            .mode = .transform,
+            .payload_codec = .unit,
+            .resume_codec = .i32,
+            .has_after = true,
+        },
+        .{
+            .requirement_index = 1,
+            .op_name = "first",
+            .mode = .transform,
+            .payload_codec = .unit,
+            .resume_codec = .i32,
+            .has_after = true,
+        },
+        .{
+            .requirement_index = 2,
+            .op_name = "second",
+            .mode = .transform,
+            .payload_codec = .unit,
+            .resume_codec = .i32,
+            .has_after = true,
+        },
+    };
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 4, .terminator_index = 0 },
+        .{ .first_instruction = 4, .instruction_count = 1, .terminator_index = 1 },
+        .{ .first_instruction = 5, .instruction_count = 0, .terminator_index = 2 },
+        .{ .first_instruction = 5, .instruction_count = 1, .terminator_index = 3 },
+        .{ .first_instruction = 6, .instruction_count = 1, .terminator_index = 4 },
+        .{ .first_instruction = 7, .instruction_count = 2, .terminator_index = 5 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .branch_if, .primary = 4, .secondary = 5 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 41,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{
+            .{ .codec = .i32 },
+            .{ .codec = .bool },
+            .{ .codec = .i32 },
+            .{ .codec = .i32 },
+            .{ .codec = .i32 },
+        },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn abortDelimitedAfterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -1757,6 +1861,33 @@ const AfterContractProgramB = boundary.program("static-machine-after-contract", 
 const AfterContractMachineA = boundary.staticMachine(AfterContractProgramA, .{});
 const AfterContractMachineB = boundary.staticMachine(AfterContractProgramB, .{});
 
+const MutuallyExclusiveAfterHandlers = struct {
+    outer: struct {
+        pub fn afterDispatch(_: *const @This(), value: bool) ![]const u8 {
+            return if (value) "matched" else "unexpected";
+        }
+    },
+    first: struct {
+        pub fn afterDispatch(_: *const @This(), value: i32) !bool {
+            return value == 7;
+        }
+    },
+    second: struct {
+        pub fn afterDispatch(_: *const @This(), value: i32) !bool {
+            return value == 9;
+        }
+    },
+};
+const MutuallyExclusiveAfterBody = struct {
+    pub const compiled_plan = mutuallyExclusiveAfterPlan("static-machine-mutually-exclusive-after");
+};
+const MutuallyExclusiveAfterProgram = boundary.program(
+    "static-machine-mutually-exclusive-after",
+    MutuallyExclusiveAfterHandlers,
+    MutuallyExclusiveAfterBody,
+);
+const MutuallyExclusiveAfterMachine = boundary.staticMachine(MutuallyExclusiveAfterProgram, .{});
+
 const AfterHandlersHandlerlessOuter = struct {
     outer: struct {},
     inner: struct {
@@ -1929,6 +2060,10 @@ test "StaticMachine publishes a fixed control-path validation scratch bound" {
     try std.testing.expectEqual(
         @as(usize, 1_048_576),
         OneEffectMachine.Manifest.maximum_control_validation_steps,
+    );
+    try std.testing.expect(
+        OneEffectMachine.Manifest.control_validation_step_bound <=
+            OneEffectMachine.Manifest.maximum_control_validation_steps,
     );
     try std.testing.expect(
         OneEffectMachine.Manifest.control_instruction_metadata_bytes <=
@@ -2978,7 +3113,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 8833600878773862189), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 10197151065108449501), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
@@ -3126,6 +3261,74 @@ test "StaticMachine after closure does not traverse a terminal abort edge" {
     };
     defer result.deinit();
     try std.testing.expectEqualStrings("true", result.value());
+}
+
+test "StaticMachine after closure preserves repeated-condition correlation" {
+    const first_state = try MutuallyExclusiveAfterMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 0)},
+    );
+    defer MutuallyExclusiveAfterMachine.deinitState(first_state);
+    var fuel: u64 = 100;
+    const first_outer_request = switch (try MutuallyExclusiveAfterMachine.reduce(first_state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.@"resume"(first_state, first_outer_request, @as(i32, 0));
+    const first_request = switch (try MutuallyExclusiveAfterMachine.reduce(first_state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.@"resume"(first_state, first_request, @as(i32, 7));
+    const first_after = switch (try MutuallyExclusiveAfterMachine.reduce(first_state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.resumeAfter(first_state, first_after, true);
+    const first_outer_after = switch (try MutuallyExclusiveAfterMachine.reduce(first_state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.resumeAfter(first_state, first_outer_after, @as([]const u8, "matched"));
+    var first_result = switch (try MutuallyExclusiveAfterMachine.reduce(first_state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer first_result.deinit();
+    try std.testing.expectEqualStrings("matched", first_result.value());
+
+    const second_state = try MutuallyExclusiveAfterMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 1)},
+    );
+    defer MutuallyExclusiveAfterMachine.deinitState(second_state);
+    fuel = 100;
+    const second_outer_request = switch (try MutuallyExclusiveAfterMachine.reduce(second_state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.@"resume"(second_state, second_outer_request, @as(i32, 0));
+    const second_request = switch (try MutuallyExclusiveAfterMachine.reduce(second_state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.@"resume"(second_state, second_request, @as(i32, 9));
+    const second_after = switch (try MutuallyExclusiveAfterMachine.reduce(second_state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.resumeAfter(second_state, second_after, true);
+    const second_outer_after = switch (try MutuallyExclusiveAfterMachine.reduce(second_state, &fuel)) {
+        .after => |after| after,
+        else => return error.UnexpectedTransition,
+    };
+    try MutuallyExclusiveAfterMachine.resumeAfter(second_state, second_outer_after, @as([]const u8, "matched"));
+    var second_result = switch (try MutuallyExclusiveAfterMachine.reduce(second_state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer second_result.deinit();
+    try std.testing.expectEqualStrings("matched", second_result.value());
 }
 
 fn hashLengthPrefixedBytes(hasher: *std.hash.Wyhash, bytes: []const u8) void {

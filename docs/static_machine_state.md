@@ -136,7 +136,8 @@ budget exhaustion, and deterministic reduction failures after dispatch begins.
 `maximum_frames` must cover the finite statically reachable helper/provider
 depth. Recursive frame graphs are rejected in v1. `maximum_state_bytes` is a
 structural writer and admission bound, not merely a post-encoding check and not
-a heap budget. Bounded validation reuses the canonical encoder traversal in a
+a heap budget, and it must fit the canonical `u32` length domain. Bounded
+validation reuses the canonical encoder traversal in a
 count-only mode: it performs checked length arithmetic without allocating or
 copying a second image. Nonterminal mutation may temporarily clone one live
 state so rejection and allocator-dependent failure remain atomic. Core
@@ -159,6 +160,13 @@ Availability starts at the exact cursor, uses the stored condition only for that
 cursor's terminator, and stops at a definition or the next effect or provider
 suspension. Every public resume and parked reduction revalidates the resulting
 state, so admission need not reconstruct discarded execution history. One
-validation may consume at most 1,048,576 units; exhaustion rejects with
-`ProgramContractViolation`. This work limit is part of the complete machine
-contract and is also published through `Machine.Manifest`.
+validation may consume at most 1,048,576 units. StaticMachine derives
+`Machine.Manifest.control_validation_step_bound` from the admitted control
+graph, active local capacity, frame depth, and after-stack capacity. Acyclic
+after graphs use their distinct reachable site count. When a function contains
+both a reachable after site and a reachable control cycle, the conservative
+capacity uses the cumulative fuel ceiling because the cycle may revisit an
+after site. Machine construction fails at comptime when that bound exceeds the
+limit. Runtime exhaustion still rejects malformed state with
+`ProgramContractViolation`. The derived bound and ceiling are part of the
+complete machine contract and are published through `Machine.Manifest`.

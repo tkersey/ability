@@ -904,20 +904,29 @@ fn ProgramProtocolForSites(
         fn validateOperationSite(comptime Site: type) void {
             validateProtocolOwner(Site);
             if (!hasDeclSafe(Site, "kind") or Site.kind != .operation) @compileError("Program.protocol coverage listed non-operation site");
+            if (!hasDeclSafe(Site, "index") or
+                Site.index >= operation_sites.len or
+                Site != operationDescriptor(operation_sites[Site.index]))
+            {
+                @compileError("Program.protocol coverage descriptor belongs to another program");
+            }
         }
 
         fn validateAfterSite(comptime Site: type) void {
             validateProtocolOwner(Site);
             if (!hasDeclSafe(Site, "kind") or Site.kind != .after) @compileError("Program.protocol coverage listed non-after site");
+            if (!hasDeclSafe(Site, "index") or
+                Site.index >= after_sites.len or
+                Site != afterDescriptor(after_sites[Site.index]))
+            {
+                @compileError("Program.protocol coverage descriptor belongs to another program");
+            }
         }
 
         pub fn assertOperationSitesCovered(comptime Sites: anytype) void {
             var covered: [operation_sites.len]bool = [_]bool{false} ** operation_sites.len;
             inline for (Sites) |Site| {
                 comptime validateOperationSite(Site);
-                if (Site.index >= operation_sites.len or operation_sites[Site.index].fingerprint != Site.fingerprint) {
-                    @compileError("Program.protocol coverage descriptor belongs to another program");
-                }
                 if (covered[Site.index]) @compileError("Program.protocol coverage listed duplicate operation site");
                 covered[Site.index] = true;
             }
@@ -930,9 +939,6 @@ fn ProgramProtocolForSites(
             var covered: [after_sites.len]bool = [_]bool{false} ** after_sites.len;
             inline for (Sites) |Site| {
                 comptime validateAfterSite(Site);
-                if (Site.index >= after_sites.len or after_sites[Site.index].fingerprint != Site.fingerprint) {
-                    @compileError("Program.protocol coverage descriptor belongs to another program");
-                }
                 if (covered[Site.index]) @compileError("Program.protocol coverage listed duplicate after site");
                 covered[Site.index] = true;
             }
@@ -945,19 +951,17 @@ fn ProgramProtocolForSites(
             var operation_covered: [operation_sites.len]bool = [_]bool{false} ** operation_sites.len;
             var after_covered: [after_sites.len]bool = [_]bool{false} ** after_sites.len;
             inline for (Sites) |Site| {
-                comptime validateProtocolOwner(Site);
+                if (!hasDeclSafe(Site, "kind")) {
+                    @compileError("Program.protocol coverage listed non-protocol site descriptor");
+                }
                 switch (Site.kind) {
                     .operation => {
-                        if (Site.index >= operation_sites.len or operation_sites[Site.index].fingerprint != Site.fingerprint) {
-                            @compileError("Program.protocol coverage descriptor belongs to another program");
-                        }
+                        comptime validateOperationSite(Site);
                         if (operation_covered[Site.index]) @compileError("Program.protocol coverage listed duplicate operation site");
                         operation_covered[Site.index] = true;
                     },
                     .after => {
-                        if (Site.index >= after_sites.len or after_sites[Site.index].fingerprint != Site.fingerprint) {
-                            @compileError("Program.protocol coverage descriptor belongs to another program");
-                        }
+                        comptime validateAfterSite(Site);
                         if (after_covered[Site.index]) @compileError("Program.protocol coverage listed duplicate after site");
                         after_covered[Site.index] = true;
                     },
@@ -1455,6 +1459,9 @@ fn StaticMachineFor(
         @compileError("Boundary StaticMachine maximum_frames is smaller than the reachable helper-frame depth");
     }
     if (options.maximum_state_bytes == 0) @compileError("Boundary StaticMachine maximum_state_bytes must be positive");
+    if (options.maximum_state_bytes > std.math.maxInt(u32)) {
+        @compileError("Boundary StaticMachine maximum_state_bytes must fit the canonical u32 domain");
+    }
     if (Program.contract.OutputsType != void or
         hasDeclSafe(Body, "collectOutputs") or
         hasDeclSafe(Body, "deinitOutputs") or
@@ -1555,6 +1562,8 @@ fn StaticMachineFor(
             pub const maximum_control_validation_scratch_bytes = Core.maximum_control_validation_scratch_bytes;
             /// Maximum control-path states dequeued by one canonical state validation.
             pub const maximum_control_validation_steps = Core.maximum_control_validation_steps;
+            /// Per-machine upper bound on control-validation work for every valid state.
+            pub const control_validation_step_bound = Core.control_validation_step_bound;
             /// Immutable generated instruction-ownership and nested-target metadata bytes.
             pub const control_instruction_metadata_bytes = Core.control_instruction_metadata_bytes;
             /// Semantic width of every canonical bare and structural usize value.

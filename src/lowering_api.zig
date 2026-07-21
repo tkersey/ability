@@ -2950,6 +2950,394 @@ const StaticMachineAfterPathGoal = union(enum) {
     function_return,
 };
 
+const StaticConditionPredicate = struct {
+    kind: program_plan.InstructionKind,
+    operand: u16,
+    aux: u16,
+
+    fn eql(self: @This(), other: @This()) bool {
+        return self.kind == other.kind and
+            self.operand == other.operand and
+            self.aux == other.aux;
+    }
+};
+
+const StaticMachineConditionValue = enum(u2) {
+    unknown,
+    false_value,
+    true_value,
+};
+
+fn staticMachineConditionPredicateForInstruction(
+    instruction: program_plan.Instruction,
+) ?StaticConditionPredicate {
+    return switch (instruction.kind) {
+        .compare_eq_zero => .{
+            .kind = instruction.kind,
+            .operand = instruction.operand,
+            .aux = 0,
+        },
+        .sum_variant_is => .{
+            .kind = instruction.kind,
+            .operand = instruction.operand,
+            .aux = instruction.aux,
+        },
+        else => null,
+    };
+}
+
+fn staticMachineFunctionConditionPredicateCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime function_index: usize,
+) usize {
+    if (function_index >= compiled_plan.functions.len) return 0;
+    const function = compiled_plan.functions[function_index];
+    const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+    var count: usize = 0;
+    for (compiled_plan.instructions[function.first_instruction..instruction_end], function.first_instruction..) |instruction, instruction_index| {
+        const predicate = staticMachineConditionPredicateForInstruction(instruction) orelse continue;
+        var prior_index: usize = function.first_instruction;
+        while (prior_index < instruction_index) : (prior_index += 1) {
+            if (staticMachineConditionPredicateForInstruction(compiled_plan.instructions[prior_index])) |prior| {
+                if (predicate.eql(prior)) break;
+            }
+        } else {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+fn staticMachineConditionPredicateIndex(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime function_index: usize,
+    predicate: StaticConditionPredicate,
+) ?usize {
+    if (function_index >= compiled_plan.functions.len) return null;
+    const function = compiled_plan.functions[function_index];
+    const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+    var unique_index: usize = 0;
+    for (compiled_plan.instructions[function.first_instruction..instruction_end], function.first_instruction..) |instruction, instruction_index| {
+        const candidate = staticMachineConditionPredicateForInstruction(instruction) orelse continue;
+        var prior_index: usize = function.first_instruction;
+        while (prior_index < instruction_index) : (prior_index += 1) {
+            if (staticMachineConditionPredicateForInstruction(compiled_plan.instructions[prior_index])) |prior| {
+                if (candidate.eql(prior)) break;
+            }
+        } else {
+            if (candidate.eql(predicate)) return unique_index;
+            unique_index += 1;
+        }
+    }
+    return null;
+}
+
+fn staticMachineConditionPredicateForIndex(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime function_index: usize,
+    target_index: usize,
+) ?StaticConditionPredicate {
+    if (function_index >= compiled_plan.functions.len) return null;
+    const function = compiled_plan.functions[function_index];
+    const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+    var unique_index: usize = 0;
+    for (compiled_plan.instructions[function.first_instruction..instruction_end], function.first_instruction..) |instruction, instruction_index| {
+        const candidate = staticMachineConditionPredicateForInstruction(instruction) orelse continue;
+        var prior_index: usize = function.first_instruction;
+        while (prior_index < instruction_index) : (prior_index += 1) {
+            if (staticMachineConditionPredicateForInstruction(compiled_plan.instructions[prior_index])) |prior| {
+                if (candidate.eql(prior)) break;
+            }
+        } else {
+            if (unique_index == target_index) return candidate;
+            unique_index += 1;
+        }
+    }
+    return null;
+}
+
+fn staticMachineFunctionBlockStartNode(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime function_index: usize,
+    block_index: usize,
+) ?usize {
+    if (function_index >= compiled_plan.functions.len or block_index >= compiled_plan.blocks.len) return null;
+    const function = compiled_plan.functions[function_index];
+    const block_end = @as(usize, function.first_block) + function.block_count;
+    if (block_index < function.first_block or block_index >= block_end) return null;
+    const block = compiled_plan.blocks[block_index];
+    return if (block.instruction_count == 0)
+        compiled_plan.instructions.len + block_index
+    else
+        block.first_instruction;
+}
+
+fn staticMachineInstructionMayWriteLocal(
+    instruction: program_plan.Instruction,
+    local_index: u16,
+) bool {
+    return switch (instruction.kind) {
+        .call_op,
+        .call_helper,
+        .call_nested_with,
+        .add_const_i32,
+        .add_i32,
+        .sub_one,
+        .const_i32,
+        .const_string,
+        .const_usize,
+        .compare_eq_zero,
+        .sum_variant_is,
+        .sum_extract_payload,
+        .product_extract_field,
+        => instruction.dst == local_index,
+        .return_value, .return_error => false,
+    };
+}
+
+const StaticAfterConditionGoal = union(enum) {
+    instruction: SessionOperationYieldSite,
+    function_return,
+};
+
+fn staticMachineAfterSiteHasConditionCompatiblePath(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime outer_site: SessionOperationYieldSite,
+    comptime goal: StaticAfterConditionGoal,
+) bool {
+    @setEvalBranchQuota(10_000_000);
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    if (comptime control_node_count == 0) return false;
+    const function_index = outer_site.function_index;
+    if (function_index >= compiled_plan.functions.len) return false;
+    switch (goal) {
+        .instruction => |inner_site| if (function_index != inner_site.function_index) return false,
+        .function_return => {},
+    }
+    const predicate_count = staticMachineFunctionConditionPredicateCount(compiled_plan, function_index);
+    if (comptime predicate_count == 0) return true;
+    const predicate_slot_count = predicate_count + 1;
+    const phase_count = 2;
+    const condition_value_count = 3;
+    const source_validity_count = 2;
+    const state_count = std.math.mul(
+        usize,
+        control_node_count,
+        phase_count * predicate_slot_count * condition_value_count * source_validity_count,
+    ) catch @compileError("Boundary StaticMachine v1 after-condition path-state count overflowed");
+    if (state_count > static_max_control_work_units) {
+        @compileError("Boundary StaticMachine v1 after-condition path analysis exceeds the v1 limit");
+    }
+    const StateIndex = std.math.IntFittingRange(0, state_count - 1);
+    const StateVisited = std.StaticBitSet(state_count);
+    const analysis = comptime program_plan.staticEntryExecutionAnalysisWithNestedTargets(
+        compiled_plan,
+        nested_with_targets,
+    ) catch return false;
+    const function = compiled_plan.functions[function_index];
+    const function_block_end = @as(usize, function.first_block) + function.block_count;
+    const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse return false;
+
+    const State = struct {
+        node: usize,
+        after_outer: bool,
+        predicate_slot: usize,
+        value: StaticMachineConditionValue,
+        source_valid: bool,
+    };
+    const encodeState = struct {
+        fn call(state: State) usize {
+            var encoded = state.node;
+            encoded = encoded * phase_count + @intFromBool(state.after_outer);
+            encoded = encoded * predicate_slot_count + state.predicate_slot;
+            encoded = encoded * condition_value_count + @intFromEnum(state.value);
+            encoded = encoded * source_validity_count + @intFromBool(state.source_valid);
+            return encoded;
+        }
+    }.call;
+    const decodeState = struct {
+        fn call(encoded_value: usize) State {
+            var encoded = encoded_value;
+            const source_valid = encoded % source_validity_count != 0;
+            encoded /= source_validity_count;
+            const value: StaticMachineConditionValue = @enumFromInt(encoded % condition_value_count);
+            encoded /= condition_value_count;
+            const predicate_slot = encoded % predicate_slot_count;
+            encoded /= predicate_slot_count;
+            const after_outer = encoded % phase_count != 0;
+            encoded /= phase_count;
+            return .{
+                .node = encoded,
+                .after_outer = after_outer,
+                .predicate_slot = predicate_slot,
+                .value = value,
+                .source_valid = source_valid,
+            };
+        }
+    }.call;
+
+    var queue: [state_count]StateIndex = undefined;
+    var visited = StateVisited.initEmpty();
+    var queue_len: usize = 0;
+    var queue_index: usize = 0;
+    const enqueue = struct {
+        fn call(
+            target_queue: *[state_count]StateIndex,
+            target_len: *usize,
+            target_visited: *StateVisited,
+            state: State,
+        ) void {
+            const encoded = encodeState(state);
+            if (target_visited.isSet(encoded)) return;
+            target_visited.set(encoded);
+            target_queue[target_len.*] = @intCast(encoded);
+            target_len.* += 1;
+        }
+    }.call;
+    enqueue(&queue, &queue_len, &visited, .{
+        .node = entry_node,
+        .after_outer = false,
+        .predicate_slot = 0,
+        .value = .unknown,
+        .source_valid = false,
+    });
+
+    while (queue_index < queue_len) : (queue_index += 1) {
+        var state = decodeState(@intCast(queue[queue_index]));
+        if (!state.after_outer and state.node == outer_site.instruction_index) {
+            const next_node = staticMachineNodeAfterSite(compiled_plan, outer_site) orelse return false;
+            const outer_instruction = compiled_plan.instructions[outer_site.instruction_index];
+            if (state.predicate_slot != 0) {
+                const predicate_index = state.predicate_slot - 1;
+                const predicate = staticMachineConditionPredicateForIndex(
+                    compiled_plan,
+                    function_index,
+                    predicate_index,
+                ) orelse return false;
+                if (staticMachineInstructionMayWriteLocal(outer_instruction, predicate.operand)) {
+                    state.source_valid = false;
+                }
+            }
+            state.node = next_node;
+            state.after_outer = true;
+            enqueue(&queue, &queue_len, &visited, state);
+            continue;
+        }
+        if (state.after_outer) switch (goal) {
+            .instruction => |inner_site| if (state.node == inner_site.instruction_index) return true,
+            .function_return => {},
+        };
+
+        if (state.node < compiled_plan.instructions.len) {
+            var block_index: usize = function.first_block;
+            const owner_block = while (block_index < function_block_end) : (block_index += 1) {
+                const candidate = compiled_plan.blocks[block_index];
+                const instruction_end = @as(usize, candidate.first_instruction) + candidate.instruction_count;
+                if (state.node >= candidate.first_instruction and state.node < instruction_end) break block_index;
+            } else return false;
+            const instruction = compiled_plan.instructions[state.node];
+            switch (instruction.kind) {
+                .return_error => continue,
+                .call_helper => if (instruction.operand >= compiled_plan.functions.len or
+                    !analysis.completion_functions[instruction.operand]) continue,
+                .call_nested_with => {
+                    const target_index = nestedWithTargetIndexForMetadata(
+                        compiled_plan,
+                        nested_with_targets,
+                        instruction.string_literal,
+                    ) orelse continue;
+                    if (!analysis.completion_functions[target_index]) continue;
+                },
+                .call_op => {
+                    if (instruction.operand >= compiled_plan.ops.len) return false;
+                    const op = compiled_plan.ops[instruction.operand];
+                    if (op.mode == .abort or (state.after_outer and op.has_after)) continue;
+                },
+                else => {},
+            }
+
+            if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
+                const predicate_index = staticMachineConditionPredicateIndex(
+                    compiled_plan,
+                    function_index,
+                    predicate,
+                ) orelse return false;
+                if (state.predicate_slot != predicate_index + 1 or !state.source_valid) {
+                    state.predicate_slot = predicate_index + 1;
+                    state.value = .unknown;
+                }
+                state.source_valid = true;
+            } else if (state.predicate_slot != 0) {
+                const predicate = staticMachineConditionPredicateForIndex(
+                    compiled_plan,
+                    function_index,
+                    state.predicate_slot - 1,
+                ) orelse return false;
+                if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
+                    state.source_valid = false;
+                }
+            }
+
+            const block = compiled_plan.blocks[owner_block];
+            const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+            state.node = if (state.node + 1 == instruction_end)
+                compiled_plan.instructions.len + owner_block
+            else
+                state.node + 1;
+            enqueue(&queue, &queue_len, &visited, state);
+            continue;
+        }
+
+        const block_index = state.node - compiled_plan.instructions.len;
+        if (block_index < function.first_block or block_index >= function_block_end) return false;
+        const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+        switch (terminator.kind) {
+            .branch_if => switch (state.value) {
+                .false_value, .true_value => {
+                    const condition = state.value == .true_value;
+                    state.node = staticMachineFunctionBlockStartNode(
+                        compiled_plan,
+                        function_index,
+                        if (condition) terminator.primary else terminator.secondary,
+                    ) orelse return false;
+                    enqueue(&queue, &queue_len, &visited, state);
+                },
+                .unknown => {
+                    var false_state = state;
+                    false_state.value = .false_value;
+                    false_state.node = staticMachineFunctionBlockStartNode(
+                        compiled_plan,
+                        function_index,
+                        terminator.secondary,
+                    ) orelse return false;
+                    enqueue(&queue, &queue_len, &visited, false_state);
+                    state.value = .true_value;
+                    state.node = staticMachineFunctionBlockStartNode(
+                        compiled_plan,
+                        function_index,
+                        terminator.primary,
+                    ) orelse return false;
+                    enqueue(&queue, &queue_len, &visited, state);
+                },
+            },
+            .jump => {
+                state.node = staticMachineFunctionBlockStartNode(
+                    compiled_plan,
+                    function_index,
+                    terminator.primary,
+                ) orelse return false;
+                enqueue(&queue, &queue_len, &visited, state);
+            },
+            .return_unit, .return_value => switch (goal) {
+                .instruction => {},
+                .function_return => if (state.after_outer) return true,
+            },
+        }
+    }
+    return false;
+}
+
 fn staticMachineAfterFreePathExists(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
@@ -3108,11 +3496,17 @@ fn staticMachineAfterSiteMayBeInnermost(
     comptime target_site: SessionOperationYieldSite,
 ) bool {
     const start_node = staticMachineNodeAfterSite(compiled_plan, target_site) orelse return false;
-    return staticMachineAfterFreePathExists(
+    if (!staticMachineAfterFreePathExists(
         compiled_plan,
         nested_with_targets,
         target_site.function_index,
         start_node,
+        .function_return,
+    )) return false;
+    return staticMachineAfterSiteHasConditionCompatiblePath(
+        compiled_plan,
+        nested_with_targets,
+        target_site,
         .function_return,
     );
 }
@@ -3125,12 +3519,18 @@ fn staticMachineAfterSitesMayBeAdjacent(
 ) bool {
     if (outer_site.function_index != inner_site.function_index) return false;
     const start_node = staticMachineNodeAfterSite(compiled_plan, outer_site) orelse return false;
-    return staticMachineAfterFreePathExists(
+    if (!staticMachineAfterFreePathExists(
         compiled_plan,
         nested_with_targets,
         outer_site.function_index,
         start_node,
         .{ .instruction = inner_site.instruction_index },
+    )) return false;
+    return staticMachineAfterSiteHasConditionCompatiblePath(
+        compiled_plan,
+        nested_with_targets,
+        outer_site,
+        .{ .instruction = inner_site },
     );
 }
 
@@ -4274,6 +4674,129 @@ fn BodySiteMetadata(comptime Body: type) type {
 
 const static_max_control_work_units: usize = 1 << 20;
 
+fn staticFunctionHasControlCycle(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+    comptime function_index: usize,
+) bool {
+    @setEvalBranchQuota(1_000_000);
+    if (function_index >= compiled_plan.functions.len) return true;
+    const function = compiled_plan.functions[function_index];
+    if (function.block_count == 0) return false;
+    const block_end = @as(usize, function.first_block) + function.block_count;
+    var incoming = [_]usize{0} ** function.block_count;
+    var reachable_count: usize = 0;
+
+    for (compiled_plan.blocks[function.first_block..block_end], 0..) |block, relative_index| {
+        const block_index = @as(usize, function.first_block) + relative_index;
+        if (!analysis.reachable_blocks[block_index]) continue;
+        reachable_count += 1;
+        const terminator = compiled_plan.terminators[block.terminator_index];
+        const targets = switch (terminator.kind) {
+            .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
+            .jump => [2]?u16{ terminator.primary, null },
+            .return_unit, .return_value => [2]?u16{ null, null },
+        };
+        incoming_targets: for (targets) |target_optional| {
+            const target = target_optional orelse continue :incoming_targets;
+            if (target < function.first_block or target >= block_end) return true;
+            if (!analysis.reachable_blocks[target]) continue :incoming_targets;
+            incoming[target - function.first_block] += 1;
+        }
+    }
+
+    var queue: [function.block_count]u16 = undefined;
+    var queue_len: usize = 0;
+    var queue_index: usize = 0;
+    for (incoming, 0..) |count, relative_index| {
+        const block_index = @as(usize, function.first_block) + relative_index;
+        if (analysis.reachable_blocks[block_index] and count == 0) {
+            queue[queue_len] = @intCast(block_index);
+            queue_len += 1;
+        }
+    }
+
+    var visited_count: usize = 0;
+    while (queue_index < queue_len) : (queue_index += 1) {
+        const block_index = queue[queue_index];
+        visited_count += 1;
+        const block = compiled_plan.blocks[block_index];
+        const terminator = compiled_plan.terminators[block.terminator_index];
+        const targets = switch (terminator.kind) {
+            .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
+            .jump => [2]?u16{ terminator.primary, null },
+            .return_unit, .return_value => [2]?u16{ null, null },
+        };
+        outgoing_targets: for (targets) |target_optional| {
+            const target = target_optional orelse continue :outgoing_targets;
+            if (!analysis.reachable_blocks[target]) continue :outgoing_targets;
+            const relative_target = target - function.first_block;
+            if (incoming[relative_target] == 0) return true;
+            incoming[relative_target] -= 1;
+            if (incoming[relative_target] == 0) {
+                queue[queue_len] = target;
+                queue_len += 1;
+            }
+        }
+    }
+    return visited_count != reachable_count;
+}
+
+fn staticAfterStackCapacity(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+) usize {
+    if (analysis.reachable_after_count == 0) return 0;
+    for (compiled_plan.functions, 0..) |function, function_index| {
+        if (!analysis.reachable_functions[function_index]) continue;
+        const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+        var has_reachable_after = false;
+        reachable_after_instructions: for (compiled_plan.instructions[function.first_instruction..instruction_end], function.first_instruction..) |instruction, instruction_index| {
+            if (!analysis.reachable_instructions[instruction_index] or instruction.kind != .call_op) {
+                continue :reachable_after_instructions;
+            }
+            if (instruction.operand >= compiled_plan.ops.len) return max_interpreter_steps;
+            if (compiled_plan.ops[instruction.operand].has_after) {
+                has_reachable_after = true;
+                break;
+            }
+        }
+        if (has_reachable_after and staticFunctionHasControlCycle(
+            compiled_plan,
+            analysis,
+            function_index,
+        )) return max_interpreter_steps;
+    }
+    return @min(analysis.reachable_after_count, max_interpreter_steps);
+}
+
+fn staticMachineControlValidationStepBound(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+    comptime control_path_state_capacity: usize,
+) ?usize {
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    const control_node_capacity = if (control_node_count == 0) 1 else control_node_count;
+    const after_stack_capacity = staticAfterStackCapacity(compiled_plan, analysis);
+    const path_search_count = std.math.add(
+        usize,
+        after_stack_capacity,
+        analysis.max_active_frame_depth,
+    ) catch return null;
+    const path_work = std.math.mul(
+        usize,
+        path_search_count,
+        control_path_state_capacity,
+    ) catch return null;
+    const local_work = std.math.mul(
+        usize,
+        analysis.max_active_local_slots,
+        control_node_capacity,
+    ) catch return null;
+    const reachability_and_local_work = std.math.add(usize, path_work, local_work) catch return null;
+    return std.math.add(usize, reachability_and_local_work, after_stack_capacity) catch null;
+}
+
 fn staticMachineContractFingerprint(
     comptime program_label: []const u8,
     comptime compiled_plan: program_plan.ProgramPlan,
@@ -4282,6 +4805,7 @@ fn staticMachineContractFingerprint(
     comptime HandlersType: type,
     comptime operation_yield_sites: anytype,
     comptime maximum_state_bytes: usize,
+    comptime control_validation_step_bound: usize,
 ) u64 {
     @setEvalBranchQuota(1_000_000);
     var hasher = std.hash.Wyhash.init(0);
@@ -4326,6 +4850,7 @@ fn staticMachineContractFingerprint(
     }
     sessionSiteHashUsize(&hasher, max_interpreter_steps);
     sessionSiteHashUsize(&hasher, static_max_control_work_units);
+    sessionSiteHashUsize(&hasher, control_validation_step_bound);
     return hasher.final();
 }
 
@@ -4375,6 +4900,7 @@ pub fn ExecutableSessionForPlan(
         0,
         0,
         0,
+        0,
     );
 }
 
@@ -4388,6 +4914,27 @@ pub fn StaticExecutableSessionForPlan(
     comptime ProtocolOwner: type,
     comptime maximum_state_bytes: usize,
 ) type {
+    const analysis = program_plan.staticEntryExecutionAnalysisWithNestedTargets(
+        compiled_plan,
+        nested_with_targets,
+    ) catch |err| @compileError("Boundary StaticMachine v1 failed execution analysis: " ++ @errorName(err));
+    if (analysis.helper_cycle) {
+        @compileError("Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs");
+    }
+    comptime validateTypedExecutablePlanSupportWithIdentity(
+        compiled_plan,
+        schema_types,
+        nested_with_targets,
+        .static_machine_v1,
+    ) catch |err| @compileError(
+        "Boundary StaticMachine v1 failed executable support validation: " ++ @errorName(err),
+    );
+    comptime validateSessionPlanSupportWithNestedTargets(
+        compiled_plan,
+        nested_with_targets,
+    ) catch |err| @compileError(
+        "Boundary StaticMachine v1 failed session support validation: " ++ @errorName(err),
+    );
     const site_metadata = BodySiteMetadata(ProtocolOwner).values;
     const operation_yield_sites = staticMachineOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
     comptime validateStaticMachineAfterHandlerContracts(
@@ -4402,6 +4949,14 @@ pub fn StaticExecutableSessionForPlan(
         compiled_plan.instructions.len,
         compiled_plan.blocks.len,
     ) orelse @compileError("Boundary StaticMachine v1 supports at most 8192 combined control instructions and blocks");
+    const control_validation_step_bound = staticMachineControlValidationStepBound(
+        compiled_plan,
+        analysis,
+        control_path_state_capacity,
+    ) orelse @compileError("Boundary StaticMachine v1 control-validation work bound overflowed");
+    if (control_validation_step_bound > static_max_control_work_units) {
+        @compileError("Boundary StaticMachine v1 control-validation work exceeds the v1 limit");
+    }
     const canonical_plan_identity = staticPlanFingerprint(compiled_plan);
     const static_contract_identity = staticMachineContractFingerprint(
         program_label,
@@ -4411,6 +4966,7 @@ pub fn StaticExecutableSessionForPlan(
         HandlersType,
         operation_yield_sites,
         maximum_state_bytes,
+        control_validation_step_bound,
     );
     return ExecutableSessionForPlanWithSelectedIdentity(
         ErrorSet,
@@ -4426,6 +4982,7 @@ pub fn StaticExecutableSessionForPlan(
         canonical_plan_identity,
         static_contract_identity,
         control_path_state_capacity,
+        control_validation_step_bound,
     );
 }
 
@@ -4443,6 +5000,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
     comptime canonical_plan_identity: u64,
     comptime static_contract_identity: u64,
     comptime static_control_path_state_capacity: usize,
+    comptime static_control_validation_step_bound: usize,
 ) type {
     const entry = compiled_plan.functions[compiled_plan.entry_index];
     const canonical_request_identity = request_identity == .canonical_static_machine;
@@ -5403,6 +5961,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             static_max_path_scratch_bytes;
         pub const maximum_control_validation_steps: usize =
             static_max_control_work_units;
+        pub const control_validation_step_bound: usize =
+            static_control_validation_step_bound;
         pub const control_instruction_metadata_bytes: usize =
             compiled_plan.instructions.len * @sizeOf(ControlInstructionMetadata);
         // zlinter-enable declaration_naming
@@ -5468,7 +6028,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         };
 
         const ControlValidationBudget = struct {
-            remaining: usize = static_max_control_work_units,
+            remaining: usize = if (canonical_request_identity)
+                static_control_validation_step_bound
+            else
+                static_max_control_work_units,
 
             fn consume(self: *@This()) error{ProgramContractViolation}!void {
                 if (self.remaining == 0) return error.ProgramContractViolation;
@@ -9004,15 +9567,17 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         pub fn start(allocator: std.mem.Allocator, args: anytype) anyerror!Self {
-            comptime validateTypedExecutablePlanSupportWithIdentity(
-                compiled_plan,
-                schema_types,
-                nested_with_targets,
-                if (canonical_request_identity) .static_machine_v1 else .legacy_session,
-            ) catch |err|
-                @compileError("Program.Session.start failed executable support validation: " ++ @errorName(err));
-            comptime validateSessionPlanSupportWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
-                @compileError("Program.Session.start unsupported: " ++ @errorName(err));
+            if (comptime !canonical_request_identity) {
+                comptime validateTypedExecutablePlanSupportWithIdentity(
+                    compiled_plan,
+                    schema_types,
+                    nested_with_targets,
+                    .legacy_session,
+                ) catch |err|
+                    @compileError("Program.Session.start failed executable support validation: " ++ @errorName(err));
+                comptime validateSessionPlanSupportWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
+                    @compileError("Program.Session.start unsupported: " ++ @errorName(err));
+            }
             var scratch = try Scratch.init(
                 allocator,
                 analysis.max_active_local_slots,
@@ -12427,6 +12992,26 @@ test "StaticMachine control-path capacity has a fixed compact scratch bound" {
     try std.testing.expectEqual(
         static_max_control_work_units,
         static_max_path_states * 32,
+    );
+}
+
+test "StaticMachine validation admission keeps acyclic after capacity structural" {
+    const compiled_plan = supportStructuredAfterHelperResultPlan();
+    const analysis = comptime program_plan.staticEntryExecutionAnalysisWithNestedTargets(
+        compiled_plan,
+        &.{},
+    ) catch unreachable;
+    const path_capacity = staticMachineControlPathStateCapacity(
+        compiled_plan.instructions.len,
+        compiled_plan.blocks.len,
+    ).?;
+    try std.testing.expectEqual(@as(usize, 1), staticAfterStackCapacity(compiled_plan, analysis));
+    try std.testing.expect(
+        staticMachineControlValidationStepBound(
+            compiled_plan,
+            analysis,
+            path_capacity,
+        ).? < static_max_control_work_units,
     );
 }
 

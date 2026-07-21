@@ -51,6 +51,6 @@ const Body = struct {
 const Program = boundary.program("static-machine-oversized-usize-constant", struct {}, Body);
 const Machine = boundary.staticMachine(Program, .{});
 
-test "StaticMachine rejects a const_usize outside the canonical domain" {
-    _ = Machine;
+comptime {
+    _ = Machine.Manifest.abi;
 }
