@@ -173,9 +173,11 @@ path-state dequeue consumes one shared call-wide work unit across after entries,
 frame cursors, and forward availability proof for every absent non-unit local.
 Availability starts at the exact cursor, uses the stored condition only for that
 cursor's terminator, and stops at a definition or the next effect or provider
-suspension. Every public resume and parked reduction revalidates the resulting
-state, so admission need not reconstruct discarded execution history. One
-validation may consume at most 1,048,576 units. StaticMachine derives
+suspension. Each absent local is budgeted over the complete predicate-authority
+path-state domain with the fixed suspension dimension removed. Every public
+resume and parked reduction revalidates the resulting state, so admission need
+not reconstruct discarded execution history. One validation may consume at
+most 1,048,576 units. StaticMachine derives
 `Machine.Manifest.control_validation_step_bound` from the admitted control
 graph, active local capacity, frame depth, and after-stack capacity. Acyclic
 after graphs use their distinct reachable site count. When a function contains

@@ -4887,8 +4887,6 @@ fn staticMachineControlValidationStepBound(
     comptime analysis: anytype,
     comptime control_path_state_capacity: usize,
 ) ?usize {
-    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
-    const control_node_capacity = if (control_node_count == 0) 1 else control_node_count;
     const after_stack_capacity = staticAfterStackCapacity(compiled_plan, analysis);
     const path_search_count = std.math.add(
         usize,
@@ -4903,7 +4901,7 @@ fn staticMachineControlValidationStepBound(
     const local_work = std.math.mul(
         usize,
         analysis.max_active_local_slots,
-        control_node_capacity,
+        control_path_state_capacity / 2,
     ) catch return null;
     const reachability_and_local_work = std.math.add(usize, path_work, local_work) catch return null;
     return std.math.add(usize, reachability_and_local_work, after_stack_capacity) catch null;

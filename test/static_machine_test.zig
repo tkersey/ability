@@ -584,6 +584,59 @@ fn correlatedAbsentLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan
     }) catch unreachable;
 }
 
+fn controlValidationLocalWorkPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 64,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 3,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 0, .terminator_index = 1 },
+        .{ .first_instruction = 1, .instruction_count = 0, .terminator_index = 2 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .jump, .primary = 0 },
+        .{ .kind = .jump, .primary = 0 },
+    };
+    const locals = [_]boundary.ir.plan.Local{
+        .{ .codec = .i32 },
+        .{ .codec = .bool },
+    } ++ [_]boundary.ir.plan.Local{.{ .codec = .i32 }} ** 62;
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 45,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &locals,
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const payload = boundary.ir.builder.local(root, 0);
@@ -2039,6 +2092,21 @@ const CorrelatedAbsentLocalProgram = boundary.program(
 );
 const CorrelatedAbsentLocalMachine = boundary.staticMachine(CorrelatedAbsentLocalProgram, .{});
 
+const ControlValidationLocalWorkBody = struct {
+    pub const compiled_plan = controlValidationLocalWorkPlan(
+        "static-machine-control-validation-local-work",
+    );
+};
+const ControlValidationLocalWorkProgram = boundary.program(
+    "static-machine-control-validation-local-work",
+    struct {},
+    ControlValidationLocalWorkBody,
+);
+const ControlValidationLocalWorkMachine = boundary.staticMachine(
+    ControlValidationLocalWorkProgram,
+    .{},
+);
+
 const HelperBody = struct {
     pub const compiled_plan = helperEffectPlan("static-machine-helper");
 };
@@ -3472,7 +3540,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 16028072894703693036), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 12321766020519252541), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
@@ -4040,6 +4108,15 @@ test "StaticMachine local presence preserves repeated-condition authority" {
     defer std.testing.allocator.free(encoded);
     const restored = try CorrelatedAbsentLocalMachine.decodeState(std.testing.allocator, encoded);
     CorrelatedAbsentLocalMachine.deinitState(restored);
+}
+
+test "StaticMachine control validation budgets absent locals by path states" {
+    const state = try ControlValidationLocalWorkMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 0)},
+    );
+    defer ControlValidationLocalWorkMachine.deinitState(state);
+    try ControlValidationLocalWorkMachine.validateState(state);
 }
 
 test "StaticMachine rejects a canonical state missing a resumed operation result" {
