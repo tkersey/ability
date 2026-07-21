@@ -77,6 +77,10 @@ pub const EntryExecutionAnalysis = inner.EntryExecutionAnalysis;
 pub const entryExecutionAnalysis = inner.entryExecutionAnalysis;
 /// Re-exported entry execution reachability analysis with resolver-backed nested targets.
 pub const entryExecutionAnalysisWithNestedTargets = inner.entryExecutionAnalysisWithNestedTargets;
+/// Re-exported StaticMachine v1 entry execution reachability analysis.
+pub const staticEntryExecutionAnalysis = inner.staticEntryExecutionAnalysis;
+/// Re-exported StaticMachine v1 entry analysis with resolver-backed nested targets.
+pub const staticEntryExecutionAnalysisWithNestedTargets = inner.staticEntryExecutionAnalysisWithNestedTargets;
 /// Re-exported exact binding-schema metadata enrichment.
 pub const enrichPlanWithBindingSchemasExact = inner.enrichPlanWithBindingSchemasExact;
 /// Re-exported legacy plan upgrader.

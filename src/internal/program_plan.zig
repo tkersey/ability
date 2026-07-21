@@ -385,10 +385,7 @@ pub const ProgramPlan = struct {
                     const instruction_end = rangeEnd(block.first_instruction, block.instruction_count) orelse return error.InvalidBlockInstructionSpan;
                     if (!try blockCanResumeToTerminator(self, function, block.first_instruction, instruction_end, &completion_reachability, nested_with_targets)) continue :executable_block_completion_scan;
                     const terminator = self.terminators[block.terminator_index];
-                    const block_completes = switch (terminator.kind) {
-                        .return_unit, .return_value => true,
-                        .jump, .branch_if => false,
-                    };
+                    const block_completes = terminatorCompletesForIdentity(.legacy_v0, terminator, &completion_reachability);
                     if (block_completes) {
                         completion_reachability[function_index] = true;
                         changed = true;
@@ -815,7 +812,8 @@ pub const ProgramPlan = struct {
         }
         canonicalHashU64(&hasher, self.value_schemas.len);
         for (self.value_schemas) |schema| {
-            canonicalHashBytes(&hasher, schema.label);
+            // Schema labels are nominal Zig type names used for diagnostics and
+            // source-plan admission. Canonical execution identity is structural.
             canonicalHashTag(&hasher, schema.codec);
             canonicalHashU16(&hasher, schema.first_field);
             canonicalHashU16(&hasher, schema.field_count);
@@ -2625,6 +2623,11 @@ pub fn entryExecutionAnalysis(comptime plan: ProgramPlan) ValidationError!EntryE
     return entryExecutionAnalysisWithNestedTargets(plan, &.{});
 }
 
+/// StaticMachine v1 execution analysis with corrected block-target semantics.
+pub fn staticEntryExecutionAnalysis(comptime plan: ProgramPlan) ValidationError!EntryExecutionAnalysis(plan) {
+    return staticEntryExecutionAnalysisWithNestedTargets(plan, &.{});
+}
+
 fn nestedWithTargetIndexForMetadata(comptime nested_with_targets: anytype, metadata: []const u8) ?u16 {
     inline for (nested_with_targets) |target| {
         if (std.mem.eql(u8, target.metadata, metadata)) return target.function_index;
@@ -2635,6 +2638,45 @@ fn nestedWithTargetIndexForMetadata(comptime nested_with_targets: anytype, metad
 pub fn entryExecutionAnalysisWithNestedTargets(
     comptime plan: ProgramPlan,
     comptime nested_with_targets: anytype,
+) ValidationError!EntryExecutionAnalysis(plan) {
+    return entryExecutionAnalysisWithIdentity(plan, nested_with_targets, .legacy_v0);
+}
+
+/// StaticMachine v1 execution analysis with resolver-backed nested targets.
+pub fn staticEntryExecutionAnalysisWithNestedTargets(
+    comptime plan: ProgramPlan,
+    comptime nested_with_targets: anytype,
+) ValidationError!EntryExecutionAnalysis(plan) {
+    return entryExecutionAnalysisWithIdentity(plan, nested_with_targets, .static_machine_v1);
+}
+
+const EntryExecutionAnalysisIdentity = enum {
+    legacy_v0,
+    static_machine_v1,
+};
+
+fn terminatorCompletesForIdentity(
+    comptime identity: EntryExecutionAnalysisIdentity,
+    terminator: Terminator,
+    completion_reachability: *const [max_indexed_table_len]bool,
+) bool {
+    return switch (identity) {
+        .legacy_v0 => switch (terminator.kind) {
+            .return_unit, .return_value => true,
+            .jump => completion_reachability[terminator.primary],
+            .branch_if => completion_reachability[terminator.primary] or completion_reachability[terminator.secondary],
+        },
+        .static_machine_v1 => switch (terminator.kind) {
+            .return_unit, .return_value => true,
+            .jump, .branch_if => false,
+        },
+    };
+}
+
+fn entryExecutionAnalysisWithIdentity(
+    comptime plan: ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime identity: EntryExecutionAnalysisIdentity,
 ) ValidationError!EntryExecutionAnalysis(plan) {
     comptime {
         @setEvalBranchQuota(1_000_000);
@@ -2674,10 +2716,7 @@ pub fn entryExecutionAnalysisWithNestedTargets(
                         continue :executable_block_completion_scan;
                     }
                     const terminator = plan.terminators[block.terminator_index];
-                    const block_completes = switch (terminator.kind) {
-                        .return_unit, .return_value => true,
-                        .jump, .branch_if => false,
-                    };
+                    const block_completes = terminatorCompletesForIdentity(identity, terminator, &completion_reachability);
                     if (block_completes) {
                         completion_reachability[function_index] = true;
                         control_changed = true;
@@ -2775,7 +2814,12 @@ pub fn entryExecutionAnalysisWithNestedTargets(
             }
         }
 
-        analysis.helper_cycle = entryAnalysisHasHelperCycle(plan, analysis, nested_with_targets);
+        analysis.helper_cycle = switch (identity) {
+            // Program.Session v0 tracked authored helper recursion only. Keep
+            // resolver-backed nested edges exclusive to StaticMachine v1.
+            .legacy_v0 => entryAnalysisHasHelperCycle(plan, analysis, &.{}),
+            .static_machine_v1 => entryAnalysisHasHelperCycle(plan, analysis, nested_with_targets),
+        };
         analysis.max_active_frame_depth = entryAnalysisMaxFrameDepth(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
         analysis.max_active_local_slots = entryAnalysisMaxLocalSlots(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
         analysis.max_active_call_arg_slots = entryAnalysisMaxCallArgSlots(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
@@ -5419,6 +5463,46 @@ test "entryExecutionAnalysisWithNestedTargets propagates terminal nested targets
     try std.testing.expect(analysis.reachable_instructions[2]);
 }
 
+test "StaticMachine entry analysis owns resolver-backed nested cycles" {
+    const metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi";
+    const plan = comptime ProgramPlan{
+        .label = "versioned-nested-cycle-analysis",
+        .ir_hash = 1,
+        .entry_index = 0,
+        .functions = &.{.{
+            .symbol_name = "root",
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 0,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 0,
+            .instruction_count = 1,
+        }},
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{},
+        .blocks = &.{.{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 }},
+        .terminators = &.{.{ .kind = .return_unit }},
+        .instructions = &.{.{
+            .kind = .call_nested_with,
+            .aux = @intFromEnum(ValueCodec.unit),
+            .string_literal = metadata,
+        }},
+    };
+    const targets = comptime .{.{ .metadata = metadata, .function_index = 0 }};
+
+    const legacy = comptime entryExecutionAnalysisWithNestedTargets(plan, targets) catch unreachable;
+    const static = comptime staticEntryExecutionAnalysisWithNestedTargets(plan, targets) catch unreachable;
+    try std.testing.expect(!legacy.helper_cycle);
+    try std.testing.expect(static.helper_cycle);
+}
+
 test "ProgramPlan.validateWithNestedTargets rejects terminal nested target result mismatches" {
     const metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi";
     const instructions = [_]Instruction{
@@ -7245,7 +7329,7 @@ test "ProgramPlan hash includes requirement semantics" {
     try std.testing.expectEqual(base.canonicalHash(), provenance_only.canonicalHash());
 }
 
-test "entry analysis separates function completion from global block indexes" {
+test "StaticMachine entry analysis separates function completion from legacy global block indexes" {
     const root = comptime program_plan_builder.function(0);
     const completing = comptime program_plan_builder.function(1);
     const looping = comptime program_plan_builder.function(2);
@@ -7332,10 +7416,14 @@ test "entry analysis separates function completion from global block indexes" {
         .terminators = &terminators,
         .instructions = &helper_instructions,
     };
-    const helper_analysis = comptime entryExecutionAnalysisWithNestedTargets(helper_plan, &.{}) catch unreachable;
-    try std.testing.expect(!helper_analysis.completion_functions[root.index]);
-    try std.testing.expect(helper_analysis.completion_functions[completing.index]);
-    try std.testing.expect(!helper_analysis.completion_functions[looping.index]);
+    const legacy_helper_analysis = comptime entryExecutionAnalysisWithNestedTargets(helper_plan, &.{}) catch unreachable;
+    try std.testing.expect(legacy_helper_analysis.completion_functions[root.index]);
+    try std.testing.expect(legacy_helper_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!legacy_helper_analysis.completion_functions[looping.index]);
+    const static_helper_analysis = comptime staticEntryExecutionAnalysisWithNestedTargets(helper_plan, &.{}) catch unreachable;
+    try std.testing.expect(!static_helper_analysis.completion_functions[root.index]);
+    try std.testing.expect(static_helper_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!static_helper_analysis.completion_functions[looping.index]);
 
     const metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi";
     const nested_instructions = comptime [_]Instruction{
@@ -7363,8 +7451,12 @@ test "entry analysis separates function completion from global block indexes" {
         .instructions = &nested_instructions,
     };
     const targets = comptime .{.{ .metadata = metadata, .function_index = looping.index }};
-    const nested_analysis = comptime entryExecutionAnalysisWithNestedTargets(nested_plan, targets) catch unreachable;
-    try std.testing.expect(!nested_analysis.completion_functions[root.index]);
-    try std.testing.expect(nested_analysis.completion_functions[completing.index]);
-    try std.testing.expect(!nested_analysis.completion_functions[looping.index]);
+    const legacy_nested_analysis = comptime entryExecutionAnalysisWithNestedTargets(nested_plan, targets) catch unreachable;
+    try std.testing.expect(legacy_nested_analysis.completion_functions[root.index]);
+    try std.testing.expect(legacy_nested_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!legacy_nested_analysis.completion_functions[looping.index]);
+    const static_nested_analysis = comptime staticEntryExecutionAnalysisWithNestedTargets(nested_plan, targets) catch unreachable;
+    try std.testing.expect(!static_nested_analysis.completion_functions[root.index]);
+    try std.testing.expect(static_nested_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!static_nested_analysis.completion_functions[looping.index]);
 }

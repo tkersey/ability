@@ -1338,12 +1338,14 @@ const StaticMachineProgramAuthenticityToken = opaque {};
 const StaticMachineCarrierBlocker = enum {
     comptime_struct_field,
     mutable_string_list,
+    non_exhaustive_enum,
 };
 
 fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBlocker {
     if (ValueType == [][]const u8) return .mutable_string_list;
     return switch (@typeInfo(ValueType)) {
         .optional => |optional| staticMachineCarrierBlocker(optional.child),
+        .@"enum" => |info| if (info.is_exhaustive) null else .non_exhaustive_enum,
         .@"struct" => |info| {
             inline for (info.fields) |field| {
                 if (field.is_comptime) return .comptime_struct_field;
@@ -1352,6 +1354,9 @@ fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBl
             return null;
         },
         .@"union" => |info| {
+            if (info.tag_type) |Tag| {
+                if (staticMachineCarrierBlocker(Tag)) |blocker| return blocker;
+            }
             inline for (info.fields) |field| {
                 if (staticMachineCarrierBlocker(field.type)) |blocker| return blocker;
             }
@@ -1373,6 +1378,7 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
         if (staticMachineCarrierBlocker(SchemaType)) |blocker| switch (blocker) {
             .comptime_struct_field => @compileError("Boundary StaticMachine v1 does not support comptime fields inside product schemas"),
             .mutable_string_list => @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas"),
+            .non_exhaustive_enum => @compileError("Boundary StaticMachine v1 does not support non-exhaustive enum carriers"),
         };
     }
     const Body = Program.StaticMachineBody;

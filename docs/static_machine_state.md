@@ -39,6 +39,12 @@ provenance; neither is a portable StaticMachine state identity. A plan-local
 `ValueRef` becomes portable only when paired with this complete machine
 contract.
 
+Canonical schema identity is structural. Nominal Zig schema labels remain
+diagnostic and source-admission metadata but do not distinguish portable state.
+Enum identity includes tag signedness and width, exhaustiveness, field names,
+and explicit discriminant values. StaticMachine v1 rejects non-exhaustive enum
+carriers because the ordinal wire codec cannot reconstruct unknown tags.
+
 StaticMachine request and after-site identities use a target-neutral canonical
 domain. Provenance-only changes such as `ir_hash` do not change canonical
 requests or state bytes. The authored program label is not provenance-only:
@@ -99,6 +105,13 @@ must preserve:
 Encoding does not advance the machine. Decoding creates fresh working
 ownership, so live request tokens may change; semantic site identity, payload,
 and continuation behavior may not.
+
+Live session identifiers and `u64` request tokens are intentionally absent from
+the image. Their allocators fail before wrap, and decoding assigns fresh live
+ownership. A resume request must match the pending state's session, token, turn,
+site, payload or current-value fingerprint, complete request fingerprint,
+machine contract, and continuation refs. The pending state—not mutable request
+projection metadata—authorizes and supplies reduction.
 
 Every successful constructor or public mutation that leaves a runnable or
 parked state proves this law before commit. `initialState`, `reduce`, `resume`,

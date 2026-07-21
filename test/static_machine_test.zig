@@ -149,6 +149,118 @@ fn portableWordProductPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn nominalCarrierEffectPlan(comptime Payload: type) boundary.ir.ProgramPlan {
+    const Schemas = boundary.ir.schema.Registry(.{Payload});
+    const root = boundary.ir.builder.function(0);
+    const payload = boundary.ir.builder.local(root, 0);
+    const resumed = boundary.ir.builder.local(root, 1);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        boundary.ir.builder.callOp(root, resumed, boundary.ir.builder.op(root, 0), payload) catch unreachable,
+        boundary.ir.builder.returnValue(root, resumed) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 2,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{.{ .label = "test", .first_op = 0, .op_count = 1 }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "inspect",
+        .mode = .transform,
+        .payload_codec = .product,
+        .payload_schema_index = 0,
+        .resume_codec = .i32,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_value }};
+    return boundary.ir.builder.finish(.{
+        .label = "static-machine-nominal-carrier",
+        .ir_hash = 23,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .value_schemas = &Schemas.value_schemas,
+        .value_fields = &Schemas.value_fields,
+        .value_variants = &Schemas.value_variants,
+        .locals = &.{
+            .{ .codec = .product, .schema_index = 0 },
+            .{ .codec = .i32 },
+        },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
+fn sumIdentityPlan(comptime Sum: type) boundary.ir.ProgramPlan {
+    const Schemas = boundary.ir.schema.Registry(.{Sum});
+    const root = boundary.ir.builder.function(0);
+    const value = boundary.ir.builder.local(root, 0);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        boundary.ir.builder.returnValue(root, value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .sum,
+        .value_schema_index = 0,
+        .result_codec = .sum,
+        .result_schema_index = 0,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 1,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_value }};
+    return boundary.ir.builder.finish(.{
+        .label = "static-machine-enum-identity",
+        .ir_hash = 24,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .value_schemas = &Schemas.value_schemas,
+        .value_fields = &Schemas.value_fields,
+        .value_variants = &Schemas.value_variants,
+        .locals = &.{.{ .codec = .sum, .schema_index = 0 }},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn extractedPortableWordPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const value = boundary.ir.builder.local(root, 0);
@@ -957,6 +1069,137 @@ fn nonCompletingHelperPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn legacyCompletionNamespacePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const completing = boundary.ir.builder.function(1);
+    const looping = boundary.ir.builder.function(2);
+    const provider = boundary.ir.builder.function(3);
+    const root_value = boundary.ir.builder.local(root, 0);
+    const completing_value = boundary.ir.builder.local(completing, 0);
+    const provider_value = boundary.ir.builder.local(provider, 0);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        boundary.ir.builder.callHelper(root, root_value, provider, null) catch unreachable,
+        boundary.ir.builder.callHelper(root, root_value, looping, null) catch unreachable,
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        boundary.ir.builder.returnValue(root, root_value) catch unreachable,
+        .{ .kind = .const_i32, .dst = completing_value.index, .operand = 7 },
+        boundary.ir.builder.returnValue(completing, completing_value) catch unreachable,
+        boundary.ir.builder.callOp(provider, provider_value, boundary.ir.builder.op(provider, 1), null) catch unreachable,
+        boundary.ir.builder.returnValue(provider, provider_value) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{
+        .{
+            .symbol_name = "run",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 1,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 1,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 0,
+            .instruction_count = 4,
+        },
+        .{
+            .symbol_name = "completing",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 1,
+            .local_count = 1,
+            .first_block = 2,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 4,
+            .instruction_count = 2,
+        },
+        .{
+            .symbol_name = "looping",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 2,
+            .local_count = 0,
+            .first_block = 1,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 8,
+            .instruction_count = 0,
+        },
+        .{
+            .symbol_name = "provider",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 1,
+            .requirement_count = 1,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 2,
+            .local_count = 1,
+            .first_block = 3,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 6,
+            .instruction_count = 2,
+        },
+    };
+    const requirements = [_]boundary.ir.plan.Requirement{
+        .{ .label = "legacy-visible", .first_op = 0, .op_count = 1 },
+        .{ .label = "reachable", .first_op = 1, .op_count = 1 },
+    };
+    const ops = [_]boundary.ir.plan.Op{
+        .{
+            .requirement_index = 0,
+            .op_name = "after-loop",
+            .mode = .transform,
+            .payload_codec = .unit,
+            .resume_codec = .unit,
+        },
+        .{
+            .requirement_index = 1,
+            .op_name = "request",
+            .mode = .transform,
+            .payload_codec = .unit,
+            .resume_codec = .i32,
+        },
+    };
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 4, .terminator_index = 0 },
+        .{ .first_instruction = 8, .instruction_count = 0, .terminator_index = 1 },
+        .{ .first_instruction = 4, .instruction_count = 2, .terminator_index = 2 },
+        .{ .first_instruction = 6, .instruction_count = 2, .terminator_index = 3 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .return_value },
+        .{ .kind = .jump, .primary = 1 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 25,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .i32 }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn nonCompletingNestedPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const provider = boundary.ir.builder.function(1);
@@ -1154,6 +1397,32 @@ const PortableWordProductProgram = boundary.program(
     PortableWordProductBody,
 );
 const PortableWordProductMachine = boundary.staticMachine(PortableWordProductProgram, .{});
+
+fn NominalCarrierProgram(comptime Payload: type) type {
+    return boundary.program("static-machine-nominal-carrier", struct {}, struct {
+        pub const value_schema_types = .{Payload};
+        pub const compiled_plan = nominalCarrierEffectPlan(Payload);
+    });
+}
+
+const NominalCarrierA = struct { word: u64 };
+const NominalCarrierB = struct { word: u64 };
+const NominalCarrierMachineA = boundary.staticMachine(NominalCarrierProgram(NominalCarrierA), .{});
+const NominalCarrierMachineB = boundary.staticMachine(NominalCarrierProgram(NominalCarrierB), .{});
+
+fn SumIdentityProgram(comptime Sum: type) type {
+    return boundary.program("static-machine-enum-identity", struct {}, struct {
+        pub const value_schema_types = .{Sum};
+        pub const compiled_plan = sumIdentityPlan(Sum);
+    });
+}
+
+const EnumMappingA = enum(u8) { ready = 1, waiting = 2 };
+const EnumMappingB = enum(u8) { ready = 2, waiting = 1 };
+const EnumMappingWide = enum(u16) { ready = 1, waiting = 2 };
+const EnumMachineA = boundary.staticMachine(SumIdentityProgram(EnumMappingA), .{});
+const EnumMachineB = boundary.staticMachine(SumIdentityProgram(EnumMappingB), .{});
+const EnumMachineWide = boundary.staticMachine(SumIdentityProgram(EnumMappingWide), .{});
 
 const ExtractedPortableWordBody = struct {
     pub const value_schema_types = .{PortableWordProduct};
@@ -1362,6 +1631,16 @@ const NonCompletingHelperProgram = boundary.program(
     NonCompletingHelperBody,
 );
 const NonCompletingHelperMachine = boundary.staticMachine(NonCompletingHelperProgram, .{});
+
+const LegacyCompletionNamespaceBody = struct {
+    pub const compiled_plan = legacyCompletionNamespacePlan("static-machine-versioned-completion");
+};
+const LegacyCompletionNamespaceProgram = boundary.program(
+    "static-machine-versioned-completion",
+    struct {},
+    LegacyCompletionNamespaceBody,
+);
+const LegacyCompletionNamespaceMachine = boundary.staticMachine(LegacyCompletionNamespaceProgram, .{});
 
 const NonCompletingNestedBody = struct {
     pub const compiled_plan = nonCompletingNestedPlan("static-machine-noncompleting-nested");
@@ -1713,6 +1992,30 @@ test "StaticMachine rejects malformed, stale, and duplicate responses" {
         .request => |request| request,
         else => return error.UnexpectedTransition,
     };
+    var tampered_turn = current;
+    tampered_turn._turn_index +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(restored, tampered_turn, @as(i32, 41)),
+    );
+    var tampered_payload = current;
+    tampered_payload._payload_value_fingerprint ^= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(restored, tampered_payload, @as(i32, 41)),
+    );
+    var tampered_request = current;
+    tampered_request._fingerprint ^= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(restored, tampered_request, @as(i32, 41)),
+    );
+    var tampered_plan = current;
+    tampered_plan._plan_fingerprint ^= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OneEffectMachine.@"resume"(restored, tampered_plan, @as(i32, 41)),
+    );
     try OneEffectMachine.@"resume"(restored, current, @as(i32, 41));
     try std.testing.expectError(
         error.ProgramContractViolation,
@@ -2073,6 +2376,30 @@ test "StaticMachine validates and restores a resumed after checkpoint" {
         .after => |value| value,
         else => return error.UnexpectedTransition,
     };
+    var tampered_turn = after;
+    tampered_turn._turn_index +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.resumeAfter(state, tampered_turn, @as(i32, 15)),
+    );
+    var tampered_value = after;
+    tampered_value._value_fingerprint ^= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.resumeAfter(state, tampered_value, @as(i32, 15)),
+    );
+    var tampered_request = after;
+    tampered_request._fingerprint ^= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.resumeAfter(state, tampered_request, @as(i32, 15)),
+    );
+    var tampered_plan = after;
+    tampered_plan._plan_fingerprint ^= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AfterMachine.resumeAfter(state, tampered_plan, @as(i32, 15)),
+    );
     try AfterMachine.resumeAfter(state, after, @as(i32, 15));
 
     const encoded = try AfterMachine.encodeState(std.testing.allocator, state);
@@ -2129,6 +2456,80 @@ test "StaticMachine exposes a closed authored failure surface" {
             @compileError("StaticMachine Error must be a closed machine operation error set");
         }
     }
+}
+
+test "StaticMachine completion analysis does not rewrite the legacy Program protocol" {
+    try std.testing.expectEqual(@as(usize, 2), LegacyCompletionNamespaceProgram.protocol.operation_site_count);
+    try std.testing.expectEqual(@as(usize, 1), LegacyCompletionNamespaceMachine.Manifest.operation_site_count);
+    const LegacySite = LegacyCompletionNamespaceProgram.protocol.operationSite("reachable", "request", 0);
+    const StaticSite = LegacyCompletionNamespaceMachine.EffectRow.operationSite("reachable", "request", 0);
+    try std.testing.expectEqual(@as(usize, 1), LegacySite.index);
+    try std.testing.expectEqual(@as(usize, 0), StaticSite.index);
+    try std.testing.expectEqual(LegacySite.fingerprint, StaticSite.legacy_fingerprint);
+
+    const state = try LegacyCompletionNamespaceMachine.initialState(std.testing.allocator, .{});
+    defer LegacyCompletionNamespaceMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try LegacyCompletionNamespaceMachine.reduce(state, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try request.expectSite(StaticSite);
+}
+
+test "StaticMachine canonical identity forgets nominal carrier names" {
+    try std.testing.expectEqual(
+        NominalCarrierMachineA.Manifest.canonical_plan_fingerprint,
+        NominalCarrierMachineB.Manifest.canonical_plan_fingerprint,
+    );
+    try std.testing.expectEqual(
+        NominalCarrierMachineA.Manifest.machine_contract_fingerprint,
+        NominalCarrierMachineB.Manifest.machine_contract_fingerprint,
+    );
+
+    const state_a = try NominalCarrierMachineA.initialState(std.testing.allocator, .{NominalCarrierA{ .word = 41 }});
+    defer NominalCarrierMachineA.deinitState(state_a);
+    var fuel: u64 = 100;
+    const request_a = switch (try NominalCarrierMachineA.reduce(state_a, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(@as(u64, 41), (try request_a.payload(NominalCarrierA)).word);
+
+    const encoded_a = try NominalCarrierMachineA.encodeState(std.testing.allocator, state_a);
+    defer std.testing.allocator.free(encoded_a);
+    const state_b = try NominalCarrierMachineB.decodeState(std.testing.allocator, encoded_a);
+    defer NominalCarrierMachineB.deinitState(state_b);
+    const request_b = switch (try NominalCarrierMachineB.current(state_b)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(@as(u64, 41), (try request_b.payload(NominalCarrierB)).word);
+    try std.testing.expectEqual(request_a.fingerprint(), request_b.fingerprint());
+
+    const encoded_b = try NominalCarrierMachineB.encodeState(std.testing.allocator, state_b);
+    defer std.testing.allocator.free(encoded_b);
+    try std.testing.expectEqualSlices(u8, encoded_a, encoded_b);
+}
+
+test "StaticMachine contract identity binds enum tag semantics" {
+    try std.testing.expectEqual(
+        EnumMachineA.Manifest.canonical_plan_fingerprint,
+        EnumMachineB.Manifest.canonical_plan_fingerprint,
+    );
+    try std.testing.expectEqual(
+        EnumMachineA.Manifest.canonical_plan_fingerprint,
+        EnumMachineWide.Manifest.canonical_plan_fingerprint,
+    );
+    try std.testing.expect(EnumMachineA.Manifest.machine_contract_fingerprint != EnumMachineB.Manifest.machine_contract_fingerprint);
+    try std.testing.expect(EnumMachineA.Manifest.machine_contract_fingerprint != EnumMachineWide.Manifest.machine_contract_fingerprint);
+
+    const state = try EnumMachineA.initialState(std.testing.allocator, .{EnumMappingA.ready});
+    defer EnumMachineA.deinitState(state);
+    const encoded = try EnumMachineA.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectError(error.ProgramContractViolation, EnumMachineB.decodeState(std.testing.allocator, encoded));
+    try std.testing.expectError(error.ProgramContractViolation, EnumMachineWide.decodeState(std.testing.allocator, encoded));
 }
 
 test "StaticMachine canonical identity ignores provenance-only ProgramPlan fields" {

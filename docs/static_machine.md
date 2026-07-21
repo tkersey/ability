@@ -67,7 +67,9 @@ schemas containing `[][]const u8` reject as well: mutation of that outer
 string-list carrier would make alias topology observable, while canonical state
 deliberately does not preserve pointer identity. StaticMachine v1 also rejects
 product schemas with comptime fields because its canonical decoder cannot
-reconstruct compile-time-only values at runtime. Immutable
+reconstruct compile-time-only values at runtime. Non-exhaustive enum carriers
+are also rejected: the v1 ordinal codec cannot represent an unknown runtime
+tag. Immutable
 `[]const []const u8` carriers remain supported. An authored `afterDispatch`
 must also have the runtime shape used by the static after-site contract: a valid
 receiver, one value parameter, and a return value. Every reachable authored
@@ -96,6 +98,14 @@ ProgramPlan `.usize` codec. Extracting a `u64` schema field into a ProgramPlan
 carrier semantics remain contract-compatible. Legacy `Program.Session` keeps
 its native-width `usize` behavior.
 
+Canonical plan and structured-value identity forget nominal Zig schema labels;
+those labels remain source-admission and diagnostic metadata. Structural
+carrier identity binds the fields that determine encoding and reduction,
+including an enum's tag signedness and width, exhaustiveness, field names, and
+explicit discriminant values. Renaming an otherwise identical carrier therefore
+preserves compatibility, while changing an enum representation or discriminant
+does not.
+
 ## Authority boundary
 
 The live `State` handle owns allocator-backed working storage because Zig
@@ -121,6 +131,12 @@ WASM-instance boundary.
 `State`. Their structured payload or current-value fields remain valid only
 until the next mutation or deinitialization of that State. A host must encode or
 copy the request data it needs before mutating or releasing the State.
+Live ownership uses a target-width session identifier and a `u64` per-session
+token. Both sources fail closed before wrap; exhaustion never reuses an
+identifier. Resume validates the session, token, turn, site, value fingerprint,
+complete request fingerprint, plan contract, and continuation refs against the
+authoritative pending state. Request metadata is a projection: reduction uses
+the pending state, not caller-modified projection fields.
 
 When `.debug_metadata = true`, `Manifest.debug_metadata` contains the generated
 operation and after-site tables and `Manifest.includes_debug_metadata` is true.
@@ -158,3 +174,13 @@ StaticMachine request traces.
 `Program.run` and `Program.Session` remain available. `StaticMachine` is an
 additional backend over the same semantic frontend. Unsupported plans fail at
 comptime; no fallback to a runtime-loaded module occurs.
+
+Legacy `ProgramPlan.validate`, entry analysis, `Program.protocol`, and
+`Program.Session` retain their v0 completion interpretation. StaticMachine v1
+uses a separately named corrected analysis in which jump targets remain block
+coordinates rather than being read as function ordinals. Consequently,
+`Program.protocol` and `Machine.EffectRow` can intentionally expose different
+site sets for a legacy namespace-collision plan. Static sites retain the exact
+matching legacy fingerprint as provenance, even when corrected reachability
+changes their dense ordinal. World v1 must close `Machine.EffectRow`; it must
+not infer the static residual row from `Program.protocol`.

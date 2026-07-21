@@ -490,8 +490,25 @@ pub fn validateTypedExecutablePlanSupportWithNestedTargets(
     comptime schema_types: anytype,
     comptime nested_with_targets: anytype,
 ) ExecutablePlanSupportError!void {
+    return validateTypedExecutablePlanSupportWithIdentity(
+        compiled_plan,
+        schema_types,
+        nested_with_targets,
+        .legacy_session,
+    );
+}
+
+fn validateTypedExecutablePlanSupportWithIdentity(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime schema_types: anytype,
+    comptime nested_with_targets: anytype,
+    comptime identity: YieldSiteAnalysisIdentity,
+) ExecutablePlanSupportError!void {
     comptime {
-        const analysis = program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch return error.UnsupportedLocalCodec;
+        const analysis = switch (identity) {
+            .legacy_session => program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets),
+            .static_machine_v1 => program_plan.staticEntryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets),
+        } catch return error.UnsupportedLocalCodec;
 
         for (compiled_plan.functions, 0..) |function, function_index| {
             if (!analysis.reachable_functions[function_index]) continue;
@@ -921,8 +938,15 @@ fn sessionSiteHashStaticCarrierType(hasher: *std.hash.Wyhash, comptime T: type) 
         },
         .@"enum" => |info| {
             sessionSiteHashBytes(hasher, "sum-enum");
+            const tag_info = @typeInfo(info.tag_type).int;
+            sessionSiteHashBytes(hasher, @tagName(tag_info.signedness));
+            sessionSiteHashU16(hasher, tag_info.bits);
+            sessionSiteHashBool(hasher, info.is_exhaustive);
             sessionSiteHashUsize(hasher, info.fields.len);
-            inline for (info.fields) |field| sessionSiteHashBytes(hasher, field.name);
+            inline for (info.fields) |field| {
+                sessionSiteHashBytes(hasher, field.name);
+                sessionSiteHashBytes(hasher, std.fmt.comptimePrint("{d}", .{field.value}));
+            }
         },
         .optional => |info| {
             sessionSiteHashBytes(hasher, "sum-optional");
@@ -930,6 +954,8 @@ fn sessionSiteHashStaticCarrierType(hasher: *std.hash.Wyhash, comptime T: type) 
         },
         .@"union" => |info| {
             sessionSiteHashBytes(hasher, "sum-union");
+            const Tag = info.tag_type orelse @compileError("unsupported untagged Boundary StaticMachine union carrier");
+            sessionSiteHashStaticCarrierType(hasher, Tag);
             sessionSiteHashUsize(hasher, info.fields.len);
             inline for (info.fields) |field| {
                 sessionSiteHashBytes(hasher, field.name);
@@ -1058,12 +1084,28 @@ fn staticMachineAfterSiteFingerprint(
     return hasher.final();
 }
 
-fn sessionOperationYieldSiteCount(
+const YieldSiteAnalysisIdentity = enum {
+    legacy_session,
+    static_machine_v1,
+};
+
+fn yieldSiteEntryAnalysis(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
+    comptime identity: YieldSiteAnalysisIdentity,
+) program_plan.EntryExecutionAnalysis(compiled_plan) {
+    return comptime switch (identity) {
+        .legacy_session => program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets),
+        .static_machine_v1 => program_plan.staticEntryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets),
+    } catch |err| @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
+}
+
+fn operationYieldSiteCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime identity: YieldSiteAnalysisIdentity,
 ) usize {
-    const analysis = comptime program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
-        @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
+    const analysis = yieldSiteEntryAnalysis(compiled_plan, nested_with_targets, identity);
     var count: usize = 0;
     inline for (compiled_plan.instructions, 0..) |instruction, instruction_index| {
         if (analysis.reachable_instructions[instruction_index] and instruction.kind == .call_op) count += 1;
@@ -1071,12 +1113,26 @@ fn sessionOperationYieldSiteCount(
     return count;
 }
 
-fn sessionAfterYieldSiteCount(
+fn sessionOperationYieldSiteCount(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
 ) usize {
-    const analysis = comptime program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
-        @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
+    return operationYieldSiteCount(compiled_plan, nested_with_targets, .legacy_session);
+}
+
+fn staticMachineOperationYieldSiteCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+) usize {
+    return operationYieldSiteCount(compiled_plan, nested_with_targets, .static_machine_v1);
+}
+
+fn afterYieldSiteCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime identity: YieldSiteAnalysisIdentity,
+) usize {
+    const analysis = yieldSiteEntryAnalysis(compiled_plan, nested_with_targets, identity);
     var count: usize = 0;
     inline for (compiled_plan.instructions, 0..) |instruction, instruction_index| {
         if (analysis.reachable_instructions[instruction_index] and
@@ -1088,6 +1144,20 @@ fn sessionAfterYieldSiteCount(
         }
     }
     return count;
+}
+
+fn sessionAfterYieldSiteCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+) usize {
+    return afterYieldSiteCount(compiled_plan, nested_with_targets, .legacy_session);
+}
+
+fn staticMachineAfterYieldSiteCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+) usize {
+    return afterYieldSiteCount(compiled_plan, nested_with_targets, .static_machine_v1);
 }
 
 fn siteLabelForInstruction(comptime site_metadata: anytype, comptime instruction_index: usize) ?[]const u8 {
@@ -1106,10 +1176,10 @@ fn fillSessionOperationYieldSites(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
     comptime site_metadata: anytype,
+    comptime identity: YieldSiteAnalysisIdentity,
     sites: anytype,
 ) void {
-    const analysis = comptime program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
-        @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
+    const analysis = yieldSiteEntryAnalysis(compiled_plan, nested_with_targets, identity);
     var next_site: usize = 0;
     inline for (compiled_plan.functions, 0..) |function, function_index| {
         const function_block_end = @as(usize, function.first_block) + function.block_count;
@@ -1169,7 +1239,7 @@ pub fn sessionOperationYieldSitesForPlanWithMetadata(
     comptime site_metadata: anytype,
 ) [sessionOperationYieldSiteCount(compiled_plan, nested_with_targets)]SessionOperationYieldSite {
     var sites: [sessionOperationYieldSiteCount(compiled_plan, nested_with_targets)]SessionOperationYieldSite = undefined;
-    fillSessionOperationYieldSites(compiled_plan, nested_with_targets, site_metadata, &sites);
+    fillSessionOperationYieldSites(compiled_plan, nested_with_targets, site_metadata, .legacy_session, &sites);
     return sites;
 }
 
@@ -1178,10 +1248,23 @@ pub fn staticMachineOperationYieldSitesForPlanWithMetadata(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
     comptime site_metadata: anytype,
-) [sessionOperationYieldSiteCount(compiled_plan, nested_with_targets)]SessionOperationYieldSite {
-    var sites = sessionOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
+) [staticMachineOperationYieldSiteCount(compiled_plan, nested_with_targets)]SessionOperationYieldSite {
+    var sites: [staticMachineOperationYieldSiteCount(compiled_plan, nested_with_targets)]SessionOperationYieldSite = undefined;
+    fillSessionOperationYieldSites(compiled_plan, nested_with_targets, site_metadata, .static_machine_v1, &sites);
+    const legacy_sites = sessionOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
     const canonical_plan_fingerprint = staticPlanFingerprint(compiled_plan);
     inline for (&sites) |*site| {
+        comptime var legacy_fingerprint: ?u64 = null;
+        inline for (legacy_sites) |legacy_site| {
+            if (legacy_site.function_index == site.function_index and
+                legacy_site.block_index == site.block_index and
+                legacy_site.instruction_index == site.instruction_index)
+            {
+                legacy_fingerprint = legacy_site.fingerprint;
+            }
+        }
+        site.legacy_fingerprint = legacy_fingerprint orelse
+            @compileError("StaticMachine operation site is absent from the legacy Program.Session catalog");
         site.canonical_fingerprint = staticMachineOperationSiteFingerprint(canonical_plan_fingerprint, site.*);
         site.fingerprint = site.canonical_fingerprint;
     }
@@ -1214,13 +1297,25 @@ pub fn staticMachineAfterYieldSitesForPlanWithMetadata(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
     comptime site_metadata: anytype,
-) [sessionAfterYieldSiteCount(compiled_plan, nested_with_targets)]SessionAfterYieldSite {
-    const legacy_operation_sites = sessionOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
+) [staticMachineAfterYieldSiteCount(compiled_plan, nested_with_targets)]SessionAfterYieldSite {
     const operation_sites = staticMachineOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
-    var sites: [sessionAfterYieldSiteCount(compiled_plan, nested_with_targets)]SessionAfterYieldSite = undefined;
-    fillSessionAfterYieldSites(compiled_plan, legacy_operation_sites, &sites);
+    const legacy_sites = sessionAfterYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
+    var sites: [staticMachineAfterYieldSiteCount(compiled_plan, nested_with_targets)]SessionAfterYieldSite = undefined;
+    fillSessionAfterYieldSites(compiled_plan, operation_sites, &sites);
     const canonical_plan_fingerprint = staticPlanFingerprint(compiled_plan);
     inline for (&sites) |*site| {
+        comptime var legacy_fingerprint: ?u64 = null;
+        inline for (legacy_sites) |legacy_site| {
+            if (legacy_site.source_function_index == site.source_function_index and
+                legacy_site.source_block_index == site.source_block_index and
+                legacy_site.source_instruction_index == site.source_instruction_index)
+            {
+                legacy_fingerprint = legacy_site.fingerprint;
+                site.source_operation_site_legacy_fingerprint = legacy_site.source_operation_site_legacy_fingerprint;
+            }
+        }
+        site.legacy_fingerprint = legacy_fingerprint orelse
+            @compileError("StaticMachine after site is absent from the legacy Program.Session catalog");
         const operation_site = operation_sites[site.source_operation_site_index];
         site.source_operation_site_fingerprint = operation_site.fingerprint;
         site.source_operation_site_canonical_fingerprint = operation_site.canonical_fingerprint;
@@ -1245,7 +1340,7 @@ fn fillSessionAfterYieldSites(
             .legacy_fingerprint = 0,
             .semantic_label = operation_site.semantic_label,
             .source_operation_site_index = operation_site.index,
-            .source_operation_site_fingerprint = operation_site.fingerprint,
+            .source_operation_site_fingerprint = operation_site.legacy_fingerprint,
             .source_operation_site_canonical_fingerprint = operation_site.canonical_fingerprint,
             .source_operation_site_legacy_fingerprint = operation_site.legacy_fingerprint,
             .source_function_index = operation_site.function_index,
@@ -2866,7 +2961,7 @@ fn staticMachineAfterFreePathExists(
     const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
     if (comptime control_node_count == 0) return false;
     if (function_index >= compiled_plan.functions.len or start_node >= control_node_count) return false;
-    const analysis = comptime program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch
+    const analysis = comptime program_plan.staticEntryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch
         return false;
     const function = compiled_plan.functions[function_index];
     const function_block_end = @as(usize, function.first_block) + function.block_count;
@@ -4350,11 +4445,14 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
     comptime static_control_path_state_capacity: usize,
 ) type {
     const entry = compiled_plan.functions[compiled_plan.entry_index];
-    const analysis = comptime program_plan.entryExecutionAnalysisWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
-        @compileError("validated ProgramPlan entry analysis failed: " ++ @errorName(err));
+    const canonical_request_identity = request_identity == .canonical_static_machine;
+    const analysis = yieldSiteEntryAnalysis(
+        compiled_plan,
+        nested_with_targets,
+        if (canonical_request_identity) .static_machine_v1 else .legacy_session,
+    );
     const ResultValue = ValueTypeForRef(compiled_plan, schema_types, program_plan.functionResultRef(entry));
     const session_after_stack_capacity = if (analysis.reachable_after_count == 0) 0 else max_interpreter_steps;
-    const canonical_request_identity = request_identity == .canonical_static_machine;
     const Scratch = InterpreterScratch(
         session_after_stack_capacity,
         if (canonical_request_identity) .lazy else .embedded,
@@ -5237,7 +5335,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         pub fn cloneExplicitStateWithAllocator(self: *const Self, allocator: std.mem.Allocator) anyerror!Self {
             var cloned = try self.cloneState(allocator);
             errdefer cloned.deinit();
-            cloned.reidentifyClone();
+            try cloned.reidentifyClone();
             return cloned;
         }
 
@@ -6772,7 +6870,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 .allocator = allocator,
                 .scratch = scratch,
                 .frames = frames,
-                .session_id = nextSessionId(),
+                .session_id = try nextSessionId(),
                 .remaining_steps = remaining_steps,
                 .next_turn_index = try reader.readUsize(),
                 .done_consumed = try reader.readBool(),
@@ -8070,7 +8168,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     const schema = compiled_plan.value_schemas[index];
                     if (schema.codec != ref.codec) return error.ProgramContractViolation;
                     traceHashU16(hasher, @intCast(index));
-                    traceHashBytes(hasher, schema.label);
+                    if (comptime !canonical_request_identity) traceHashBytes(hasher, schema.label);
                     traceHashCodec(hasher, schema.codec);
                     return switch (schema.codec) {
                         .product => traceHashProductValuePayload(hasher, index, T, value),
@@ -8475,17 +8573,38 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         }
 
         const session_id_source = struct {
-            var next: std.atomic.Value(usize) = std.atomic.Value(usize).init(1);
+            var next: usize = 1;
         };
 
-        fn nextSessionId() usize {
-            var session_identifier = session_id_source.next.fetchAdd(1, .monotonic);
-            if (session_identifier == 0) session_identifier = session_id_source.next.fetchAdd(1, .monotonic);
-            return session_identifier;
+        fn nextSessionId() error{ProgramContractViolation}!usize {
+            while (true) {
+                const candidate = @atomicLoad(usize, &session_id_source.next, .monotonic);
+                if (candidate == 0 or candidate == std.math.maxInt(usize)) return error.ProgramContractViolation;
+                if (@cmpxchgWeak(
+                    usize,
+                    &session_id_source.next,
+                    candidate,
+                    candidate + 1,
+                    .monotonic,
+                    .monotonic,
+                ) == null) return candidate;
+            }
+        }
+
+        fn takeNextToken(self: *Self) error{ProgramContractViolation}!u64 {
+            const token = self.next_token;
+            if (token == 0 or token == std.math.maxInt(u64)) return error.ProgramContractViolation;
+            self.next_token = token + 1;
+            return token;
         }
 
         pub fn start(allocator: std.mem.Allocator, args: anytype) anyerror!Self {
-            comptime validateTypedExecutablePlanSupportWithNestedTargets(compiled_plan, schema_types, nested_with_targets) catch |err|
+            comptime validateTypedExecutablePlanSupportWithIdentity(
+                compiled_plan,
+                schema_types,
+                nested_with_targets,
+                if (canonical_request_identity) .static_machine_v1 else .legacy_session,
+            ) catch |err|
                 @compileError("Program.Session.start failed executable support validation: " ++ @errorName(err));
             comptime validateSessionPlanSupportWithNestedTargets(compiled_plan, nested_with_targets) catch |err|
                 @compileError("Program.Session.start unsupported: " ++ @errorName(err));
@@ -8503,7 +8622,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 .allocator = allocator,
                 .scratch = scratch,
                 .frames = frames,
-                .session_id = nextSessionId(),
+                .session_id = try nextSessionId(),
             };
             scratch = .{ .allocator = allocator };
             frames = .{};
@@ -9022,8 +9141,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         result_ref,
                         op.has_after,
                     );
-                    const token = self.next_token;
-                    self.next_token +%= 1;
+                    const token = try self.takeNextToken();
                     const after_site: ?SessionAfterYieldSite = if (op.has_after) afterSiteForOperationSite(operation_site.index) orelse return error.ProgramContractViolation else null;
                     self.pending = .{ .op = .{
                         .session_id = self.session_id,
@@ -9133,8 +9251,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         result_ref,
                         remaining,
                     );
-                    const token = self.next_token;
-                    self.next_token +%= 1;
+                    const token = try self.takeNextToken();
                     self.pending = .{ .after = .{
                         .session_id = self.session_id,
                         .token = token,
@@ -9204,6 +9321,12 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 pending.instruction_index != request.instruction_index or
                 pending.op_index != request.op_index or
                 pending.mode != request.mode or
+                pending.turn_index != request._turn_index or
+                !pending.payload_ref.eql(request.payload_ref) or
+                pending.payload_value_fingerprint != request._payload_value_fingerprint or
+                pending.request_fingerprint != request._fingerprint or
+                pending.has_after != request.has_after or
+                request._plan_fingerprint != (if (canonical_request_identity) contract_fingerprint else plan_hash) or
                 !pending.resume_ref.eql(request.resume_ref) or
                 !pending.result_ref.eql(request.result_ref))
             {
@@ -9227,6 +9350,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 pending.block_index != request.block_index or
                 pending.instruction_index != request.instruction_index or
                 pending.op_index != request.op_index or
+                pending.turn_index != request._turn_index or
+                pending.value_fingerprint != request._value_fingerprint or
+                pending.request_fingerprint != request._fingerprint or
+                request._plan_fingerprint != (if (canonical_request_identity) contract_fingerprint else plan_hash) or
                 pending.remaining != request._remaining or
                 !pending.value_ref.eql(request.value_ref) or
                 !pending.output_ref.eql(request.output_ref) or
@@ -9504,10 +9631,12 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             return core;
         }
 
-        fn reidentifyClone(self: *Self) void {
+        fn reidentifyClone(self: *Self) error{ProgramContractViolation}!void {
             const token = self.next_token;
-            self.next_token +%= 1;
-            self.session_id = nextSessionId();
+            if (token == 0 or token == std.math.maxInt(u64)) return error.ProgramContractViolation;
+            const session_id = try nextSessionId();
+            self.next_token = token + 1;
+            self.session_id = session_id;
             if (self.pending) |*pending_union| {
                 switch (pending_union.*) {
                     .op => |*pending| {
@@ -9524,7 +9653,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
 
         fn retokenizePending(self: *Self) error{ProgramContractViolation}!void {
             if (self.pending == null) return error.ProgramContractViolation;
-            self.reidentifyClone();
+            try self.reidentifyClone();
         }
 
         fn activeLocalSliceConst(self: *const Self, frame: InterpreterFrame) error{ProgramContractViolation}![]const ExecutableValue {
@@ -11894,6 +12023,79 @@ test "StaticMachine control-path capacity has a fixed compact scratch bound" {
         static_max_control_work_units,
         static_max_path_states * 64,
     );
+}
+
+test "StaticMachine live ownership identifiers exhaust without wrapping" {
+    const Core = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-live-ownership-exhaustion",
+        supportStandaloneUsizeOpPlan(),
+        .{},
+        &.{},
+        struct {},
+        struct {},
+        1 << 20,
+    );
+
+    const saved_session_id = @atomicLoad(usize, &Core.session_id_source.next, .monotonic);
+    defer @atomicStore(usize, &Core.session_id_source.next, saved_session_id, .monotonic);
+    @atomicStore(usize, &Core.session_id_source.next, std.math.maxInt(usize) - 1, .monotonic);
+    try std.testing.expectEqual(std.math.maxInt(usize) - 1, try Core.nextSessionId());
+    try std.testing.expectError(error.ProgramContractViolation, Core.nextSessionId());
+    try std.testing.expectEqual(
+        std.math.maxInt(usize),
+        @atomicLoad(usize, &Core.session_id_source.next, .monotonic),
+    );
+    @atomicStore(usize, &Core.session_id_source.next, saved_session_id, .monotonic);
+
+    var core = try Core.start(std.testing.allocator, .{@as(usize, 7)});
+    defer core.deinit();
+    core.next_token = std.math.maxInt(u64) - 1;
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, try core.takeNextToken());
+    try std.testing.expectError(error.ProgramContractViolation, core.takeNextToken());
+    try std.testing.expectEqual(std.math.maxInt(u64), core.next_token);
+}
+
+test "StaticMachine request identity rejects a simulated owner collision" {
+    const Core = StaticExecutableSessionForPlan(
+        error{ProgramContractViolation},
+        "static-live-ownership-collision",
+        supportStandaloneUsizeOpPlan(),
+        .{},
+        &.{},
+        struct {},
+        struct {},
+        1 << 20,
+    );
+
+    var first = try Core.start(std.testing.allocator, .{@as(usize, 7)});
+    defer first.deinit();
+    const foreign = switch (try first.next()) {
+        .request => |request| request,
+        else => return error.ProgramContractViolation,
+    };
+
+    var second = try Core.start(std.testing.allocator, .{@as(usize, 8)});
+    defer second.deinit();
+    _ = switch (try second.next()) {
+        .request => |request| request,
+        else => return error.ProgramContractViolation,
+    };
+    second.session_id = first.session_id;
+    if (second.pending) |*pending_union| switch (pending_union.*) {
+        .op => |*pending| pending.session_id = first.session_id,
+        .after => return error.ProgramContractViolation,
+    } else return error.ProgramContractViolation;
+
+    const authoritative = switch (try second.current()) {
+        .request => |request| request,
+        else => return error.ProgramContractViolation,
+    };
+    try std.testing.expectEqual(foreign._session_id, authoritative._session_id);
+    try std.testing.expectEqual(foreign.token, authoritative.token);
+    try std.testing.expect(foreign._payload_value_fingerprint != authoritative._payload_value_fingerprint);
+    try std.testing.expectError(error.ProgramContractViolation, second.@"resume"(foreign, @as(usize, 11)));
+    try second.@"resume"(authoritative, @as(usize, 12));
 }
 
 test "StaticMachine control-path searches share one exact work budget" {

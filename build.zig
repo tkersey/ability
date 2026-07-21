@@ -1129,6 +1129,10 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support comptime fields inside product schemas",
         },
         .{
+            .path = "test/compile_fail/static_machine_non_exhaustive_enum.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support non-exhaustive enum carriers",
+        },
+        .{
             .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",
             .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
         },
