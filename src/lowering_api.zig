@@ -4975,6 +4975,27 @@ fn staticMachineControlValidationStepBound(
     return std.math.add(usize, reachability_and_local_work, after_stack_capacity) catch null;
 }
 
+fn staticMachineCanonicalNestedWithTargets(
+    comptime nested_with_targets: anytype,
+) [nested_with_targets.len]NestedWithTarget {
+    var canonical: [nested_with_targets.len]NestedWithTarget = undefined;
+    inline for (nested_with_targets, 0..) |target, index| canonical[index] = target;
+
+    var index: usize = 1;
+    while (index < canonical.len) : (index += 1) {
+        const target = canonical[index];
+        var insertion_index = index;
+        while (insertion_index > 0 and
+            std.mem.order(u8, target.metadata, canonical[insertion_index - 1].metadata) == .lt)
+        {
+            canonical[insertion_index] = canonical[insertion_index - 1];
+            insertion_index -= 1;
+        }
+        canonical[insertion_index] = target;
+    }
+    return canonical;
+}
+
 fn staticMachineContractFingerprint(
     comptime program_label: []const u8,
     comptime compiled_plan: program_plan.ProgramPlan,
@@ -4994,8 +5015,9 @@ fn staticMachineContractFingerprint(
     sessionSiteHashU64(&hasher, staticPlanFingerprint(compiled_plan));
     sessionSiteHashStaticSchemaCarriers(&hasher, schema_types);
     sessionSiteHashUsize(&hasher, maximum_state_bytes);
-    sessionSiteHashUsize(&hasher, nested_with_targets.len);
-    inline for (nested_with_targets) |target| {
+    const canonical_nested_with_targets = staticMachineCanonicalNestedWithTargets(nested_with_targets);
+    sessionSiteHashUsize(&hasher, canonical_nested_with_targets.len);
+    inline for (canonical_nested_with_targets) |target| {
         sessionSiteHashBytes(&hasher, target.metadata);
         sessionSiteHashU16(&hasher, target.function_index);
     }

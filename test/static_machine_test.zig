@@ -1183,6 +1183,7 @@ fn returnErrorPlan(comptime label: []const u8, comptime error_name: []const u8) 
 }
 
 const nested_metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi";
+const alternate_nested_metadata = "j\x1fk\x1fl\x1fm\x1fn\x1fo\x1fp\x1fq\x1fr";
 
 fn alternateNestedTargetPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
@@ -2106,8 +2107,13 @@ fn NominalCarrierProgram(comptime Payload: type) type {
 
 const NominalCarrierA = struct { word: u64 };
 const NominalCarrierB = struct { word: u64 };
+const ImmutableStringListCarrier = struct { items: []const []const u8 };
 const NominalCarrierMachineA = boundary.staticMachine(NominalCarrierProgram(NominalCarrierA), .{});
 const NominalCarrierMachineB = boundary.staticMachine(NominalCarrierProgram(NominalCarrierB), .{});
+const ImmutableStringListCarrierMachine = boundary.staticMachine(
+    NominalCarrierProgram(ImmutableStringListCarrier),
+    .{},
+);
 
 fn SumIdentityProgram(comptime Sum: type) type {
     return boundary.program("static-machine-enum-identity", struct {}, struct {
@@ -2265,6 +2271,25 @@ const NestedFirstProgram = boundary.program("static-machine-nested-identity", st
 const NestedSecondProgram = boundary.program("static-machine-nested-identity", struct {}, NestedSecondBody);
 const NestedFirstMachine = boundary.staticMachine(NestedFirstProgram, .{});
 const NestedSecondMachine = boundary.staticMachine(NestedSecondProgram, .{});
+
+const NestedOrderedBodyA = struct {
+    pub const compiled_plan = NestedFirstBody.compiled_plan;
+    pub const nested_with_targets = .{
+        boundary.ir.NestedWithTarget{ .metadata = nested_metadata, .function_index = 1 },
+        boundary.ir.NestedWithTarget{ .metadata = alternate_nested_metadata, .function_index = 2 },
+    };
+};
+const NestedOrderedBodyB = struct {
+    pub const compiled_plan = NestedFirstBody.compiled_plan;
+    pub const nested_with_targets = .{
+        boundary.ir.NestedWithTarget{ .metadata = alternate_nested_metadata, .function_index = 2 },
+        boundary.ir.NestedWithTarget{ .metadata = nested_metadata, .function_index = 1 },
+    };
+};
+const NestedOrderedProgramA = boundary.program("static-machine-nested-order", struct {}, NestedOrderedBodyA);
+const NestedOrderedProgramB = boundary.program("static-machine-nested-order", struct {}, NestedOrderedBodyB);
+const NestedOrderedMachineA = boundary.staticMachine(NestedOrderedProgramA, .{});
+const NestedOrderedMachineB = boundary.staticMachine(NestedOrderedProgramB, .{});
 
 const ProvenanceBodyA = struct {
     pub const compiled_plan = provenanceVariantPlan(13);
@@ -3313,6 +3338,30 @@ test "StaticMachine state binds the complete nested target contract" {
     );
 }
 
+test "StaticMachine nested target identity normalizes unique resolver row order" {
+    try std.testing.expectEqual(
+        NestedOrderedMachineA.Manifest.machine_contract_fingerprint,
+        NestedOrderedMachineB.Manifest.machine_contract_fingerprint,
+    );
+    const state = try NestedOrderedMachineA.initialState(std.testing.allocator, .{});
+    defer NestedOrderedMachineA.deinitState(state);
+    const encoded = try NestedOrderedMachineA.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try NestedOrderedMachineB.decodeState(std.testing.allocator, encoded);
+    defer NestedOrderedMachineB.deinitState(restored);
+}
+
+test "ProgramPlan rejects duplicate nested target metadata" {
+    const duplicate_targets = .{
+        boundary.ir.NestedWithTarget{ .metadata = nested_metadata, .function_index = 1 },
+        boundary.ir.NestedWithTarget{ .metadata = nested_metadata, .function_index = 2 },
+    };
+    try std.testing.expectError(
+        error.DuplicateNestedTargetMetadata,
+        NestedFirstBody.compiled_plan.validateWithNestedTargets(duplicate_targets),
+    );
+}
+
 test "StaticMachine exposes a closed authored failure surface" {
     comptime {
         if (AuthoredRejectedMachine.Failure != error{Rejected}) {
@@ -3444,6 +3493,44 @@ test "StaticMachine canonical identity forgets nominal carrier names" {
     const encoded_b = try NominalCarrierMachineB.encodeState(std.testing.allocator, state_b);
     defer std.testing.allocator.free(encoded_b);
     try std.testing.expectEqualSlices(u8, encoded_a, encoded_b);
+}
+
+test "StaticMachine round trips immutable string-list schema carriers" {
+    const items = [_][]const u8{ "alpha", "beta" };
+    const state = try ImmutableStringListCarrierMachine.initialState(
+        std.testing.allocator,
+        .{ImmutableStringListCarrier{ .items = &items }},
+    );
+    defer ImmutableStringListCarrierMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try ImmutableStringListCarrierMachine.reduce(state, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    const payload = try request.payload(ImmutableStringListCarrier);
+    try std.testing.expectEqual(@as(usize, 2), payload.items.len);
+    try std.testing.expectEqualStrings("alpha", payload.items[0]);
+    try std.testing.expectEqualStrings("beta", payload.items[1]);
+
+    const encoded = try ImmutableStringListCarrierMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try ImmutableStringListCarrierMachine.decodeState(std.testing.allocator, encoded);
+    defer ImmutableStringListCarrierMachine.deinitState(restored);
+    const restored_request = switch (try ImmutableStringListCarrierMachine.current(restored)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    const restored_payload = try restored_request.payload(ImmutableStringListCarrier);
+    try std.testing.expectEqualStrings("alpha", restored_payload.items[0]);
+    try std.testing.expectEqualStrings("beta", restored_payload.items[1]);
+
+    try ImmutableStringListCarrierMachine.@"resume"(restored, restored_request, @as(i32, 7));
+    var result = switch (try ImmutableStringListCarrierMachine.reduce(restored, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqual(@as(i32, 7), result.value());
 }
 
 test "StaticMachine contract identity binds logical enum semantics" {

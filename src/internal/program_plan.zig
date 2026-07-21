@@ -281,6 +281,14 @@ pub const ProgramPlan = struct {
         if (self.functions.len == 0) return error.EmptyProgram;
         try self.validateAddressableTableLengths();
         if (self.entry_index >= self.functions.len) return error.InvalidEntryIndex;
+        inline for (nested_with_targets, 0..) |target, target_index| {
+            prior_target: inline for (nested_with_targets, 0..) |prior, prior_index| {
+                if (prior_index >= target_index) continue :prior_target;
+                if (std.mem.eql(u8, prior.metadata, target.metadata)) {
+                    return error.DuplicateNestedTargetMetadata;
+                }
+            }
+        }
         var reachable_blocks = [_]bool{false} ** max_indexed_table_len;
         var terminal_reachability = [_]bool{false} ** max_indexed_table_len;
         var completion_reachability = [_]bool{false} ** max_indexed_table_len;
@@ -1215,6 +1223,7 @@ pub const ValidationError = error{
     EmptyValueFieldName,
     EmptyValueSchemaLabel,
     EmptyValueVariantName,
+    DuplicateNestedTargetMetadata,
     DuplicateOutputLabel,
     OverlappingFunctionBlockSpan,
     OverlappingFunctionInstrSpan,
@@ -1267,7 +1276,7 @@ pub fn codecForType(comptime T: type) CodecError!ValueCodec {
     if (T == u64) return .usize;
     if (T == usize) return .usize;
     if (T == []const u8) return .string;
-    if (T == [][]const u8) return .string_list;
+    if (T == []const []const u8 or T == [][]const u8) return .string_list;
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
             inline for (info.fields) |field| {
