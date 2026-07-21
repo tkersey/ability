@@ -1133,6 +1133,10 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
         },
         .{
+            .path = "test/compile_fail/static_machine_in_place_after_chain_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every potentially innermost afterDispatch input to match its function value",
+        },
+        .{
             .path = "test/compile_fail/static_machine_mutable_string_list_schema.zig",
             .expected_error = "Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas",
         },
@@ -1143,6 +1147,10 @@ pub fn build(b: *std.Build) void {
         .{
             .path = "test/compile_fail/static_machine_non_exhaustive_enum.zig",
             .expected_error = "Boundary StaticMachine v1 does not support non-exhaustive enum carriers",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_target_sized_enum.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support target-sized enum tag types",
         },
         .{
             .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",

@@ -3008,6 +3008,19 @@ fn staticMachineFunctionConditionPredicateCount(
     return count;
 }
 
+fn staticMachineMaximumConditionPredicateCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+) usize {
+    var maximum: usize = 0;
+    for (0..compiled_plan.functions.len) |function_index| {
+        maximum = @max(
+            maximum,
+            staticMachineFunctionConditionPredicateCount(compiled_plan, function_index),
+        );
+    }
+    return maximum;
+}
+
 fn staticMachineConditionPredicateIndex(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime function_index: usize,
@@ -3056,6 +3069,40 @@ fn staticMachineConditionPredicateForIndex(
     return null;
 }
 
+fn staticMachineConditionPredicateIndexForRuntimeFunction(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    function_index: usize,
+    predicate: StaticConditionPredicate,
+) ?usize {
+    inline for (0..compiled_plan.functions.len) |candidate_function_index| {
+        if (function_index == candidate_function_index) {
+            return staticMachineConditionPredicateIndex(
+                compiled_plan,
+                candidate_function_index,
+                predicate,
+            );
+        }
+    }
+    return null;
+}
+
+fn staticMachineConditionPredicateForRuntimeFunctionIndex(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    function_index: usize,
+    predicate_index: usize,
+) ?StaticConditionPredicate {
+    inline for (0..compiled_plan.functions.len) |candidate_function_index| {
+        if (function_index == candidate_function_index) {
+            return staticMachineConditionPredicateForIndex(
+                compiled_plan,
+                candidate_function_index,
+                predicate_index,
+            );
+        }
+    }
+    return null;
+}
+
 fn staticMachineFunctionBlockStartNode(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime function_index: usize,
@@ -3093,6 +3140,20 @@ fn staticMachineInstructionMayWriteLocal(
         => instruction.dst == local_index,
         .return_value, .return_error => false,
     };
+}
+
+fn staticMachineFunctionMayWriteLocal(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    function_index: usize,
+    local_index: u16,
+) bool {
+    if (function_index >= compiled_plan.functions.len) return false;
+    const function = compiled_plan.functions[function_index];
+    const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+    for (compiled_plan.instructions[function.first_instruction..instruction_end]) |instruction| {
+        if (staticMachineInstructionMayWriteLocal(instruction, local_index)) return true;
+    }
+    return false;
 }
 
 const StaticAfterConditionGoal = union(enum) {
@@ -3267,7 +3328,10 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                     state.predicate_slot = predicate_index + 1;
                     state.value = .unknown;
                 }
-                state.source_valid = true;
+                state.source_valid = !staticMachineInstructionMayWriteLocal(
+                    instruction,
+                    predicate.operand,
+                );
             } else if (state.predicate_slot != 0) {
                 const predicate = staticMachineConditionPredicateForIndex(
                     compiled_plan,
@@ -4860,18 +4924,50 @@ const ExecutableRequestIdentity = enum {
 };
 
 const static_max_path_states: usize = 32 * 1024;
-const static_max_control_nodes: usize = static_max_path_states / 4;
+const static_max_control_nodes: usize = static_max_path_states / 8;
 const StaticMaxPathVisited = std.StaticBitSet(static_max_path_states);
 const static_max_path_scratch_bytes =
     static_max_path_states * @sizeOf(u16) +
     @sizeOf(StaticMaxPathVisited);
 
-fn staticMachineControlPathStateCapacity(instruction_count: usize, block_count: usize) ?usize {
-    const node_count = std.math.add(usize, instruction_count, block_count) catch return null;
+fn controlPathCapacityForCounts(
+    instruction_count: usize,
+    block_count: usize,
+    predicate_count: usize,
+) ?usize {
+    const node_count = std.math.add(
+        usize,
+        instruction_count,
+        block_count,
+    ) catch return null;
     const node_capacity = if (node_count == 0) 1 else node_count;
-    const state_capacity = std.math.mul(usize, node_capacity, 4) catch return null;
+    const predicate_slot_count = std.math.add(
+        usize,
+        predicate_count,
+        1,
+    ) catch return null;
+    const condition_authority_count = std.math.mul(
+        usize,
+        predicate_slot_count,
+        4,
+    ) catch return null;
+    const state_capacity = std.math.mul(
+        usize,
+        node_capacity,
+        std.math.mul(usize, condition_authority_count, 2) catch return null,
+    ) catch return null;
     if (state_capacity > static_max_path_states) return null;
     return state_capacity;
+}
+
+fn staticMachineControlPathStateCapacity(
+    comptime compiled_plan: program_plan.ProgramPlan,
+) ?usize {
+    return controlPathCapacityForCounts(
+        compiled_plan.instructions.len,
+        compiled_plan.blocks.len,
+        staticMachineMaximumConditionPredicateCount(compiled_plan),
+    );
 }
 
 pub fn ExecutableSessionForPlan(
@@ -4945,10 +5041,8 @@ pub fn StaticExecutableSessionForPlan(
         operation_yield_sites,
     );
     const after_yield_sites = staticMachineAfterYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
-    const control_path_state_capacity = staticMachineControlPathStateCapacity(
-        compiled_plan.instructions.len,
-        compiled_plan.blocks.len,
-    ) orelse @compileError("Boundary StaticMachine v1 supports at most 8192 combined control instructions and blocks");
+    const control_path_state_capacity = staticMachineControlPathStateCapacity(compiled_plan) orelse
+        @compileError("Boundary StaticMachine v1 control-path state space exceeds the v1 limit");
     const control_validation_step_bound = staticMachineControlValidationStepBound(
         compiled_plan,
         analysis,
@@ -5971,12 +6065,20 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         const state_image_magic = "ABL_STM1";
         const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
         const control_node_capacity = if (control_node_count == 0) 1 else control_node_count;
+        const control_predicate_slot_count = if (canonical_request_identity)
+            staticMachineMaximumConditionPredicateCount(compiled_plan) + 1
+        else
+            1;
+        const condition_validity_count = if (canonical_request_identity) 2 else 1;
+        const condition_authority_count =
+            control_predicate_slot_count * 2 * condition_validity_count;
         const control_path_state_capacity = if (canonical_request_identity)
             static_control_path_state_capacity
         else
-            control_node_capacity * 4;
+            control_node_capacity * 2 * condition_authority_count;
         const ControlPathStateIndex = std.math.IntFittingRange(0, control_path_state_capacity - 1);
         const ControlPathVisited = std.StaticBitSet(control_path_state_capacity);
+        const ControlConditionAuthority = std.StaticBitSet(condition_authority_count);
         const ControlNodeIndex = std.math.IntFittingRange(0, control_node_capacity - 1);
         const ControlNodeVisited = std.StaticBitSet(control_node_capacity);
         const invalid_control_metadata_index = std.math.maxInt(u16);
@@ -6042,7 +6144,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         const ControlPathState = struct {
             node: usize,
             traversed_allowed_suspension: bool,
+            predicate_slot: usize,
             condition_matches_reference: bool,
+            source_valid: bool,
         };
 
         const DurableWriter = struct {
@@ -7626,8 +7730,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     if (instruction.operand >= locals.len or instruction.dst >= locals.len) {
                         return error.ProgramContractViolation;
                     }
+                    const stored = switch (locals[instruction.dst]) {
+                        .bool => |value| value,
+                        else => return error.ProgramContractViolation,
+                    };
                     const expected = switch (instruction.kind) {
                         .compare_eq_zero => blk: {
+                            if (instruction.dst == instruction.operand) break :blk frame.last_condition;
                             const operand_ref = localRefForFunctionIndex(
                                 compiled_plan,
                                 frame.function_index,
@@ -7650,10 +7759,6 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                             schema_types,
                             locals[instruction.operand],
                         )) == instruction.aux,
-                        else => return error.ProgramContractViolation,
-                    };
-                    const stored = switch (locals[instruction.dst]) {
-                        .bool => |value| value,
                         else => return error.ProgramContractViolation,
                     };
                     if (stored != expected or frame.last_condition != expected) {
@@ -7706,7 +7811,17 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 return error.ProgramContractViolation;
                             if (!parent_ref.eql(child_ref)) return error.ProgramContractViolation;
                             if (local_id >= parent_locals.len or arg_index >= child_locals.len) return error.ProgramContractViolation;
-                            try validateDecodedArgumentValue(parent_ref, parent_locals[local_id], child_locals[arg_index]);
+                            if (!staticMachineFunctionMayWriteLocal(
+                                compiled_plan,
+                                child.function_index,
+                                @intCast(arg_index),
+                            )) {
+                                try validateDecodedArgumentValue(
+                                    parent_ref,
+                                    parent_locals[local_id],
+                                    child_locals[arg_index],
+                                );
+                            }
                         }
                     }
                 },
@@ -7782,21 +7897,103 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             return block_index;
         }
 
+        fn instructionForRuntimeIndex(instruction_index: usize) ?program_plan.Instruction {
+            inline for (compiled_plan.instructions, 0..) |instruction, candidate_index| {
+                if (instruction_index == candidate_index) return instruction;
+            }
+            return null;
+        }
+
         fn enqueueControlPathState(
             queue: *[control_path_state_capacity]ControlPathStateIndex,
             queue_len: *usize,
             visited: *ControlPathVisited,
             state: ControlPathState,
         ) error{ProgramContractViolation}!void {
-            if (state.node >= control_node_count) return error.ProgramContractViolation;
-            const state_index = state.node * 4 +
-                @as(usize, @intFromBool(state.traversed_allowed_suspension)) * 2 +
-                @intFromBool(state.condition_matches_reference);
+            if (state.node >= control_node_count or
+                state.predicate_slot >= control_predicate_slot_count or
+                (condition_validity_count == 1 and state.source_valid))
+            {
+                return error.ProgramContractViolation;
+            }
+            const authority_index =
+                (state.predicate_slot * 2 + @intFromBool(state.condition_matches_reference)) *
+                condition_validity_count +
+                @intFromBool(state.source_valid);
+            const state_index =
+                (state.node * 2 + @intFromBool(state.traversed_allowed_suspension)) *
+                condition_authority_count +
+                authority_index;
             if (visited.isSet(state_index)) return;
             if (queue_len.* >= queue.len) return error.ProgramContractViolation;
             visited.set(state_index);
             queue[queue_len.*] = @intCast(state_index);
             queue_len.* += 1;
+        }
+
+        fn conditionAuthorityIndex(
+            predicate_slot: usize,
+            condition_matches_reference: bool,
+            source_valid: bool,
+        ) error{ProgramContractViolation}!usize {
+            if (predicate_slot >= control_predicate_slot_count or
+                (condition_validity_count == 1 and source_valid))
+            {
+                return error.ProgramContractViolation;
+            }
+            return (predicate_slot * 2 + @intFromBool(condition_matches_reference)) *
+                condition_validity_count +
+                @intFromBool(source_valid);
+        }
+
+        fn conditionAuthorityContainsReference(
+            authority: ControlConditionAuthority,
+        ) bool {
+            var predicate_slot: usize = 0;
+            while (predicate_slot < control_predicate_slot_count) : (predicate_slot += 1) {
+                var validity_index: usize = 0;
+                while (validity_index < condition_validity_count) : (validity_index += 1) {
+                    const authority_index =
+                        (predicate_slot * 2 + 1) * condition_validity_count +
+                        validity_index;
+                    if (authority.isSet(authority_index)) return true;
+                }
+            }
+            return false;
+        }
+
+        fn advanceConditionAuthority(
+            function_index: usize,
+            instruction: program_plan.Instruction,
+            authority: ControlConditionAuthority,
+        ) error{ProgramContractViolation}!ControlConditionAuthority {
+            if (comptime !canonical_request_identity) return authority;
+            var result = ControlConditionAuthority.initEmpty();
+            var authority_index: usize = 0;
+            while (authority_index < condition_authority_count) : (authority_index += 1) {
+                if (!authority.isSet(authority_index)) continue;
+                var encoded_authority = authority_index;
+                var source_valid = encoded_authority % condition_validity_count != 0;
+                encoded_authority /= condition_validity_count;
+                const condition_matches_reference = encoded_authority % 2 != 0;
+                const predicate_slot = encoded_authority / 2;
+                if (predicate_slot != 0 and source_valid) {
+                    const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
+                        compiled_plan,
+                        function_index,
+                        predicate_slot - 1,
+                    ) orelse return error.ProgramContractViolation;
+                    if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
+                        source_valid = false;
+                    }
+                }
+                result.set(try conditionAuthorityIndex(
+                    predicate_slot,
+                    condition_matches_reference,
+                    source_valid,
+                ));
+            }
+            return result;
         }
 
         fn controlPathExistsWithoutUnrecordedAfter(
@@ -7806,8 +8003,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             target_node: usize,
             allowed_suspended_instruction: ?usize,
             condition_reference: bool,
-            initial_condition_mask: u2,
-        ) error{ProgramContractViolation}!u2 {
+            initial_condition_authority: ControlConditionAuthority,
+        ) error{ProgramContractViolation}!ControlConditionAuthority {
             if (control_node_count == 0 or start_node >= control_node_count or target_node >= control_node_count) {
                 return error.ProgramContractViolation;
             }
@@ -7819,36 +8016,57 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             var visited = ControlPathVisited.initEmpty();
             var queue_len: usize = 0;
             var queue_index: usize = 0;
-            if (initial_condition_mask & 1 != 0) {
+            var authority_index: usize = 0;
+            while (authority_index < condition_authority_count) : (authority_index += 1) {
+                if (!initial_condition_authority.isSet(authority_index)) continue;
+                var encoded_authority = authority_index;
+                const source_valid = if (condition_validity_count == 1)
+                    false
+                else blk: {
+                    const valid = encoded_authority % condition_validity_count != 0;
+                    encoded_authority /= condition_validity_count;
+                    break :blk valid;
+                };
+                const condition_matches_reference = encoded_authority % 2 != 0;
+                const predicate_slot = encoded_authority / 2;
                 try enqueueControlPathState(&queue, &queue_len, &visited, .{
                     .node = start_node,
                     .traversed_allowed_suspension = allowed_suspended_instruction == null,
-                    .condition_matches_reference = false,
-                });
-            }
-            if (initial_condition_mask & 2 != 0) {
-                try enqueueControlPathState(&queue, &queue_len, &visited, .{
-                    .node = start_node,
-                    .traversed_allowed_suspension = allowed_suspended_instruction == null,
-                    .condition_matches_reference = true,
+                    .predicate_slot = predicate_slot,
+                    .condition_matches_reference = condition_matches_reference,
+                    .source_valid = source_valid,
                 });
             }
 
-            var result_condition_mask: u2 = 0;
+            var result_condition_authority = ControlConditionAuthority.initEmpty();
 
             while (queue_index < queue_len) : (queue_index += 1) {
                 try budget.consume();
-                const state_index: usize = @intCast(queue[queue_index]);
-                const state_flags = state_index % 4;
+                var encoded_state: usize = @intCast(queue[queue_index]);
+                var encoded_authority = encoded_state % condition_authority_count;
+                encoded_state /= condition_authority_count;
+                const source_valid = if (condition_validity_count == 1)
+                    false
+                else blk: {
+                    const valid = encoded_authority % condition_validity_count != 0;
+                    encoded_authority /= condition_validity_count;
+                    break :blk valid;
+                };
                 const state: ControlPathState = .{
-                    .node = state_index / 4,
-                    .traversed_allowed_suspension = state_flags & 2 != 0,
-                    .condition_matches_reference = state_flags & 1 != 0,
+                    .node = encoded_state / 2,
+                    .traversed_allowed_suspension = encoded_state % 2 != 0,
+                    .predicate_slot = encoded_authority / 2,
+                    .condition_matches_reference = encoded_authority % 2 != 0,
+                    .source_valid = source_valid,
                 };
                 const node = state.node;
                 if (node == target_node) {
                     if (state.traversed_allowed_suspension) {
-                        result_condition_mask |= if (state.condition_matches_reference) 2 else 1;
+                        result_condition_authority.set(try conditionAuthorityIndex(
+                            state.predicate_slot,
+                            state.condition_matches_reference,
+                            state.source_valid,
+                        ));
                     }
                     continue;
                 }
@@ -7884,23 +8102,80 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     else
                         node + 1;
                     const traversed_allowed_suspension = state.traversed_allowed_suspension or is_allowed_suspension;
-                    switch (instruction.kind) {
+                    if (comptime canonical_request_identity) {
+                        if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
+                            const predicate_index = staticMachineConditionPredicateIndexForRuntimeFunction(
+                                compiled_plan,
+                                function_index,
+                                predicate,
+                            ) orelse return error.ProgramContractViolation;
+                            const predicate_source_valid = !staticMachineInstructionMayWriteLocal(
+                                instruction,
+                                predicate.operand,
+                            );
+                            if (state.predicate_slot == predicate_index + 1 and state.source_valid) {
+                                try enqueueControlPathState(&queue, &queue_len, &visited, .{
+                                    .node = next_node,
+                                    .traversed_allowed_suspension = traversed_allowed_suspension,
+                                    .predicate_slot = predicate_index + 1,
+                                    .condition_matches_reference = state.condition_matches_reference,
+                                    .source_valid = predicate_source_valid,
+                                });
+                            } else {
+                                try enqueueControlPathState(&queue, &queue_len, &visited, .{
+                                    .node = next_node,
+                                    .traversed_allowed_suspension = traversed_allowed_suspension,
+                                    .predicate_slot = predicate_index + 1,
+                                    .condition_matches_reference = false,
+                                    .source_valid = predicate_source_valid,
+                                });
+                                try enqueueControlPathState(&queue, &queue_len, &visited, .{
+                                    .node = next_node,
+                                    .traversed_allowed_suspension = traversed_allowed_suspension,
+                                    .predicate_slot = predicate_index + 1,
+                                    .condition_matches_reference = true,
+                                    .source_valid = predicate_source_valid,
+                                });
+                            }
+                        } else {
+                            var next_state = state;
+                            next_state.node = next_node;
+                            next_state.traversed_allowed_suspension = traversed_allowed_suspension;
+                            if (state.predicate_slot != 0) {
+                                const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
+                                    compiled_plan,
+                                    function_index,
+                                    state.predicate_slot - 1,
+                                ) orelse return error.ProgramContractViolation;
+                                if (staticMachineInstructionMayWriteLocal(instruction, predicate.operand)) {
+                                    next_state.source_valid = false;
+                                }
+                            }
+                            try enqueueControlPathState(&queue, &queue_len, &visited, next_state);
+                        }
+                    } else switch (instruction.kind) {
                         .compare_eq_zero, .sum_variant_is => {
                             try enqueueControlPathState(&queue, &queue_len, &visited, .{
                                 .node = next_node,
                                 .traversed_allowed_suspension = traversed_allowed_suspension,
+                                .predicate_slot = 0,
                                 .condition_matches_reference = false,
+                                .source_valid = false,
                             });
                             try enqueueControlPathState(&queue, &queue_len, &visited, .{
                                 .node = next_node,
                                 .traversed_allowed_suspension = traversed_allowed_suspension,
+                                .predicate_slot = 0,
                                 .condition_matches_reference = true,
+                                .source_valid = false,
                             });
                         },
                         else => try enqueueControlPathState(&queue, &queue_len, &visited, .{
                             .node = next_node,
                             .traversed_allowed_suspension = traversed_allowed_suspension,
+                            .predicate_slot = 0,
                             .condition_matches_reference = state.condition_matches_reference,
+                            .source_valid = false,
                         }),
                     }
                     continue;
@@ -7927,7 +8202,9 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                     if (condition) terminator.primary else terminator.secondary,
                                 ),
                                 .traversed_allowed_suspension = state.traversed_allowed_suspension,
+                                .predicate_slot = state.predicate_slot,
                                 .condition_matches_reference = state.condition_matches_reference,
+                                .source_valid = state.source_valid,
                             },
                         );
                     },
@@ -7938,13 +8215,15 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         .{
                             .node = try controlNodeForBlockStart(terminator.primary),
                             .traversed_allowed_suspension = state.traversed_allowed_suspension,
+                            .predicate_slot = state.predicate_slot,
                             .condition_matches_reference = state.condition_matches_reference,
+                            .source_valid = state.source_valid,
                         },
                     ),
                     .return_unit, .return_value => {},
                 }
             }
-            return result_condition_mask;
+            return result_condition_authority;
         }
 
         fn validateControlPathWithoutUnrecordedAfter(
@@ -7954,17 +8233,25 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             target_node: usize,
             allowed_suspended_instruction: ?usize,
         ) error{ProgramContractViolation}!void {
-            const initial_condition_mask: u2 = 2;
             const condition_reference = false;
-            if (try controlPathExistsWithoutUnrecordedAfter(
+            const condition_matches_reference = true;
+            const source_valid = false;
+            var initial_condition_authority = ControlConditionAuthority.initEmpty();
+            initial_condition_authority.set(try conditionAuthorityIndex(
+                0,
+                condition_matches_reference,
+                source_valid,
+            ));
+            const final_condition_authority = try controlPathExistsWithoutUnrecordedAfter(
                 budget,
                 function_index,
                 start_node,
                 target_node,
                 allowed_suspended_instruction,
                 condition_reference,
-                initial_condition_mask,
-            ) == 0) return error.ProgramContractViolation;
+                initial_condition_authority,
+            );
+            if (final_condition_authority.count() == 0) return error.ProgramContractViolation;
         }
 
         fn instructionReadsLocal(
@@ -8077,6 +8364,11 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         ) error{ProgramContractViolation}!bool {
             const frame = self.frames.at(frame_index) orelse return error.ProgramContractViolation;
             if (frame_index + 1 < self.frames.len()) {
+                const child = self.frames.at(frame_index + 1) orelse return error.ProgramContractViolation;
+                if (child.function_index >= analysis.completion_functions.len) {
+                    return error.ProgramContractViolation;
+                }
+                if (!analysis.completion_functions[child.function_index]) return true;
                 if (frame.waiting_helper_dst == null or frame.waiting_helper_dst.? != local_index) return false;
                 if (frame.instruction_index == 0) return error.ProgramContractViolation;
                 return instructionDefinesLocalOnFutureContinuation(
@@ -8228,7 +8520,13 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             const function = compiled_plan.functions[frame.function_index];
             const entry_block = @as(usize, function.first_block) + function.entry_block;
             var segment_start = try controlNodeForBlockStart(entry_block);
-            var condition_mask: u2 = if (frame.last_condition) 1 else 2;
+            const source_valid = false;
+            var condition_authority = ControlConditionAuthority.initEmpty();
+            condition_authority.set(try conditionAuthorityIndex(
+                0,
+                !frame.last_condition,
+                source_valid,
+            ));
 
             const after_end = if (frame_index + 1 < self.frames.len()) blk: {
                 const child = self.frames.at(frame_index + 1) orelse return error.ProgramContractViolation;
@@ -8250,16 +8548,24 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                     after_site.source_block_index,
                     after_site.source_instruction_index,
                 );
-                condition_mask = try controlPathExistsWithoutUnrecordedAfter(
+                condition_authority = try controlPathExistsWithoutUnrecordedAfter(
                     budget,
                     frame.function_index,
                     segment_start,
                     site_node,
                     null,
                     frame.last_condition,
-                    condition_mask,
+                    condition_authority,
                 );
-                if (condition_mask == 0) return error.ProgramContractViolation;
+                if (condition_authority.count() == 0) return error.ProgramContractViolation;
+                const site_instruction = instructionForRuntimeIndex(
+                    after_site.source_instruction_index,
+                ) orelse return error.ProgramContractViolation;
+                condition_authority = try advanceConditionAuthority(
+                    frame.function_index,
+                    site_instruction,
+                    condition_authority,
+                );
                 segment_start = site_node + 1;
                 const site_block = compiled_plan.blocks[after_site.source_block_index];
                 const site_instruction_end = @as(usize, site_block.first_instruction) + site_block.instruction_count;
@@ -8284,16 +8590,18 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 frame.block_index,
                 frame.instruction_index,
             );
-            condition_mask = try controlPathExistsWithoutUnrecordedAfter(
+            condition_authority = try controlPathExistsWithoutUnrecordedAfter(
                 budget,
                 frame.function_index,
                 segment_start,
                 cursor_node,
                 allowed_suspended_instruction,
                 frame.last_condition,
-                condition_mask,
+                condition_authority,
             );
-            if (condition_mask & 2 == 0) return error.ProgramContractViolation;
+            if (!conditionAuthorityContainsReference(condition_authority)) {
+                return error.ProgramContractViolation;
+            }
         }
 
         fn validateDecodedAfterStackReachability(
@@ -12973,16 +13281,16 @@ test "Program.Session validation rejects equal helper arguments with different i
 
 test "StaticMachine control-path capacity has a fixed compact scratch bound" {
     try std.testing.expectEqual(
-        @as(?usize, 4),
-        staticMachineControlPathStateCapacity(0, 0),
+        @as(?usize, 8),
+        controlPathCapacityForCounts(0, 0, 0),
     );
     try std.testing.expectEqual(
         @as(?usize, static_max_path_states),
-        staticMachineControlPathStateCapacity(static_max_control_nodes, 0),
+        controlPathCapacityForCounts(static_max_control_nodes, 0, 0),
     );
     try std.testing.expectEqual(
         @as(?usize, null),
-        staticMachineControlPathStateCapacity(static_max_control_nodes + 1, 0),
+        controlPathCapacityForCounts(static_max_control_nodes + 1, 0, 0),
     );
     try std.testing.expectEqual(@as(usize, 69_632), static_max_path_scratch_bytes);
     try std.testing.expectEqual(
@@ -13001,10 +13309,7 @@ test "StaticMachine validation admission keeps acyclic after capacity structural
         compiled_plan,
         &.{},
     ) catch unreachable;
-    const path_capacity = staticMachineControlPathStateCapacity(
-        compiled_plan.instructions.len,
-        compiled_plan.blocks.len,
-    ).?;
+    const path_capacity = staticMachineControlPathStateCapacity(compiled_plan).?;
     try std.testing.expectEqual(@as(usize, 1), staticAfterStackCapacity(compiled_plan, analysis));
     try std.testing.expect(
         staticMachineControlValidationStepBound(

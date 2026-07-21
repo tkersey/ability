@@ -1352,13 +1352,19 @@ const StaticMachineCarrierBlocker = enum {
     comptime_struct_field,
     mutable_string_list,
     non_exhaustive_enum,
+    target_sized_enum_tag,
 };
 
 fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBlocker {
     if (ValueType == [][]const u8) return .mutable_string_list;
     return switch (@typeInfo(ValueType)) {
         .optional => |optional| staticMachineCarrierBlocker(optional.child),
-        .@"enum" => |info| if (info.is_exhaustive) null else .non_exhaustive_enum,
+        .@"enum" => |info| if (!info.is_exhaustive)
+            .non_exhaustive_enum
+        else if (info.tag_type == usize or info.tag_type == isize)
+            .target_sized_enum_tag
+        else
+            null,
         .@"struct" => |info| {
             inline for (info.fields) |field| {
                 if (field.is_comptime) return .comptime_struct_field;
@@ -1392,6 +1398,7 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
             .comptime_struct_field => @compileError("Boundary StaticMachine v1 does not support comptime fields inside product schemas"),
             .mutable_string_list => @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas"),
             .non_exhaustive_enum => @compileError("Boundary StaticMachine v1 does not support non-exhaustive enum carriers"),
+            .target_sized_enum_tag => @compileError("Boundary StaticMachine v1 does not support target-sized enum tag types"),
         };
     }
     const Body = Program.StaticMachineBody;

@@ -69,6 +69,10 @@ ProgramPlan `.usize` local applies the canonical 32-bit domain. Oversized
 authored values, reachable `const_usize` instructions, responses,
 reducer-produced values, and decoded state all fail closed.
 
+Enums used as StaticMachine schema carriers must declare fixed-width tag types.
+Target-sized `usize` and `isize` enum tags are rejected because their concrete
+carrier identity changes between native 64-bit and wasm32 targets.
+
 Readers reject a mismatched machine identity, invalid enum or boolean, malformed
 frame topology, an after stack that is not reachable along the decoded control
 path, an unowned root after-stack prefix, a pending operation whose after entry
