@@ -421,6 +421,205 @@ fn inPlaceBranchCachePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     }) catch unreachable;
 }
 
+fn rewrittenSourceBranchCachePlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const result = boundary.ir.builder.local(root, 2);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = input.index },
+        .{ .kind = .const_i32, .dst = input.index, .operand = 1 },
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        .{ .kind = .const_i32, .dst = result.index, .operand = 1 },
+        boundary.ir.builder.returnValue(root, result) catch unreachable,
+        .{ .kind = .const_i32, .dst = result.index, .operand = 2 },
+        boundary.ir.builder.returnValue(root, result) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 3,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 3,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{.{
+        .label = "test",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "wait",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 4, .terminator_index = 1 },
+        .{ .first_instruction = 5, .instruction_count = 2, .terminator_index = 2 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 43,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .bool }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
+fn correlatedBinarySumPlan(comptime Sum: type, comptime label: []const u8) boundary.ir.ProgramPlan {
+    const Schemas = boundary.ir.schema.Registry(.{Sum});
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const result = boundary.ir.builder.local(root, 2);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .sum_variant_is, .dst = condition.index, .operand = input.index, .aux = 0 },
+        .{ .kind = .sum_variant_is, .dst = condition.index, .operand = input.index, .aux = 1 },
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        .{ .kind = .const_i32, .dst = result.index, .operand = 1 },
+        boundary.ir.builder.returnValue(root, result) catch unreachable,
+        .{ .kind = .const_i32, .dst = result.index, .operand = 2 },
+        boundary.ir.builder.returnValue(root, result) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .i32,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 3,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 4,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{.{
+        .label = "test",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "wait",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 2, .terminator_index = 1 },
+        .{ .first_instruction = 3, .instruction_count = 2, .terminator_index = 2 },
+        .{ .first_instruction = 5, .instruction_count = 2, .terminator_index = 3 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 3 },
+        .{ .kind = .jump, .primary = 2 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 44,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .value_schemas = &Schemas.value_schemas,
+        .value_fields = &Schemas.value_fields,
+        .value_variants = &Schemas.value_variants,
+        .locals = &.{
+            .{ .codec = .sum, .schema_index = 0 },
+            .{ .codec = .bool },
+            .{ .codec = .i32 },
+        },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
+fn interleavedConditionPredicatesPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const first = boundary.ir.builder.local(root, 0);
+    const second = boundary.ir.builder.local(root, 1);
+    const first_condition = boundary.ir.builder.local(root, 2);
+    const second_condition = boundary.ir.builder.local(root, 3);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = first_condition.index, .operand = first.index },
+        .{ .kind = .compare_eq_zero, .dst = second_condition.index, .operand = second.index },
+        .{ .kind = .add_const_i32, .dst = first.index, .operand = first.index, .aux = 0 },
+        .{ .kind = .compare_eq_zero, .dst = first_condition.index, .operand = first.index },
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .parameter_count = 2,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 4,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_unit }};
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 45,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{
+            .{ .codec = .i32 },
+            .{ .codec = .i32 },
+            .{ .codec = .bool },
+            .{ .codec = .bool },
+        },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn conditionalLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -2156,6 +2355,51 @@ const InPlaceBranchCacheProgram = boundary.program(
 );
 const InPlaceBranchCacheMachine = boundary.staticMachine(InPlaceBranchCacheProgram, .{});
 
+const RewrittenSourceBranchCacheBody = struct {
+    pub const compiled_plan = rewrittenSourceBranchCachePlan(
+        "static-machine-rewritten-source-branch-cache",
+    );
+};
+const RewrittenSourceBranchCacheProgram = boundary.program(
+    "static-machine-rewritten-source-branch-cache",
+    struct {},
+    RewrittenSourceBranchCacheBody,
+);
+const RewrittenSourceBranchCacheMachine = boundary.staticMachine(
+    RewrittenSourceBranchCacheProgram,
+    .{},
+);
+
+const BinaryConditionChoice = enum(u8) { first, second };
+const CorrelatedBinarySumBody = struct {
+    pub const value_schema_types = .{BinaryConditionChoice};
+    pub const compiled_plan = correlatedBinarySumPlan(
+        BinaryConditionChoice,
+        "static-machine-correlated-binary-sum",
+    );
+};
+const CorrelatedBinarySumProgram = boundary.program(
+    "static-machine-correlated-binary-sum",
+    struct {},
+    CorrelatedBinarySumBody,
+);
+const CorrelatedBinarySumMachine = boundary.staticMachine(CorrelatedBinarySumProgram, .{});
+
+const InterleavedConditionPredicatesBody = struct {
+    pub const compiled_plan = interleavedConditionPredicatesPlan(
+        "static-machine-interleaved-condition-predicates",
+    );
+};
+const InterleavedConditionPredicatesProgram = boundary.program(
+    "static-machine-interleaved-condition-predicates",
+    struct {},
+    InterleavedConditionPredicatesBody,
+);
+const InterleavedConditionPredicatesMachine = boundary.staticMachine(
+    InterleavedConditionPredicatesProgram,
+    .{},
+);
+
 const ConditionalLocalBody = struct {
     pub const compiled_plan = conditionalLocalPlan("static-machine-conditional-local");
 };
@@ -3739,7 +3983,7 @@ test "StaticMachine contract binds handler-derived after protocol refs" {
         .after => |after| after,
         else => return error.UnexpectedTransition,
     };
-    try std.testing.expectEqual(@as(u64, 9113974118256725148), inner_after.fingerprint());
+    try std.testing.expectEqual(@as(u64, 10707283190065710798), inner_after.fingerprint());
 
     const encoded = try AfterContractMachineA.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
@@ -4803,6 +5047,111 @@ test "StaticMachine preserves in-place condition state across fuel yield" {
     };
     defer result.deinit();
     try std.testing.expectEqual(@as(i32, 2), result.value());
+}
+
+test "StaticMachine canonical condition authority preserves cached condition" {
+    var runtime = boundary.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var session = try RewrittenSourceBranchCacheProgram.Session.startWithArgs(
+        &runtime,
+        .{},
+        .{@as(i32, 0)},
+    );
+    defer session.deinit();
+    const session_request = switch (try session.next()) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+
+    const state = try RewrittenSourceBranchCacheMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 0)},
+    );
+    defer RewrittenSourceBranchCacheMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (try RewrittenSourceBranchCacheMachine.reduce(state, &fuel)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expectEqual(session_request.instruction_index, request.instruction_index);
+    try RewrittenSourceBranchCacheMachine.validateState(state);
+
+    const encoded = try RewrittenSourceBranchCacheMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const restored = try RewrittenSourceBranchCacheMachine.decodeState(
+        std.testing.allocator,
+        encoded,
+    );
+    defer RewrittenSourceBranchCacheMachine.deinitState(restored);
+    const restored_request = switch (try RewrittenSourceBranchCacheMachine.current(restored)) {
+        .request => |value| value,
+        else => return error.UnexpectedTransition,
+    };
+
+    try session.@"resume"(session_request, {});
+    try RewrittenSourceBranchCacheMachine.@"resume"(restored, restored_request, {});
+    var session_result = switch (try session.next()) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer session_result.deinit();
+    var static_result = switch (try RewrittenSourceBranchCacheMachine.reduce(restored, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer static_result.deinit();
+    try std.testing.expectEqual(@as(i32, 1), session_result.value);
+    try std.testing.expectEqual(session_result.value, static_result.value());
+}
+
+test "StaticMachine canonical condition authority rejects incompatible sum predicates" {
+    const state = try CorrelatedBinarySumMachine.initialState(
+        std.testing.allocator,
+        .{BinaryConditionChoice.first},
+    );
+    defer CorrelatedBinarySumMachine.deinitState(state);
+    var fuel: u64 = 100;
+    switch (try CorrelatedBinarySumMachine.reduce(state, &fuel)) {
+        .request => {},
+        else => return error.UnexpectedTransition,
+    }
+    try CorrelatedBinarySumMachine.validateState(state);
+
+    const encoded = try CorrelatedBinarySumMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try CorrelatedBinarySumMachine.decodeState(std.testing.allocator, encoded);
+    CorrelatedBinarySumMachine.deinitState(restored);
+
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 0);
+    const last_condition_offset = frame_offset + 6 * 8;
+    try std.testing.expectEqual(@as(u8, 0), forged[last_condition_offset]);
+    forged[last_condition_offset] = 1;
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        CorrelatedBinarySumMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine condition authority admits independent predicate revisits" {
+    const state = try InterleavedConditionPredicatesMachine.initialState(
+        std.testing.allocator,
+        .{ @as(i32, 0), @as(i32, 1) },
+    );
+    defer InterleavedConditionPredicatesMachine.deinitState(state);
+    var fuel: u64 = 100;
+    var result = switch (try InterleavedConditionPredicatesMachine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    _ = result.value();
 }
 
 test "StaticMachine rejects divergent pending and unwind after values" {

@@ -155,21 +155,27 @@ fuel-derived bound but allocate only as they are recorded; unused capacity is
 neither serialized nor semantic.
 
 Control-path reachability validation uses a compact queue and bitset while
-retaining one compact condition-authority bitset for every active frame.
+retaining one compact condition-authority bitset for every active frame. The
+authority keeps the cached `last_condition` relation separate from the current
+truth relation of its tracked predicate source. Ordinary local writes update
+only the source relation; the cached relation changes only when a predicate
+instruction executes.
 StaticMachine v1 admits at most 32,768 `(control node, suspension traversed,
 condition relation)` states. The queue and visited set reserve at most 69,632
 bytes. Canonical 64-bit word rounding makes the zero-predicate, maximum-depth
 case the largest simultaneous frame-authority layout at another 32,768 bytes,
 for a 102,400-byte ceiling on explicit allocation-free validation
 buffers. The state count is
-`max(1, instructions + blocks) * (maximum distinct condition predicates + 1) * 8`.
+`max(1, instructions + blocks) * 2 * (2 + 6 * maximum distinct condition predicates)`.
 The predicate maximum covers every declared function because decoded function
 indices remain untrusted until validation. The structural ceiling is therefore
 4,096 combined instruction and block nodes when no predicate exists, 2,048
 nodes when the maximum is one, and fewer as the maximum grows. A reachable
-control path may use multiple predicates, but StaticMachine v1 rejects an
-unchanged predicate A revisited after a distinct predicate B because its
-compact validator deliberately retains one predicate relation.
+control path may use multiple predicates. Re-evaluating the same unchanged
+predicate preserves its exact source relation. Distinct variants of the same
+binary sum transfer the complementary relation exactly; wider sums retain the
+sound set of possible relations instead of inventing correlation or rejecting
+all multi-predicate programs.
 `Machine.Manifest` publishes the actual path-state count and the combined
 queue, visited-set, and frame-authority scratch bytes together with both v1
 ceilings. Comptime-generated `u16` metadata maps each

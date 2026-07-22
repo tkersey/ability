@@ -980,14 +980,14 @@ fn sessionHostMayReturnNow(mode: program_plan.ControlMode) bool {
 }
 
 fn sessionOperationSiteFingerprint(
-    comptime compiled_plan: program_plan.ProgramPlan,
+    plan_fingerprint: u64,
     site: SessionOperationYieldSite,
 ) u64 {
     var hasher = std.hash.Wyhash.init(0);
     sessionSiteHashBytes(&hasher, "boundary.session.static_site");
     sessionSiteHashU32(&hasher, trace_fingerprint_version);
     sessionSiteHashBytes(&hasher, "operation");
-    sessionSiteHashU64(&hasher, compiled_plan.hash());
+    sessionSiteHashU64(&hasher, plan_fingerprint);
     sessionSiteHashUsize(&hasher, site.index);
     sessionSiteHashUsize(&hasher, site.function_index);
     sessionSiteHashBytes(&hasher, site.function_symbol_name);
@@ -1037,14 +1037,14 @@ fn staticMachineOperationSiteFingerprint(
 }
 
 fn sessionAfterSiteFingerprint(
-    comptime compiled_plan: program_plan.ProgramPlan,
+    plan_fingerprint: u64,
     site: SessionAfterYieldSite,
 ) u64 {
     var hasher = std.hash.Wyhash.init(0);
     sessionSiteHashBytes(&hasher, "boundary.session.static_site");
     sessionSiteHashU32(&hasher, trace_fingerprint_version);
     sessionSiteHashBytes(&hasher, "after");
-    sessionSiteHashU64(&hasher, compiled_plan.hash());
+    sessionSiteHashU64(&hasher, plan_fingerprint);
     sessionSiteHashUsize(&hasher, site.index);
     sessionSiteHashUsize(&hasher, site.source_operation_site_index);
     sessionSiteHashU64(&hasher, site.source_operation_site_fingerprint);
@@ -1177,6 +1177,7 @@ fn fillSessionOperationYieldSites(
     sites: anytype,
 ) void {
     const analysis = yieldSiteEntryAnalysis(compiled_plan, nested_with_targets, identity);
+    const plan_fingerprint = compiled_plan.hash();
     var next_site: usize = 0;
     inline for (compiled_plan.functions, 0..) |function, function_index| {
         const function_block_end = @as(usize, function.first_block) + function.block_count;
@@ -1211,7 +1212,7 @@ fn fillSessionOperationYieldSites(
                     .host_may_return_now = sessionHostMayReturnNow(op.mode),
                     .can_yield_after = op.has_after,
                 };
-                site.fingerprint = sessionOperationSiteFingerprint(compiled_plan, site);
+                site.fingerprint = sessionOperationSiteFingerprint(plan_fingerprint, site);
                 site.legacy_fingerprint = site.fingerprint;
                 sites[next_site] = site;
                 next_site += 1;
@@ -1250,18 +1251,8 @@ pub fn staticMachineOperationYieldSitesForPlanWithMetadata(
     fillSessionOperationYieldSites(compiled_plan, nested_with_targets, site_metadata, .static_machine_v1, &sites);
     const legacy_sites = sessionOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
     const canonical_plan_fingerprint = staticPlanFingerprint(compiled_plan);
+    reconcileSessionOperationLegacySites(legacy_sites, &sites);
     inline for (&sites) |*site| {
-        comptime var legacy_fingerprint: ?u64 = null;
-        inline for (legacy_sites) |legacy_site| {
-            if (legacy_site.function_index == site.function_index and
-                legacy_site.block_index == site.block_index and
-                legacy_site.instruction_index == site.instruction_index)
-            {
-                legacy_fingerprint = legacy_site.fingerprint;
-            }
-        }
-        site.legacy_fingerprint = legacy_fingerprint orelse
-            @compileError("StaticMachine operation site is absent from the legacy Program.Session catalog");
         site.canonical_fingerprint = staticMachineOperationSiteFingerprint(canonical_plan_fingerprint, site.*);
         site.fingerprint = site.canonical_fingerprint;
     }
@@ -1300,19 +1291,8 @@ pub fn staticMachineAfterYieldSitesForPlanWithMetadata(
     var sites: [staticMachineAfterYieldSiteCount(compiled_plan, nested_with_targets)]SessionAfterYieldSite = undefined;
     fillSessionAfterYieldSites(compiled_plan, operation_sites, &sites);
     const canonical_plan_fingerprint = staticPlanFingerprint(compiled_plan);
+    reconcileSessionAfterLegacySites(legacy_sites, &sites);
     inline for (&sites) |*site| {
-        comptime var legacy_fingerprint: ?u64 = null;
-        inline for (legacy_sites) |legacy_site| {
-            if (legacy_site.source_function_index == site.source_function_index and
-                legacy_site.source_block_index == site.source_block_index and
-                legacy_site.source_instruction_index == site.source_instruction_index)
-            {
-                legacy_fingerprint = legacy_site.fingerprint;
-                site.source_operation_site_legacy_fingerprint = legacy_site.source_operation_site_legacy_fingerprint;
-            }
-        }
-        site.legacy_fingerprint = legacy_fingerprint orelse
-            @compileError("StaticMachine after site is absent from the legacy Program.Session catalog");
         const operation_site = operation_sites[site.source_operation_site_index];
         site.source_operation_site_fingerprint = operation_site.fingerprint;
         site.source_operation_site_canonical_fingerprint = operation_site.canonical_fingerprint;
@@ -1322,11 +1302,90 @@ pub fn staticMachineAfterYieldSitesForPlanWithMetadata(
     return sites;
 }
 
+fn sessionOperationSitePositionLessThan(
+    lhs: anytype,
+    rhs: anytype,
+) bool {
+    if (lhs.function_index != rhs.function_index) return lhs.function_index < rhs.function_index;
+    if (lhs.block_index != rhs.block_index) return lhs.block_index < rhs.block_index;
+    return lhs.instruction_index < rhs.instruction_index;
+}
+
+fn sessionOperationSitePositionEql(
+    lhs: anytype,
+    rhs: anytype,
+) bool {
+    return lhs.function_index == rhs.function_index and
+        lhs.block_index == rhs.block_index and
+        lhs.instruction_index == rhs.instruction_index;
+}
+
+fn sessionAfterSitePositionLessThan(
+    lhs: anytype,
+    rhs: anytype,
+) bool {
+    if (lhs.source_function_index != rhs.source_function_index) {
+        return lhs.source_function_index < rhs.source_function_index;
+    }
+    if (lhs.source_block_index != rhs.source_block_index) {
+        return lhs.source_block_index < rhs.source_block_index;
+    }
+    return lhs.source_instruction_index < rhs.source_instruction_index;
+}
+
+fn sessionAfterSitePositionEql(
+    lhs: anytype,
+    rhs: anytype,
+) bool {
+    return lhs.source_function_index == rhs.source_function_index and
+        lhs.source_block_index == rhs.source_block_index and
+        lhs.source_instruction_index == rhs.source_instruction_index;
+}
+
+fn reconcileSessionOperationLegacySites(comptime legacy_sites: anytype, sites: anytype) void {
+    comptime var legacy_site_index: usize = 0;
+    inline for (sites) |*site| {
+        while (legacy_site_index < legacy_sites.len and
+            sessionOperationSitePositionLessThan(legacy_sites[legacy_site_index], site.*))
+        {
+            legacy_site_index += 1;
+        }
+        if (legacy_site_index >= legacy_sites.len or
+            !sessionOperationSitePositionEql(legacy_sites[legacy_site_index], site.*))
+        {
+            @compileError("StaticMachine operation site is absent from the legacy Program.Session catalog");
+        }
+        site.legacy_fingerprint = legacy_sites[legacy_site_index].fingerprint;
+        legacy_site_index += 1;
+    }
+}
+
+fn reconcileSessionAfterLegacySites(comptime legacy_sites: anytype, sites: anytype) void {
+    comptime var legacy_site_index: usize = 0;
+    inline for (sites) |*site| {
+        while (legacy_site_index < legacy_sites.len and
+            sessionAfterSitePositionLessThan(legacy_sites[legacy_site_index], site.*))
+        {
+            legacy_site_index += 1;
+        }
+        if (legacy_site_index >= legacy_sites.len or
+            !sessionAfterSitePositionEql(legacy_sites[legacy_site_index], site.*))
+        {
+            @compileError("StaticMachine after site is absent from the legacy Program.Session catalog");
+        }
+        const legacy_site = legacy_sites[legacy_site_index];
+        site.legacy_fingerprint = legacy_site.fingerprint;
+        site.source_operation_site_legacy_fingerprint = legacy_site.source_operation_site_legacy_fingerprint;
+        legacy_site_index += 1;
+    }
+}
+
 fn fillSessionAfterYieldSites(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime operation_sites: anytype,
     sites: anytype,
 ) void {
+    const plan_fingerprint = compiled_plan.hash();
     var next_after_site: usize = 0;
     inline for (operation_sites) |operation_site| {
         if (!operation_site.has_after) continue;
@@ -1349,7 +1408,7 @@ fn fillSessionAfterYieldSites(
             .original_op_name = operation_site.op_name,
             .result_ref = operation_site.result_ref,
         };
-        site.fingerprint = sessionAfterSiteFingerprint(compiled_plan, site);
+        site.fingerprint = sessionAfterSiteFingerprint(plan_fingerprint, site);
         site.legacy_fingerprint = site.fingerprint;
         sites[next_after_site] = site;
         next_after_site += 1;
@@ -3163,34 +3222,40 @@ fn staticMachineInstructionPredicateWriteEffect(
     };
 }
 
-fn staticMachineAdvanceConditionValue(
+fn staticMachineAdvanceConditionSourceValue(
     instruction: program_plan.Instruction,
     predicate: StaticConditionPredicate,
-    value: *StaticMachineConditionValue,
+    source_value: *StaticMachineConditionValue,
     source_valid: *bool,
 ) error{ProgramContractViolation}!void {
     switch (try staticMachineInstructionPredicateWriteEffect(instruction, predicate)) {
         .unchanged => {},
-        .unknown => source_valid.* = false,
+        .unknown => {
+            source_value.* = .unknown;
+            source_valid.* = false;
+        },
         .known => |known| {
-            value.* = if (known) .true_value else .false_value;
+            source_value.* = if (known) .true_value else .false_value;
             source_valid.* = true;
         },
     }
 }
 
-fn staticMachineAdvanceConditionRelation(
+fn staticMachineAdvanceConditionSourceRelation(
     instruction: program_plan.Instruction,
     predicate: StaticConditionPredicate,
     condition_reference: bool,
-    condition_matches_reference: *bool,
+    source_matches_reference: *bool,
     source_valid: *bool,
 ) error{ProgramContractViolation}!void {
     switch (try staticMachineInstructionPredicateWriteEffect(instruction, predicate)) {
         .unchanged => {},
-        .unknown => source_valid.* = false,
+        .unknown => {
+            source_matches_reference.* = false;
+            source_valid.* = false;
+        },
         .known => |known| {
-            condition_matches_reference.* = known == condition_reference;
+            source_matches_reference.* = known == condition_reference;
             source_valid.* = true;
         },
     }
@@ -3210,171 +3275,13 @@ fn staticMachineFunctionMayWriteLocal(
     return false;
 }
 
-const PredicateHistoryPhase = enum(u2) {
-    before_candidate,
-    candidate_seen,
-    distinct_seen,
-};
-
-fn staticMachineFunctionHasInterleavedPredicateRevisit(
-    comptime compiled_plan: program_plan.ProgramPlan,
-    comptime nested_with_targets: anytype,
-    comptime analysis: anytype,
-    comptime function_index: usize,
-) bool {
-    @setEvalBranchQuota(10_000_000);
-    const predicate_count = staticMachineFunctionConditionPredicateCount(
-        compiled_plan,
-        function_index,
-    );
-    if (predicate_count < 2) return false;
-    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
-    if (control_node_count == 0 or control_node_count > static_max_control_nodes) return false;
-    const state_count = control_node_count * 3;
-    const StateIndex = std.math.IntFittingRange(0, state_count - 1);
-    const StateVisited = std.StaticBitSet(state_count);
-    const function = compiled_plan.functions[function_index];
-    const function_block_end = @as(usize, function.first_block) + function.block_count;
-    const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse
-        return false;
-
-    const State = struct {
-        node: usize,
-        phase: PredicateHistoryPhase,
-    };
-    const encodeState = struct {
-        fn call(state: State) usize {
-            return state.node * 3 + @intFromEnum(state.phase);
-        }
-    }.call;
-    const enqueue = struct {
-        fn call(
-            queue: *[state_count]StateIndex,
-            queue_len: *usize,
-            visited: *StateVisited,
-            state: State,
-        ) void {
-            const encoded = encodeState(state);
-            if (visited.isSet(encoded)) return;
-            visited.set(encoded);
-            queue[queue_len.*] = @intCast(encoded);
-            queue_len.* += 1;
-        }
-    }.call;
-
-    for (0..predicate_count) |candidate_index| {
-        const candidate = staticMachineConditionPredicateForIndex(
-            compiled_plan,
-            function_index,
-            candidate_index,
-        ) orelse return true;
-        var queue: [state_count]StateIndex = undefined;
-        var visited = StateVisited.initEmpty();
-        var queue_len: usize = 0;
-        var queue_index: usize = 0;
-        enqueue(&queue, &queue_len, &visited, .{
-            .node = entry_node,
-            .phase = .before_candidate,
-        });
-
-        predicate_search: while (queue_index < queue_len) : (queue_index += 1) {
-            const encoded: usize = @intCast(queue[queue_index]);
-            var state = State{
-                .node = encoded / 3,
-                .phase = @enumFromInt(encoded % 3),
-            };
-            if (state.node < compiled_plan.instructions.len) {
-                var block_index: usize = function.first_block;
-                const owner_block = while (block_index < function_block_end) : (block_index += 1) {
-                    const block = compiled_plan.blocks[block_index];
-                    const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
-                    if (state.node >= block.first_instruction and state.node < instruction_end) {
-                        break block_index;
-                    }
-                } else return true;
-                const instruction = compiled_plan.instructions[state.node];
-                switch (instruction.kind) {
-                    .return_error => continue :predicate_search,
-                    .call_helper => if (instruction.operand >= compiled_plan.functions.len or
-                        !analysis.completion_functions[instruction.operand]) continue :predicate_search,
-                    .call_nested_with => {
-                        const target_index = nestedWithTargetIndexForMetadata(
-                            compiled_plan,
-                            nested_with_targets,
-                            instruction.string_literal,
-                        ) orelse continue :predicate_search;
-                        if (!analysis.completion_functions[target_index]) continue :predicate_search;
-                    },
-                    .call_op => {
-                        if (instruction.operand >= compiled_plan.ops.len) return true;
-                        if (compiled_plan.ops[instruction.operand].mode == .abort) continue :predicate_search;
-                    },
-                    else => {},
-                }
-
-                if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
-                    if (predicate.eql(candidate)) {
-                        if (state.phase == .distinct_seen) return true;
-                        state.phase = .candidate_seen;
-                    } else if (state.phase == .candidate_seen) {
-                        state.phase = .distinct_seen;
-                    }
-                }
-                switch (staticMachineInstructionPredicateWriteEffect(
-                    instruction,
-                    candidate,
-                ) catch return true) {
-                    .unchanged => {},
-                    .unknown, .known => state.phase = .before_candidate,
-                }
-
-                const block = compiled_plan.blocks[owner_block];
-                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
-                state.node = if (state.node + 1 == instruction_end)
-                    compiled_plan.instructions.len + owner_block
-                else
-                    state.node + 1;
-                enqueue(&queue, &queue_len, &visited, state);
-                continue :predicate_search;
-            }
-
-            const block_index = state.node - compiled_plan.instructions.len;
-            if (block_index < function.first_block or block_index >= function_block_end) return true;
-            const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
-            const targets = switch (terminator.kind) {
-                .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
-                .jump => [2]?u16{ terminator.primary, null },
-                .return_unit, .return_value => [2]?u16{ null, null },
-            };
-            target_search: for (targets) |target_optional| {
-                const target = target_optional orelse continue :target_search;
-                state.node = staticMachineFunctionBlockStartNode(
-                    compiled_plan,
-                    function_index,
-                    target,
-                ) orelse return true;
-                enqueue(&queue, &queue_len, &visited, state);
-            }
-        }
-    }
-    return false;
-}
-
 fn validateStaticMachineRepresentableStateAuthority(
     comptime compiled_plan: program_plan.ProgramPlan,
-    comptime nested_with_targets: anytype,
+    comptime _: anytype,
     comptime analysis: anytype,
 ) void {
     for (compiled_plan.functions, 0..) |function, function_index| {
         if (!analysis.reachable_functions[function_index]) continue;
-        if (staticMachineFunctionHasInterleavedPredicateRevisit(
-            compiled_plan,
-            nested_with_targets,
-            analysis,
-            function_index,
-        )) {
-            @compileError("Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate");
-        }
         if (function_index == compiled_plan.entry_index) continue;
         for (0..function.parameter_count) |parameter_index| {
             if (staticMachineFunctionMayWriteLocal(
@@ -3418,7 +3325,8 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
     const state_count = std.math.mul(
         usize,
         control_node_count,
-        phase_count * predicate_slot_count * condition_value_count * source_validity_count,
+        phase_count * predicate_slot_count * condition_value_count *
+            condition_value_count * source_validity_count,
     ) catch @compileError("Boundary StaticMachine v1 after-condition path-state count overflowed");
     if (state_count > static_max_control_work_units) {
         @compileError("Boundary StaticMachine v1 after-condition path analysis exceeds the v1 limit");
@@ -3437,7 +3345,8 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
         node: usize,
         after_outer: bool,
         predicate_slot: usize,
-        value: StaticMachineConditionValue,
+        cached_value: StaticMachineConditionValue,
+        source_value: StaticMachineConditionValue,
         source_valid: bool,
     };
     const encodeState = struct {
@@ -3445,7 +3354,8 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
             var encoded = state.node;
             encoded = encoded * phase_count + @intFromBool(state.after_outer);
             encoded = encoded * predicate_slot_count + state.predicate_slot;
-            encoded = encoded * condition_value_count + @intFromEnum(state.value);
+            encoded = encoded * condition_value_count + @intFromEnum(state.cached_value);
+            encoded = encoded * condition_value_count + @intFromEnum(state.source_value);
             encoded = encoded * source_validity_count + @intFromBool(state.source_valid);
             return encoded;
         }
@@ -3455,7 +3365,9 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
             var encoded = encoded_value;
             const source_valid = encoded % source_validity_count != 0;
             encoded /= source_validity_count;
-            const value: StaticMachineConditionValue = @enumFromInt(encoded % condition_value_count);
+            const source_value: StaticMachineConditionValue = @enumFromInt(encoded % condition_value_count);
+            encoded /= condition_value_count;
+            const cached_value: StaticMachineConditionValue = @enumFromInt(encoded % condition_value_count);
             encoded /= condition_value_count;
             const predicate_slot = encoded % predicate_slot_count;
             encoded /= predicate_slot_count;
@@ -3465,7 +3377,8 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                 .node = encoded,
                 .after_outer = after_outer,
                 .predicate_slot = predicate_slot,
-                .value = value,
+                .cached_value = cached_value,
+                .source_value = source_value,
                 .source_valid = source_valid,
             };
         }
@@ -3493,7 +3406,8 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
         .node = entry_node,
         .after_outer = false,
         .predicate_slot = 0,
-        .value = .unknown,
+        .cached_value = .unknown,
+        .source_value = .unknown,
         .source_valid = false,
     });
 
@@ -3513,10 +3427,10 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                     function_index,
                     predicate_index,
                 ) orelse return false;
-                staticMachineAdvanceConditionValue(
+                staticMachineAdvanceConditionSourceValue(
                     outer_instruction,
                     predicate,
-                    &state.value,
+                    &state.source_value,
                     &state.source_valid,
                 ) catch return false;
             }
@@ -3566,24 +3480,30 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                     function_index,
                     predicate,
                 ) orelse return false;
-                if (state.predicate_slot != predicate_index + 1 or !state.source_valid) {
-                    state.predicate_slot = predicate_index + 1;
-                    state.value = .unknown;
-                }
+                state.cached_value = if (state.predicate_slot == predicate_index + 1 and
+                    state.source_valid)
+                    state.source_value
+                else
+                    .unknown;
+                state.predicate_slot = predicate_index + 1;
                 state.source_valid = !staticMachineInstructionMayWriteLocal(
                     instruction,
                     predicate.operand,
                 );
+                state.source_value = if (state.source_valid)
+                    state.cached_value
+                else
+                    .unknown;
             } else if (state.predicate_slot != 0) {
                 const predicate = staticMachineConditionPredicateForIndex(
                     compiled_plan,
                     function_index,
                     state.predicate_slot - 1,
                 ) orelse return false;
-                staticMachineAdvanceConditionValue(
+                staticMachineAdvanceConditionSourceValue(
                     instruction,
                     predicate,
-                    &state.value,
+                    &state.source_value,
                     &state.source_valid,
                 ) catch return false;
             }
@@ -3602,9 +3522,9 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
         if (block_index < function.first_block or block_index >= function_block_end) return false;
         const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
         switch (terminator.kind) {
-            .branch_if => switch (state.value) {
+            .branch_if => switch (state.cached_value) {
                 .false_value, .true_value => {
-                    const condition = state.value == .true_value;
+                    const condition = state.cached_value == .true_value;
                     state.node = staticMachineFunctionBlockStartNode(
                         compiled_plan,
                         function_index,
@@ -3614,14 +3534,20 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                 },
                 .unknown => {
                     var false_state = state;
-                    false_state.value = .false_value;
+                    false_state.cached_value = .false_value;
+                    if (false_state.source_valid and false_state.source_value == .unknown) {
+                        false_state.source_value = .false_value;
+                    }
                     false_state.node = staticMachineFunctionBlockStartNode(
                         compiled_plan,
                         function_index,
                         terminator.secondary,
                     ) orelse return false;
                     enqueue(&queue, &queue_len, &visited, false_state);
-                    state.value = .true_value;
+                    state.cached_value = .true_value;
+                    if (state.source_valid and state.source_value == .unknown) {
+                        state.source_value = .true_value;
+                    }
                     state.node = staticMachineFunctionBlockStartNode(
                         compiled_plan,
                         function_index,
@@ -4981,23 +4907,68 @@ fn staticMachineControlValidationStepBound(
     return std.math.add(usize, reachability_and_local_work, after_stack_capacity) catch null;
 }
 
+const StaticMachineNestedTargetRange = struct {
+    first: usize,
+    end: usize,
+    offset: usize,
+};
+
 fn staticMachineCanonicalNestedWithTargets(
     comptime nested_with_targets: anytype,
 ) [nested_with_targets.len]NestedWithTarget {
     var canonical: [nested_with_targets.len]NestedWithTarget = undefined;
     inline for (nested_with_targets, 0..) |target, index| canonical[index] = target;
+    if (comptime canonical.len < 2) return canonical;
 
-    var index: usize = 1;
-    while (index < canonical.len) : (index += 1) {
-        const target = canonical[index];
-        var insertion_index = index;
-        while (insertion_index > 0 and
-            std.mem.order(u8, target.metadata, canonical[insertion_index - 1].metadata) == .lt)
-        {
-            canonical[insertion_index] = canonical[insertion_index - 1];
-            insertion_index -= 1;
+    var scratch: [nested_with_targets.len]NestedWithTarget = undefined;
+    var ranges: [nested_with_targets.len]StaticMachineNestedTargetRange = undefined;
+    ranges[0] = .{ .first = 0, .end = canonical.len, .offset = 0 };
+    var range_count: usize = 1;
+
+    while (range_count != 0) {
+        range_count -= 1;
+        const range = ranges[range_count];
+        var counts = [_]usize{0} ** 257;
+        for (canonical[range.first..range.end]) |target| {
+            const key = if (range.offset < target.metadata.len)
+                @as(usize, target.metadata[range.offset]) + 1
+            else
+                0;
+            counts[key] += 1;
         }
-        canonical[insertion_index] = target;
+        if (counts[0] > 1) {
+            @compileError("Boundary StaticMachine v1 requires unique nested target metadata");
+        }
+
+        var starts: [257]usize = undefined;
+        var cursor = range.first;
+        for (&starts, counts) |*start, count| {
+            start.* = cursor;
+            cursor += count;
+        }
+        var next = starts;
+        for (canonical[range.first..range.end]) |target| {
+            const key = if (range.offset < target.metadata.len)
+                @as(usize, target.metadata[range.offset]) + 1
+            else
+                0;
+            scratch[next[key]] = target;
+            next[key] += 1;
+        }
+        for (canonical[range.first..range.end], scratch[range.first..range.end]) |*destination, target| {
+            destination.* = target;
+        }
+
+        key_loop: for (1..counts.len) |key| {
+            if (counts[key] < 2) continue :key_loop;
+            if (range_count == ranges.len) unreachable;
+            ranges[range_count] = .{
+                .first = starts[key],
+                .end = next[key],
+                .offset = range.offset + 1,
+            };
+            range_count += 1;
+        }
     }
     return canonical;
 }
@@ -5075,7 +5046,7 @@ const static_max_path_scratch_bytes =
     static_max_path_states * @sizeOf(u16) +
     @sizeOf(StaticMaxPathVisited);
 // Every reachable function owns at least one control block, so active frame
-// depth cannot exceed the control-node ceiling. One authority has four bits in
+// depth cannot exceed the control-node ceiling. One authority has two bits in
 // the zero-predicate worst case but still occupies one canonical 64-bit storage
 // word; 4,096 frames therefore require at most 32 KiB. More predicates reduce
 // the admitted node and frame counts faster than they grow the rounded bitset.
@@ -5092,6 +5063,14 @@ fn staticMachineBitSetScratchBytes(bit_count: usize) ?usize {
     return std.math.mul(usize, word_count, @sizeOf(u64)) catch null;
 }
 
+fn conditionAuthorityCountForPredicateCount(predicate_count: usize) ?usize {
+    return std.math.add(
+        usize,
+        2,
+        std.math.mul(usize, predicate_count, 6) catch return null,
+    ) catch null;
+}
+
 fn controlPathCapacityForCounts(
     instruction_count: usize,
     block_count: usize,
@@ -5103,16 +5082,9 @@ fn controlPathCapacityForCounts(
         block_count,
     ) catch return null;
     const node_capacity = if (node_count == 0) 1 else node_count;
-    const predicate_slot_count = std.math.add(
-        usize,
+    const condition_authority_count = conditionAuthorityCountForPredicateCount(
         predicate_count,
-        1,
-    ) catch return null;
-    const condition_authority_count = std.math.mul(
-        usize,
-        predicate_slot_count,
-        4,
-    ) catch return null;
+    ) orelse return null;
     const state_capacity = std.math.mul(
         usize,
         node_capacity,
@@ -5137,16 +5109,9 @@ fn staticMachineControlValidationScratchBytes(
     comptime analysis: anytype,
     comptime control_path_state_capacity: usize,
 ) ?usize {
-    const predicate_slot_count = std.math.add(
-        usize,
+    const condition_authority_count = conditionAuthorityCountForPredicateCount(
         staticMachineMaximumConditionPredicateCount(compiled_plan),
-        1,
-    ) catch return null;
-    const condition_authority_count = std.math.mul(
-        usize,
-        predicate_slot_count,
-        4,
-    ) catch return null;
+    ) orelse return null;
     const ControlPathStateIndex = std.math.IntFittingRange(0, control_path_state_capacity - 1);
     const queue_bytes = std.math.mul(
         usize,
@@ -6286,13 +6251,14 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         const state_image_magic = "ABL_STM1";
         const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
         const control_node_capacity = if (control_node_count == 0) 1 else control_node_count;
-        const control_predicate_slot_count = if (canonical_request_identity)
-            staticMachineMaximumConditionPredicateCount(compiled_plan) + 1
+        const control_predicate_count = if (canonical_request_identity)
+            staticMachineMaximumConditionPredicateCount(compiled_plan)
         else
-            1;
-        const condition_validity_count = if (canonical_request_identity) 2 else 1;
-        const condition_authority_count =
-            control_predicate_slot_count * 2 * condition_validity_count;
+            0;
+        const control_predicate_slot_count = control_predicate_count + 1;
+        const condition_authority_count = conditionAuthorityCountForPredicateCount(
+            control_predicate_count,
+        ) orelse @compileError("Boundary StaticMachine condition-authority count overflowed");
         const control_path_state_capacity = if (canonical_request_identity)
             static_control_path_state_capacity
         else
@@ -6362,12 +6328,77 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             }
         };
 
+        const ControlConditionState = struct {
+            const Relation = enum { differs, matches };
+
+            predicate_slot: usize,
+            cached_matches_reference: bool,
+            source_valid: bool,
+            source_matches_reference: bool,
+
+            fn predicateFree(relation: Relation) @This() {
+                return .{
+                    .predicate_slot = 0,
+                    .cached_matches_reference = relation == .matches,
+                    .source_valid = false,
+                    .source_matches_reference = false,
+                };
+            }
+
+            fn encode(self: @This()) error{ProgramContractViolation}!usize {
+                if (self.predicate_slot >= control_predicate_slot_count) {
+                    return error.ProgramContractViolation;
+                }
+                if (self.predicate_slot == 0) {
+                    if (self.source_valid or self.source_matches_reference) {
+                        return error.ProgramContractViolation;
+                    }
+                    return @intFromBool(self.cached_matches_reference);
+                }
+                if (comptime !canonical_request_identity) {
+                    return error.ProgramContractViolation;
+                }
+                const base = 2 + (self.predicate_slot - 1) * 6;
+                if (!self.source_valid) {
+                    if (self.source_matches_reference) return error.ProgramContractViolation;
+                    return base + @intFromBool(self.cached_matches_reference);
+                }
+                return base + 2 + @as(usize, @intFromBool(self.cached_matches_reference)) * 2 +
+                    @intFromBool(self.source_matches_reference);
+            }
+
+            fn decode(encoded: usize) error{ProgramContractViolation}!@This() {
+                if (encoded >= condition_authority_count) return error.ProgramContractViolation;
+                if (encoded < 2) return predicateFree(if (encoded != 0) .matches else .differs);
+                if (comptime !canonical_request_identity) {
+                    return error.ProgramContractViolation;
+                }
+                const predicate_encoded = encoded - 2;
+                const predicate_slot = predicate_encoded / 6 + 1;
+                const relation_encoded = predicate_encoded % 6;
+                if (predicate_slot >= control_predicate_slot_count) {
+                    return error.ProgramContractViolation;
+                }
+                if (relation_encoded < 2) return .{
+                    .predicate_slot = predicate_slot,
+                    .cached_matches_reference = relation_encoded != 0,
+                    .source_valid = false,
+                    .source_matches_reference = false,
+                };
+                const valid_encoded = relation_encoded - 2;
+                return .{
+                    .predicate_slot = predicate_slot,
+                    .cached_matches_reference = valid_encoded / 2 != 0,
+                    .source_valid = true,
+                    .source_matches_reference = valid_encoded % 2 != 0,
+                };
+            }
+        };
+
         const ControlPathState = struct {
             node: usize,
             traversed_allowed_suspension: bool,
-            predicate_slot: usize,
-            condition_matches_reference: bool,
-            source_valid: bool,
+            condition: ControlConditionState,
         };
 
         const DurableWriter = struct {
@@ -8125,16 +8156,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             visited: *ControlPathVisited,
             state: ControlPathState,
         ) error{ProgramContractViolation}!void {
-            if (state.node >= control_node_count or
-                state.predicate_slot >= control_predicate_slot_count or
-                (condition_validity_count == 1 and state.source_valid))
-            {
-                return error.ProgramContractViolation;
-            }
-            const authority_index =
-                (state.predicate_slot * 2 + @intFromBool(state.condition_matches_reference)) *
-                condition_validity_count +
-                @intFromBool(state.source_valid);
+            if (state.node >= control_node_count) return error.ProgramContractViolation;
+            const authority_index = try state.condition.encode();
             const state_index =
                 (state.node * 2 + @intFromBool(state.traversed_allowed_suspension)) *
                 condition_authority_count +
@@ -8146,36 +8169,82 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             queue_len.* += 1;
         }
 
-        fn conditionAuthorityIndex(
-            predicate_slot: usize,
-            condition_matches_reference: bool,
-            source_valid: bool,
-        ) error{ProgramContractViolation}!usize {
-            if (predicate_slot >= control_predicate_slot_count or
-                (condition_validity_count == 1 and source_valid))
-            {
-                return error.ProgramContractViolation;
-            }
-            return (predicate_slot * 2 + @intFromBool(condition_matches_reference)) *
-                condition_validity_count +
-                @intFromBool(source_valid);
-        }
-
         fn conditionAuthorityMatchingReference(
             authority: ControlConditionAuthority,
-        ) ControlConditionAuthority {
+        ) error{ProgramContractViolation}!ControlConditionAuthority {
             var result = ControlConditionAuthority.initEmpty();
-            var predicate_slot: usize = 0;
-            while (predicate_slot < control_predicate_slot_count) : (predicate_slot += 1) {
-                var validity_index: usize = 0;
-                while (validity_index < condition_validity_count) : (validity_index += 1) {
-                    const authority_index =
-                        (predicate_slot * 2 + 1) * condition_validity_count +
-                        validity_index;
-                    if (authority.isSet(authority_index)) result.set(authority_index);
-                }
+            var authority_index: usize = 0;
+            while (authority_index < condition_authority_count) : (authority_index += 1) {
+                if (!authority.isSet(authority_index)) continue;
+                const condition = try ControlConditionState.decode(authority_index);
+                if (condition.cached_matches_reference) result.set(authority_index);
             }
             return result;
+        }
+
+        fn predicateCachedRelations(
+            function_index: usize,
+            predicate: StaticConditionPredicate,
+            condition_reference: bool,
+            condition: ControlConditionState,
+        ) error{ProgramContractViolation}![2]?bool {
+            if (condition.predicate_slot == 0 or !condition.source_valid) {
+                return .{ false, true };
+            }
+            const tracked = staticMachineConditionPredicateForRuntimeFunctionIndex(
+                compiled_plan,
+                function_index,
+                condition.predicate_slot - 1,
+            ) orelse return error.ProgramContractViolation;
+            if (tracked.eql(predicate)) {
+                return .{ condition.source_matches_reference, null };
+            }
+            if (tracked.kind != .sum_variant_is or
+                predicate.kind != .sum_variant_is or
+                tracked.operand != predicate.operand)
+            {
+                return .{ false, true };
+            }
+
+            const tracked_truth = if (condition.source_matches_reference)
+                condition_reference
+            else
+                !condition_reference;
+            if (tracked_truth) return .{ false == condition_reference, null };
+
+            const operand_ref = localRefForFunctionIndex(
+                compiled_plan,
+                function_index,
+                predicate.operand,
+            ) orelse return error.ProgramContractViolation;
+            const schema_index = operand_ref.schema_index orelse return error.ProgramContractViolation;
+            if (operand_ref.codec != .sum or schema_index >= compiled_plan.value_schemas.len) {
+                return error.ProgramContractViolation;
+            }
+            const schema = compiled_plan.value_schemas[schema_index];
+            if (schema.variant_count == 2) return .{ true == condition_reference, null };
+            return .{ false, true };
+        }
+
+        fn conditionAfterPredicate(
+            predicate_index: usize,
+            instruction: program_plan.Instruction,
+            predicate: StaticConditionPredicate,
+            cached_matches_reference: bool,
+        ) ControlConditionState {
+            const source_valid = !staticMachineInstructionMayWriteLocal(
+                instruction,
+                predicate.operand,
+            );
+            return .{
+                .predicate_slot = predicate_index + 1,
+                .cached_matches_reference = cached_matches_reference,
+                .source_valid = source_valid,
+                .source_matches_reference = if (source_valid)
+                    cached_matches_reference
+                else
+                    false,
+            };
         }
 
         fn advanceConditionAuthority(
@@ -8189,30 +8258,22 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             var authority_index: usize = 0;
             while (authority_index < condition_authority_count) : (authority_index += 1) {
                 if (!authority.isSet(authority_index)) continue;
-                var encoded_authority = authority_index;
-                var source_valid = encoded_authority % condition_validity_count != 0;
-                encoded_authority /= condition_validity_count;
-                var condition_matches_reference = encoded_authority % 2 != 0;
-                const predicate_slot = encoded_authority / 2;
-                if (predicate_slot != 0) {
+                var condition = try ControlConditionState.decode(authority_index);
+                if (condition.predicate_slot != 0) {
                     const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
                         compiled_plan,
                         function_index,
-                        predicate_slot - 1,
+                        condition.predicate_slot - 1,
                     ) orelse return error.ProgramContractViolation;
-                    try staticMachineAdvanceConditionRelation(
+                    try staticMachineAdvanceConditionSourceRelation(
                         instruction,
                         predicate,
                         condition_reference,
-                        &condition_matches_reference,
-                        &source_valid,
+                        &condition.source_matches_reference,
+                        &condition.source_valid,
                     );
                 }
-                result.set(try conditionAuthorityIndex(
-                    predicate_slot,
-                    condition_matches_reference,
-                    source_valid,
-                ));
+                result.set(try condition.encode());
             }
             return result;
         }
@@ -8240,22 +8301,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             var authority_index: usize = 0;
             while (authority_index < condition_authority_count) : (authority_index += 1) {
                 if (!initial_condition_authority.isSet(authority_index)) continue;
-                var encoded_authority = authority_index;
-                const source_valid = if (condition_validity_count == 1)
-                    false
-                else blk: {
-                    const valid = encoded_authority % condition_validity_count != 0;
-                    encoded_authority /= condition_validity_count;
-                    break :blk valid;
-                };
-                const condition_matches_reference = encoded_authority % 2 != 0;
-                const predicate_slot = encoded_authority / 2;
                 try enqueueControlPathState(&queue, &queue_len, &visited, .{
                     .node = start_node,
                     .traversed_allowed_suspension = allowed_suspended_instruction == null,
-                    .predicate_slot = predicate_slot,
-                    .condition_matches_reference = condition_matches_reference,
-                    .source_valid = source_valid,
+                    .condition = try ControlConditionState.decode(authority_index),
                 });
             }
 
@@ -8264,30 +8313,17 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             while (queue_index < queue_len) : (queue_index += 1) {
                 try budget.consume();
                 var encoded_state: usize = @intCast(queue[queue_index]);
-                var encoded_authority = encoded_state % condition_authority_count;
+                const encoded_authority = encoded_state % condition_authority_count;
                 encoded_state /= condition_authority_count;
-                const source_valid = if (condition_validity_count == 1)
-                    false
-                else blk: {
-                    const valid = encoded_authority % condition_validity_count != 0;
-                    encoded_authority /= condition_validity_count;
-                    break :blk valid;
-                };
                 const state: ControlPathState = .{
                     .node = encoded_state / 2,
                     .traversed_allowed_suspension = encoded_state % 2 != 0,
-                    .predicate_slot = encoded_authority / 2,
-                    .condition_matches_reference = encoded_authority % 2 != 0,
-                    .source_valid = source_valid,
+                    .condition = try ControlConditionState.decode(encoded_authority),
                 };
                 const node = state.node;
                 if (node == target_node) {
                     if (state.traversed_allowed_suspension) {
-                        result_condition_authority.set(try conditionAuthorityIndex(
-                            state.predicate_slot,
-                            state.condition_matches_reference,
-                            state.source_valid,
-                        ));
+                        result_condition_authority.set(try state.condition.encode());
                     }
                     continue;
                 }
@@ -8330,50 +8366,41 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                 function_index,
                                 predicate,
                             ) orelse return error.ProgramContractViolation;
-                            const predicate_source_valid = !staticMachineInstructionMayWriteLocal(
-                                instruction,
-                                predicate.operand,
+                            const cached_relations = try predicateCachedRelations(
+                                function_index,
+                                predicate,
+                                condition_reference,
+                                state.condition,
                             );
-                            if (state.predicate_slot == predicate_index + 1 and state.source_valid) {
+                            relation_loop: for (cached_relations) |cached_optional| {
+                                const cached_matches_reference = cached_optional orelse continue :relation_loop;
                                 try enqueueControlPathState(&queue, &queue_len, &visited, .{
                                     .node = next_node,
                                     .traversed_allowed_suspension = traversed_allowed_suspension,
-                                    .predicate_slot = predicate_index + 1,
-                                    .condition_matches_reference = state.condition_matches_reference,
-                                    .source_valid = predicate_source_valid,
-                                });
-                            } else {
-                                try enqueueControlPathState(&queue, &queue_len, &visited, .{
-                                    .node = next_node,
-                                    .traversed_allowed_suspension = traversed_allowed_suspension,
-                                    .predicate_slot = predicate_index + 1,
-                                    .condition_matches_reference = false,
-                                    .source_valid = predicate_source_valid,
-                                });
-                                try enqueueControlPathState(&queue, &queue_len, &visited, .{
-                                    .node = next_node,
-                                    .traversed_allowed_suspension = traversed_allowed_suspension,
-                                    .predicate_slot = predicate_index + 1,
-                                    .condition_matches_reference = true,
-                                    .source_valid = predicate_source_valid,
+                                    .condition = conditionAfterPredicate(
+                                        predicate_index,
+                                        instruction,
+                                        predicate,
+                                        cached_matches_reference,
+                                    ),
                                 });
                             }
                         } else {
                             var next_state = state;
                             next_state.node = next_node;
                             next_state.traversed_allowed_suspension = traversed_allowed_suspension;
-                            if (state.predicate_slot != 0) {
+                            if (state.condition.predicate_slot != 0) {
                                 const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
                                     compiled_plan,
                                     function_index,
-                                    state.predicate_slot - 1,
+                                    state.condition.predicate_slot - 1,
                                 ) orelse return error.ProgramContractViolation;
-                                try staticMachineAdvanceConditionRelation(
+                                try staticMachineAdvanceConditionSourceRelation(
                                     instruction,
                                     predicate,
                                     condition_reference,
-                                    &next_state.condition_matches_reference,
-                                    &next_state.source_valid,
+                                    &next_state.condition.source_matches_reference,
+                                    &next_state.condition.source_valid,
                                 );
                             }
                             try enqueueControlPathState(&queue, &queue_len, &visited, next_state);
@@ -8383,24 +8410,20 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                             try enqueueControlPathState(&queue, &queue_len, &visited, .{
                                 .node = next_node,
                                 .traversed_allowed_suspension = traversed_allowed_suspension,
-                                .predicate_slot = 0,
-                                .condition_matches_reference = false,
-                                .source_valid = false,
+                                .condition = ControlConditionState.predicateFree(.differs),
                             });
                             try enqueueControlPathState(&queue, &queue_len, &visited, .{
                                 .node = next_node,
                                 .traversed_allowed_suspension = traversed_allowed_suspension,
-                                .predicate_slot = 0,
-                                .condition_matches_reference = true,
-                                .source_valid = false,
+                                .condition = ControlConditionState.predicateFree(.matches),
                             });
                         },
                         else => try enqueueControlPathState(&queue, &queue_len, &visited, .{
                             .node = next_node,
                             .traversed_allowed_suspension = traversed_allowed_suspension,
-                            .predicate_slot = 0,
-                            .condition_matches_reference = state.condition_matches_reference,
-                            .source_valid = false,
+                            .condition = ControlConditionState.predicateFree(
+                                if (state.condition.cached_matches_reference) .matches else .differs,
+                            ),
                         }),
                     }
                     continue;
@@ -8414,7 +8437,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 const terminator = compiled_plan.terminators[block.terminator_index];
                 switch (terminator.kind) {
                     .branch_if => {
-                        const condition = if (state.condition_matches_reference)
+                        const condition = if (state.condition.cached_matches_reference)
                             condition_reference
                         else
                             !condition_reference;
@@ -8427,9 +8450,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                                     if (condition) terminator.primary else terminator.secondary,
                                 ),
                                 .traversed_allowed_suspension = state.traversed_allowed_suspension,
-                                .predicate_slot = state.predicate_slot,
-                                .condition_matches_reference = state.condition_matches_reference,
-                                .source_valid = state.source_valid,
+                                .condition = state.condition,
                             },
                         );
                     },
@@ -8440,9 +8461,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                         .{
                             .node = try controlNodeForBlockStart(terminator.primary),
                             .traversed_allowed_suspension = state.traversed_allowed_suspension,
-                            .predicate_slot = state.predicate_slot,
-                            .condition_matches_reference = state.condition_matches_reference,
-                            .source_valid = state.source_valid,
+                            .condition = state.condition,
                         },
                     ),
                     .return_unit, .return_value => {},
@@ -8459,14 +8478,8 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             allowed_suspended_instruction: ?usize,
         ) error{ProgramContractViolation}!void {
             const condition_reference = false;
-            const condition_matches_reference = true;
-            const source_valid = false;
             var initial_condition_authority = ControlConditionAuthority.initEmpty();
-            initial_condition_authority.set(try conditionAuthorityIndex(
-                0,
-                condition_matches_reference,
-                source_valid,
-            ));
+            initial_condition_authority.set(try ControlConditionState.predicateFree(.matches).encode());
             const final_condition_authority = try controlPathExistsWithoutUnrecordedAfter(
                 budget,
                 function_index,
@@ -8622,41 +8635,22 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             var authority_index: usize = 0;
             while (authority_index < condition_authority_count) : (authority_index += 1) {
                 if (!initial_condition_authority.isSet(authority_index)) continue;
-                var encoded_authority = authority_index;
-                const source_valid = if (condition_validity_count == 1)
-                    false
-                else blk: {
-                    const valid = encoded_authority % condition_validity_count != 0;
-                    encoded_authority /= condition_validity_count;
-                    break :blk valid;
-                };
                 try enqueueControlPathState(&queue, &queue_len, &visited, .{
                     .node = cursor_node,
                     .traversed_allowed_suspension = true,
-                    .predicate_slot = encoded_authority / 2,
-                    .condition_matches_reference = encoded_authority % 2 != 0,
-                    .source_valid = source_valid,
+                    .condition = try ControlConditionState.decode(authority_index),
                 });
             }
 
             while (queue_index < queue_len) : (queue_index += 1) {
                 try budget.consume();
                 var encoded_state: usize = @intCast(queue[queue_index]);
-                var encoded_authority = encoded_state % condition_authority_count;
+                const encoded_authority = encoded_state % condition_authority_count;
                 encoded_state /= condition_authority_count;
-                const source_valid = if (condition_validity_count == 1)
-                    false
-                else blk: {
-                    const valid = encoded_authority % condition_validity_count != 0;
-                    encoded_authority /= condition_validity_count;
-                    break :blk valid;
-                };
                 var state: ControlPathState = .{
                     .node = encoded_state / 2,
                     .traversed_allowed_suspension = true,
-                    .predicate_slot = encoded_authority / 2,
-                    .condition_matches_reference = encoded_authority % 2 != 0,
-                    .source_valid = source_valid,
+                    .condition = try ControlConditionState.decode(encoded_authority),
                 };
                 const node = state.node;
                 if (node < compiled_plan.instructions.len) {
@@ -8700,37 +8694,38 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                             frame.function_index,
                             predicate,
                         ) orelse return error.ProgramContractViolation;
-                        const predicate_source_valid = !staticMachineInstructionMayWriteLocal(
-                            instruction,
-                            predicate.operand,
+                        const cached_relations = try predicateCachedRelations(
+                            frame.function_index,
+                            predicate,
+                            frame.last_condition,
+                            state.condition,
                         );
-                        if (state.predicate_slot == predicate_index + 1 and state.source_valid) {
-                            state.node = next_node;
-                            state.source_valid = predicate_source_valid;
-                            try enqueueControlPathState(&queue, &queue_len, &visited, state);
-                        } else {
-                            state.node = next_node;
-                            state.predicate_slot = predicate_index + 1;
-                            state.condition_matches_reference = false;
-                            state.source_valid = predicate_source_valid;
-                            try enqueueControlPathState(&queue, &queue_len, &visited, state);
-                            state.condition_matches_reference = true;
-                            try enqueueControlPathState(&queue, &queue_len, &visited, state);
+                        relation_loop: for (cached_relations) |cached_optional| {
+                            const cached_matches_reference = cached_optional orelse continue :relation_loop;
+                            var next_state = state;
+                            next_state.node = next_node;
+                            next_state.condition = conditionAfterPredicate(
+                                predicate_index,
+                                instruction,
+                                predicate,
+                                cached_matches_reference,
+                            );
+                            try enqueueControlPathState(&queue, &queue_len, &visited, next_state);
                         }
                     } else {
                         state.node = next_node;
-                        if (state.predicate_slot != 0) {
+                        if (state.condition.predicate_slot != 0) {
                             const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
                                 compiled_plan,
                                 frame.function_index,
-                                state.predicate_slot - 1,
+                                state.condition.predicate_slot - 1,
                             ) orelse return error.ProgramContractViolation;
-                            try staticMachineAdvanceConditionRelation(
+                            try staticMachineAdvanceConditionSourceRelation(
                                 instruction,
                                 predicate,
                                 frame.last_condition,
-                                &state.condition_matches_reference,
-                                &state.source_valid,
+                                &state.condition.source_matches_reference,
+                                &state.condition.source_valid,
                             );
                         }
                         try enqueueControlPathState(&queue, &queue_len, &visited, state);
@@ -8745,7 +8740,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
                 switch (terminator.kind) {
                     .branch_if => {
-                        const condition = if (state.condition_matches_reference)
+                        const condition = if (state.condition.cached_matches_reference)
                             frame.last_condition
                         else
                             !frame.last_condition;
@@ -8772,13 +8767,10 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             const function = compiled_plan.functions[frame.function_index];
             const entry_block = @as(usize, function.first_block) + function.entry_block;
             var segment_start = try controlNodeForBlockStart(entry_block);
-            const source_valid = false;
             var condition_authority = ControlConditionAuthority.initEmpty();
-            condition_authority.set(try conditionAuthorityIndex(
-                0,
-                !frame.last_condition,
-                source_valid,
-            ));
+            condition_authority.set(try ControlConditionState.predicateFree(
+                if (!frame.last_condition) .matches else .differs,
+            ).encode());
 
             const after_end = if (frame_index + 1 < self.frames.len()) blk: {
                 const child = self.frames.at(frame_index + 1) orelse return error.ProgramContractViolation;
@@ -8852,7 +8844,7 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 frame.last_condition,
                 condition_authority,
             );
-            const matching_authority = conditionAuthorityMatchingReference(condition_authority);
+            const matching_authority = try conditionAuthorityMatchingReference(condition_authority);
             if (matching_authority.count() == 0) return error.ProgramContractViolation;
             return matching_authority;
         }
@@ -14354,4 +14346,82 @@ test "Program.Session capsule image rejects union carrier variant drift" {
     defer std.testing.allocator.free(image);
 
     try std.testing.expectError(error.ProgramContractViolation, DriftedSession.Capsule.decode(std.testing.allocator, image));
+}
+
+test "StaticMachine bounded construction canonicalizes 1415 reverse nested targets" {
+    const target_count = 1_415;
+    const WitnessTarget = struct {
+        metadata: []const u8,
+        function_index: u16,
+    };
+    const orders_match = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        var reverse: [target_count]WitnessTarget = undefined;
+        var forward: [target_count]WitnessTarget = undefined;
+        for (0..target_count) |index| {
+            reverse[index] = .{
+                .metadata = std.fmt.comptimePrint("bounded-target-{d:0>4}", .{target_count - 1 - index}),
+                .function_index = 1,
+            };
+            forward[index] = .{
+                .metadata = std.fmt.comptimePrint("bounded-target-{d:0>4}", .{index}),
+                .function_index = 1,
+            };
+        }
+        const canonical_reverse = staticMachineCanonicalNestedWithTargets(reverse);
+        const canonical_forward = staticMachineCanonicalNestedWithTargets(forward);
+        var matches = true;
+        for (canonical_reverse, canonical_forward) |lhs, rhs| {
+            if (!std.mem.eql(u8, lhs.metadata, rhs.metadata) or
+                lhs.function_index != rhs.function_index)
+            {
+                matches = false;
+                break;
+            }
+        }
+        break :blk matches;
+    };
+    try std.testing.expect(orders_match);
+}
+
+test "StaticMachine bounded construction reconciles 2000 ordered operation sites" {
+    const site_count = 2_000;
+    const WitnessSite = struct {
+        function_index: usize,
+        block_index: usize,
+        instruction_index: usize,
+        fingerprint: u64,
+        legacy_fingerprint: u64,
+    };
+    const reconciles = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        var legacy_sites: [site_count]WitnessSite = undefined;
+        var static_sites: [site_count]WitnessSite = undefined;
+        for (0..site_count) |index| {
+            legacy_sites[index] = .{
+                .function_index = 0,
+                .block_index = 0,
+                .instruction_index = index,
+                .fingerprint = @intCast(index + 1),
+                .legacy_fingerprint = 0,
+            };
+            static_sites[index] = .{
+                .function_index = 0,
+                .block_index = 0,
+                .instruction_index = index,
+                .fingerprint = 0,
+                .legacy_fingerprint = 0,
+            };
+        }
+        reconcileSessionOperationLegacySites(legacy_sites, &static_sites);
+        var matches = true;
+        for (static_sites, legacy_sites) |site, legacy_site| {
+            if (site.legacy_fingerprint != legacy_site.fingerprint) {
+                matches = false;
+                break;
+            }
+        }
+        break :blk matches;
+    };
+    try std.testing.expect(reconciles);
 }

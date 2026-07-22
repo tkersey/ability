@@ -1153,10 +1153,6 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support non-exhaustive enum carriers",
         },
         .{
-            .path = "test/compile_fail/static_machine_multiple_condition_predicates.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
-        },
-        .{
             .path = "test/compile_fail/static_machine_mutable_helper_parameter.zig",
             .expected_error = "Boundary StaticMachine v1 does not support reachable helper functions that write parameter locals",
         },
