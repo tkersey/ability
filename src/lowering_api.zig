@@ -3416,8 +3416,12 @@ fn staticMachineFunctionHasInterleavedPredicateRevisit(
                         state.phase = .distinct_seen;
                     }
                 }
-                if (staticMachineInstructionMayWriteLocal(instruction, candidate.operand)) {
-                    state.phase = .before_candidate;
+                switch (staticMachineInstructionPredicateWriteEffect(
+                    instruction,
+                    candidate,
+                ) catch return true) {
+                    .unchanged => {},
+                    .known, .unknown => state.phase = .before_candidate,
                 }
 
                 const block = compiled_plan.blocks[owner_block];
@@ -3657,6 +3661,26 @@ fn validateStaticMachineRepresentableStateAuthority(
                 }
                 if (source != instruction.dst and predicate_locals[source]) {
                     @compileError("Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals");
+                }
+            }
+            if (instruction.kind == .call_helper) {
+                if (instruction.operand >= compiled_plan.functions.len) {
+                    @compileError("Boundary StaticMachine v1 observed an invalid helper call");
+                }
+                const callee = compiled_plan.functions[instruction.operand];
+                if (callee.parameter_count != 0 and instruction.aux == std.math.maxInt(u16)) {
+                    @compileError("Boundary StaticMachine v1 observed an invalid helper argument table");
+                }
+                for (0..callee.parameter_count) |arg_index| {
+                    const call_arg_index = std.math.add(usize, instruction.aux, arg_index) catch
+                        @compileError("Boundary StaticMachine v1 observed an invalid helper argument table");
+                    const source = planCallArgAt(compiled_plan, call_arg_index);
+                    if (source >= predicate_locals.len) {
+                        @compileError("Boundary StaticMachine v1 observed an invalid helper argument local");
+                    }
+                    if (source != instruction.dst and predicate_locals[source]) {
+                        @compileError("Boundary StaticMachine v1 does not support helper result correlations between condition-predicate locals");
+                    }
                 }
             }
             if (instruction.kind != .product_extract_field and instruction.kind != .sum_extract_payload) {

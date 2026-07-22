@@ -1142,6 +1142,14 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
         },
         .{
+            .path = "test/compile_fail/static_machine_multiple_condition_predicates.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_helper_predicate_alias.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support helper result correlations between condition-predicate locals",
+        },
+        .{
             .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
             .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
         },
