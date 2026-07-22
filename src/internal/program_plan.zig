@@ -286,7 +286,7 @@ pub const ProgramPlan = struct {
             sorted_nested_metadata[target_index] = target.metadata;
         }
         if (comptime nested_with_targets.len > 1) {
-            std.mem.sort(
+            std.sort.heap(
                 []const u8,
                 &sorted_nested_metadata,
                 {},
@@ -4650,12 +4650,15 @@ const NestedTargetValidationRow = struct {
     function_index: u16,
 };
 
-fn largeUniqueNestedTargets() [large_nested_target_count]NestedTargetValidationRow {
+fn reverseOrderedLargeUniqueNestedTargets() [large_nested_target_count]NestedTargetValidationRow {
     @setEvalBranchQuota(1_000_000);
     var targets: [large_nested_target_count]NestedTargetValidationRow = undefined;
     inline for (&targets, 0..) |*target, index| {
         target.* = .{
-            .metadata = std.fmt.comptimePrint("target-{d}", .{index}),
+            .metadata = std.fmt.comptimePrint(
+                "target-{d}",
+                .{large_nested_target_count - 1 - index},
+            ),
             .function_index = 0,
         };
     }
@@ -4698,9 +4701,9 @@ fn nestedTargetValidationPlan() ProgramPlan {
     }) catch |err| invalidGeneratedPlan(err);
 }
 
-test "nested target validation remains bounded for large unique maps" {
+test "nested target validation remains bounded for reverse-ordered large unique maps" {
     const plan = comptime nestedTargetValidationPlan();
-    const targets = comptime largeUniqueNestedTargets();
+    const targets = comptime reverseOrderedLargeUniqueNestedTargets();
     comptime {
         @setEvalBranchQuota(100_000);
         try plan.validateWithNestedTargets(targets);
