@@ -3320,8 +3320,12 @@ fn staticMachineFunctionHasInterleavedPredicateRevisit(
                         state.phase = .distinct_seen;
                     }
                 }
-                if (staticMachineInstructionMayWriteLocal(instruction, candidate.operand)) {
-                    state.phase = .before_candidate;
+                switch (staticMachineInstructionPredicateWriteEffect(
+                    instruction,
+                    candidate,
+                ) catch return true) {
+                    .unchanged => {},
+                    .unknown, .known => state.phase = .before_candidate,
                 }
 
                 const block = compiled_plan.blocks[owner_block];
@@ -4871,6 +4875,7 @@ fn staticFunctionHasControlCycle(
         const block_index = @as(usize, function.first_block) + relative_index;
         if (!analysis.reachable_blocks[block_index]) continue;
         reachable_count += 1;
+        if (!analysis.reachable_terminators[block_index]) continue;
         const terminator = compiled_plan.terminators[block.terminator_index];
         const targets = switch (terminator.kind) {
             .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
@@ -4900,6 +4905,7 @@ fn staticFunctionHasControlCycle(
     while (queue_index < queue_len) : (queue_index += 1) {
         const block_index = queue[queue_index];
         visited_count += 1;
+        if (!analysis.reachable_terminators[block_index]) continue;
         const block = compiled_plan.blocks[block_index];
         const terminator = compiled_plan.terminators[block.terminator_index];
         const targets = switch (terminator.kind) {
@@ -13336,6 +13342,68 @@ fn supportStructuredAfterHelperResultPlan() program_plan.ProgramPlan {
     }) catch |err| supportPlanError(err);
 }
 
+fn supportAfterBeforeUnreachableCyclePlan() program_plan.ProgramPlan {
+    const root = program_plan.program_plan_builder.function(0);
+    const requirements = [_]program_plan.RequirementPlan{.{
+        .label = "after",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]program_plan.OpPlan{.{
+        .requirement_index = 0,
+        .op_name = "after",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+        .has_after = true,
+    }};
+    const instructions = [_]program_plan.Instruction{
+        program_plan.program_plan_builder.callOp(
+            root,
+            null,
+            program_plan.program_plan_builder.op(root, 0),
+            null,
+        ) catch |err| supportPlanError(err),
+        .{ .kind = .return_error, .string_literal = "done" },
+    };
+    const functions = [_]program_plan.FunctionPlan{.{
+        .symbol_name = "run",
+        .value_codec = .unit,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 0,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = 2,
+    }};
+    const blocks = [_]program_plan.BlockPlan{.{
+        .first_instruction = 0,
+        .instruction_count = 2,
+        .terminator_index = 0,
+    }};
+    const terminators = [_]program_plan.Terminator{.{
+        .kind = .jump,
+        .primary = 0,
+    }};
+    return program_plan.program_plan_builder.finish(.{
+        .label = "after-before-unreachable-cycle",
+        .ir_hash = 113,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch |err| supportPlanError(err);
+}
+
 test "boundary.program executable support accepts scalar entry codecs" {
     inline for (.{ program_plan.ValueCodec.unit, .bool, .i32, .usize, .string }) |codec| {
         try validateExecutablePlanSupport(supportResultPlan(codec));
@@ -13580,6 +13648,18 @@ test "StaticMachine validation admission keeps acyclic after capacity structural
             path_capacity,
         ).? < static_max_control_work_units,
     );
+}
+
+test "StaticMachine cycle accounting ignores unreachable terminators" {
+    const compiled_plan = supportAfterBeforeUnreachableCyclePlan();
+    const analysis = comptime program_plan.staticEntryExecutionAnalysisWithNestedTargets(
+        compiled_plan,
+        &.{},
+    ) catch unreachable;
+    try std.testing.expect(analysis.reachable_blocks[0]);
+    try std.testing.expect(!analysis.reachable_terminators[0]);
+    try std.testing.expect(!staticFunctionHasControlCycle(compiled_plan, analysis, 0));
+    try std.testing.expectEqual(@as(usize, 1), staticAfterStackCapacity(compiled_plan, analysis));
 }
 
 test "StaticMachine live ownership identifiers exhaust without wrapping" {

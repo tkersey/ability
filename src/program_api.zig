@@ -1352,10 +1352,12 @@ const StaticMachineCarrierBlocker = enum {
     comptime_struct_field,
     mutable_string_list,
     non_exhaustive_enum,
+    uninhabited,
 };
 
 fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBlocker {
     if (ValueType == [][]const u8) return .mutable_string_list;
+    if (ValueType == noreturn) return .uninhabited;
     return switch (@typeInfo(ValueType)) {
         .optional => |optional| staticMachineCarrierBlocker(optional.child),
         .@"enum" => |info| if (!info.is_exhaustive)
@@ -1395,6 +1397,7 @@ pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOpti
             .comptime_struct_field => @compileError("Boundary StaticMachine v1 does not support comptime fields inside product schemas"),
             .mutable_string_list => @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas"),
             .non_exhaustive_enum => @compileError("Boundary StaticMachine v1 does not support non-exhaustive enum carriers"),
+            .uninhabited => @compileError("Boundary StaticMachine v1 does not support noreturn schema carriers"),
         };
     }
     const Body = Program.StaticMachineBody;

@@ -281,12 +281,19 @@ pub const ProgramPlan = struct {
         if (self.functions.len == 0) return error.EmptyProgram;
         try self.validateAddressableTableLengths();
         if (self.entry_index >= self.functions.len) return error.InvalidEntryIndex;
+        var sorted_nested_metadata: [nested_with_targets.len][]const u8 = undefined;
         inline for (nested_with_targets, 0..) |target, target_index| {
-            prior_target: inline for (nested_with_targets, 0..) |prior, prior_index| {
-                if (prior_index >= target_index) continue :prior_target;
-                if (std.mem.eql(u8, prior.metadata, target.metadata)) {
-                    return error.DuplicateNestedTargetMetadata;
-                }
+            sorted_nested_metadata[target_index] = target.metadata;
+        }
+        if (comptime nested_with_targets.len > 1) {
+            std.mem.sort(
+                []const u8,
+                &sorted_nested_metadata,
+                {},
+                byteSliceLessThan,
+            );
+            for (sorted_nested_metadata[1..], sorted_nested_metadata[0 .. sorted_nested_metadata.len - 1]) |metadata, previous| {
+                if (std.mem.eql(u8, previous, metadata)) return error.DuplicateNestedTargetMetadata;
             }
         }
         var reachable_blocks = [_]bool{false} ** max_indexed_table_len;
@@ -984,6 +991,10 @@ const OutputLabelSortContext = struct {
 fn outputLabelSortKeyLessThan(context: OutputLabelSortContext, lhs: OutputLabelSortKey, rhs: OutputLabelSortKey) bool {
     if (lhs.hash != rhs.hash) return lhs.hash < rhs.hash;
     return std.mem.lessThan(u8, context.outputs[lhs.index].label, context.outputs[rhs.index].label);
+}
+
+fn byteSliceLessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.lessThan(u8, lhs, rhs);
 }
 
 /// Internal construction kernel for compiler-produced runtime plans.
@@ -2616,6 +2627,8 @@ pub fn EntryExecutionAnalysis(comptime plan: ProgramPlan) type {
     return struct {
         reachable_functions: [plan.functions.len]bool,
         reachable_blocks: [plan.blocks.len]bool,
+        /// Whether executable control in each reachable block reaches its terminator.
+        reachable_terminators: [plan.blocks.len]bool,
         reachable_instructions: [plan.instructions.len]bool,
         completion_functions: [plan.functions.len]bool,
         terminal_functions: [plan.functions.len]bool,
@@ -2693,6 +2706,7 @@ fn entryExecutionAnalysisWithIdentity(
         var analysis: EntryExecutionAnalysis(plan) = .{
             .reachable_functions = [_]bool{false} ** plan.functions.len,
             .reachable_blocks = [_]bool{false} ** plan.blocks.len,
+            .reachable_terminators = [_]bool{false} ** plan.blocks.len,
             .reachable_instructions = [_]bool{false} ** plan.instructions.len,
             .completion_functions = [_]bool{false} ** plan.functions.len,
             .terminal_functions = [_]bool{false} ** plan.functions.len,
@@ -2868,6 +2882,7 @@ fn markEntryAnalysisFunctionBlocks(
             if (!try blockCanResumeToTerminator(plan, function, block.first_instruction, instruction_end, completion_reachability, nested_with_targets)) {
                 continue :reachable_block_scan;
             }
+            analysis.reachable_terminators[block_index] = true;
             const terminator = plan.terminators[block.terminator_index];
             switch (terminator.kind) {
                 .branch_if => {
@@ -4626,6 +4641,70 @@ pub fn planFromOpenRowProgram(
         .instructions = &instructions,
     }) catch |err| invalidGeneratedPlan(err);
     return plan;
+}
+
+const large_nested_target_count = 500;
+
+const NestedTargetValidationRow = struct {
+    metadata: []const u8,
+    function_index: u16,
+};
+
+fn largeUniqueNestedTargets() [large_nested_target_count]NestedTargetValidationRow {
+    @setEvalBranchQuota(1_000_000);
+    var targets: [large_nested_target_count]NestedTargetValidationRow = undefined;
+    inline for (&targets, 0..) |*target, index| {
+        target.* = .{
+            .metadata = std.fmt.comptimePrint("target-{d}", .{index}),
+            .function_index = 0,
+        };
+    }
+    return targets;
+}
+
+fn nestedTargetValidationPlan() ProgramPlan {
+    const functions = [_]FunctionPlan{.{
+        .symbol_name = "run",
+        .value_codec = .unit,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 0,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = 0,
+    }};
+    const blocks = [_]BlockPlan{.{
+        .first_instruction = 0,
+        .instruction_count = 0,
+        .terminator_index = 0,
+    }};
+    const terminators = [_]Terminator{.{ .kind = .return_unit }};
+    return program_plan_builder.finish(.{
+        .label = "nested-target-validation",
+        .ir_hash = 1,
+        .entry = program_plan_builder.function(0),
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &.{},
+    }) catch |err| invalidGeneratedPlan(err);
+}
+
+test "nested target validation remains bounded for large unique maps" {
+    const plan = comptime nestedTargetValidationPlan();
+    const targets = comptime largeUniqueNestedTargets();
+    comptime {
+        @setEvalBranchQuota(100_000);
+        try plan.validateWithNestedTargets(targets);
+    }
 }
 
 test "codecForType covers scalar product and sum shapes" {

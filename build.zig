@@ -1141,6 +1141,10 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas",
         },
         .{
+            .path = "test/compile_fail/static_machine_noreturn_schema.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support noreturn schema carriers",
+        },
+        .{
             .path = "test/compile_fail/static_machine_comptime_product_field.zig",
             .expected_error = "Boundary StaticMachine v1 does not support comptime fields inside product schemas",
         },

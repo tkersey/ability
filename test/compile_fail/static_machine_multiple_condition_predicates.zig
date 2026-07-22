@@ -10,6 +10,7 @@ fn plan() boundary.ir.ProgramPlan {
     const instructions = [_]boundary.ir.plan.Instruction{
         .{ .kind = .compare_eq_zero, .dst = first_condition.index, .operand = first.index },
         .{ .kind = .compare_eq_zero, .dst = second_condition.index, .operand = second.index },
+        .{ .kind = .add_const_i32, .dst = first.index, .operand = first.index, .aux = 0 },
         .{ .kind = .compare_eq_zero, .dst = first_condition.index, .operand = first.index },
     };
     const functions = [_]boundary.ir.plan.Function{.{
@@ -25,9 +26,9 @@ fn plan() boundary.ir.ProgramPlan {
         .entry_block = 0,
         .block_count = 1,
         .first_instruction = 0,
-        .instruction_count = 3,
+        .instruction_count = 4,
     }};
-    const blocks = [_]boundary.ir.plan.Block{.{ .first_instruction = 0, .instruction_count = 3, .terminator_index = 0 }};
+    const blocks = [_]boundary.ir.plan.Block{.{ .first_instruction = 0, .instruction_count = 4, .terminator_index = 0 }};
     const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_unit }};
     return boundary.ir.builder.finish(.{
         .label = "static-machine-multiple-condition-predicates",
