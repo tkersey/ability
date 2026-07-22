@@ -1703,6 +1703,95 @@ fn correlatedOutermostAfterPlan(comptime label: []const u8) boundary.ir.ProgramP
     }) catch unreachable;
 }
 
+fn correlatedBinarySumAfterPlan(
+    comptime Sum: type,
+    comptime label: []const u8,
+) boundary.ir.ProgramPlan {
+    @setEvalBranchQuota(10_000);
+    const Schemas = boundary.ir.schema.Registry(.{Sum});
+    const root = boundary.ir.builder.function(0);
+    const input = boundary.ir.builder.local(root, 0);
+    const condition = boundary.ir.builder.local(root, 1);
+    const outer_resume = boundary.ir.builder.local(root, 2);
+    const inner_resume = boundary.ir.builder.local(root, 3);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .sum_variant_is, .dst = condition.index, .operand = input.index, .aux = 0 },
+        boundary.ir.builder.callOp(root, outer_resume, boundary.ir.builder.op(root, 0), null) catch unreachable,
+        boundary.ir.builder.callOp(root, outer_resume, boundary.ir.builder.op(root, 1), null) catch unreachable,
+        .{ .kind = .sum_variant_is, .dst = condition.index, .operand = input.index, .aux = 1 },
+        boundary.ir.builder.callOp(root, inner_resume, boundary.ir.builder.op(root, 3), null) catch unreachable,
+        boundary.ir.builder.returnValue(root, inner_resume) catch unreachable,
+        boundary.ir.builder.callOp(root, inner_resume, boundary.ir.builder.op(root, 2), null) catch unreachable,
+        boundary.ir.builder.returnValue(root, inner_resume) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .i32,
+        .result_codec = .string,
+        .parameter_count = 1,
+        .first_requirement = 0,
+        .requirement_count = 4,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 4,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 6,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{
+        .{ .label = "outer_a", .first_op = 0, .op_count = 1 },
+        .{ .label = "outer_b", .first_op = 1, .op_count = 1 },
+        .{ .label = "inner_a", .first_op = 2, .op_count = 1 },
+        .{ .label = "inner_b", .first_op = 3, .op_count = 1 },
+    };
+    const ops = [_]boundary.ir.plan.Op{
+        .{ .requirement_index = 0, .op_name = "outer_a", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = true },
+        .{ .requirement_index = 1, .op_name = "outer_b", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = true },
+        .{ .requirement_index = 2, .op_name = "inner_a", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = true },
+        .{ .requirement_index = 3, .op_name = "inner_b", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = true },
+    };
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 1, .terminator_index = 1 },
+        .{ .first_instruction = 2, .instruction_count = 1, .terminator_index = 2 },
+        .{ .first_instruction = 3, .instruction_count = 1, .terminator_index = 3 },
+        .{ .first_instruction = 4, .instruction_count = 2, .terminator_index = 4 },
+        .{ .first_instruction = 6, .instruction_count = 2, .terminator_index = 5 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 2 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .jump, .primary = 3 },
+        .{ .kind = .branch_if, .primary = 4, .secondary = 5 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 46,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .value_schemas = &Schemas.value_schemas,
+        .value_fields = &Schemas.value_fields,
+        .value_variants = &Schemas.value_variants,
+        .locals = &.{
+            .{ .codec = .sum, .schema_index = 0 },
+            .{ .codec = .bool },
+            .{ .codec = .i32 },
+            .{ .codec = .i32 },
+        },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn abortDelimitedAfterPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -2384,6 +2473,45 @@ const CorrelatedBinarySumProgram = boundary.program(
     CorrelatedBinarySumBody,
 );
 const CorrelatedBinarySumMachine = boundary.staticMachine(CorrelatedBinarySumProgram, .{});
+
+const CorrelatedBinarySumAfterHandlers = struct {
+    outer_a: struct {
+        pub fn afterDispatch(_: *const @This(), value: bool) ![]const u8 {
+            return if (value) "a" else "unexpected";
+        }
+    },
+    outer_b: struct {
+        pub fn afterDispatch(_: *const @This(), value: i32) ![]const u8 {
+            return if (value != 0) "b" else "unexpected";
+        }
+    },
+    inner_a: struct {
+        pub fn afterDispatch(_: *const @This(), value: i32) !bool {
+            return value != 0;
+        }
+    },
+    inner_b: struct {
+        pub fn afterDispatch(_: *const @This(), value: i32) !i32 {
+            return value;
+        }
+    },
+};
+const CorrelatedBinarySumAfterBody = struct {
+    pub const value_schema_types = .{BinaryConditionChoice};
+    pub const compiled_plan = correlatedBinarySumAfterPlan(
+        BinaryConditionChoice,
+        "static-machine-correlated-binary-sum-after",
+    );
+};
+const CorrelatedBinarySumAfterProgram = boundary.program(
+    "static-machine-correlated-binary-sum-after",
+    CorrelatedBinarySumAfterHandlers,
+    CorrelatedBinarySumAfterBody,
+);
+const CorrelatedBinarySumAfterMachine = boundary.staticMachine(
+    CorrelatedBinarySumAfterProgram,
+    .{},
+);
 
 const InterleavedConditionPredicatesBody = struct {
     pub const compiled_plan = interleavedConditionPredicatesPlan(
@@ -5136,6 +5264,17 @@ test "StaticMachine canonical condition authority rejects incompatible sum predi
     try std.testing.expectError(
         error.ProgramContractViolation,
         CorrelatedBinarySumMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine after contracts preserve binary sum complement correlation" {
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        CorrelatedBinarySumAfterMachine.Manifest.operation_site_count,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        CorrelatedBinarySumAfterMachine.Manifest.after_site_count,
     );
 }
 

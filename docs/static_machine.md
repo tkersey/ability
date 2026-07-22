@@ -59,15 +59,17 @@ machine contract rather than the live Zig handle type.
 
 StaticMachine v1 rejects recursive helper/provider frame graphs and programs
 with output collection or result/output cleanup hooks. Its compact condition
-authority rejects a reachable path that revisits unchanged predicate A after
-evaluating distinct predicate B, and reachable helpers may not write their
-parameter locals. Broader programs remain available through `Program.Session`
-until a future portable representation can validate those histories exactly.
-Control-path validation admits at most 32,768 states: the count is the combined
-instruction-and-block node count multiplied by eight and by one plus the
-maximum distinct-predicate count of any declared function. That permits at
-most 4,096 nodes when no predicate exists, 2,048 nodes when the maximum is one,
-and fewer as the maximum grows. Generated direct
+authority preserves repeated predicates and complementary variants of one
+unchanged binary sum. A reachable exact copy between two locals that both
+participate in condition predicates is rejected during construction because
+the v1 carrier does not retain cross-local equivalence. Reachable helpers may
+not write their parameter locals. Broader programs remain available through
+`Program.Session` until a future portable representation can validate those
+histories exactly. Control-path validation admits at most 32,768 states: the
+count is the combined instruction-and-block node count multiplied by two and
+by `2 + 6P`, where `P` is the maximum distinct-predicate count of any declared
+function. An independent 4,096-node ceiling keeps the structural contract fixed
+even when the state formula would otherwise admit more nodes. Generated direct
 instruction metadata and one shared 1,048,576-unit work budget also bound CPU
 across repeated after-continuation reachability checks. StaticMachine derives a
 per-machine worst-case validation bound at comptime and rejects a machine whose

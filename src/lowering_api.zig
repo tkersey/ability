@@ -3154,6 +3154,37 @@ fn staticMachineConditionPredicateForRuntimeFunctionIndex(
     return null;
 }
 
+fn staticMachinePredicateTruthPossibilities(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    function_index: usize,
+    tracked: StaticConditionPredicate,
+    tracked_truth: bool,
+    predicate: StaticConditionPredicate,
+) error{ProgramContractViolation}![2]?bool {
+    if (tracked.eql(predicate)) return .{ tracked_truth, null };
+    if (tracked.kind != .sum_variant_is or
+        predicate.kind != .sum_variant_is or
+        tracked.operand != predicate.operand)
+    {
+        return .{ false, true };
+    }
+    if (tracked_truth) return .{ false, null };
+
+    const operand_ref = localRefForFunctionIndex(
+        compiled_plan,
+        function_index,
+        predicate.operand,
+    ) orelse return error.ProgramContractViolation;
+    const schema_index = operand_ref.schema_index orelse return error.ProgramContractViolation;
+    if (operand_ref.codec != .sum or schema_index >= compiled_plan.value_schemas.len) {
+        return error.ProgramContractViolation;
+    }
+    return if (compiled_plan.value_schemas[schema_index].variant_count == 2)
+        .{ true, null }
+    else
+        .{ false, true };
+}
+
 fn staticMachineFunctionBlockStartNode(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime function_index: usize,
@@ -3282,6 +3313,40 @@ fn validateStaticMachineRepresentableStateAuthority(
 ) void {
     for (compiled_plan.functions, 0..) |function, function_index| {
         if (!analysis.reachable_functions[function_index]) continue;
+        var predicate_locals = [_]bool{false} ** function.local_count;
+        const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+        predicate_local_scan: for (
+            compiled_plan.instructions[function.first_instruction..instruction_end],
+            function.first_instruction..,
+        ) |instruction, instruction_index| {
+            if (!analysis.reachable_instructions[instruction_index]) continue :predicate_local_scan;
+            const predicate = staticMachineConditionPredicateForInstruction(instruction) orelse
+                continue :predicate_local_scan;
+            if (predicate.operand >= predicate_locals.len) {
+                @compileError("Boundary StaticMachine v1 observed an invalid condition-predicate local");
+            }
+            predicate_locals[predicate.operand] = true;
+        }
+        exact_copy_scan: for (
+            compiled_plan.instructions[function.first_instruction..instruction_end],
+            function.first_instruction..,
+        ) |instruction, instruction_index| {
+            if (!analysis.reachable_instructions[instruction_index] or
+                instruction.kind != .add_const_i32 or
+                instruction.aux != 0 or
+                instruction.dst == instruction.operand)
+            {
+                continue :exact_copy_scan;
+            }
+            if (instruction.dst >= predicate_locals.len or
+                instruction.operand >= predicate_locals.len)
+            {
+                @compileError("Boundary StaticMachine v1 observed an invalid exact-copy local");
+            }
+            if (predicate_locals[instruction.dst] and predicate_locals[instruction.operand]) {
+                @compileError("Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals");
+            }
+        }
         if (function_index == compiled_plan.entry_index) continue;
         for (0..function.parameter_count) |parameter_index| {
             if (staticMachineFunctionMayWriteLocal(
@@ -3480,11 +3545,30 @@ fn staticMachineAfterSiteHasConditionCompatiblePath(
                     function_index,
                     predicate,
                 ) orelse return false;
-                state.cached_value = if (state.predicate_slot == predicate_index + 1 and
-                    state.source_valid)
-                    state.source_value
-                else
-                    .unknown;
+                state.cached_value = .unknown;
+                if (state.predicate_slot != 0 and
+                    state.source_valid and
+                    state.source_value != .unknown)
+                {
+                    const tracked = staticMachineConditionPredicateForIndex(
+                        compiled_plan,
+                        function_index,
+                        state.predicate_slot - 1,
+                    ) orelse return false;
+                    const possible_truths = staticMachinePredicateTruthPossibilities(
+                        compiled_plan,
+                        function_index,
+                        tracked,
+                        state.source_value == .true_value,
+                        predicate,
+                    ) catch return false;
+                    if (possible_truths[1] == null) {
+                        state.cached_value = if (possible_truths[0].?)
+                            .true_value
+                        else
+                            .false_value;
+                    }
+                }
                 state.predicate_slot = predicate_index + 1;
                 state.source_valid = !staticMachineInstructionMayWriteLocal(
                     instruction,
@@ -5081,6 +5165,7 @@ fn controlPathCapacityForCounts(
         instruction_count,
         block_count,
     ) catch return null;
+    if (node_count > static_max_control_nodes) return null;
     const node_capacity = if (node_count == 0) 1 else node_count;
     const condition_authority_count = conditionAuthorityCountForPredicateCount(
         predicate_count,
@@ -8196,34 +8281,23 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 function_index,
                 condition.predicate_slot - 1,
             ) orelse return error.ProgramContractViolation;
-            if (tracked.eql(predicate)) {
-                return .{ condition.source_matches_reference, null };
-            }
-            if (tracked.kind != .sum_variant_is or
-                predicate.kind != .sum_variant_is or
-                tracked.operand != predicate.operand)
-            {
-                return .{ false, true };
-            }
-
             const tracked_truth = if (condition.source_matches_reference)
                 condition_reference
             else
                 !condition_reference;
-            if (tracked_truth) return .{ false == condition_reference, null };
-
-            const operand_ref = localRefForFunctionIndex(
+            const possible_truths = try staticMachinePredicateTruthPossibilities(
                 compiled_plan,
                 function_index,
-                predicate.operand,
-            ) orelse return error.ProgramContractViolation;
-            const schema_index = operand_ref.schema_index orelse return error.ProgramContractViolation;
-            if (operand_ref.codec != .sum or schema_index >= compiled_plan.value_schemas.len) {
-                return error.ProgramContractViolation;
+                tracked,
+                tracked_truth,
+                predicate,
+            );
+            var relations: [2]?bool = .{ null, null };
+            for (possible_truths, 0..) |truth_optional, index| {
+                const truth = truth_optional orelse continue;
+                relations[index] = truth == condition_reference;
             }
-            const schema = compiled_plan.value_schemas[schema_index];
-            if (schema.variant_count == 2) return .{ true == condition_reference, null };
-            return .{ false, true };
+            return relations;
         }
 
         fn conditionAfterPredicate(
@@ -13601,11 +13675,11 @@ test "Program.Session validation rejects equal helper arguments with different i
 
 test "StaticMachine control-path capacity has a fixed compact scratch bound" {
     try std.testing.expectEqual(
-        @as(?usize, 8),
+        @as(?usize, 4),
         controlPathCapacityForCounts(0, 0, 0),
     );
     try std.testing.expectEqual(
-        @as(?usize, static_max_path_states),
+        @as(?usize, static_max_control_nodes * 4),
         controlPathCapacityForCounts(static_max_control_nodes, 0, 0),
     );
     try std.testing.expectEqual(

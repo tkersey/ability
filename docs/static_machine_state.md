@@ -168,14 +168,16 @@ for a 102,400-byte ceiling on explicit allocation-free validation
 buffers. The state count is
 `max(1, instructions + blocks) * 2 * (2 + 6 * maximum distinct condition predicates)`.
 The predicate maximum covers every declared function because decoded function
-indices remain untrusted until validation. The structural ceiling is therefore
-4,096 combined instruction and block nodes when no predicate exists, 2,048
-nodes when the maximum is one, and fewer as the maximum grows. A reachable
+indices remain untrusted until validation. A separate 4,096-node guard keeps
+the public structural ceiling fixed; the state formula may impose a lower node
+limit as the predicate count grows. A reachable
 control path may use multiple predicates. Re-evaluating the same unchanged
 predicate preserves its exact source relation. Distinct variants of the same
 binary sum transfer the complementary relation exactly; wider sums retain the
 sound set of possible relations instead of inventing correlation or rejecting
-all multi-predicate programs.
+all multi-predicate programs. Exact copies between two predicate-participating
+locals are rejected during StaticMachine construction because the v1 carrier
+does not encode local-equivalence classes.
 `Machine.Manifest` publishes the actual path-state count and the combined
 queue, visited-set, and frame-authority scratch bytes together with both v1
 ceilings. Comptime-generated `u16` metadata maps each

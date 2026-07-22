@@ -377,6 +377,11 @@ pub fn build(b: *std.Build) void {
     addTestArtifact(b, test_step, boundary_shared, test_args);
     addTestArtifact(b, test_step, core.effect_ir, test_args);
     addTestArtifact(b, test_step, core.frontend, test_args);
+    const lowering_api_capacity_test = b.addTest(.{
+        .root_module = core.lowering_api,
+        .filters = &.{"StaticMachine control-path capacity has a fixed compact scratch bound"},
+    });
+    test_step.dependOn(&addRunArtifactWithArgs(b, lowering_api_capacity_test, &.{}).step);
     addTestArtifact(b, test_step, core.internal_kernel, test_args);
     addTestArtifact(b, test_step, core.internal_program_plan, test_args);
     addTestArtifact(b, test_step, core.loaded_execution, test_args);
@@ -1119,6 +1124,10 @@ pub fn build(b: *std.Build) void {
         .{
             .path = "test/compile_fail/static_machine_control_validation_work_limit.zig",
             .expected_error = "Boundary StaticMachine v1 control-validation work exceeds the v1 limit",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_cross_local_predicate_copy.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
         },
         .{
             .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
