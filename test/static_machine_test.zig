@@ -2523,10 +2523,6 @@ const InterleavedConditionPredicatesProgram = boundary.program(
     struct {},
     InterleavedConditionPredicatesBody,
 );
-const InterleavedConditionPredicatesMachine = boundary.staticMachine(
-    InterleavedConditionPredicatesProgram,
-    .{},
-);
 
 const ConditionalLocalBody = struct {
     pub const compiled_plan = conditionalLocalPlan("static-machine-conditional-local");
@@ -5154,6 +5150,42 @@ test "StaticMachine rejects a last-condition cache that differs from its source 
     );
 }
 
+test "StaticMachine rejects retained predicate authority that differs from decoded source local" {
+    const state = try CorrelatedAbsentLocalMachine.initialState(
+        std.testing.allocator,
+        .{@as(i32, 0)},
+    );
+    defer CorrelatedAbsentLocalMachine.deinitState(state);
+    var fuel: u64 = 100;
+    switch (try CorrelatedAbsentLocalMachine.reduce(state, &fuel)) {
+        .request => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try CorrelatedAbsentLocalMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        std.mem.readInt(u64, forged[locals_count_offset..][0..8], .little),
+    );
+    const input_value_offset = locals_count_offset + 8 + 2 + 1;
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        std.mem.readInt(i32, forged[input_value_offset..][0..4], .little),
+    );
+    std.mem.writeInt(i32, forged[input_value_offset..][0..4], 1, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        CorrelatedAbsentLocalMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
 test "StaticMachine preserves in-place condition state across fuel yield" {
     const state = try InPlaceBranchCacheMachine.initialState(std.testing.allocator, .{true});
     defer InPlaceBranchCacheMachine.deinitState(state);
@@ -5278,19 +5310,19 @@ test "StaticMachine after contracts preserve binary sum complement correlation" 
     );
 }
 
-test "StaticMachine condition authority admits independent predicate revisits" {
-    const state = try InterleavedConditionPredicatesMachine.initialState(
-        std.testing.allocator,
+test "Program.Session remains available for independent predicate families" {
+    var runtime = boundary.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var session = try InterleavedConditionPredicatesProgram.Session.startWithArgs(
+        &runtime,
+        .{},
         .{ @as(i32, 0), @as(i32, 1) },
     );
-    defer InterleavedConditionPredicatesMachine.deinitState(state);
-    var fuel: u64 = 100;
-    var result = switch (try InterleavedConditionPredicatesMachine.reduce(state, &fuel)) {
-        .done => |done| done,
+    defer session.deinit();
+    switch (try session.next()) {
+        .done => {},
         else => return error.UnexpectedTransition,
-    };
-    defer result.deinit();
-    _ = result.value();
+    }
 }
 
 test "StaticMachine rejects divergent pending and unwind after values" {

@@ -3306,13 +3306,304 @@ fn staticMachineFunctionMayWriteLocal(
     return false;
 }
 
+const PredicateHistoryPhase = enum(u2) {
+    before_candidate,
+    candidate_seen,
+    distinct_seen,
+};
+
+fn staticMachineFunctionHasInterleavedPredicateRevisit(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime analysis: anytype,
+    comptime function_index: usize,
+) bool {
+    @setEvalBranchQuota(10_000_000);
+    const predicate_count = staticMachineFunctionConditionPredicateCount(
+        compiled_plan,
+        function_index,
+    );
+    if (predicate_count < 2) return false;
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    if (control_node_count == 0 or control_node_count > static_max_control_nodes) return false;
+    const state_count = control_node_count * 3;
+    const StateIndex = std.math.IntFittingRange(0, state_count - 1);
+    const StateVisited = std.StaticBitSet(state_count);
+    const function = compiled_plan.functions[function_index];
+    const function_block_end = @as(usize, function.first_block) + function.block_count;
+    const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse
+        return false;
+
+    const State = struct {
+        node: usize,
+        phase: PredicateHistoryPhase,
+    };
+    const encodeState = struct {
+        fn call(state: State) usize {
+            return state.node * 3 + @intFromEnum(state.phase);
+        }
+    }.call;
+    const enqueue = struct {
+        fn call(
+            queue: *[state_count]StateIndex,
+            queue_len: *usize,
+            visited: *StateVisited,
+            state: State,
+        ) void {
+            const encoded = encodeState(state);
+            if (visited.isSet(encoded)) return;
+            visited.set(encoded);
+            queue[queue_len.*] = @intCast(encoded);
+            queue_len.* += 1;
+        }
+    }.call;
+
+    for (0..predicate_count) |candidate_index| {
+        const candidate = staticMachineConditionPredicateForIndex(
+            compiled_plan,
+            function_index,
+            candidate_index,
+        ) orelse return true;
+        var queue: [state_count]StateIndex = undefined;
+        var visited = StateVisited.initEmpty();
+        var queue_len: usize = 0;
+        var queue_index: usize = 0;
+        enqueue(&queue, &queue_len, &visited, .{
+            .node = entry_node,
+            .phase = .before_candidate,
+        });
+
+        predicate_search: while (queue_index < queue_len) : (queue_index += 1) {
+            const encoded: usize = @intCast(queue[queue_index]);
+            var state = State{
+                .node = encoded / 3,
+                .phase = @enumFromInt(encoded % 3),
+            };
+            if (state.node < compiled_plan.instructions.len) {
+                var block_index: usize = function.first_block;
+                const owner_block = while (block_index < function_block_end) : (block_index += 1) {
+                    const block = compiled_plan.blocks[block_index];
+                    const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                    if (state.node >= block.first_instruction and state.node < instruction_end) {
+                        break block_index;
+                    }
+                } else return true;
+                const instruction = compiled_plan.instructions[state.node];
+                switch (instruction.kind) {
+                    .return_error => continue :predicate_search,
+                    .call_helper => if (instruction.operand >= compiled_plan.functions.len or
+                        !analysis.completion_functions[instruction.operand]) continue :predicate_search,
+                    .call_nested_with => {
+                        const target_index = nestedWithTargetIndexForMetadata(
+                            compiled_plan,
+                            nested_with_targets,
+                            instruction.string_literal,
+                        ) orelse continue :predicate_search;
+                        if (!analysis.completion_functions[target_index]) continue :predicate_search;
+                    },
+                    .call_op => {
+                        if (instruction.operand >= compiled_plan.ops.len) return true;
+                        if (compiled_plan.ops[instruction.operand].mode == .abort) continue :predicate_search;
+                    },
+                    else => {},
+                }
+
+                if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
+                    if (predicate.eql(candidate)) {
+                        if (state.phase == .distinct_seen) return true;
+                        state.phase = .candidate_seen;
+                    } else if (state.phase == .candidate_seen) {
+                        state.phase = .distinct_seen;
+                    }
+                }
+                if (staticMachineInstructionMayWriteLocal(instruction, candidate.operand)) {
+                    state.phase = .before_candidate;
+                }
+
+                const block = compiled_plan.blocks[owner_block];
+                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                state.node = if (state.node + 1 == instruction_end)
+                    compiled_plan.instructions.len + owner_block
+                else
+                    state.node + 1;
+                enqueue(&queue, &queue_len, &visited, state);
+                continue :predicate_search;
+            }
+
+            const block_index = state.node - compiled_plan.instructions.len;
+            if (block_index < function.first_block or block_index >= function_block_end) return true;
+            const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+            const targets = switch (terminator.kind) {
+                .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
+                .jump => [2]?u16{ terminator.primary, null },
+                .return_unit, .return_value => [2]?u16{ null, null },
+            };
+            target_search: for (targets) |target_optional| {
+                const target = target_optional orelse continue :target_search;
+                state.node = staticMachineFunctionBlockStartNode(
+                    compiled_plan,
+                    function_index,
+                    target,
+                ) orelse return true;
+                enqueue(&queue, &queue_len, &visited, state);
+            }
+        }
+    }
+    return false;
+}
+
+fn staticMachineLocalHasSingleZeroWriter(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+    function: program_plan.FunctionPlan,
+    local_index: u16,
+) bool {
+    var found = false;
+    const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+    for (
+        compiled_plan.instructions[function.first_instruction..instruction_end],
+        function.first_instruction..,
+    ) |instruction, instruction_index| {
+        if (!analysis.reachable_instructions[instruction_index] or
+            !staticMachineInstructionMayWriteLocal(instruction, local_index))
+        {
+            continue;
+        }
+        if (found) return false;
+        found = true;
+        switch (instruction.kind) {
+            .const_i32 => if ((constI32Value(instruction) catch return false) != 0) return false,
+            .const_usize => if ((std.fmt.parseUnsigned(u64, instruction.string_literal, 0) catch return false) != 0) return false,
+            else => return false,
+        }
+    }
+    return found;
+}
+
+fn staticMachineFunctionHasPathWithoutLocalWrite(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime analysis: anytype,
+    comptime function_index: usize,
+    start_instruction_index: usize,
+    target_instruction_index: usize,
+    local_index: u16,
+) bool {
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    if (control_node_count == 0 or control_node_count > static_max_control_nodes or
+        function_index >= compiled_plan.functions.len)
+    {
+        return false;
+    }
+    const function = compiled_plan.functions[function_index];
+    const function_block_end = @as(usize, function.first_block) + function.block_count;
+    var start_block_index: usize = function.first_block;
+    const start_block = while (start_block_index < function_block_end) : (start_block_index += 1) {
+        const block = compiled_plan.blocks[start_block_index];
+        const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+        if (start_instruction_index >= block.first_instruction and
+            start_instruction_index < instruction_end)
+        {
+            break block;
+        }
+    } else return false;
+    const start_instruction_end = @as(usize, start_block.first_instruction) + start_block.instruction_count;
+    const start_node = if (start_instruction_index + 1 == start_instruction_end)
+        compiled_plan.instructions.len + start_block_index
+    else
+        start_instruction_index + 1;
+    const StateIndex = std.math.IntFittingRange(0, control_node_count - 1);
+    const StateVisited = std.StaticBitSet(control_node_count);
+    var queue: [control_node_count]StateIndex = undefined;
+    var visited = StateVisited.initEmpty();
+    var queue_len: usize = 1;
+    var queue_index: usize = 0;
+    queue[0] = @intCast(start_node);
+    visited.set(start_node);
+
+    path_search: while (queue_index < queue_len) : (queue_index += 1) {
+        const node: usize = @intCast(queue[queue_index]);
+        if (node == target_instruction_index) return true;
+        if (node < compiled_plan.instructions.len) {
+            var block_index: usize = function.first_block;
+            const owner_block = while (block_index < function_block_end) : (block_index += 1) {
+                const block = compiled_plan.blocks[block_index];
+                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                if (node >= block.first_instruction and node < instruction_end) break block;
+            } else return false;
+            const instruction = compiled_plan.instructions[node];
+            if (staticMachineInstructionMayWriteLocal(instruction, local_index)) continue :path_search;
+            switch (instruction.kind) {
+                .return_error => continue :path_search,
+                .call_helper => if (instruction.operand >= compiled_plan.functions.len or
+                    !analysis.completion_functions[instruction.operand]) continue :path_search,
+                .call_nested_with => {
+                    const target_index = nestedWithTargetIndexForMetadata(
+                        compiled_plan,
+                        nested_with_targets,
+                        instruction.string_literal,
+                    ) orelse continue :path_search;
+                    if (!analysis.completion_functions[target_index]) continue :path_search;
+                },
+                .call_op => {
+                    if (instruction.operand >= compiled_plan.ops.len) return false;
+                    if (compiled_plan.ops[instruction.operand].mode == .abort) continue :path_search;
+                },
+                else => {},
+            }
+            const instruction_end = @as(usize, owner_block.first_instruction) + owner_block.instruction_count;
+            const next_node = if (node + 1 == instruction_end)
+                compiled_plan.instructions.len + block_index
+            else
+                node + 1;
+            if (!visited.isSet(next_node)) {
+                visited.set(next_node);
+                queue[queue_len] = @intCast(next_node);
+                queue_len += 1;
+            }
+            continue :path_search;
+        }
+
+        const block_index = node - compiled_plan.instructions.len;
+        if (block_index < function.first_block or block_index >= function_block_end) return false;
+        const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+        const targets = switch (terminator.kind) {
+            .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
+            .jump => [2]?u16{ terminator.primary, null },
+            .return_unit, .return_value => [2]?u16{ null, null },
+        };
+        target_search: for (targets) |target_optional| {
+            const target = target_optional orelse continue :target_search;
+            const next_node = staticMachineFunctionBlockStartNode(
+                compiled_plan,
+                function_index,
+                target,
+            ) orelse return false;
+            if (!visited.isSet(next_node)) {
+                visited.set(next_node);
+                queue[queue_len] = @intCast(next_node);
+                queue_len += 1;
+            }
+        }
+    }
+    return false;
+}
+
 fn validateStaticMachineRepresentableStateAuthority(
     comptime compiled_plan: program_plan.ProgramPlan,
-    comptime _: anytype,
+    comptime nested_with_targets: anytype,
     comptime analysis: anytype,
 ) void {
     for (compiled_plan.functions, 0..) |function, function_index| {
         if (!analysis.reachable_functions[function_index]) continue;
+        if (staticMachineFunctionHasInterleavedPredicateRevisit(
+            compiled_plan,
+            nested_with_targets,
+            analysis,
+            function_index,
+        )) {
+            @compileError("Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate");
+        }
         var predicate_locals = [_]bool{false} ** function.local_count;
         const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
         predicate_local_scan: for (
@@ -3332,18 +3623,79 @@ fn validateStaticMachineRepresentableStateAuthority(
             function.first_instruction..,
         ) |instruction, instruction_index| {
             if (!analysis.reachable_instructions[instruction_index] or
-                instruction.kind != .add_const_i32 or
-                instruction.aux != 0 or
-                instruction.dst == instruction.operand)
+                instruction.dst == std.math.maxInt(u16) or
+                instruction.dst >= predicate_locals.len or
+                !predicate_locals[instruction.dst])
             {
                 continue :exact_copy_scan;
             }
-            if (instruction.dst >= predicate_locals.len or
-                instruction.operand >= predicate_locals.len)
-            {
-                @compileError("Boundary StaticMachine v1 observed an invalid exact-copy local");
+            const copied_source: ?u16 = switch (instruction.kind) {
+                .add_const_i32 => if (instruction.aux == 0) instruction.operand else null,
+                .add_i32 => if (instruction.operand < function.local_count and
+                    staticMachineLocalHasSingleZeroWriter(
+                        compiled_plan,
+                        analysis,
+                        function,
+                        instruction.operand,
+                    ))
+                    instruction.aux
+                else if (instruction.aux < function.local_count and
+                    staticMachineLocalHasSingleZeroWriter(
+                        compiled_plan,
+                        analysis,
+                        function,
+                        instruction.aux,
+                    ))
+                    instruction.operand
+                else
+                    null,
+                else => null,
+            };
+            if (copied_source) |source| {
+                if (source >= predicate_locals.len) {
+                    @compileError("Boundary StaticMachine v1 observed an invalid exact-copy local");
+                }
+                if (source != instruction.dst and predicate_locals[source]) {
+                    @compileError("Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals");
+                }
             }
-            if (predicate_locals[instruction.dst] and predicate_locals[instruction.operand]) {
+            if (instruction.kind != .product_extract_field and instruction.kind != .sum_extract_payload) {
+                continue :exact_copy_scan;
+            }
+            if (instruction.operand >= function.local_count) continue :exact_copy_scan;
+            prior_extract_scan: for (
+                compiled_plan.instructions[function.first_instruction..instruction_index],
+                function.first_instruction..,
+            ) |prior, prior_index| {
+                if (!analysis.reachable_instructions[prior_index] or
+                    prior.kind != instruction.kind or
+                    prior.operand != instruction.operand or
+                    prior.aux != instruction.aux or
+                    prior.dst == instruction.dst or
+                    prior.dst >= predicate_locals.len or
+                    !predicate_locals[prior.dst])
+                {
+                    continue :prior_extract_scan;
+                }
+                if (!staticMachineFunctionHasPathWithoutLocalWrite(
+                    compiled_plan,
+                    nested_with_targets,
+                    analysis,
+                    function_index,
+                    prior_index,
+                    instruction_index,
+                    instruction.operand,
+                ) and !staticMachineFunctionHasPathWithoutLocalWrite(
+                    compiled_plan,
+                    nested_with_targets,
+                    analysis,
+                    function_index,
+                    instruction_index,
+                    prior_index,
+                    instruction.operand,
+                )) {
+                    continue :prior_extract_scan;
+                }
                 @compileError("Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals");
             }
         }
@@ -8254,15 +8606,70 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             queue_len.* += 1;
         }
 
+        fn conditionPredicateTruthForLocals(
+            function_index: usize,
+            predicate: StaticConditionPredicate,
+            locals: []const ExecutableValue,
+        ) error{ProgramContractViolation}!bool {
+            if (predicate.operand >= locals.len) return error.ProgramContractViolation;
+            return switch (predicate.kind) {
+                .compare_eq_zero => blk: {
+                    const operand_ref = localRefForFunctionIndex(
+                        compiled_plan,
+                        function_index,
+                        predicate.operand,
+                    ) orelse return error.ProgramContractViolation;
+                    break :blk switch (operand_ref.codec) {
+                        .bool => switch (locals[predicate.operand]) {
+                            .bool => |value| !value,
+                            else => return error.ProgramContractViolation,
+                        },
+                        .i32 => switch (locals[predicate.operand]) {
+                            .i32 => |value| value == 0,
+                            else => return error.ProgramContractViolation,
+                        },
+                        .usize => (try executableWordU64(locals[predicate.operand])) == 0,
+                        else => return error.ProgramContractViolation,
+                    };
+                },
+                .sum_variant_is => (try activeVariantOrdinalForExecutable(
+                    schema_types,
+                    locals[predicate.operand],
+                )) == predicate.aux,
+                else => error.ProgramContractViolation,
+            };
+        }
+
         fn conditionAuthorityMatchingReference(
             authority: ControlConditionAuthority,
+            function_index: usize,
+            condition_reference: bool,
+            locals: []const ExecutableValue,
         ) error{ProgramContractViolation}!ControlConditionAuthority {
             var result = ControlConditionAuthority.initEmpty();
             var authority_index: usize = 0;
             while (authority_index < condition_authority_count) : (authority_index += 1) {
                 if (!authority.isSet(authority_index)) continue;
                 const condition = try ControlConditionState.decode(authority_index);
-                if (condition.cached_matches_reference) result.set(authority_index);
+                if (!condition.cached_matches_reference) continue;
+                if (condition.predicate_slot != 0 and condition.source_valid) {
+                    const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
+                        compiled_plan,
+                        function_index,
+                        condition.predicate_slot - 1,
+                    ) orelse return error.ProgramContractViolation;
+                    const source_truth = conditionPredicateTruthForLocals(
+                        function_index,
+                        predicate,
+                        locals,
+                    ) catch continue;
+                    const expected_truth = if (condition.source_matches_reference)
+                        condition_reference
+                    else
+                        !condition_reference;
+                    if (source_truth != expected_truth) continue;
+                }
+                result.set(authority_index);
             }
             return result;
         }
@@ -8918,7 +9325,12 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 frame.last_condition,
                 condition_authority,
             );
-            const matching_authority = try conditionAuthorityMatchingReference(condition_authority);
+            const matching_authority = try conditionAuthorityMatchingReference(
+                condition_authority,
+                frame.function_index,
+                frame.last_condition,
+                self.scratch.frameLocalsConst(frame.frame),
+            );
             if (matching_authority.count() == 0) return error.ProgramContractViolation;
             return matching_authority;
         }

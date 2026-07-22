@@ -1130,6 +1130,18 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
         },
         .{
+            .path = "test/compile_fail/static_machine_product_extract_predicate_copy.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_add_i32_predicate_copy.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_interleaved_predicate_family.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
+        },
+        .{
             .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
             .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
         },

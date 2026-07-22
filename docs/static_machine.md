@@ -60,23 +60,25 @@ machine contract rather than the live Zig handle type.
 StaticMachine v1 rejects recursive helper/provider frame graphs and programs
 with output collection or result/output cleanup hooks. Its compact condition
 authority preserves repeated predicates and complementary variants of one
-unchanged binary sum. A reachable exact copy between two locals that both
-participate in condition predicates is rejected during construction because
-the v1 carrier does not retain cross-local equivalence. Reachable helpers may
-not write their parameter locals. Broader programs remain available through
-`Program.Session` until a future portable representation can validate those
-histories exactly. Control-path validation admits at most 32,768 states: the
-count is the combined instruction-and-block node count multiplied by two and
-by `2 + 6P`, where `P` is the maximum distinct-predicate count of any declared
-function. An independent 4,096-node ceiling keeps the structural contract fixed
-even when the state formula would otherwise admit more nodes. Generated direct
-instruction metadata and one shared 1,048,576-unit work budget also bound CPU
-across repeated after-continuation reachability checks. StaticMachine derives a
-per-machine worst-case validation bound at comptime and rejects a machine whose
-bound exceeds that budget. Product or sum
-schemas containing `[][]const u8` reject as well: mutation of that outer
-string-list carrier would make alias topology observable, while canonical state
-deliberately does not preserve pointer identity. StaticMachine v1 also rejects
+unchanged binary sum. It admits ordinary multi-predicate programs, but rejects
+an unchanged predicate revisited after a distinct predicate because the compact
+carrier cannot retain both histories. Reachable exact copies between two
+predicate locals are also rejected regardless of whether the copy is scalar or
+extraction-mediated. Reachable helpers may not write their parameter locals.
+Broader programs remain available through `Program.Session` until a future
+portable representation can validate those histories exactly. Control-path
+validation admits at most 32,768 states: the count is the combined
+instruction-and-block node count multiplied by two and by `2 + 6P`, where `P`
+is the maximum distinct-predicate count of any declared function. An independent
+4,096-node ceiling keeps the structural contract fixed even when the state
+formula would otherwise admit more nodes. Generated direct instruction metadata
+and one shared 1,048,576-unit work budget also bound CPU across repeated
+after-continuation reachability checks. StaticMachine derives a per-machine
+worst-case validation bound at comptime and rejects a machine whose bound exceeds
+that budget. Product or sum schemas containing `[][]const u8` reject as well:
+mutation of that outer string-list carrier would make alias topology observable,
+while canonical state deliberately does not preserve pointer identity.
+StaticMachine v1 also rejects
 product schemas with comptime fields because its canonical decoder cannot
 reconstruct compile-time-only values at runtime. Non-exhaustive enum carriers
 are also rejected: the v1 tag-name codec cannot represent an unknown runtime

@@ -170,14 +170,14 @@ buffers. The state count is
 The predicate maximum covers every declared function because decoded function
 indices remain untrusted until validation. A separate 4,096-node guard keeps
 the public structural ceiling fixed; the state formula may impose a lower node
-limit as the predicate count grows. A reachable
-control path may use multiple predicates. Re-evaluating the same unchanged
-predicate preserves its exact source relation. Distinct variants of the same
-binary sum transfer the complementary relation exactly; wider sums retain the
-sound set of possible relations instead of inventing correlation or rejecting
-all multi-predicate programs. Exact copies between two predicate-participating
-locals are rejected during StaticMachine construction because the v1 carrier
-does not encode local-equivalence classes.
+limit as the predicate count grows. A reachable control path may use one
+or more predicates. Re-evaluating the same unchanged predicate preserves its
+exact source relation, and the two variants of one unchanged binary sum
+transfer the complementary relation exactly. Construction rejects only an
+unchanged predicate revisited after an interleaved distinct predicate and
+cross-local predicate aliases that require authority the compact carrier does
+not encode. Final control-path authority is also checked against the decoded
+source local whenever that source remains valid.
 `Machine.Manifest` publishes the actual path-state count and the combined
 queue, visited-set, and frame-authority scratch bytes together with both v1
 ceilings. Comptime-generated `u16` metadata maps each
