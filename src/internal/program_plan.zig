@@ -281,20 +281,8 @@ pub const ProgramPlan = struct {
         if (self.functions.len == 0) return error.EmptyProgram;
         try self.validateAddressableTableLengths();
         if (self.entry_index >= self.functions.len) return error.InvalidEntryIndex;
-        var sorted_nested_metadata: [nested_with_targets.len][]const u8 = undefined;
-        inline for (nested_with_targets, 0..) |target, target_index| {
-            sorted_nested_metadata[target_index] = target.metadata;
-        }
-        if (comptime nested_with_targets.len > 1) {
-            std.sort.heap(
-                []const u8,
-                &sorted_nested_metadata,
-                {},
-                byteSliceLessThan,
-            );
-            for (sorted_nested_metadata[1..], sorted_nested_metadata[0 .. sorted_nested_metadata.len - 1]) |metadata, previous| {
-                if (std.mem.eql(u8, previous, metadata)) return error.DuplicateNestedTargetMetadata;
-            }
+        if (comptime nestedTargetMetadataHasDuplicate(nested_with_targets)) {
+            return error.DuplicateNestedTargetMetadata;
         }
         var reachable_blocks = [_]bool{false} ** max_indexed_table_len;
         var terminal_reachability = [_]bool{false} ** max_indexed_table_len;
@@ -993,8 +981,77 @@ fn outputLabelSortKeyLessThan(context: OutputLabelSortContext, lhs: OutputLabelS
     return std.mem.lessThan(u8, context.outputs[lhs.index].label, context.outputs[rhs.index].label);
 }
 
-fn byteSliceLessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
-    return std.mem.lessThan(u8, lhs, rhs);
+const NestedTargetMetadataRange = struct {
+    first: usize,
+    end: usize,
+    offset: usize,
+};
+
+fn nestedTargetMetadataHasDuplicate(comptime nested_with_targets: anytype) bool {
+    if (comptime nested_with_targets.len < 2) return false;
+
+    var metadata: [nested_with_targets.len][]const u8 = undefined;
+    var scratch: [nested_with_targets.len][]const u8 = undefined;
+    inline for (nested_with_targets, 0..) |target, target_index| {
+        metadata[target_index] = target.metadata;
+    }
+
+    var ranges: [nested_with_targets.len]NestedTargetMetadataRange = undefined;
+    ranges[0] = .{ .first = 0, .end = metadata.len, .offset = 0 };
+    var range_count: usize = 1;
+
+    while (range_count != 0) {
+        range_count -= 1;
+        const range = ranges[range_count];
+        var counts = [_]usize{0} ** 257;
+        var used_keys: [257]u16 = undefined;
+        var used_key_count: usize = 0;
+
+        for (metadata[range.first..range.end]) |value| {
+            const key = if (range.offset < value.len)
+                @as(usize, value[range.offset]) + 1
+            else
+                0;
+            if (counts[key] == 0) {
+                used_keys[used_key_count] = @intCast(key);
+                used_key_count += 1;
+            }
+            counts[key] += 1;
+        }
+        if (counts[0] > 1) return true;
+
+        var next = [_]usize{0} ** 257;
+        var cursor = range.first;
+        for (used_keys[0..used_key_count]) |raw_key| {
+            const key: usize = raw_key;
+            next[key] = cursor;
+            cursor += counts[key];
+        }
+        for (metadata[range.first..range.end]) |value| {
+            const key = if (range.offset < value.len)
+                @as(usize, value[range.offset]) + 1
+            else
+                0;
+            scratch[next[key]] = value;
+            next[key] += 1;
+        }
+        for (metadata[range.first..range.end], scratch[range.first..range.end]) |*destination, value| {
+            destination.* = value;
+        }
+
+        used_key_loop: for (used_keys[0..used_key_count]) |raw_key| {
+            const key: usize = raw_key;
+            if (key == 0 or counts[key] < 2) continue :used_key_loop;
+            if (range_count == ranges.len) unreachable;
+            ranges[range_count] = .{
+                .first = next[key] - counts[key],
+                .end = next[key],
+                .offset = range.offset + 1,
+            };
+            range_count += 1;
+        }
+    }
+    return false;
 }
 
 /// Internal construction kernel for compiler-produced runtime plans.
@@ -4656,7 +4713,7 @@ fn reverseOrderedLargeUniqueNestedTargets() [large_nested_target_count]NestedTar
     inline for (&targets, 0..) |*target, index| {
         target.* = .{
             .metadata = std.fmt.comptimePrint(
-                "target-{d}",
+                "target-{d:0>4}",
                 .{large_nested_target_count - 1 - index},
             ),
             .function_index = 0,
@@ -4708,6 +4765,26 @@ test "nested target validation remains bounded for reverse-ordered large unique 
         @setEvalBranchQuota(100_000);
         try plan.validateWithNestedTargets(targets);
     }
+}
+
+test "nested target validation distinguishes prefixes and rejects exact duplicates" {
+    const plan = comptime nestedTargetValidationPlan();
+    const unique_targets = .{
+        NestedTargetValidationRow{ .metadata = "target", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-a", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-aa", .function_index = 0 },
+    };
+    const duplicate_targets = .{
+        NestedTargetValidationRow{ .metadata = "target-a", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-aa", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-a", .function_index = 0 },
+    };
+
+    try plan.validateWithNestedTargets(unique_targets);
+    try std.testing.expectError(
+        error.DuplicateNestedTargetMetadata,
+        plan.validateWithNestedTargets(duplicate_targets),
+    );
 }
 
 test "codecForType covers scalar product and sum shapes" {

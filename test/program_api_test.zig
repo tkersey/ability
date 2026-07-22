@@ -33428,3 +33428,23 @@ test "Program.Exchange request envelope validates embedded capsule compatibility
     forged.capsule_image_fingerprint = other_image.image_fingerprint;
     try std.testing.expectError(error.ProgramContractViolation, forged.validate());
 }
+
+test "boundary.program admits a large common-prefix nested target map within its comptime quota" {
+    const Body = struct {
+        pub const compiled_plan = voidReturnPlan("program-nested-target-quota");
+        pub const nested_with_targets = blk: {
+            @setEvalBranchQuota(1_000_000);
+            var targets: [400]boundary.ir.NestedWithTarget = undefined;
+            for (&targets, 0..) |*target, index| {
+                target.* = .{
+                    .metadata = std.fmt.comptimePrint("target-{d:0>4}", .{399 - index}),
+                    .function_index = 0,
+                };
+            }
+            break :blk targets;
+        };
+    };
+    const Program = boundary.program("program-nested-target-quota", struct {}, Body);
+
+    try std.testing.expectEqual(@as(usize, 400), Program.contract.nested_with_targets.len);
+}
