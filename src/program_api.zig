@@ -646,6 +646,11 @@ fn ProgramContractFor(
     };
 }
 
+const ProgramProtocolIdentity = enum {
+    legacy_session,
+    static_machine,
+};
+
 // zlinter-disable require_doc_comment
 fn ProgramProtocolFor(
     comptime program_label: []const u8,
@@ -659,17 +664,72 @@ fn ProgramProtocolFor(
 ) type {
     const operation_sites = lowering_api.sessionOperationYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
     const after_sites = lowering_api.sessionAfterYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
-    const plan_hash = plan.hash();
+    return ProgramProtocolForSites(
+        program_label,
+        plan,
+        schema_types,
+        HandlersType,
+        ProtocolOwner,
+        InterpreterToken,
+        operation_sites,
+        after_sites,
+        .legacy_session,
+    );
+}
+
+fn StaticMachineProtocolFor(
+    comptime program_label: []const u8,
+    comptime plan: lowering_api.ProgramPlan,
+    comptime schema_types: anytype,
+    comptime nested_targets: anytype,
+    comptime HandlersType: type,
+    comptime ProtocolOwner: type,
+    comptime site_metadata: anytype,
+    comptime InterpreterToken: type,
+) type {
+    const operation_sites = lowering_api.staticMachineOperationYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
+    const after_sites = lowering_api.staticMachineAfterYieldSitesForPlanWithMetadata(plan, nested_targets, site_metadata);
+    return ProgramProtocolForSites(
+        program_label,
+        plan,
+        schema_types,
+        HandlersType,
+        ProtocolOwner,
+        InterpreterToken,
+        operation_sites,
+        after_sites,
+        .static_machine,
+    );
+}
+
+fn ProgramProtocolForSites(
+    comptime program_label: []const u8,
+    comptime plan: lowering_api.ProgramPlan,
+    comptime schema_types: anytype,
+    comptime HandlersType: type,
+    comptime ProtocolOwner: type,
+    comptime InterpreterToken: type,
+    comptime operation_sites: anytype,
+    comptime after_sites: anytype,
+    comptime identity: ProgramProtocolIdentity,
+) type {
+    const legacy_plan_hash = plan.hash();
+    const plan_hash = if (identity == .static_machine)
+        lowering_api.staticPlanFingerprint(plan)
+    else
+        legacy_plan_hash;
 
     return struct {
         pub const Owner = ProtocolOwner;
         pub const label = program_label;
         pub const hash = plan_hash;
+        pub const legacy_hash = legacy_plan_hash;
         pub const OwnerHandlers = HandlersType;
         pub const operation_site_count = operation_sites.len;
         pub const after_site_count = after_sites.len;
         pub const operation_site_metadata = &operation_sites;
         pub const after_site_metadata = &after_sites;
+        pub const uses_static_machine_identity = identity == .static_machine;
 
         fn operationDescriptor(comptime site: lowering_api.SessionOperationYieldSite) type {
             const PayloadType = ProgramValueTypeForRef(plan, schema_types, site.payload_ref);
@@ -687,6 +747,8 @@ fn ProgramProtocolFor(
                 pub const metadata = site;
                 pub const index = site.index;
                 pub const fingerprint = site.fingerprint;
+                pub const canonical_fingerprint = site.canonical_fingerprint;
+                pub const legacy_fingerprint = site.legacy_fingerprint;
                 pub const semantic_label = site.semantic_label;
                 pub const function_index = site.function_index;
                 pub const function_symbol_name = site.function_symbol_name;
@@ -728,9 +790,13 @@ fn ProgramProtocolFor(
                     pub const metadata = site;
                     pub const index = site.index;
                     pub const fingerprint = site.fingerprint;
+                    pub const canonical_fingerprint = site.canonical_fingerprint;
+                    pub const legacy_fingerprint = site.legacy_fingerprint;
                     pub const semantic_label = site.semantic_label;
                     pub const source_operation_site_index = site.source_operation_site_index;
                     pub const source_operation_site_fingerprint = site.source_operation_site_fingerprint;
+                    pub const source_operation_site_canonical_fingerprint = site.source_operation_site_canonical_fingerprint;
+                    pub const source_operation_site_legacy_fingerprint = site.source_operation_site_legacy_fingerprint;
                     pub const source_function_index = site.source_function_index;
                     pub const source_block_index = site.source_block_index;
                     pub const source_instruction_index = site.source_instruction_index;
@@ -756,9 +822,13 @@ fn ProgramProtocolFor(
                 pub const metadata = site;
                 pub const index = site.index;
                 pub const fingerprint = site.fingerprint;
+                pub const canonical_fingerprint = site.canonical_fingerprint;
+                pub const legacy_fingerprint = site.legacy_fingerprint;
                 pub const semantic_label = site.semantic_label;
                 pub const source_operation_site_index = site.source_operation_site_index;
                 pub const source_operation_site_fingerprint = site.source_operation_site_fingerprint;
+                pub const source_operation_site_canonical_fingerprint = site.source_operation_site_canonical_fingerprint;
+                pub const source_operation_site_legacy_fingerprint = site.source_operation_site_legacy_fingerprint;
                 pub const source_function_index = site.source_function_index;
                 pub const source_block_index = site.source_block_index;
                 pub const source_instruction_index = site.source_instruction_index;
@@ -834,20 +904,29 @@ fn ProgramProtocolFor(
         fn validateOperationSite(comptime Site: type) void {
             validateProtocolOwner(Site);
             if (!hasDeclSafe(Site, "kind") or Site.kind != .operation) @compileError("Program.protocol coverage listed non-operation site");
+            if (!hasDeclSafe(Site, "index") or
+                Site.index >= operation_sites.len or
+                Site != operationDescriptor(operation_sites[Site.index]))
+            {
+                @compileError("Program.protocol coverage descriptor belongs to another program");
+            }
         }
 
         fn validateAfterSite(comptime Site: type) void {
             validateProtocolOwner(Site);
             if (!hasDeclSafe(Site, "kind") or Site.kind != .after) @compileError("Program.protocol coverage listed non-after site");
+            if (!hasDeclSafe(Site, "index") or
+                Site.index >= after_sites.len or
+                Site != afterDescriptor(after_sites[Site.index]))
+            {
+                @compileError("Program.protocol coverage descriptor belongs to another program");
+            }
         }
 
         pub fn assertOperationSitesCovered(comptime Sites: anytype) void {
             var covered: [operation_sites.len]bool = [_]bool{false} ** operation_sites.len;
             inline for (Sites) |Site| {
                 comptime validateOperationSite(Site);
-                if (Site.index >= operation_sites.len or operation_sites[Site.index].fingerprint != Site.fingerprint) {
-                    @compileError("Program.protocol coverage descriptor belongs to another program");
-                }
                 if (covered[Site.index]) @compileError("Program.protocol coverage listed duplicate operation site");
                 covered[Site.index] = true;
             }
@@ -860,9 +939,6 @@ fn ProgramProtocolFor(
             var covered: [after_sites.len]bool = [_]bool{false} ** after_sites.len;
             inline for (Sites) |Site| {
                 comptime validateAfterSite(Site);
-                if (Site.index >= after_sites.len or after_sites[Site.index].fingerprint != Site.fingerprint) {
-                    @compileError("Program.protocol coverage descriptor belongs to another program");
-                }
                 if (covered[Site.index]) @compileError("Program.protocol coverage listed duplicate after site");
                 covered[Site.index] = true;
             }
@@ -875,19 +951,17 @@ fn ProgramProtocolFor(
             var operation_covered: [operation_sites.len]bool = [_]bool{false} ** operation_sites.len;
             var after_covered: [after_sites.len]bool = [_]bool{false} ** after_sites.len;
             inline for (Sites) |Site| {
-                comptime validateProtocolOwner(Site);
+                if (!hasDeclSafe(Site, "kind")) {
+                    @compileError("Program.protocol coverage listed non-protocol site descriptor");
+                }
                 switch (Site.kind) {
                     .operation => {
-                        if (Site.index >= operation_sites.len or operation_sites[Site.index].fingerprint != Site.fingerprint) {
-                            @compileError("Program.protocol coverage descriptor belongs to another program");
-                        }
+                        comptime validateOperationSite(Site);
                         if (operation_covered[Site.index]) @compileError("Program.protocol coverage listed duplicate operation site");
                         operation_covered[Site.index] = true;
                     },
                     .after => {
-                        if (Site.index >= after_sites.len or after_sites[Site.index].fingerprint != Site.fingerprint) {
-                            @compileError("Program.protocol coverage descriptor belongs to another program");
-                        }
+                        comptime validateAfterSite(Site);
                         if (after_covered[Site.index]) @compileError("Program.protocol coverage listed duplicate after site");
                         after_covered[Site.index] = true;
                     },
@@ -904,12 +978,21 @@ fn ProgramProtocolFor(
 
         pub fn assertAllSitesCoveredBy(comptime InterpreterType: type) void {
             if (!hasDeclSafe(InterpreterType, "InterpreterToken") or
-                InterpreterType.InterpreterToken != InterpreterToken or
-                !hasDeclSafe(InterpreterType, "assertCoversAll"))
+                InterpreterType.InterpreterToken != InterpreterToken)
             {
                 @compileError("Program.protocol expected a Program.Interpreter type");
             }
-            InterpreterType.assertCoversAll();
+            if (identity == .static_machine) {
+                if (!hasDeclSafe(InterpreterType, "assertCoversEffectRow")) {
+                    @compileError("Program.protocol expected a Program.Interpreter type");
+                }
+                InterpreterType.assertCoversEffectRow(operation_sites, after_sites);
+            } else {
+                if (!hasDeclSafe(InterpreterType, "assertCoversAll")) {
+                    @compileError("Program.protocol expected a Program.Interpreter type");
+                }
+                InterpreterType.assertCoversAll();
+            }
         }
     };
 }
@@ -1244,6 +1327,412 @@ fn mapProgramRunError(comptime ErrorSet: type, err: anyerror) ErrorSet {
     return error.ProgramContractViolation;
 }
 
+/// Canonical state encoding selected for a generated StaticMachine.
+pub const StaticMachineStateEncoding = enum {
+    canonical_v1,
+};
+
+/// Residual port policy selected for a generated StaticMachine.
+pub const StaticMachineWorldPorts = enum {
+    explicit,
+};
+
+/// Compile-time controls for the Boundary StaticMachine backend.
+pub const StaticMachineOptions = struct {
+    state_encoding: StaticMachineStateEncoding = .canonical_v1,
+    world_ports: StaticMachineWorldPorts = .explicit,
+    debug_metadata: bool = false,
+    maximum_frames: usize = 64,
+    maximum_state_bytes: usize = 1 << 20,
+};
+
+const StaticMachineProgramAuthenticityToken = opaque {};
+
+const StaticMachineCarrierBlocker = enum {
+    comptime_struct_field,
+    mutable_string_list,
+    non_exhaustive_enum,
+    uninhabited,
+};
+
+fn staticMachineCarrierBlocker(comptime ValueType: type) ?StaticMachineCarrierBlocker {
+    if (ValueType == [][]const u8) return .mutable_string_list;
+    if (ValueType == noreturn) return .uninhabited;
+    return switch (@typeInfo(ValueType)) {
+        .optional => |optional| staticMachineCarrierBlocker(optional.child),
+        .@"enum" => |info| if (!info.is_exhaustive)
+            .non_exhaustive_enum
+        else
+            null,
+        .@"struct" => |info| {
+            inline for (info.fields) |field| {
+                if (field.is_comptime) return .comptime_struct_field;
+                if (staticMachineCarrierBlocker(field.type)) |blocker| return blocker;
+            }
+            return null;
+        },
+        .@"union" => |info| {
+            if (info.tag_type) |Tag| {
+                if (staticMachineCarrierBlocker(Tag)) |blocker| return blocker;
+            }
+            inline for (info.fields) |field| {
+                if (staticMachineCarrierBlocker(field.type)) |blocker| return blocker;
+            }
+            return null;
+        },
+        else => null,
+    };
+}
+
+/// Generate a typed static reducer for one Boundary Program.
+pub fn staticMachine(comptime Program: type, comptime options: StaticMachineOptions) type {
+    if (!hasDeclSafe(Program, "StaticMachineProgramAuthenticity")) {
+        @compileError("boundary.staticMachine expects a type returned by boundary.program");
+    }
+    if (Program.StaticMachineProgramAuthenticity != StaticMachineProgramAuthenticityToken) {
+        @compileError("boundary.staticMachine expects a type returned by boundary.program");
+    }
+    inline for (Program.value_schema_types) |SchemaType| {
+        if (staticMachineCarrierBlocker(SchemaType)) |blocker| switch (blocker) {
+            .comptime_struct_field => @compileError("Boundary StaticMachine v1 does not support comptime fields inside product schemas"),
+            .mutable_string_list => @compileError("Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas"),
+            .non_exhaustive_enum => @compileError("Boundary StaticMachine v1 does not support non-exhaustive enum carriers"),
+            .uninhabited => @compileError("Boundary StaticMachine v1 does not support noreturn schema carriers"),
+        };
+    }
+    const Body = Program.StaticMachineBody;
+    const nested_targets = BodyNestedWithTargets(Body).values;
+    const site_metadata = BodySiteMetadata(Body).values;
+    const StaticProtocol = StaticMachineProtocolFor(
+        Program.contract.label,
+        Program.compiled_plan,
+        Program.value_schema_types,
+        nested_targets,
+        Program.Handlers,
+        Body,
+        site_metadata,
+        Program.InterpreterToken,
+    );
+    const StaticCore = lowering_api.StaticExecutableSessionForPlan(
+        BodyErrorSet(Body),
+        Program.contract.label,
+        Program.compiled_plan,
+        Program.value_schema_types,
+        nested_targets,
+        Program.Handlers,
+        Body,
+        options.maximum_state_bytes,
+    );
+    return StaticMachineFor(Program, Body, StaticCore, StaticProtocol, options);
+}
+
+fn StaticInitialArgs(comptime Program: type) type {
+    const plan = Program.compiled_plan;
+    const entry = plan.functions[plan.entry_index];
+    var parameter_types: [entry.parameter_count]type = undefined;
+    for (0..entry.parameter_count) |parameter_index| {
+        const local = plan.locals[entry.first_local + parameter_index];
+        parameter_types[parameter_index] = ProgramValueTypeForRef(
+            plan,
+            Program.value_schema_types,
+            .{ .codec = local.codec, .schema_index = local.schema_index },
+        );
+    }
+    return @Tuple(&parameter_types);
+}
+
+fn StaticMachineFor(
+    comptime Program: type,
+    comptime Body: type,
+    comptime Core: type,
+    comptime StaticProtocol: type,
+    comptime options: StaticMachineOptions,
+) type {
+    const FailureSet = BodyErrorSet(Body);
+    if (@typeInfo(FailureSet).error_set == null) {
+        @compileError("Boundary StaticMachine requires Body.Error to be a closed error set");
+    }
+    inline for (.{ "OutOfMemory", "ProgramContractViolation", "ExecutionBudgetExceeded" }) |reserved_error| {
+        if (errorSetContains(FailureSet, reserved_error)) {
+            @compileError("Boundary StaticMachine Body.Error must not contain reserved operational error: " ++ reserved_error);
+        }
+    }
+    if (Core.has_frame_cycle) {
+        @compileError("Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs");
+    }
+    if (options.maximum_frames == 0) @compileError("Boundary StaticMachine maximum_frames must be positive");
+    if (options.maximum_frames < Core.maximum_frame_depth) {
+        @compileError("Boundary StaticMachine maximum_frames is smaller than the reachable helper-frame depth");
+    }
+    if (options.maximum_state_bytes == 0) @compileError("Boundary StaticMachine maximum_state_bytes must be positive");
+    if (options.maximum_state_bytes > std.math.maxInt(u32)) {
+        @compileError("Boundary StaticMachine maximum_state_bytes must fit the canonical u32 domain");
+    }
+    if (Program.contract.OutputsType != void or
+        hasDeclSafe(Body, "collectOutputs") or
+        hasDeclSafe(Body, "deinitOutputs") or
+        hasDeclSafe(Body, "deinitResult"))
+    {
+        @compileError("Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks");
+    }
+
+    return struct {
+        const Self = @This();
+
+        /// Boundary StaticMachine ABI version consumed by World comptime.
+        pub const abi_version: u32 = 1;
+        const StateStorage = opaque {
+            const Machine = Self;
+        };
+        /// Machine-branded opaque owner handle for one decoded explicit state.
+        pub const State = *StateStorage;
+        /// Typed entry arguments accepted by initialState.
+        pub const InitialArgs = StaticInitialArgs(Program);
+        /// Typed terminal program value borrowed from an OwnedResult until that owner is deinitialized.
+        pub const Result = Program.contract.ResultType;
+        /// Terminal value owner whose `value()` projection remains valid until `deinit`.
+        pub const OwnedResult = Core.OpaqueResult;
+        /// Program-authored deterministic failures.
+        pub const Failure = FailureSet;
+        /// Closed StaticMachine operation error set.
+        pub const Error = Failure || error{
+            OutOfMemory,
+            ProgramContractViolation,
+            ExecutionBudgetExceeded,
+        };
+        /// Static operation and after-continuation site descriptors.
+        pub const EffectRow = StaticProtocol;
+        /// Defunctionalized operation request borrowing State storage until mutation or deinit.
+        pub const Request = Core.Request;
+        /// Defunctionalized after request borrowing State storage until mutation or deinit.
+        pub const AfterRequest = Core.AfterRequest;
+        /// Current parked request projection.
+        pub const Current = Core.Current;
+        /// Optional application-inspectable diagnostic metadata.
+        pub const DebugMetadata = struct {
+            operation_sites: @TypeOf(StaticProtocol.operation_site_metadata),
+            after_sites: @TypeOf(StaticProtocol.after_site_metadata),
+        };
+
+        /// One reduction boundary exposed to World.
+        pub const Transition = union(enum) {
+            request: Request,
+            after: AfterRequest,
+            done: *OwnedResult,
+            yielded_fuel,
+        };
+
+        /// Compile-time machine manifest.
+        pub const Manifest = struct {
+            /// StaticMachine ABI version.
+            pub const abi = abi_version;
+            /// Boundary program identity label.
+            pub const program_label = Program.contract.label;
+            /// Compiled ProgramPlan identity label.
+            pub const plan_label = Program.compiled_plan.label;
+            /// Target-neutral canonical ProgramPlan identity.
+            pub const plan_hash = Core.canonical_plan_fingerprint;
+            /// Provenance-sensitive ProgramPlan identity retained for Program.Session compatibility.
+            pub const legacy_plan_hash = Program.compiled_plan.hash();
+            /// Target-neutral canonical ProgramPlan identity.
+            pub const canonical_plan_fingerprint = Core.canonical_plan_fingerprint;
+            /// Complete reducer contract identity, including nested target resolution.
+            pub const machine_contract_fingerprint = Core.contract_fingerprint;
+            /// Plan identity carried by StaticMachine request traces.
+            pub const request_trace_plan_hash = Core.contract_fingerprint;
+            /// Canonical state image format version.
+            pub const state_image_format_version = Core.state_image_format_version;
+            /// Canonical state image fingerprint version.
+            pub const state_image_fingerprint_version = Core.state_image_fingerprint_version;
+            /// Reachable operation-site metadata in semantic order.
+            pub const operation_sites = StaticProtocol.operation_site_metadata;
+            /// Reachable after-continuation-site metadata in semantic order.
+            pub const after_sites = StaticProtocol.after_site_metadata;
+            /// Number of reachable operation sites.
+            pub const operation_site_count = StaticProtocol.operation_site_count;
+            /// Number of reachable after-continuation sites.
+            pub const after_site_count = StaticProtocol.after_site_count;
+            /// Maximum statically reachable helper-frame depth.
+            pub const maximum_frame_depth = Core.maximum_frame_depth;
+            /// Maximum cumulative instruction fuel enforced by Boundary.
+            pub const maximum_interpreter_fuel = Core.maximum_interpreter_fuel;
+            /// Maximum deterministic request/after turn ordinal admitted by state validation.
+            pub const maximum_turn_count = Core.maximum_turn_count;
+            /// Reachable control-path states represented by the generated state validator.
+            pub const control_path_state_count = Core.control_path_state_count;
+            /// StaticMachine v1 compile-time ceiling for control-path validator states.
+            pub const maximum_control_path_states = Core.maximum_control_path_states;
+            /// Exact local scratch bytes used by this machine's control-path validator.
+            pub const control_validation_scratch_bytes = Core.control_validation_scratch_bytes;
+            /// StaticMachine v1 ceiling for control-path validator local scratch bytes.
+            pub const maximum_control_validation_scratch_bytes = Core.maximum_control_validation_scratch_bytes;
+            /// Maximum control-path states dequeued by one canonical state validation.
+            pub const maximum_control_validation_steps = Core.maximum_control_validation_steps;
+            /// Per-machine upper bound on control-validation work for every valid state.
+            pub const control_validation_step_bound = Core.control_validation_step_bound;
+            /// Immutable generated instruction-ownership and nested-target metadata bytes.
+            pub const control_instruction_metadata_bytes = Core.control_instruction_metadata_bytes;
+            /// Semantic width of every canonical bare and structural usize value.
+            pub const canonical_usize_bits = Core.canonical_usize_bits;
+            /// Maximum canonical state image bytes selected by the application.
+            pub const maximum_state_bytes = options.maximum_state_bytes;
+            /// Optional diagnostic metadata requested by the application.
+            pub const debug_metadata: ?DebugMetadata = if (options.debug_metadata) .{
+                .operation_sites = StaticProtocol.operation_site_metadata,
+                .after_sites = StaticProtocol.after_site_metadata,
+            } else null;
+            /// Whether inspectable diagnostic metadata is present.
+            pub const includes_debug_metadata = debug_metadata != null;
+            /// Whether every residual world port must be explicit.
+            pub const ports_are_explicit = options.world_ports == .explicit;
+            /// Whether the machine uses canonical state image v1.
+            pub const state_is_canonical_v1 = options.state_encoding == .canonical_v1;
+        };
+
+        fn stateCore(state: State) *Core {
+            return @ptrCast(@alignCast(state));
+        }
+
+        fn stateCoreConst(state: State) *const Core {
+            return @ptrCast(@alignCast(state));
+        }
+
+        fn ownCore(allocator: std.mem.Allocator, core_value: Core) Error!State {
+            const storage = allocator.create(Core) catch return error.OutOfMemory;
+            storage.* = core_value;
+            return @ptrCast(storage);
+        }
+
+        fn commitCandidate(state: State, candidate: *Core) void {
+            const current_core = stateCore(state);
+            current_core.deinit();
+            current_core.* = candidate.*;
+        }
+
+        fn mapError(err: anyerror) Error {
+            return mapProgramRunError(Error, err);
+        }
+
+        /// Construct an initial explicit state from typed entry arguments.
+        pub fn initialState(allocator: std.mem.Allocator, args: InitialArgs) Error!State {
+            var core_value = Core.start(allocator, args) catch |err| return mapError(err);
+            errdefer core_value.deinit();
+            core_value.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
+            return ownCore(allocator, core_value);
+        }
+
+        /// Construct an independent live owner with the same canonical continuation state.
+        pub fn cloneState(allocator: std.mem.Allocator, state: State) Error!State {
+            var core_value = stateCoreConst(state).cloneExplicitStateWithAllocator(allocator) catch |err| return mapError(err);
+            errdefer core_value.deinit();
+            core_value.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
+            return ownCore(allocator, core_value);
+        }
+
+        /// Advance to one effect, terminal result, or deterministic fuel boundary.
+        pub fn reduce(state: State, fuel: *u64) Error!Transition {
+            if (stateCoreConst(state).hasPendingRequest()) return error.ProgramContractViolation;
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            var candidate_fuel = fuel.*;
+            const outcome = candidate.nextWithFuel(&candidate_fuel) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                commitCandidate(state, &candidate);
+                candidate_owned = false;
+                fuel.* = candidate_fuel;
+                return mapError(err);
+            };
+            switch (outcome) {
+                .yielded_fuel => candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err),
+                .step => |step| switch (step) {
+                    .request, .after => candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err),
+                    .done => {},
+                },
+            }
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
+            fuel.* = candidate_fuel;
+            return switch (outcome) {
+                .yielded_fuel => .yielded_fuel,
+                .step => |step| switch (step) {
+                    .request => |request| .{ .request = request },
+                    .after => |after| .{ .after = after },
+                    .done => |done| .{ .done = done },
+                },
+            };
+        }
+
+        /// Return the current parked request without advancing.
+        pub fn current(state: State) error{ProgramContractViolation}!Current {
+            return stateCore(state).current();
+        }
+
+        /// Resume one operation request with a typed value.
+        pub fn @"resume"(state: State, request: Request, value: anytype) Error!void {
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            candidate.@"resume"(request, value) catch |err| return mapError(err);
+            candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
+        }
+
+        /// Resume one after-continuation request with a typed value.
+        pub fn resumeAfter(state: State, request: AfterRequest, value: anytype) Error!void {
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            candidate.resumeAfter(request, value) catch |err| return mapError(err);
+            candidate.validateStateBounded(options.maximum_state_bytes) catch |err| return mapError(err);
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
+        }
+
+        /// Complete one choice or abort request immediately.
+        pub fn returnNow(state: State, request: Request, value: anytype) Error!void {
+            var candidate = stateCoreConst(state).cloneExplicitState() catch |err| return mapError(err);
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            candidate.returnNow(request, value) catch |err| return mapError(err);
+            commitCandidate(state, &candidate);
+            candidate_owned = false;
+        }
+
+        /// Encode target-neutral authoritative continuation bytes.
+        pub fn encodeState(allocator: std.mem.Allocator, state: State) Error![]u8 {
+            return stateCoreConst(state).encodeStateBounded(allocator, options.maximum_state_bytes) catch |err|
+                return mapError(err);
+        }
+
+        /// Decode and validate target-neutral continuation bytes.
+        pub fn decodeState(allocator: std.mem.Allocator, bytes: []const u8) Error!State {
+            if (bytes.len > options.maximum_state_bytes) return error.ProgramContractViolation;
+            var core_value = Core.decodeState(allocator, bytes) catch |err| return mapError(err);
+            errdefer core_value.deinit();
+            return ownCore(allocator, core_value);
+        }
+
+        /// Validate one live explicit state without advancing it.
+        pub fn validateState(state: State) error{ProgramContractViolation}!void {
+            return stateCore(state).validateStateBounded(options.maximum_state_bytes);
+        }
+
+        /// Release ephemeral allocations owned by a decoded or initial state.
+        pub fn deinitState(state: State) void {
+            const core = stateCore(state);
+            const allocator = core.allocator;
+            core.deinit();
+            allocator.destroy(core);
+        }
+
+        comptime {
+            _ = Self;
+        }
+    };
+}
+
 /// Declare one reusable explicit local effect program.
 pub fn program(
     comptime label: []const u8,
@@ -1281,6 +1770,8 @@ pub fn program(
         pub const Evidence = program_evidence;
         /// Static closure and evidence certificates over configured Boundary effect graphs.
         pub const BoundaryClosure = Evidence.BoundaryClosure(@This());
+        const StaticMachineProgramAuthenticity = StaticMachineProgramAuthenticityToken;
+        const StaticMachineBody = Body;
         /// Separate fingerprint domain for protocol reinterpretation metadata.
         pub const reinterpret_fingerprint_version: u32 = Evidence.domains.reinterpretation.fingerprint_version;
         /// Separate fingerprint domain for residual ProgramPlan transformation metadata.
@@ -21926,6 +22417,17 @@ pub fn program(
                     comptime assertInterpreterCoversAll(entries);
                 }
 
+                fn assertCoversEffectRow(
+                    comptime expected_operation_sites: anytype,
+                    comptime expected_after_sites: anytype,
+                ) void {
+                    comptime assertInterpreterCoversEffectRow(
+                        entries,
+                        expected_operation_sites,
+                        expected_after_sites,
+                    );
+                }
+
                 /// Return static coverage counts for this interpreter.
                 pub fn coverage() struct { operation_sites: usize, after_sites: usize } {
                     comptime var operation_count: usize = 0;
@@ -22707,29 +23209,90 @@ pub fn program(
             return refs;
         }
 
+        fn validateInterpreterCoverageSite(comptime Site: type) void {
+            Handler.validateAnySite(Site);
+            if (!hasDeclSafe(Site, "index")) {
+                @compileError("Program.Interpreter coverage descriptor belongs to another program");
+            }
+            switch (Site.kind) {
+                .operation => {
+                    if (Site.index >= protocol.operation_site_count or
+                        Site != protocol.siteByIndex(Site.index))
+                    {
+                        @compileError("Program.Interpreter coverage descriptor belongs to another program");
+                    }
+                },
+                .after => {
+                    if (Site.index >= protocol.after_site_count or
+                        Site != protocol.afterSiteByIndex(Site.index))
+                    {
+                        @compileError("Program.Interpreter coverage descriptor belongs to another program");
+                    }
+                },
+                else => @compileError("Program.Interpreter entries must be Program.Handler declarations"),
+            }
+        }
+
         fn assertInterpreterCoversAll(comptime entries: anytype) void {
             var operation_covered: [protocol.operation_site_count]bool = [_]bool{false} ** protocol.operation_site_count;
             var after_covered: [protocol.after_site_count]bool = [_]bool{false} ** protocol.after_site_count;
             inline for (entries) |Entry| {
                 switch (Entry.kind) {
-                    .operation, .after => Handler.validateAnySite(Entry.Site),
+                    .operation, .after => validateInterpreterCoverageSite(Entry.Site),
                     .protocol_operation => continue,
                     else => @compileError("Program.Interpreter entries must be Program.Handler declarations"),
                 }
                 switch (Entry.kind) {
                     .operation => {
-                        if (Entry.Site.index >= protocol.operation_site_count or protocol.operation_site_metadata[Entry.Site.index].fingerprint != Entry.Site.fingerprint) {
-                            @compileError("Program.Interpreter coverage descriptor belongs to another program");
-                        }
                         if (operation_covered[Entry.Site.index]) @compileError("Program.Interpreter listed duplicate handler for site");
                         operation_covered[Entry.Site.index] = true;
                     },
                     .after => {
-                        if (Entry.Site.index >= protocol.after_site_count or protocol.after_site_metadata[Entry.Site.index].fingerprint != Entry.Site.fingerprint) {
-                            @compileError("Program.Interpreter coverage descriptor belongs to another program");
-                        }
                         if (after_covered[Entry.Site.index]) @compileError("Program.Interpreter listed duplicate handler for site");
                         after_covered[Entry.Site.index] = true;
+                    },
+                    else => {},
+                }
+            }
+            inline for (operation_covered) |is_covered| {
+                if (!is_covered) @compileError("Program.Interpreter coverage omitted reachable operation site");
+            }
+            inline for (after_covered) |is_covered| {
+                if (!is_covered) @compileError("Program.Interpreter coverage omitted reachable after site");
+            }
+        }
+
+        fn assertInterpreterCoversEffectRow(
+            comptime entries: anytype,
+            comptime expected_operation_sites: anytype,
+            comptime expected_after_sites: anytype,
+        ) void {
+            var operation_covered: [expected_operation_sites.len]bool = [_]bool{false} ** expected_operation_sites.len;
+            var after_covered: [expected_after_sites.len]bool = [_]bool{false} ** expected_after_sites.len;
+            inline for (entries) |Entry| {
+                switch (Entry.kind) {
+                    .operation, .after => validateInterpreterCoverageSite(Entry.Site),
+                    .protocol_operation => continue,
+                    else => @compileError("Program.Interpreter entries must be Program.Handler declarations"),
+                }
+                switch (Entry.kind) {
+                    .operation => inline for (expected_operation_sites, 0..) |site, site_index| {
+                        if (Entry.Site.fingerprint == site.legacy_fingerprint and
+                            Entry.Site.function_index == site.function_index and
+                            Entry.Site.block_index == site.block_index and
+                            Entry.Site.instruction_index == site.instruction_index)
+                        {
+                            operation_covered[site_index] = true;
+                        }
+                    },
+                    .after => inline for (expected_after_sites, 0..) |site, site_index| {
+                        if (Entry.Site.fingerprint == site.legacy_fingerprint and
+                            Entry.Site.source_function_index == site.source_function_index and
+                            Entry.Site.source_block_index == site.source_block_index and
+                            Entry.Site.source_instruction_index == site.source_instruction_index)
+                        {
+                            after_covered[site_index] = true;
+                        }
                     },
                     else => {},
                 }

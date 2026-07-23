@@ -343,16 +343,16 @@ const agent_loop_semantic_spec = blk: {
                 .{
                     .name = "check_read_tool",
                     .instructions = .{
-                        semantic.subOne("tool_selector", "tool_index"),
-                        semantic.compareEqZero("is_read_tool", "tool_selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_read_tool", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_read_tool", .{ .then = "tool", .@"else" = "check_write_tool" }),
                 },
                 .{
                     .name = "check_write_tool",
                     .instructions = .{
-                        semantic.subOne("tool_selector", "tool_selector"),
-                        semantic.compareEqZero("is_write_tool", "tool_selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_write_tool", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_write_tool", .{ .then = "tool", .@"else" = "unknown_tool" }),
                 },
@@ -557,16 +557,16 @@ const toolbox_semantic_spec = blk: {
                 .{
                     .name = "check_read",
                     .instructions = .{
-                        semantic.subOne("selector", "tool_index"),
-                        semantic.compareEqZero("is_read", "selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_read", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_read", .{ .then = "read_file", .@"else" = "check_write" }),
                 },
                 .{
                     .name = "check_write",
                     .instructions = .{
-                        semantic.subOne("selector", "selector"),
-                        semantic.compareEqZero("is_write", "selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_write", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_write", .{ .then = "write_file", .@"else" = "unsupported" }),
                 },
@@ -1689,4 +1689,199 @@ test "agent toolbox generated-loaded parity write file residual" {
     const result = try runToolboxProviderParityScenario(std.testing.allocator, 2, fixture_write_payload, "write=ok");
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("write=ok", result);
+}
+
+test "agent StaticMachine root parks on the model decision site" {
+    const Machine = boundary.staticMachine(Program, .{
+        .maximum_frames = 64,
+        .maximum_state_bytes = 1 << 20,
+    });
+    const StaticAgentDecision = Machine.EffectRow.operationSite("agent", "decide", 0);
+    const StaticToolboxCall = Machine.EffectRow.operationSite("tool", "call", 0);
+    const state = try Machine.initialState(
+        std.testing.allocator,
+        .{ @as(usize, 5), @as([]const u8, "goal=invoke") },
+    );
+    defer Machine.deinitState(state);
+
+    var fuel: u64 = 100;
+    const request = switch (try Machine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expect(request.matches(StaticAgentDecision));
+    const typed = try request.as(StaticAgentDecision);
+    try std.testing.expectEqualStrings("goal=invoke", try typed.payload());
+
+    const encoded = try Machine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try Machine.decodeState(std.testing.allocator, encoded);
+    defer Machine.deinitState(restored);
+    const current = switch (try Machine.current(restored)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expect(current.matches(StaticAgentDecision));
+
+    try Machine.@"resume"(restored, current, Action{ .tool = toolRequest(0, "") });
+    const toolbox = switch (try Machine.reduce(restored, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expect(toolbox.matches(StaticToolboxCall));
+    const typed_toolbox = try toolbox.as(StaticToolboxCall);
+    const tool_request = try typed_toolbox.payload();
+    try std.testing.expect(tool_request.tool_id.eql(BoundaryTools.id(0)));
+    try std.testing.expectEqualStrings("", tool_request.payload);
+
+    try Machine.@"resume"(restored, toolbox, @as([]const u8, "actuate"));
+    const second_decision = switch (try Machine.reduce(restored, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expect(second_decision.matches(StaticAgentDecision));
+    try Machine.@"resume"(
+        restored,
+        second_decision,
+        Action{ .final = "final=actuate skeleton complete" },
+    );
+    var result = switch (try Machine.reduce(restored, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("final=actuate skeleton complete", result.value());
+}
+
+test "agent StaticMachine root completes fixture read write flow" {
+    const Machine = boundary.staticMachine(Program, .{
+        .maximum_frames = 64,
+        .maximum_state_bytes = 1 << 20,
+    });
+    const StaticAgentDecision = Machine.EffectRow.operationSite("agent", "decide", 0);
+    const StaticToolboxCall = Machine.EffectRow.operationSite("tool", "call", 0);
+    const state = try Machine.initialState(
+        std.testing.allocator,
+        .{ @as(usize, 5), @as([]const u8, "goal=fixture") },
+    );
+    defer Machine.deinitState(state);
+
+    var fuel: u64 = 100;
+    const first_decision = switch (try Machine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try first_decision.expectSite(StaticAgentDecision);
+    try std.testing.expectEqualStrings("goal=fixture", try (try first_decision.as(StaticAgentDecision)).payload());
+    try Machine.@"resume"(state, first_decision, Action{ .tool = toolRequest(1, fixture_input_path) });
+
+    const read_tool = switch (try Machine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try read_tool.expectSite(StaticToolboxCall);
+    const read_request = try (try read_tool.as(StaticToolboxCall)).payload();
+    try std.testing.expect(read_request.tool_id.eql(BoundaryTools.id(1)));
+    try std.testing.expectEqualStrings(fixture_input_path, read_request.payload);
+    try Machine.@"resume"(state, read_tool, @as([]const u8, fixture_observation));
+
+    const second_decision = switch (try Machine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try second_decision.expectSite(StaticAgentDecision);
+    try std.testing.expectEqualStrings(fixture_observation, try (try second_decision.as(StaticAgentDecision)).payload());
+    try Machine.@"resume"(state, second_decision, Action{ .tool = toolRequest(2, fixture_write_payload) });
+
+    const write_tool = switch (try Machine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try write_tool.expectSite(StaticToolboxCall);
+    const write_request = try (try write_tool.as(StaticToolboxCall)).payload();
+    try std.testing.expect(write_request.tool_id.eql(BoundaryTools.id(2)));
+    try std.testing.expectEqualStrings(fixture_write_payload, write_request.payload);
+    try Machine.@"resume"(state, write_tool, @as([]const u8, "write=ok"));
+
+    const final_decision = switch (try Machine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try final_decision.expectSite(StaticAgentDecision);
+    try std.testing.expectEqualStrings("write=ok", try (try final_decision.as(StaticAgentDecision)).payload());
+    try Machine.@"resume"(state, final_decision, Action{ .final = "final=fixture updated" });
+
+    var result = switch (try Machine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("final=fixture updated", result.value());
+}
+
+test "agent StaticMachine toolbox provider parks on a file effect" {
+    const Machine = boundary.staticMachine(ToolboxProgram, .{
+        .maximum_frames = 64,
+        .maximum_state_bytes = 1 << 20,
+    });
+    const StaticFileRead = Machine.EffectRow.operationSite("file", "read", 0);
+    const state = try Machine.initialState(
+        std.testing.allocator,
+        .{ @as(usize, 1), @as([]const u8, fixture_input_path) },
+    );
+    defer Machine.deinitState(state);
+
+    var fuel: u64 = 100;
+    const request = switch (try Machine.reduce(state, &fuel)) {
+        .request => |request| request,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expect(request.matches(StaticFileRead));
+    const typed = try request.as(StaticFileRead);
+    try std.testing.expectEqualStrings(fixture_input_path, try typed.payload());
+
+    const encoded = try Machine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const restored = try Machine.decodeState(std.testing.allocator, encoded);
+    defer Machine.deinitState(restored);
+    const current = switch (try Machine.current(restored)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try std.testing.expect(current.matches(StaticFileRead));
+    try Machine.@"resume"(restored, current, @as([]const u8, fixture_observation));
+    var result = switch (try Machine.reduce(restored, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings(fixture_observation, result.value());
+}
+
+test "agent StaticMachine toolbox provider resumes write to completion" {
+    const Machine = boundary.staticMachine(ToolboxProgram, .{
+        .maximum_frames = 64,
+        .maximum_state_bytes = 1 << 20,
+    });
+    const StaticFileWrite = Machine.EffectRow.operationSite("file", "write", 0);
+    const state = try Machine.initialState(
+        std.testing.allocator,
+        .{ @as(usize, 2), @as([]const u8, fixture_write_payload) },
+    );
+    defer Machine.deinitState(state);
+
+    var fuel: u64 = 100;
+    const request = switch (try Machine.reduce(state, &fuel)) {
+        .request => |parked| parked,
+        else => return error.UnexpectedTransition,
+    };
+    try request.expectSite(StaticFileWrite);
+    try std.testing.expectEqualStrings(fixture_write_payload, try (try request.as(StaticFileWrite)).payload());
+    try Machine.@"resume"(state, request, @as([]const u8, "write=ok"));
+    var result = switch (try Machine.reduce(state, &fuel)) {
+        .done => |done| done,
+        else => return error.UnexpectedTransition,
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings("write=ok", result.value());
 }

@@ -281,6 +281,9 @@ pub const ProgramPlan = struct {
         if (self.functions.len == 0) return error.EmptyProgram;
         try self.validateAddressableTableLengths();
         if (self.entry_index >= self.functions.len) return error.InvalidEntryIndex;
+        if (comptime nestedTargetMetadataHasDuplicate(nested_with_targets)) {
+            return error.DuplicateNestedTargetMetadata;
+        }
         var reachable_blocks = [_]bool{false} ** max_indexed_table_len;
         var terminal_reachability = [_]bool{false} ** max_indexed_table_len;
         var completion_reachability = [_]bool{false} ** max_indexed_table_len;
@@ -385,11 +388,7 @@ pub const ProgramPlan = struct {
                     const instruction_end = rangeEnd(block.first_instruction, block.instruction_count) orelse return error.InvalidBlockInstructionSpan;
                     if (!try blockCanResumeToTerminator(self, function, block.first_instruction, instruction_end, &completion_reachability, nested_with_targets)) continue :executable_block_completion_scan;
                     const terminator = self.terminators[block.terminator_index];
-                    const block_completes = switch (terminator.kind) {
-                        .return_unit, .return_value => true,
-                        .jump => completion_reachability[terminator.primary],
-                        .branch_if => completion_reachability[terminator.primary] or completion_reachability[terminator.secondary],
-                    };
+                    const block_completes = terminatorCompletesForIdentity(.legacy_v0, terminator, &completion_reachability);
                     if (block_completes) {
                         completion_reachability[function_index] = true;
                         changed = true;
@@ -757,6 +756,115 @@ pub const ProgramPlan = struct {
         return hasher.final();
     }
 
+    /// Compute a target-neutral hash over every field that changes executable plan semantics.
+    ///
+    /// Unlike `hash`, this identity writes every integer explicitly in little-endian order and
+    /// length-prefixes byte strings. `hash` remains the v0 compatibility fingerprint.
+    pub fn canonicalHash(self: @This()) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        canonicalHashBytes(&hasher, "boundary.program-plan.canonical.v1");
+        canonicalHashU32(&hasher, self.schema_version);
+        canonicalHashBytes(&hasher, self.label);
+        // `ir_hash` is v0 source provenance. It is not consulted by execution and its legacy
+        // construction includes native-width values, so it cannot enter a target-neutral identity.
+        canonicalHashU16(&hasher, self.entry_index);
+        canonicalHashU64(&hasher, self.functions.len);
+        for (self.functions) |function| {
+            canonicalHashBytes(&hasher, function.symbol_name);
+            canonicalHashTag(&hasher, function.value_codec);
+            canonicalHashOptionalU16(&hasher, function.value_schema_index);
+            canonicalHashOptionalTag(&hasher, function.result_codec);
+            canonicalHashOptionalU16(&hasher, function.result_schema_index);
+            canonicalHashU16(&hasher, function.parameter_count);
+            canonicalHashU16(&hasher, function.first_requirement);
+            canonicalHashU16(&hasher, function.requirement_count);
+            canonicalHashU16(&hasher, function.first_output);
+            canonicalHashU16(&hasher, function.output_count);
+            canonicalHashU16(&hasher, function.first_local);
+            canonicalHashU16(&hasher, function.local_count);
+            canonicalHashU16(&hasher, function.first_block);
+            canonicalHashU16(&hasher, function.entry_block);
+            canonicalHashU16(&hasher, function.block_count);
+            canonicalHashU16(&hasher, function.first_instruction);
+            canonicalHashU16(&hasher, function.instruction_count);
+        }
+        canonicalHashU64(&hasher, self.requirements.len);
+        for (self.requirements) |requirement| {
+            canonicalHashBytes(&hasher, requirement.label);
+            canonicalHashU16(&hasher, requirement.first_op);
+            canonicalHashU16(&hasher, requirement.op_count);
+            canonicalHashTag(&hasher, requirement.lifecycle_tag);
+            canonicalHashTag(&hasher, requirement.output_tag);
+        }
+        canonicalHashU64(&hasher, self.ops.len);
+        for (self.ops) |op| {
+            canonicalHashU16(&hasher, op.requirement_index);
+            canonicalHashBytes(&hasher, op.op_name);
+            canonicalHashTag(&hasher, op.mode);
+            canonicalHashTag(&hasher, op.payload_codec);
+            canonicalHashOptionalU16(&hasher, op.payload_schema_index);
+            canonicalHashTag(&hasher, op.resume_codec);
+            canonicalHashOptionalU16(&hasher, op.resume_schema_index);
+            canonicalHashBool(&hasher, op.has_after);
+        }
+        canonicalHashU64(&hasher, self.outputs.len);
+        for (self.outputs) |output| {
+            canonicalHashBytes(&hasher, output.label);
+            canonicalHashTag(&hasher, output.codec);
+            canonicalHashOptionalU16(&hasher, output.schema_index);
+        }
+        canonicalHashU64(&hasher, self.value_schemas.len);
+        for (self.value_schemas) |schema| {
+            // Schema labels are nominal Zig type names used for diagnostics and
+            // source-plan admission. Canonical execution identity is structural.
+            canonicalHashTag(&hasher, schema.codec);
+            canonicalHashU16(&hasher, schema.first_field);
+            canonicalHashU16(&hasher, schema.field_count);
+            canonicalHashU16(&hasher, schema.first_variant);
+            canonicalHashU16(&hasher, schema.variant_count);
+        }
+        canonicalHashU64(&hasher, self.value_fields.len);
+        for (self.value_fields) |field| {
+            canonicalHashBytes(&hasher, field.name);
+            canonicalHashTag(&hasher, field.codec);
+            canonicalHashOptionalU16(&hasher, field.schema_index);
+        }
+        canonicalHashU64(&hasher, self.value_variants.len);
+        for (self.value_variants) |variant| {
+            canonicalHashBytes(&hasher, variant.name);
+            canonicalHashTag(&hasher, variant.codec);
+            canonicalHashOptionalU16(&hasher, variant.schema_index);
+        }
+        canonicalHashU64(&hasher, self.locals.len);
+        for (self.locals) |local| {
+            canonicalHashTag(&hasher, local.codec);
+            canonicalHashOptionalU16(&hasher, local.schema_index);
+        }
+        canonicalHashU64(&hasher, self.call_args.len);
+        for (self.call_args) |local_id| canonicalHashU16(&hasher, local_id);
+        canonicalHashU64(&hasher, self.blocks.len);
+        for (self.blocks) |block| {
+            canonicalHashU16(&hasher, block.first_instruction);
+            canonicalHashU16(&hasher, block.instruction_count);
+            canonicalHashU16(&hasher, block.terminator_index);
+        }
+        canonicalHashU64(&hasher, self.terminators.len);
+        for (self.terminators) |terminator| {
+            canonicalHashTag(&hasher, terminator.kind);
+            canonicalHashU16(&hasher, terminator.primary);
+            canonicalHashU16(&hasher, terminator.secondary);
+        }
+        canonicalHashU64(&hasher, self.instructions.len);
+        for (self.instructions) |instruction| {
+            canonicalHashTag(&hasher, instruction.kind);
+            canonicalHashU16(&hasher, instruction.dst);
+            canonicalHashU16(&hasher, instruction.operand);
+            canonicalHashU16(&hasher, instruction.aux);
+            canonicalHashBytes(&hasher, instruction.string_literal);
+        }
+        return hasher.final();
+    }
+
     fn validateFunctionOutputLabels(self: @This(), function: FunctionPlan) ValidationError!void {
         const output_start = function.first_output;
         const output_end = rangeEnd(output_start, function.output_count) orelse return error.InvalidFunctionOutputSpan;
@@ -871,6 +979,79 @@ const OutputLabelSortContext = struct {
 fn outputLabelSortKeyLessThan(context: OutputLabelSortContext, lhs: OutputLabelSortKey, rhs: OutputLabelSortKey) bool {
     if (lhs.hash != rhs.hash) return lhs.hash < rhs.hash;
     return std.mem.lessThan(u8, context.outputs[lhs.index].label, context.outputs[rhs.index].label);
+}
+
+const NestedTargetMetadataRange = struct {
+    first: usize,
+    end: usize,
+    offset: usize,
+};
+
+fn nestedTargetMetadataHasDuplicate(comptime nested_with_targets: anytype) bool {
+    if (comptime nested_with_targets.len < 2) return false;
+
+    var metadata: [nested_with_targets.len][]const u8 = undefined;
+    var scratch: [nested_with_targets.len][]const u8 = undefined;
+    inline for (nested_with_targets, 0..) |target, target_index| {
+        metadata[target_index] = target.metadata;
+    }
+
+    var ranges: [nested_with_targets.len]NestedTargetMetadataRange = undefined;
+    ranges[0] = .{ .first = 0, .end = metadata.len, .offset = 0 };
+    var range_count: usize = 1;
+
+    while (range_count != 0) {
+        range_count -= 1;
+        const range = ranges[range_count];
+        var counts = [_]usize{0} ** 257;
+        var used_keys: [257]u16 = undefined;
+        var used_key_count: usize = 0;
+
+        for (metadata[range.first..range.end]) |value| {
+            const key = if (range.offset < value.len)
+                @as(usize, value[range.offset]) + 1
+            else
+                0;
+            if (counts[key] == 0) {
+                used_keys[used_key_count] = @intCast(key);
+                used_key_count += 1;
+            }
+            counts[key] += 1;
+        }
+        if (counts[0] > 1) return true;
+
+        var next = [_]usize{0} ** 257;
+        var cursor = range.first;
+        for (used_keys[0..used_key_count]) |raw_key| {
+            const key: usize = raw_key;
+            next[key] = cursor;
+            cursor += counts[key];
+        }
+        for (metadata[range.first..range.end]) |value| {
+            const key = if (range.offset < value.len)
+                @as(usize, value[range.offset]) + 1
+            else
+                0;
+            scratch[next[key]] = value;
+            next[key] += 1;
+        }
+        for (metadata[range.first..range.end], scratch[range.first..range.end]) |*destination, value| {
+            destination.* = value;
+        }
+
+        used_key_loop: for (used_keys[0..used_key_count]) |raw_key| {
+            const key: usize = raw_key;
+            if (key == 0 or counts[key] < 2) continue :used_key_loop;
+            if (range_count == ranges.len) unreachable;
+            ranges[range_count] = .{
+                .first = next[key] - counts[key],
+                .end = next[key],
+                .offset = range.offset + 1,
+            };
+            range_count += 1;
+        }
+    }
+    return false;
 }
 
 /// Internal construction kernel for compiler-produced runtime plans.
@@ -1110,6 +1291,7 @@ pub const ValidationError = error{
     EmptyValueFieldName,
     EmptyValueSchemaLabel,
     EmptyValueVariantName,
+    DuplicateNestedTargetMetadata,
     DuplicateOutputLabel,
     OverlappingFunctionBlockSpan,
     OverlappingFunctionInstrSpan,
@@ -1162,7 +1344,7 @@ pub fn codecForType(comptime T: type) CodecError!ValueCodec {
     if (T == u64) return .usize;
     if (T == usize) return .usize;
     if (T == []const u8) return .string;
-    if (T == [][]const u8) return .string_list;
+    if (T == []const []const u8 or T == [][]const u8) return .string_list;
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
             inline for (info.fields) |field| {
@@ -2128,6 +2310,47 @@ fn hashOptionalU16(hasher: *std.hash.Wyhash, value: ?u16) void {
     if (value) |unwrapped| hasher.update(std.mem.asBytes(&unwrapped));
 }
 
+fn canonicalHashBytes(hasher: *std.hash.Wyhash, value: []const u8) void {
+    canonicalHashU64(hasher, value.len);
+    hasher.update(value);
+}
+
+fn canonicalHashBool(hasher: *std.hash.Wyhash, value: bool) void {
+    hasher.update(&[_]u8{@intFromBool(value)});
+}
+
+fn canonicalHashU16(hasher: *std.hash.Wyhash, value: u16) void {
+    var bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn canonicalHashU32(hasher: *std.hash.Wyhash, value: u32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn canonicalHashU64(hasher: *std.hash.Wyhash, value: anytype) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, @intCast(value), .little);
+    hasher.update(&bytes);
+}
+
+fn canonicalHashOptionalU16(hasher: *std.hash.Wyhash, value: ?u16) void {
+    canonicalHashBool(hasher, value != null);
+    if (value) |unwrapped| canonicalHashU16(hasher, unwrapped);
+}
+
+fn canonicalHashTag(hasher: *std.hash.Wyhash, value: anytype) void {
+    canonicalHashBytes(hasher, @tagName(value));
+}
+
+fn canonicalHashOptionalTag(hasher: *std.hash.Wyhash, value: anytype) void {
+    canonicalHashBool(hasher, value != null);
+    if (value) |unwrapped| canonicalHashTag(hasher, unwrapped);
+}
+
 fn hashEffectIrValueRef(hasher: *std.hash.Wyhash, ref: effect_ir.ValueRef) void {
     hashBytes(hasher, @tagName(ref.codec));
     hashOptionalU16(hasher, ref.schema_index);
@@ -2461,7 +2684,10 @@ pub fn EntryExecutionAnalysis(comptime plan: ProgramPlan) type {
     return struct {
         reachable_functions: [plan.functions.len]bool,
         reachable_blocks: [plan.blocks.len]bool,
+        /// Whether executable control in each reachable block reaches its terminator.
+        reachable_terminators: [plan.blocks.len]bool,
         reachable_instructions: [plan.instructions.len]bool,
+        completion_functions: [plan.functions.len]bool,
         terminal_functions: [plan.functions.len]bool,
         after_result_functions: [plan.functions.len]bool,
         helper_cycle: bool,
@@ -2476,6 +2702,11 @@ pub fn entryExecutionAnalysis(comptime plan: ProgramPlan) ValidationError!EntryE
     return entryExecutionAnalysisWithNestedTargets(plan, &.{});
 }
 
+/// StaticMachine v1 execution analysis with corrected block-target semantics.
+pub fn staticEntryExecutionAnalysis(comptime plan: ProgramPlan) ValidationError!EntryExecutionAnalysis(plan) {
+    return staticEntryExecutionAnalysisWithNestedTargets(plan, &.{});
+}
+
 fn nestedWithTargetIndexForMetadata(comptime nested_with_targets: anytype, metadata: []const u8) ?u16 {
     inline for (nested_with_targets) |target| {
         if (std.mem.eql(u8, target.metadata, metadata)) return target.function_index;
@@ -2487,13 +2718,54 @@ pub fn entryExecutionAnalysisWithNestedTargets(
     comptime plan: ProgramPlan,
     comptime nested_with_targets: anytype,
 ) ValidationError!EntryExecutionAnalysis(plan) {
+    return entryExecutionAnalysisWithIdentity(plan, nested_with_targets, .legacy_v0);
+}
+
+/// StaticMachine v1 execution analysis with resolver-backed nested targets.
+pub fn staticEntryExecutionAnalysisWithNestedTargets(
+    comptime plan: ProgramPlan,
+    comptime nested_with_targets: anytype,
+) ValidationError!EntryExecutionAnalysis(plan) {
+    return entryExecutionAnalysisWithIdentity(plan, nested_with_targets, .static_machine_v1);
+}
+
+const EntryExecutionAnalysisIdentity = enum {
+    legacy_v0,
+    static_machine_v1,
+};
+
+fn terminatorCompletesForIdentity(
+    comptime identity: EntryExecutionAnalysisIdentity,
+    terminator: Terminator,
+    completion_reachability: *const [max_indexed_table_len]bool,
+) bool {
+    return switch (identity) {
+        .legacy_v0 => switch (terminator.kind) {
+            .return_unit, .return_value => true,
+            .jump => completion_reachability[terminator.primary],
+            .branch_if => completion_reachability[terminator.primary] or completion_reachability[terminator.secondary],
+        },
+        .static_machine_v1 => switch (terminator.kind) {
+            .return_unit, .return_value => true,
+            .jump, .branch_if => false,
+        },
+    };
+}
+
+fn entryExecutionAnalysisWithIdentity(
+    comptime plan: ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime identity: EntryExecutionAnalysisIdentity,
+) ValidationError!EntryExecutionAnalysis(plan) {
     comptime {
         @setEvalBranchQuota(1_000_000);
         try plan.validateAddressableTableLengths();
         var analysis: EntryExecutionAnalysis(plan) = .{
             .reachable_functions = [_]bool{false} ** plan.functions.len,
             .reachable_blocks = [_]bool{false} ** plan.blocks.len,
+            .reachable_terminators = [_]bool{false} ** plan.blocks.len,
             .reachable_instructions = [_]bool{false} ** plan.instructions.len,
+            .completion_functions = [_]bool{false} ** plan.functions.len,
             .terminal_functions = [_]bool{false} ** plan.functions.len,
             .after_result_functions = [_]bool{false} ** plan.functions.len,
             .helper_cycle = false,
@@ -2524,11 +2796,7 @@ pub fn entryExecutionAnalysisWithNestedTargets(
                         continue :executable_block_completion_scan;
                     }
                     const terminator = plan.terminators[block.terminator_index];
-                    const block_completes = switch (terminator.kind) {
-                        .return_unit, .return_value => true,
-                        .jump => completion_reachability[terminator.primary],
-                        .branch_if => completion_reachability[terminator.primary] or completion_reachability[terminator.secondary],
-                    };
+                    const block_completes = terminatorCompletesForIdentity(identity, terminator, &completion_reachability);
                     if (block_completes) {
                         completion_reachability[function_index] = true;
                         control_changed = true;
@@ -2570,6 +2838,7 @@ pub fn entryExecutionAnalysisWithNestedTargets(
         }
 
         for (plan.functions, 0..) |function, function_index| {
+            analysis.completion_functions[function_index] = completion_reachability[function_index];
             analysis.terminal_functions[function_index] = terminal_reachability[function_index];
             const completion_codecs = try functionCompletionCodecReachability(plan, function, &completion_reachability, nested_with_targets);
             analysis.after_result_functions[function_index] = completion_codecs.result_codec;
@@ -2625,7 +2894,12 @@ pub fn entryExecutionAnalysisWithNestedTargets(
             }
         }
 
-        analysis.helper_cycle = entryAnalysisHasHelperCycle(plan, analysis);
+        analysis.helper_cycle = switch (identity) {
+            // Program.Session v0 tracked authored helper recursion only. Keep
+            // resolver-backed nested edges exclusive to StaticMachine v1.
+            .legacy_v0 => entryAnalysisHasHelperCycle(plan, analysis, &.{}),
+            .static_machine_v1 => entryAnalysisHasHelperCycle(plan, analysis, nested_with_targets),
+        };
         analysis.max_active_frame_depth = entryAnalysisMaxFrameDepth(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
         analysis.max_active_local_slots = entryAnalysisMaxLocalSlots(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
         analysis.max_active_call_arg_slots = entryAnalysisMaxCallArgSlots(plan, analysis, plan.entry_index, [_]bool{false} ** plan.functions.len, nested_with_targets);
@@ -2665,6 +2939,7 @@ fn markEntryAnalysisFunctionBlocks(
             if (!try blockCanResumeToTerminator(plan, function, block.first_instruction, instruction_end, completion_reachability, nested_with_targets)) {
                 continue :reachable_block_scan;
             }
+            analysis.reachable_terminators[block_index] = true;
             const terminator = plan.terminators[block.terminator_index];
             switch (terminator.kind) {
                 .branch_if => {
@@ -2699,7 +2974,11 @@ fn markEntryAnalysisFunctionBlocks(
     return changed;
 }
 
-fn entryAnalysisHasHelperCycle(comptime plan: ProgramPlan, comptime analysis: EntryExecutionAnalysis(plan)) bool {
+fn entryAnalysisHasHelperCycle(
+    comptime plan: ProgramPlan,
+    comptime analysis: EntryExecutionAnalysis(plan),
+    comptime nested_with_targets: anytype,
+) bool {
     for (plan.functions, 0..) |_, start_index| {
         if (!analysis.reachable_functions[start_index]) continue;
         var seen = [_]bool{false} ** plan.functions.len;
@@ -2711,10 +2990,16 @@ fn entryAnalysisHasHelperCycle(comptime plan: ProgramPlan, comptime analysis: En
                 if (!seen[owner_index]) continue :seen_owner_scan;
                 const instruction_end = rangeEnd(owner_function.first_instruction, owner_function.instruction_count) orelse continue :seen_owner_scan;
                 reachable_instruction_scan: for (plan.instructions[owner_function.first_instruction..instruction_end], owner_function.first_instruction..) |instruction, instruction_index| {
-                    if (!analysis.reachable_instructions[instruction_index] or instruction.kind != .call_helper) continue :reachable_instruction_scan;
-                    if (instruction.operand == start_index) return true;
-                    if (instruction.operand < seen.len and !seen[instruction.operand]) {
-                        seen[instruction.operand] = true;
+                    if (!analysis.reachable_instructions[instruction_index]) continue :reachable_instruction_scan;
+                    const target_index = switch (instruction.kind) {
+                        .call_helper => instruction.operand,
+                        .call_nested_with => nestedWithTargetIndexForMetadata(nested_with_targets, instruction.string_literal) orelse
+                            continue :reachable_instruction_scan,
+                        else => continue :reachable_instruction_scan,
+                    };
+                    if (target_index == start_index) return true;
+                    if (target_index < seen.len and !seen[target_index]) {
+                        seen[target_index] = true;
                         changed = true;
                     }
                 }
@@ -4415,6 +4700,93 @@ pub fn planFromOpenRowProgram(
     return plan;
 }
 
+const large_nested_target_count = 500;
+
+const NestedTargetValidationRow = struct {
+    metadata: []const u8,
+    function_index: u16,
+};
+
+fn reverseOrderedLargeUniqueNestedTargets() [large_nested_target_count]NestedTargetValidationRow {
+    @setEvalBranchQuota(1_000_000);
+    var targets: [large_nested_target_count]NestedTargetValidationRow = undefined;
+    inline for (&targets, 0..) |*target, index| {
+        target.* = .{
+            .metadata = std.fmt.comptimePrint(
+                "target-{d:0>4}",
+                .{large_nested_target_count - 1 - index},
+            ),
+            .function_index = 0,
+        };
+    }
+    return targets;
+}
+
+fn nestedTargetValidationPlan() ProgramPlan {
+    const functions = [_]FunctionPlan{.{
+        .symbol_name = "run",
+        .value_codec = .unit,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 0,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = 0,
+    }};
+    const blocks = [_]BlockPlan{.{
+        .first_instruction = 0,
+        .instruction_count = 0,
+        .terminator_index = 0,
+    }};
+    const terminators = [_]Terminator{.{ .kind = .return_unit }};
+    return program_plan_builder.finish(.{
+        .label = "nested-target-validation",
+        .ir_hash = 1,
+        .entry = program_plan_builder.function(0),
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &.{},
+    }) catch |err| invalidGeneratedPlan(err);
+}
+
+test "nested target validation remains bounded for reverse-ordered large unique maps" {
+    const plan = comptime nestedTargetValidationPlan();
+    const targets = comptime reverseOrderedLargeUniqueNestedTargets();
+    comptime {
+        @setEvalBranchQuota(100_000);
+        try plan.validateWithNestedTargets(targets);
+    }
+}
+
+test "nested target validation distinguishes prefixes and rejects exact duplicates" {
+    const plan = comptime nestedTargetValidationPlan();
+    const unique_targets = .{
+        NestedTargetValidationRow{ .metadata = "target", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-a", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-aa", .function_index = 0 },
+    };
+    const duplicate_targets = .{
+        NestedTargetValidationRow{ .metadata = "target-a", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-aa", .function_index = 0 },
+        NestedTargetValidationRow{ .metadata = "target-a", .function_index = 0 },
+    };
+
+    try plan.validateWithNestedTargets(unique_targets);
+    try std.testing.expectError(
+        error.DuplicateNestedTargetMetadata,
+        plan.validateWithNestedTargets(duplicate_targets),
+    );
+}
+
 test "codecForType covers scalar product and sum shapes" {
     const Product = struct {
         amount: i32,
@@ -5257,6 +5629,46 @@ test "entryExecutionAnalysisWithNestedTargets propagates terminal nested targets
     try std.testing.expect(analysis.reachable_instructions[0]);
     try std.testing.expect(!analysis.reachable_instructions[1]);
     try std.testing.expect(analysis.reachable_instructions[2]);
+}
+
+test "StaticMachine entry analysis owns resolver-backed nested cycles" {
+    const metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi";
+    const plan = comptime ProgramPlan{
+        .label = "versioned-nested-cycle-analysis",
+        .ir_hash = 1,
+        .entry_index = 0,
+        .functions = &.{.{
+            .symbol_name = "root",
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 0,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 0,
+            .instruction_count = 1,
+        }},
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{},
+        .blocks = &.{.{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 }},
+        .terminators = &.{.{ .kind = .return_unit }},
+        .instructions = &.{.{
+            .kind = .call_nested_with,
+            .aux = @intFromEnum(ValueCodec.unit),
+            .string_literal = metadata,
+        }},
+    };
+    const targets = comptime .{.{ .metadata = metadata, .function_index = 0 }};
+
+    const legacy = comptime entryExecutionAnalysisWithNestedTargets(plan, targets) catch unreachable;
+    const static = comptime staticEntryExecutionAnalysisWithNestedTargets(plan, targets) catch unreachable;
+    try std.testing.expect(!legacy.helper_cycle);
+    try std.testing.expect(static.helper_cycle);
 }
 
 test "ProgramPlan.validateWithNestedTargets rejects terminal nested target result mismatches" {
@@ -7021,6 +7433,7 @@ test "ProgramPlan hash survives JSON roundtrip" {
 
     try parsed.value.validate();
     try std.testing.expectEqual(plan.hash(), parsed.value.hash());
+    try std.testing.expectEqual(plan.canonicalHash(), parsed.value.canonicalHash());
 }
 
 test "ProgramPlan hash includes requirement semantics" {
@@ -7076,4 +7489,142 @@ test "ProgramPlan hash includes requirement semantics" {
     };
 
     try std.testing.expect(base.hash() != enriched.hash());
+    try std.testing.expect(base.canonicalHash() != enriched.canonicalHash());
+
+    var provenance_only = base;
+    provenance_only.ir_hash +%= 1;
+    try std.testing.expect(base.hash() != provenance_only.hash());
+    try std.testing.expectEqual(base.canonicalHash(), provenance_only.canonicalHash());
+}
+
+test "StaticMachine entry analysis separates function completion from legacy global block indexes" {
+    const root = comptime program_plan_builder.function(0);
+    const completing = comptime program_plan_builder.function(1);
+    const looping = comptime program_plan_builder.function(2);
+    const root_value = comptime program_plan_builder.local(root, 0);
+    const completing_value = comptime program_plan_builder.local(completing, 0);
+    const helper_instructions = comptime [_]Instruction{
+        program_plan_builder.callHelper(root, root_value, looping, null) catch unreachable,
+        program_plan_builder.returnValue(root, root_value) catch unreachable,
+        .{ .kind = .const_i32, .dst = completing_value.index, .operand = 7 },
+        program_plan_builder.returnValue(completing, completing_value) catch unreachable,
+    };
+    const functions = comptime [_]FunctionPlan{
+        .{
+            .symbol_name = "root",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 0,
+            .local_count = 1,
+            .first_block = 0,
+            .entry_block = 0,
+            .block_count = 2,
+            .first_instruction = 0,
+            .instruction_count = 2,
+        },
+        .{
+            .symbol_name = "completing",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 1,
+            .local_count = 1,
+            .first_block = 2,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 2,
+            .instruction_count = 2,
+        },
+        .{
+            .symbol_name = "looping",
+            .value_codec = .i32,
+            .result_codec = .i32,
+            .first_requirement = 0,
+            .requirement_count = 0,
+            .first_output = 0,
+            .output_count = 0,
+            .first_local = 2,
+            .local_count = 0,
+            .first_block = 3,
+            .entry_block = 0,
+            .block_count = 1,
+            .first_instruction = 4,
+            .instruction_count = 0,
+        },
+    };
+    const blocks = comptime [_]BlockPlan{
+        .{ .first_instruction = 0, .instruction_count = 0, .terminator_index = 0 },
+        .{ .first_instruction = 0, .instruction_count = 2, .terminator_index = 1 },
+        .{ .first_instruction = 2, .instruction_count = 2, .terminator_index = 2 },
+        .{ .first_instruction = 4, .instruction_count = 0, .terminator_index = 3 },
+    };
+    const terminators = comptime [_]Terminator{
+        .{ .kind = .jump, .primary = 1 },
+        .{ .kind = .return_value },
+        .{ .kind = .return_value },
+        .{ .kind = .jump, .primary = 3 },
+    };
+    const helper_plan = comptime ProgramPlan{
+        .label = "completion-namespace-helper",
+        .ir_hash = 1,
+        .entry_index = root.index,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .i32 } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &helper_instructions,
+    };
+    const legacy_helper_analysis = comptime entryExecutionAnalysisWithNestedTargets(helper_plan, &.{}) catch unreachable;
+    try std.testing.expect(legacy_helper_analysis.completion_functions[root.index]);
+    try std.testing.expect(legacy_helper_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!legacy_helper_analysis.completion_functions[looping.index]);
+    const static_helper_analysis = comptime staticEntryExecutionAnalysisWithNestedTargets(helper_plan, &.{}) catch unreachable;
+    try std.testing.expect(!static_helper_analysis.completion_functions[root.index]);
+    try std.testing.expect(static_helper_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!static_helper_analysis.completion_functions[looping.index]);
+
+    const metadata = "a\x1fb\x1fc\x1fd\x1fe\x1ff\x1fg\x1fh\x1fi";
+    const nested_instructions = comptime [_]Instruction{
+        .{
+            .kind = .call_nested_with,
+            .dst = root_value.index,
+            .aux = @intFromEnum(ValueCodec.i32),
+            .string_literal = metadata,
+        },
+        program_plan_builder.returnValue(root, root_value) catch unreachable,
+        .{ .kind = .const_i32, .dst = completing_value.index, .operand = 7 },
+        program_plan_builder.returnValue(completing, completing_value) catch unreachable,
+    };
+    const nested_plan = comptime ProgramPlan{
+        .label = "completion-namespace-nested",
+        .ir_hash = helper_plan.ir_hash,
+        .entry_index = helper_plan.entry_index,
+        .functions = helper_plan.functions,
+        .requirements = helper_plan.requirements,
+        .ops = helper_plan.ops,
+        .outputs = helper_plan.outputs,
+        .locals = helper_plan.locals,
+        .blocks = helper_plan.blocks,
+        .terminators = helper_plan.terminators,
+        .instructions = &nested_instructions,
+    };
+    const targets = comptime .{.{ .metadata = metadata, .function_index = looping.index }};
+    const legacy_nested_analysis = comptime entryExecutionAnalysisWithNestedTargets(nested_plan, targets) catch unreachable;
+    try std.testing.expect(legacy_nested_analysis.completion_functions[root.index]);
+    try std.testing.expect(legacy_nested_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!legacy_nested_analysis.completion_functions[looping.index]);
+    const static_nested_analysis = comptime staticEntryExecutionAnalysisWithNestedTargets(nested_plan, targets) catch unreachable;
+    try std.testing.expect(!static_nested_analysis.completion_functions[root.index]);
+    try std.testing.expect(static_nested_analysis.completion_functions[completing.index]);
+    try std.testing.expect(!static_nested_analysis.completion_functions[looping.index]);
 }

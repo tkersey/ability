@@ -2981,6 +2981,22 @@ test "schema Registry emits sum value variants from tuple order" {
     try standard.testing.expectEqual(@as(?u16, 0), Schemas.value_fields[0].schema_index);
 }
 
+test "schema Registry admits immutable string-list fields and variants" {
+    const ProductPayload = struct {
+        items: []const []const u8,
+    };
+    const LookupResult = union(enum) {
+        found: []const []const u8,
+        missing: void,
+    };
+    const Schemas = schema.Registry(.{ ProductPayload, LookupResult });
+
+    try standard.testing.expectEqual(program_plan.ValueCodec.string_list, Schemas.value_fields[0].codec);
+    try standard.testing.expectEqual(@as(?u16, null), Schemas.value_fields[0].schema_index);
+    try standard.testing.expectEqual(program_plan.ValueCodec.string_list, Schemas.value_variants[0].codec);
+    try standard.testing.expectEqual(@as(?u16, null), Schemas.value_variants[0].schema_index);
+}
+
 test "schema Registry refs are accepted by Protocol.Rows" {
     const RequestPayload = struct {
         id: []const u8,

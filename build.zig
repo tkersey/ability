@@ -377,6 +377,11 @@ pub fn build(b: *std.Build) void {
     addTestArtifact(b, test_step, boundary_shared, test_args);
     addTestArtifact(b, test_step, core.effect_ir, test_args);
     addTestArtifact(b, test_step, core.frontend, test_args);
+    const lowering_api_capacity_test = b.addTest(.{
+        .root_module = core.lowering_api,
+        .filters = &.{"StaticMachine control-path capacity has a fixed compact scratch bound"},
+    });
+    test_step.dependOn(&addRunArtifactWithArgs(b, lowering_api_capacity_test, &.{}).step);
     addTestArtifact(b, test_step, core.internal_kernel, test_args);
     addTestArtifact(b, test_step, core.internal_program_plan, test_args);
     addTestArtifact(b, test_step, core.loaded_execution, test_args);
@@ -990,6 +995,67 @@ pub fn build(b: *std.Build) void {
     const program_api_tests = b.addTest(.{ .root_module = program_api_tests_mod, .filters = test_args.filters });
     test_step.dependOn(&addRunArtifactWithArgs(b, program_api_tests, test_args.passthrough).step);
 
+    const static_machine_tests_mod = b.createModule(.{
+        .root_source_file = b.path("test/static_machine_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    static_machine_tests_mod.addImport("boundary", boundary);
+    const static_machine_tests = b.addTest(.{ .root_module = static_machine_tests_mod, .filters = test_args.filters });
+    const run_static_machine_tests = addRunArtifactWithArgs(b, static_machine_tests, test_args.passthrough);
+    test_step.dependOn(&run_static_machine_tests.step);
+    const static_machine_step = b.step("check-boundary-static-machine", "Check the Boundary StaticMachine API, state codec, and reducer.");
+    static_machine_step.dependOn(&run_static_machine_tests.step);
+    const static_machine_wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const static_machine_wasm_core = addCoreModules(b, static_machine_wasm_target, .ReleaseSmall);
+    const static_machine_wasm_shared = b.createModule(.{
+        .root_source_file = b.path("src/boundary_shared.zig"),
+        .target = static_machine_wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wireBoundaryImports(static_machine_wasm_shared, static_machine_wasm_core);
+    const static_machine_wasm_boundary = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = static_machine_wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    static_machine_wasm_boundary.addImport("boundary_shared", static_machine_wasm_shared);
+    const static_machine_wasm_smoke_mod = b.createModule(.{
+        .root_source_file = b.path("test/static_machine_wasm32_compile.zig"),
+        .target = static_machine_wasm_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "boundary", .module = static_machine_wasm_boundary }},
+    });
+    const static_machine_wasm_smoke = b.addExecutable(.{
+        .name = "boundary-static-machine-wasm32-smoke",
+        .root_module = static_machine_wasm_smoke_mod,
+    });
+    static_machine_wasm_smoke.entry = .disabled;
+    static_machine_wasm_smoke.rdynamic = true;
+    static_machine_wasm_smoke.export_memory = true;
+    const static_machine_wasm_step = b.step("check-boundary-static-machine-wasm32", "Compile a Boundary StaticMachine for wasm32-freestanding.");
+    static_machine_wasm_step.dependOn(&static_machine_wasm_smoke.step);
+    static_machine_step.dependOn(static_machine_wasm_step);
+    check_step.dependOn(static_machine_wasm_step);
+    const static_machine_parity_step = b.step("check-boundary-static-machine-parity", "Check Program.Session and StaticMachine semantic parity.");
+    static_machine_parity_step.dependOn(&run_static_machine_tests.step);
+    const static_agent_step = b.step("check-boundary-static-agent", "Check the StaticMachine agent fixture.");
+    const static_agent_tests = b.addTest(.{
+        .root_module = agent_loop_tests_mod,
+        .filters = &.{"agent StaticMachine root"},
+    });
+    static_agent_step.dependOn(&addRunArtifactWithArgs(b, static_agent_tests, test_args.passthrough).step);
+    const static_provider_step = b.step("check-boundary-static-provider", "Check StaticMachine helper and provider suspension.");
+    const static_provider_tests = b.addTest(.{
+        .root_module = agent_loop_tests_mod,
+        .filters = &.{"agent StaticMachine toolbox provider"},
+    });
+    static_provider_step.dependOn(&addRunArtifactWithArgs(b, static_provider_tests, test_args.passthrough).step);
+
     const evidence_kernel_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/evidence_kernel_test.zig"),
         .target = target,
@@ -1030,6 +1096,190 @@ pub fn build(b: *std.Build) void {
         .{
             .path = "test/compile_fail/invalid_result_cleanup_with_outputs.zig",
             .expected_error = "Body.deinitResult with Body.Outputs must have type fn (std.mem.Allocator, value) void; release outputs separately with Body.deinitOutputs",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_cleanup_unsupported.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_reserved_out_of_memory.zig",
+            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: OutOfMemory",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_reserved_program_contract_violation.zig",
+            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: ProgramContractViolation",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_reserved_execution_budget_exceeded.zig",
+            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: ExecutionBudgetExceeded",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_oversized_usize_constant.zig",
+            .expected_error = "Boundary StaticMachine v1 requires const_usize values to fit the canonical u32 domain",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_maximum_state_bytes_u32.zig",
+            .expected_error = "Boundary StaticMachine maximum_state_bytes must fit the canonical u32 domain",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_control_validation_work_limit.zig",
+            .expected_error = "Boundary StaticMachine v1 control-validation work exceeds the v1 limit",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_cross_local_predicate_copy.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_product_extract_predicate_copy.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_add_i32_predicate_copy.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_interleaved_predicate_family.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_multiple_condition_predicates.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_helper_predicate_alias.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support helper result correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_nonzero_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_add_i32_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_duplicate_add_i32_predicate_derivation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support repeated add_i32 derivations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_sub_one_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_duplicate_sub_one_predicate_derivation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support repeated sub_one derivations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_in_place_add_const_predicate.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_in_place_add_i32_predicate.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_shared_source_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_boolean_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support boolean-result correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_known_predicate_source.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support a suspension site that is unreachable under predicate authority",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_helper_predicate_parameter_alias.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support aliased helper predicate parameters",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_repeated_helper_predicate_derivation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support repeated helper result derivations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_after_predicate_overlap.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_in_place_after_predicate_overlap.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_after_chain_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_after_chain_prefixed_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_in_place_after_chain_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every potentially innermost afterDispatch input to match its function value",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_mutable_string_list_schema.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_noreturn_schema.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support noreturn schema carriers",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_comptime_product_field.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support comptime fields inside product schemas",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_non_exhaustive_enum.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support non-exhaustive enum carriers",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_mutable_helper_parameter.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable helper functions that write parameter locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",
+            .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_coverage_omitted.zig",
+            .expected_error = "Program.Interpreter coverage omitted reachable operation site",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_after_coverage_omitted.zig",
+            .expected_error = "Program.Interpreter coverage omitted reachable after site",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_forged_legacy_site.zig",
+            .expected_error = "Program.Interpreter coverage descriptor belongs to another program",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_forged_operation_descriptor.zig",
+            .expected_error = "Program.protocol coverage descriptor belongs to another program",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_effect_row_forged_after_descriptor.zig",
+            .expected_error = "Program.protocol coverage descriptor belongs to another program",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_invalid_after_handler_shape.zig",
+            .expected_error = "Boundary StaticMachine v1 requires afterDispatch to have a receiver, one value parameter, and a return value",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_innermost_after_input_mismatch.zig",
+            .expected_error = "Boundary StaticMachine v1 requires every potentially innermost afterDispatch input to match its function value",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_forged_program.zig",
+            .expected_error = "boundary.staticMachine expects a type returned by boundary.program",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_cross_machine_state.zig",
+            .expected_error = "parameter type declared here",
         },
         .{
             .path = "test/compile_fail/value_schema_variant_mismatch.zig",
