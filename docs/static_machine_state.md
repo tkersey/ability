@@ -173,13 +173,16 @@ the public structural ceiling fixed; the state formula may impose a lower node
 limit as the predicate count grows. A reachable control path may use one
 or more predicates. Re-evaluating the same unchanged predicate preserves its
 exact source relation, and the two variants of one unchanged binary sum
-transfer the complementary relation exactly. Construction rejects only an
-unchanged predicate revisited after an interleaved distinct predicate and
-cross-local predicate aliases that require authority the compact carrier does
-not encode. Semantic no-op writes do not erase that history. Helper results may
-not form a second predicate local from a predicate argument because v1 does not
-encode general interprocedural correlation. Final control-path authority is also
-checked against the decoded source local whenever that source remains valid.
+transfer the complementary relation exactly. An in-place boolean
+`compare_eq_zero` also transfers the exact complementary post-write source
+relation. Construction rejects an unchanged predicate revisited after an
+interleaved distinct predicate, cross-local predicate aliases, deterministic
+scalar correlations between predicate locals, and live after histories that
+would require simultaneous authority for distinct predicates. Semantic no-op
+writes do not erase predicate history. Helper results may not form a second
+predicate local from a predicate argument because v1 does not encode general
+interprocedural correlation. Final control-path authority is also checked
+against the decoded source local whenever that source remains valid.
 `Machine.Manifest` publishes the actual path-state count and the combined
 queue, visited-set, and frame-authority scratch bytes together with both v1
 ceilings. Comptime-generated `u16` metadata maps each

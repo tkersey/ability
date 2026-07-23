@@ -3185,6 +3185,39 @@ fn staticMachinePredicateTruthPossibilities(
         .{ false, true };
 }
 
+fn staticMachinePredicateRelationIsRepresentable(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime function_index: usize,
+    tracked: StaticConditionPredicate,
+    predicate: StaticConditionPredicate,
+) bool {
+    const tracked_false_value = false;
+    const tracked_true_value = true;
+    const tracked_false = staticMachinePredicateTruthPossibilities(
+        compiled_plan,
+        function_index,
+        tracked,
+        tracked_false_value,
+        predicate,
+    ) catch return false;
+    const tracked_true = staticMachinePredicateTruthPossibilities(
+        compiled_plan,
+        function_index,
+        tracked,
+        tracked_true_value,
+        predicate,
+    ) catch return false;
+    var false_count: usize = 0;
+    var true_count: usize = 0;
+    for (tracked_false) |value| if (value != null) {
+        false_count += 1;
+    };
+    for (tracked_true) |value| if (value != null) {
+        true_count += 1;
+    };
+    return false_count == 1 and true_count == 1;
+}
+
 fn staticMachineFunctionBlockStartNode(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime function_index: usize,
@@ -3311,6 +3344,186 @@ const PredicateHistoryPhase = enum(u2) {
     candidate_seen,
     distinct_seen,
 };
+
+const AfterPredicateHistoryPhase = enum(u2) {
+    before_candidate,
+    candidate_seen,
+    distinct_seen,
+    after_seen,
+};
+
+fn staticMachineInstructionHasAfterSite(
+    comptime operation_yield_sites: anytype,
+    instruction_index: usize,
+) bool {
+    inline for (operation_yield_sites) |site| {
+        if (site.instruction_index == instruction_index) return site.has_after;
+    }
+    return false;
+}
+
+fn staticMachineFunctionHasAfterPredicateOverlap(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime analysis: anytype,
+    comptime operation_yield_sites: anytype,
+    comptime function_index: usize,
+) bool {
+    @setEvalBranchQuota(10_000_000);
+    const predicate_count = staticMachineFunctionConditionPredicateCount(
+        compiled_plan,
+        function_index,
+    );
+    if (predicate_count < 2) return false;
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    if (control_node_count == 0 or control_node_count > static_max_control_nodes) return false;
+    const state_count = control_node_count * 4;
+    const StateIndex = std.math.IntFittingRange(0, state_count - 1);
+    const StateVisited = std.StaticBitSet(state_count);
+    const function = compiled_plan.functions[function_index];
+    const function_block_end = @as(usize, function.first_block) + function.block_count;
+    const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse
+        return false;
+
+    const State = struct {
+        node: usize,
+        phase: AfterPredicateHistoryPhase,
+    };
+    const encodeState = struct {
+        fn call(state: State) usize {
+            return state.node * 4 + @intFromEnum(state.phase);
+        }
+    }.call;
+    const enqueue = struct {
+        fn call(
+            queue: *[state_count]StateIndex,
+            queue_len: *usize,
+            visited: *StateVisited,
+            state: State,
+        ) void {
+            const encoded = encodeState(state);
+            if (visited.isSet(encoded)) return;
+            visited.set(encoded);
+            queue[queue_len.*] = @intCast(encoded);
+            queue_len.* += 1;
+        }
+    }.call;
+
+    for (0..predicate_count) |candidate_index| {
+        const candidate = staticMachineConditionPredicateForIndex(
+            compiled_plan,
+            function_index,
+            candidate_index,
+        ) orelse return true;
+        var queue: [state_count]StateIndex = undefined;
+        var visited = StateVisited.initEmpty();
+        var queue_len: usize = 0;
+        var queue_index: usize = 0;
+        enqueue(&queue, &queue_len, &visited, .{
+            .node = entry_node,
+            .phase = .before_candidate,
+        });
+
+        path_search: while (queue_index < queue_len) : (queue_index += 1) {
+            const encoded: usize = @intCast(queue[queue_index]);
+            var state = State{
+                .node = encoded / 4,
+                .phase = @enumFromInt(encoded % 4),
+            };
+            if (state.node < compiled_plan.instructions.len) {
+                var block_index: usize = function.first_block;
+                const owner_block = while (block_index < function_block_end) : (block_index += 1) {
+                    const block = compiled_plan.blocks[block_index];
+                    const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                    if (state.node >= block.first_instruction and state.node < instruction_end) {
+                        break block_index;
+                    }
+                } else return true;
+                const instruction = compiled_plan.instructions[state.node];
+                switch (instruction.kind) {
+                    .return_error => continue :path_search,
+                    .call_helper => if (instruction.operand >= compiled_plan.functions.len or
+                        !analysis.completion_functions[instruction.operand]) continue :path_search,
+                    .call_nested_with => {
+                        const target_index = nestedWithTargetIndexForMetadata(
+                            compiled_plan,
+                            nested_with_targets,
+                            instruction.string_literal,
+                        ) orelse continue :path_search;
+                        if (!analysis.completion_functions[target_index]) continue :path_search;
+                    },
+                    .call_op => {
+                        if (instruction.operand >= compiled_plan.ops.len) return true;
+                        if (compiled_plan.ops[instruction.operand].mode == .abort) continue :path_search;
+                    },
+                    else => {},
+                }
+
+                if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
+                    if (predicate.eql(candidate)) {
+                        if (state.phase == .before_candidate) state.phase = .candidate_seen;
+                    } else if (!staticMachinePredicateRelationIsRepresentable(
+                        compiled_plan,
+                        function_index,
+                        candidate,
+                        predicate,
+                    )) {
+                        switch (state.phase) {
+                            .candidate_seen => state.phase = .distinct_seen,
+                            .after_seen => return true,
+                            .before_candidate, .distinct_seen => {},
+                        }
+                    }
+                }
+                if (staticMachineInstructionHasAfterSite(operation_yield_sites, state.node)) {
+                    switch (state.phase) {
+                        .candidate_seen => state.phase = .after_seen,
+                        .distinct_seen => return true,
+                        .before_candidate, .after_seen => {},
+                    }
+                }
+                switch (staticMachineInstructionPredicateWriteEffect(
+                    instruction,
+                    candidate,
+                ) catch return true) {
+                    .unchanged => {},
+                    .known, .unknown => switch (state.phase) {
+                        .candidate_seen, .distinct_seen => state.phase = .before_candidate,
+                        .before_candidate, .after_seen => {},
+                    },
+                }
+
+                const block = compiled_plan.blocks[owner_block];
+                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                state.node = if (state.node + 1 == instruction_end)
+                    compiled_plan.instructions.len + owner_block
+                else
+                    state.node + 1;
+                enqueue(&queue, &queue_len, &visited, state);
+                continue :path_search;
+            }
+
+            const block_index = state.node - compiled_plan.instructions.len;
+            if (block_index < function.first_block or block_index >= function_block_end) return true;
+            const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+            const targets = switch (terminator.kind) {
+                .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
+                .jump => [2]?u16{ terminator.primary, null },
+                .return_unit, .return_value => [2]?u16{ null, null },
+            };
+            target_search: for (targets) |target_optional| {
+                const target = target_optional orelse continue :target_search;
+                state.node = staticMachineFunctionBlockStartNode(
+                    compiled_plan,
+                    function_index,
+                    target,
+                ) orelse return true;
+                enqueue(&queue, &queue_len, &visited, state);
+            }
+        }
+    }
+    return false;
+}
 
 fn staticMachineFunctionHasInterleavedPredicateRevisit(
     comptime compiled_plan: program_plan.ProgramPlan,
@@ -3597,6 +3810,7 @@ fn validateStaticMachineRepresentableStateAuthority(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
     comptime analysis: anytype,
+    comptime operation_yield_sites: anytype,
 ) void {
     for (compiled_plan.functions, 0..) |function, function_index| {
         if (!analysis.reachable_functions[function_index]) continue;
@@ -3607,6 +3821,15 @@ fn validateStaticMachineRepresentableStateAuthority(
             function_index,
         )) {
             @compileError("Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate");
+        }
+        if (staticMachineFunctionHasAfterPredicateOverlap(
+            compiled_plan,
+            nested_with_targets,
+            analysis,
+            operation_yield_sites,
+            function_index,
+        )) {
+            @compileError("Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates");
         }
         var predicate_locals = [_]bool{false} ** function.local_count;
         const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
@@ -3661,6 +3884,55 @@ fn validateStaticMachineRepresentableStateAuthority(
                 }
                 if (source != instruction.dst and predicate_locals[source]) {
                     @compileError("Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals");
+                }
+            }
+            const scalar_source: ?u16 = switch (instruction.kind) {
+                .add_const_i32 => instruction.operand,
+                else => null,
+            };
+            if (scalar_source) |source| {
+                if (source >= predicate_locals.len) {
+                    @compileError("Boundary StaticMachine v1 observed an invalid scalar-correlation local");
+                }
+                if (source != instruction.dst and predicate_locals[source] and
+                    instruction.aux != 0)
+                {
+                    @compileError("Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals");
+                }
+                prior_scalar_scan: for (
+                    compiled_plan.instructions[function.first_instruction..instruction_index],
+                    function.first_instruction..,
+                ) |prior, prior_index| {
+                    if (!analysis.reachable_instructions[prior_index] or
+                        prior.kind != .add_const_i32 or
+                        prior.operand != source or
+                        prior.dst == instruction.dst or
+                        prior.dst == source or
+                        prior.dst >= predicate_locals.len or
+                        !predicate_locals[prior.dst])
+                    {
+                        continue :prior_scalar_scan;
+                    }
+                    if (!staticMachineFunctionHasPathWithoutLocalWrite(
+                        compiled_plan,
+                        nested_with_targets,
+                        analysis,
+                        function_index,
+                        prior_index,
+                        instruction_index,
+                        source,
+                    ) and !staticMachineFunctionHasPathWithoutLocalWrite(
+                        compiled_plan,
+                        nested_with_targets,
+                        analysis,
+                        function_index,
+                        instruction_index,
+                        prior_index,
+                        source,
+                    )) {
+                        continue :prior_scalar_scan;
+                    }
+                    @compileError("Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals");
                 }
             }
             if (instruction.kind == .call_helper) {
@@ -5644,11 +5916,6 @@ pub fn StaticExecutableSessionForPlan(
     if (analysis.helper_cycle) {
         @compileError("Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs");
     }
-    comptime validateStaticMachineRepresentableStateAuthority(
-        compiled_plan,
-        nested_with_targets,
-        analysis,
-    );
     comptime validateTypedExecutablePlanSupportWithIdentity(
         compiled_plan,
         schema_types,
@@ -5665,6 +5932,12 @@ pub fn StaticExecutableSessionForPlan(
     );
     const site_metadata = BodySiteMetadata(ProtocolOwner).values;
     const operation_yield_sites = staticMachineOperationYieldSitesForPlanWithMetadata(compiled_plan, nested_with_targets, site_metadata);
+    comptime validateStaticMachineRepresentableStateAuthority(
+        compiled_plan,
+        nested_with_targets,
+        analysis,
+        operation_yield_sites,
+    );
     comptime validateStaticMachineAfterHandlerContracts(
         compiled_plan,
         nested_with_targets,
@@ -8737,6 +9010,16 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             predicate: StaticConditionPredicate,
             cached_matches_reference: bool,
         ) ControlConditionState {
+            if (instruction.kind == .compare_eq_zero and
+                instruction.dst == predicate.operand)
+            {
+                return .{
+                    .predicate_slot = predicate_index + 1,
+                    .cached_matches_reference = cached_matches_reference,
+                    .source_valid = true,
+                    .source_matches_reference = !cached_matches_reference,
+                };
+            }
             const source_valid = !staticMachineInstructionMayWriteLocal(
                 instruction,
                 predicate.operand,

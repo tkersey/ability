@@ -64,11 +64,16 @@ unchanged binary sum. It admits ordinary multi-predicate programs, but rejects
 an unchanged predicate revisited after a distinct predicate because the compact
 carrier cannot retain both histories. Reachable exact copies between two
 predicate locals are also rejected regardless of whether the copy is scalar or
-extraction-mediated. A helper result cannot become a predicate local when the
+extraction-mediated. The same admission boundary rejects reachable affine
+relations between predicate locals, two predicate locals derived from one
+unchanged scalar source, and a live after continuation that would cross a
+distinct predicate. A helper result cannot become a predicate local when the
 helper consumes another predicate local, because the compact carrier does not
 encode arbitrary interprocedural correlation. Reachable helpers may not write
 their parameter locals. Semantic no-op writes preserve predicate history;
-known or unknown changes begin a new history.
+known or unknown changes begin a new history. An in-place boolean
+`compare_eq_zero` retains the exact complementary relation between its cached
+condition and rewritten source.
 Broader programs remain available through `Program.Session` until a future
 portable representation can validate those histories exactly. Control-path
 validation admits at most 32,768 states: the count is the combined

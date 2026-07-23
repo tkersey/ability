@@ -5209,6 +5209,36 @@ test "StaticMachine preserves in-place condition state across fuel yield" {
     try std.testing.expectEqual(@as(i32, 2), result.value());
 }
 
+test "StaticMachine rejects a forged in-place boolean predicate source" {
+    const state = try InPlaceBranchCacheMachine.initialState(std.testing.allocator, .{true});
+    defer InPlaceBranchCacheMachine.deinitState(state);
+    var fuel: u64 = 1;
+    switch (try InPlaceBranchCacheMachine.reduce(state, &fuel)) {
+        .yielded_fuel => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try InPlaceBranchCacheMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        std.mem.readInt(u64, forged[locals_count_offset..][0..8], .little),
+    );
+    const condition_value_offset = locals_count_offset + 8 + 2 + 1;
+    try std.testing.expectEqual(@as(u8, 0), forged[condition_value_offset]);
+    forged[condition_value_offset] = 1;
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        InPlaceBranchCacheMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
 test "StaticMachine canonical condition authority preserves cached condition" {
     var runtime = boundary.Runtime.init(std.testing.allocator);
     defer runtime.deinit();

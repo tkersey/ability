@@ -1150,6 +1150,18 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support helper result correlations between condition-predicate locals",
         },
         .{
+            .path = "test/compile_fail/static_machine_nonzero_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_shared_source_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_after_predicate_overlap.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates",
+        },
+        .{
             .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
             .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
         },
