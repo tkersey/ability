@@ -1,5 +1,5 @@
 Boundary v0 public surface
-package: boundary 0.6.2
+package: boundary 0.7.0
 manifest_format_version: 1
 manifest_fingerprint_version: 1
 manifest_fingerprint: 0xc3f1f221d499a992
