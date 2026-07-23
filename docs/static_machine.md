@@ -68,10 +68,11 @@ extraction-mediated. The same admission boundary rejects reachable affine
 relations between predicate locals, repeated `add_i32` or `sub_one`
 derivations from unchanged operands, boolean results reused as predicate
 operands, and a live after continuation that would cross a distinct predicate.
-For every operation suspension, construction derives all predicate truths that
-uniquely gate that site. Canonical decoding validates those truths against the
-decoded source locals even when a later predicate owns `last_condition`;
-construction rejects a suspension that no predicate-consistent path can reach.
+For every operation, helper, and nested-provider suspension site, construction
+derives all predicate truths that uniquely gate that site. Canonical decoding
+validates those truths against the decoded source locals of every parked frame,
+even when a later predicate owns `last_condition`; construction rejects a
+suspension that no predicate-consistent path can reach.
 Constant-backed binary additions and cross-local
 `sub_one` relations are rejected; in-place selector countdowns remain
 available. A helper result cannot become a predicate local when the helper

@@ -3703,12 +3703,87 @@ const PredicateAuthorityRequirement = enum(u2) {
     true_value,
 };
 
+const StaticPredicateAuthoritySite = struct {
+    function_index: usize,
+    instruction_index: usize,
+};
+
+fn staticMachineHelperSuspensionSiteCount(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+) usize {
+    var count: usize = 0;
+    for (compiled_plan.functions, 0..) |function, function_index| {
+        if (!analysis.reachable_functions[function_index]) continue;
+        const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+        instruction_scan: for (
+            compiled_plan.instructions[function.first_instruction..instruction_end],
+            function.first_instruction..,
+        ) |instruction, instruction_index| {
+            if (!analysis.reachable_instructions[instruction_index]) continue :instruction_scan;
+            switch (instruction.kind) {
+                .call_helper, .call_nested_with => count += 1,
+                else => {},
+            }
+        }
+    }
+    return count;
+}
+
+fn staticMachinePredicateAuthoritySites(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+    comptime operation_yield_sites: anytype,
+) [
+    operation_yield_sites.len + staticMachineHelperSuspensionSiteCount(
+        compiled_plan,
+        analysis,
+    )
+]StaticPredicateAuthoritySite {
+    var sites: [
+        operation_yield_sites.len + staticMachineHelperSuspensionSiteCount(
+            compiled_plan,
+            analysis,
+        )
+    ]StaticPredicateAuthoritySite = undefined;
+    var site_index: usize = 0;
+    for (operation_yield_sites) |site| {
+        sites[site_index] = .{
+            .function_index = site.function_index,
+            .instruction_index = site.instruction_index,
+        };
+        site_index += 1;
+    }
+    for (compiled_plan.functions, 0..) |function, function_index| {
+        if (!analysis.reachable_functions[function_index]) continue;
+        const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+        instruction_scan: for (
+            compiled_plan.instructions[function.first_instruction..instruction_end],
+            function.first_instruction..,
+        ) |instruction, instruction_index| {
+            if (!analysis.reachable_instructions[instruction_index]) continue :instruction_scan;
+            switch (instruction.kind) {
+                .call_helper, .call_nested_with => {
+                    sites[site_index] = .{
+                        .function_index = function_index,
+                        .instruction_index = instruction_index,
+                    };
+                    site_index += 1;
+                },
+                else => {},
+            }
+        }
+    }
+    std.debug.assert(site_index == sites.len);
+    return sites;
+}
+
 fn staticMachinePredicateAuthorityRequirements(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
     comptime analysis: anytype,
-    comptime operation_yield_sites: anytype,
-) [operation_yield_sites.len][
+    comptime authority_sites: anytype,
+) [authority_sites.len][
     staticMachineMaximumConditionPredicateCount(
         compiled_plan,
     )
@@ -3719,7 +3794,7 @@ fn staticMachinePredicateAuthorityRequirements(
     var requirements =
         [_][maximum_predicate_count]PredicateAuthorityRequirement{
             [_]PredicateAuthorityRequirement{.none} ** maximum_predicate_count,
-        } ** operation_yield_sites.len;
+        } ** authority_sites.len;
     if (control_node_count == 0 or control_node_count > static_max_control_nodes) {
         return requirements;
     }
@@ -3844,9 +3919,9 @@ fn staticMachinePredicateAuthorityRequirements(
             var visited = StateVisited.initEmpty();
             var queue_len: usize = 0;
             var queue_index: usize = 0;
-            var reached_inactive = [_]bool{false} ** operation_yield_sites.len;
-            var reached_false = [_]bool{false} ** operation_yield_sites.len;
-            var reached_true = [_]bool{false} ** operation_yield_sites.len;
+            var reached_inactive = [_]bool{false} ** authority_sites.len;
+            var reached_false = [_]bool{false} ** authority_sites.len;
+            var reached_true = [_]bool{false} ** authority_sites.len;
             enqueue(&queue, &queue_len, &visited, .{
                 .node = entry_node,
                 .gate = .inactive,
@@ -3857,7 +3932,7 @@ fn staticMachinePredicateAuthorityRequirements(
 
             predicate_search: while (queue_index < queue_len) : (queue_index += 1) {
                 var state = decodeState(@intCast(queue[queue_index]));
-                site_search: inline for (operation_yield_sites, 0..) |site, site_index| {
+                site_search: inline for (authority_sites, 0..) |site, site_index| {
                     if (site.function_index != function_index or
                         site.instruction_index != state.node)
                     {
@@ -3998,12 +4073,12 @@ fn staticMachinePredicateAuthorityRequirements(
                 }
             }
 
-            result_site_search: inline for (operation_yield_sites, 0..) |site, site_index| {
+            result_site_search: inline for (authority_sites, 0..) |site, site_index| {
                 if (site.function_index != function_index or reached_inactive[site_index]) {
                     continue :result_site_search;
                 }
                 if (!reached_false[site_index] and !reached_true[site_index]) {
-                    @compileError("Boundary StaticMachine v1 does not support an operation suspension that is unreachable under predicate authority");
+                    @compileError("Boundary StaticMachine v1 does not support a suspension site that is unreachable under predicate authority");
                 }
                 if (reached_false[site_index] == reached_true[site_index]) {
                     continue :result_site_search;
@@ -6661,17 +6736,22 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
     else
         compiled_plan.hash();
     const maximum_predicate_count = staticMachineMaximumConditionPredicateCount(compiled_plan);
+    const predicate_authority_sites = staticMachinePredicateAuthoritySites(
+        compiled_plan,
+        analysis,
+        operation_yield_sites,
+    );
     const site_predicate_requirements = if (canonical_request_identity)
         staticMachinePredicateAuthorityRequirements(
             compiled_plan,
             nested_with_targets,
             analysis,
-            operation_yield_sites,
+            predicate_authority_sites,
         )
     else
         [_][maximum_predicate_count]PredicateAuthorityRequirement{
             [_]PredicateAuthorityRequirement{.none} ** maximum_predicate_count,
-        } ** operation_yield_sites.len;
+        } ** predicate_authority_sites.len;
 
     if (canonical_request_identity) comptime {
         for (compiled_plan.instructions, 0..) |instruction, instruction_index| {
@@ -9459,6 +9539,59 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
                 },
                 else => return error.ProgramContractViolation,
             }
+            if (comptime canonical_request_identity) {
+                const site_index = predicateAuthoritySiteIndexForInstruction(
+                    parent.function_index,
+                    call_instruction_index,
+                ) orelse return error.ProgramContractViolation;
+                try self.validateDecodedFramePredicateAuthority(parent, site_index);
+            }
+        }
+
+        fn predicateAuthoritySiteIndexForInstruction(
+            function_index: usize,
+            instruction_index: usize,
+        ) ?usize {
+            inline for (predicate_authority_sites, 0..) |site, site_index| {
+                if (site.function_index == function_index and
+                    site.instruction_index == instruction_index)
+                {
+                    return site_index;
+                }
+            }
+            return null;
+        }
+
+        fn validateDecodedFramePredicateAuthority(
+            self: *const Self,
+            frame: ActiveInterpreterFrame,
+            site_index: usize,
+        ) error{ProgramContractViolation}!void {
+            if (site_index >= site_predicate_requirements.len) {
+                return error.ProgramContractViolation;
+            }
+            const site = predicate_authority_sites[site_index];
+            if (site.function_index != frame.function_index) {
+                return error.ProgramContractViolation;
+            }
+            const locals = self.scratch.frameLocalsConst(frame.frame);
+            requirement_scan: for (0..maximum_predicate_count) |predicate_index| {
+                const expected = site_predicate_requirements[site_index][predicate_index];
+                if (expected == .none) continue :requirement_scan;
+                const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
+                    compiled_plan,
+                    frame.function_index,
+                    predicate_index,
+                ) orelse return error.ProgramContractViolation;
+                const actual = try conditionPredicateTruthForLocals(
+                    frame.function_index,
+                    predicate,
+                    locals,
+                );
+                if (actual != (expected == .true_value)) {
+                    return error.ProgramContractViolation;
+                }
+            }
         }
 
         fn nestedTargetIndexForInstruction(instruction_index: usize) ?usize {
@@ -10531,31 +10664,23 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
             if (comptime canonical_request_identity) {
-                if (pending.operation_site_index >= site_predicate_requirements.len) {
+                if (pending.operation_site_index >= operation_yield_sites.len or
+                    pending.operation_site_index >= predicate_authority_sites.len)
+                {
                     return error.ProgramContractViolation;
                 }
                 const site = operation_yield_sites[pending.operation_site_index];
-                if (site.function_index != active.function_index) {
+                const authority_site = predicate_authority_sites[pending.operation_site_index];
+                if (site.function_index != active.function_index or
+                    authority_site.function_index != site.function_index or
+                    authority_site.instruction_index != site.instruction_index)
+                {
                     return error.ProgramContractViolation;
                 }
-                const locals = self.scratch.frameLocalsConst(active.frame);
-                requirement_scan: for (0..maximum_predicate_count) |predicate_index| {
-                    const expected = site_predicate_requirements[pending.operation_site_index][predicate_index];
-                    if (expected == .none) continue :requirement_scan;
-                    const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
-                        compiled_plan,
-                        active.function_index,
-                        predicate_index,
-                    ) orelse return error.ProgramContractViolation;
-                    const actual = try conditionPredicateTruthForLocals(
-                        active.function_index,
-                        predicate,
-                        locals,
-                    );
-                    if (actual != (expected == .true_value)) {
-                        return error.ProgramContractViolation;
-                    }
-                }
+                try self.validateDecodedFramePredicateAuthority(
+                    active.*,
+                    pending.operation_site_index,
+                );
             }
             if (pending.has_after and self.scratch.afterEntries().len >= session_after_stack_capacity) {
                 return error.ProgramContractViolation;

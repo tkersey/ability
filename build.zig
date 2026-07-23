@@ -1187,7 +1187,7 @@ pub fn build(b: *std.Build) void {
         },
         .{
             .path = "test/compile_fail/static_machine_known_predicate_source.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support an operation suspension that is unreachable under predicate authority",
+            .expected_error = "Boundary StaticMachine v1 does not support a suspension site that is unreachable under predicate authority",
         },
         .{
             .path = "test/compile_fail/static_machine_helper_predicate_parameter_alias.zig",
