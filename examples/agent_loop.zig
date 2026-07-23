@@ -343,16 +343,16 @@ const agent_loop_semantic_spec = blk: {
                 .{
                     .name = "check_read_tool",
                     .instructions = .{
-                        semantic.subOne("tool_selector", "tool_index"),
-                        semantic.compareEqZero("is_read_tool", "tool_selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_read_tool", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_read_tool", .{ .then = "tool", .@"else" = "check_write_tool" }),
                 },
                 .{
                     .name = "check_write_tool",
                     .instructions = .{
-                        semantic.subOne("tool_selector", "tool_selector"),
-                        semantic.compareEqZero("is_write_tool", "tool_selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_write_tool", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_write_tool", .{ .then = "tool", .@"else" = "unknown_tool" }),
                 },
@@ -557,16 +557,16 @@ const toolbox_semantic_spec = blk: {
                 .{
                     .name = "check_read",
                     .instructions = .{
-                        semantic.subOne("selector", "tool_index"),
-                        semantic.compareEqZero("is_read", "selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_read", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_read", .{ .then = "read_file", .@"else" = "check_write" }),
                 },
                 .{
                     .name = "check_write",
                     .instructions = .{
-                        semantic.subOne("selector", "selector"),
-                        semantic.compareEqZero("is_write", "selector"),
+                        semantic.subOne("tool_index", "tool_index"),
+                        semantic.compareEqZero("is_write", "tool_index"),
                     },
                     .terminator = semantic.branchIf("is_write", .{ .then = "write_file", .@"else" = "unsupported" }),
                 },

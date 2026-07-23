@@ -1154,11 +1154,43 @@ pub fn build(b: *std.Build) void {
             .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
         },
         .{
+            .path = "test/compile_fail/static_machine_add_i32_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_sub_one_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_in_place_add_const_predicate.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_in_place_add_i32_predicate.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+        },
+        .{
             .path = "test/compile_fail/static_machine_shared_source_predicate_correlation.zig",
             .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
         },
         .{
+            .path = "test/compile_fail/static_machine_boolean_predicate_correlation.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support boolean-result correlations between condition-predicate locals",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_known_predicate_source.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support condition predicates reached from a known scalar write",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_helper_predicate_parameter_alias.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support aliased helper predicate parameters",
+        },
+        .{
             .path = "test/compile_fail/static_machine_after_predicate_overlap.zig",
+            .expected_error = "Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates",
+        },
+        .{
+            .path = "test/compile_fail/static_machine_in_place_after_predicate_overlap.zig",
             .expected_error = "Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates",
         },
         .{

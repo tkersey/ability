@@ -3059,6 +3059,21 @@ fn staticMachineFunctionConditionPredicateCount(
     return count;
 }
 
+fn staticMachineFunctionLocalIsConditionPredicate(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime function_index: usize,
+    local_index: u16,
+) bool {
+    if (function_index >= compiled_plan.functions.len) return false;
+    const function = compiled_plan.functions[function_index];
+    const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+    for (compiled_plan.instructions[function.first_instruction..instruction_end]) |instruction| {
+        const predicate = staticMachineConditionPredicateForInstruction(instruction) orelse continue;
+        if (predicate.operand == local_index) return true;
+    }
+    return false;
+}
+
 fn staticMachineMaximumConditionPredicateCount(
     comptime compiled_plan: program_plan.ProgramPlan,
 ) usize {
@@ -3259,6 +3274,7 @@ fn staticMachineInstructionMayWriteLocal(
 
 const StaticPredicateWriteEffect = union(enum) {
     unchanged,
+    inverted,
     unknown,
     known: bool,
 };
@@ -3279,6 +3295,10 @@ fn staticMachineInstructionPredicateWriteEffect(
                 .unchanged
             else
                 .unknown,
+            .compare_eq_zero => if (instruction.dst == predicate.operand)
+                .inverted
+            else
+                .unknown,
             else => .unknown,
         },
         .sum_variant_is => .unknown,
@@ -3294,6 +3314,13 @@ fn staticMachineAdvanceConditionSourceValue(
 ) error{ProgramContractViolation}!void {
     switch (try staticMachineInstructionPredicateWriteEffect(instruction, predicate)) {
         .unchanged => {},
+        .inverted => {
+            source_value.* = switch (source_value.*) {
+                .unknown => .unknown,
+                .false_value => .true_value,
+                .true_value => .false_value,
+            };
+        },
         .unknown => {
             source_value.* = .unknown;
             source_valid.* = false;
@@ -3314,6 +3341,7 @@ fn staticMachineAdvanceConditionSourceRelation(
 ) error{ProgramContractViolation}!void {
     switch (try staticMachineInstructionPredicateWriteEffect(instruction, predicate)) {
         .unchanged => {},
+        .inverted => source_matches_reference.* = !source_matches_reference.*,
         .unknown => {
             source_matches_reference.* = false;
             source_valid.* = false;
@@ -3486,7 +3514,7 @@ fn staticMachineFunctionHasAfterPredicateOverlap(
                     instruction,
                     candidate,
                 ) catch return true) {
-                    .unchanged => {},
+                    .unchanged, .inverted => {},
                     .known, .unknown => switch (state.phase) {
                         .candidate_seen, .distinct_seen => state.phase = .before_candidate,
                         .before_candidate, .after_seen => {},
@@ -3633,7 +3661,7 @@ fn staticMachineFunctionHasInterleavedPredicateRevisit(
                     instruction,
                     candidate,
                 ) catch return true) {
-                    .unchanged => {},
+                    .unchanged, .inverted => {},
                     .known, .unknown => state.phase = .before_candidate,
                 }
 
@@ -3667,6 +3695,34 @@ fn staticMachineFunctionHasInterleavedPredicateRevisit(
         }
     }
     return false;
+}
+
+fn staticMachineLocalHasSingleScalarConstantWriter(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime analysis: anytype,
+    function: program_plan.FunctionPlan,
+    local_index: u16,
+) bool {
+    var found = false;
+    const instruction_end = @as(usize, function.first_instruction) + function.instruction_count;
+    for (
+        compiled_plan.instructions[function.first_instruction..instruction_end],
+        function.first_instruction..,
+    ) |instruction, instruction_index| {
+        if (!analysis.reachable_instructions[instruction_index] or
+            !staticMachineInstructionMayWriteLocal(instruction, local_index))
+        {
+            continue;
+        }
+        if (found) return false;
+        found = true;
+        switch (instruction.kind) {
+            .const_i32 => _ = constI32Value(instruction) catch return false,
+            .const_usize => _ = std.fmt.parseUnsigned(u64, instruction.string_literal, 0) catch return false,
+            else => return false,
+        }
+    }
+    return found;
 }
 
 fn staticMachineLocalHasSingleZeroWriter(
@@ -3806,6 +3862,103 @@ fn staticMachineFunctionHasPathWithoutLocalWrite(
     return false;
 }
 
+fn staticMachineFunctionEntryReachesInstructionWithoutPredicate(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime analysis: anytype,
+    comptime function_index: usize,
+    target_instruction_index: usize,
+) bool {
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    if (control_node_count == 0 or
+        control_node_count > static_max_control_nodes or
+        function_index >= compiled_plan.functions.len)
+    {
+        return false;
+    }
+    const function = compiled_plan.functions[function_index];
+    const function_block_end = @as(usize, function.first_block) + function.block_count;
+    const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse
+        return false;
+    const StateIndex = std.math.IntFittingRange(0, control_node_count - 1);
+    const StateVisited = std.StaticBitSet(control_node_count);
+    var queue: [control_node_count]StateIndex = undefined;
+    var visited = StateVisited.initEmpty();
+    var queue_len: usize = 1;
+    var queue_index: usize = 0;
+    queue[0] = @intCast(entry_node);
+    visited.set(entry_node);
+
+    path_search: while (queue_index < queue_len) : (queue_index += 1) {
+        const node: usize = @intCast(queue[queue_index]);
+        if (node == target_instruction_index) return true;
+        if (node < compiled_plan.instructions.len) {
+            var block_index: usize = function.first_block;
+            const owner_block = while (block_index < function_block_end) : (block_index += 1) {
+                const block = compiled_plan.blocks[block_index];
+                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                if (node >= block.first_instruction and node < instruction_end) break block;
+            } else return false;
+            const instruction = compiled_plan.instructions[node];
+            if (staticMachineConditionPredicateForInstruction(instruction) != null) {
+                continue :path_search;
+            }
+            switch (instruction.kind) {
+                .return_error => continue :path_search,
+                .call_helper => if (instruction.operand >= compiled_plan.functions.len or
+                    !analysis.completion_functions[instruction.operand]) continue :path_search,
+                .call_nested_with => {
+                    const target_index = nestedWithTargetIndexForMetadata(
+                        compiled_plan,
+                        nested_with_targets,
+                        instruction.string_literal,
+                    ) orelse continue :path_search;
+                    if (!analysis.completion_functions[target_index]) continue :path_search;
+                },
+                .call_op => {
+                    if (instruction.operand >= compiled_plan.ops.len) return false;
+                    if (compiled_plan.ops[instruction.operand].mode == .abort) continue :path_search;
+                },
+                else => {},
+            }
+            const instruction_end = @as(usize, owner_block.first_instruction) + owner_block.instruction_count;
+            const next_node = if (node + 1 == instruction_end)
+                compiled_plan.instructions.len + block_index
+            else
+                node + 1;
+            if (!visited.isSet(next_node)) {
+                visited.set(next_node);
+                queue[queue_len] = @intCast(next_node);
+                queue_len += 1;
+            }
+            continue :path_search;
+        }
+
+        const block_index = node - compiled_plan.instructions.len;
+        if (block_index < function.first_block or block_index >= function_block_end) return false;
+        const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+        const targets = switch (terminator.kind) {
+            .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
+            .jump => [2]?u16{ terminator.primary, null },
+            .return_unit, .return_value => [2]?u16{ null, null },
+        };
+        target_search: for (targets) |target_optional| {
+            const target = target_optional orelse continue :target_search;
+            const next_node = staticMachineFunctionBlockStartNode(
+                compiled_plan,
+                function_index,
+                target,
+            ) orelse return false;
+            if (!visited.isSet(next_node)) {
+                visited.set(next_node);
+                queue[queue_len] = @intCast(next_node);
+                queue_len += 1;
+            }
+        }
+    }
+    return false;
+}
+
 fn validateStaticMachineRepresentableStateAuthority(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
@@ -3845,6 +3998,44 @@ fn validateStaticMachineRepresentableStateAuthority(
             }
             predicate_locals[predicate.operand] = true;
         }
+        known_writer_scan: for (
+            compiled_plan.instructions[function.first_instruction..instruction_end],
+            function.first_instruction..,
+        ) |writer, writer_index| {
+            if (!analysis.reachable_instructions[writer_index] or
+                (writer.kind != .const_i32 and writer.kind != .const_usize) or
+                writer.dst >= predicate_locals.len or
+                !predicate_locals[writer.dst])
+            {
+                continue :known_writer_scan;
+            }
+            predicate_scan: for (
+                compiled_plan.instructions[function.first_instruction..instruction_end],
+                function.first_instruction..,
+            ) |candidate, candidate_index| {
+                if (!analysis.reachable_instructions[candidate_index]) continue :predicate_scan;
+                const predicate = staticMachineConditionPredicateForInstruction(candidate) orelse
+                    continue :predicate_scan;
+                if (predicate.operand != writer.dst) continue :predicate_scan;
+                if (staticMachineFunctionEntryReachesInstructionWithoutPredicate(
+                    compiled_plan,
+                    nested_with_targets,
+                    analysis,
+                    function_index,
+                    writer_index,
+                ) and staticMachineFunctionHasPathWithoutLocalWrite(
+                    compiled_plan,
+                    nested_with_targets,
+                    analysis,
+                    function_index,
+                    writer_index,
+                    candidate_index,
+                    writer.dst,
+                )) {
+                    @compileError("Boundary StaticMachine v1 does not support condition predicates reached from a known scalar write");
+                }
+            }
+        }
         exact_copy_scan: for (
             compiled_plan.instructions[function.first_instruction..instruction_end],
             function.first_instruction..,
@@ -3855,6 +4046,84 @@ fn validateStaticMachineRepresentableStateAuthority(
                 !predicate_locals[instruction.dst])
             {
                 continue :exact_copy_scan;
+            }
+            switch (instruction.kind) {
+                .add_const_i32 => {
+                    if (instruction.operand >= predicate_locals.len) {
+                        @compileError("Boundary StaticMachine v1 observed an invalid scalar-correlation local");
+                    }
+                    if (instruction.operand == instruction.dst and instruction.aux != 0) {
+                        @compileError("Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals");
+                    }
+                },
+                .add_i32 => {
+                    if (instruction.operand >= predicate_locals.len or
+                        instruction.aux >= predicate_locals.len)
+                    {
+                        @compileError("Boundary StaticMachine v1 observed an invalid scalar-correlation local");
+                    }
+                    const lhs_is_predicate = predicate_locals[instruction.operand];
+                    const rhs_is_predicate = predicate_locals[instruction.aux];
+                    const lhs_is_constant = staticMachineLocalHasSingleScalarConstantWriter(
+                        compiled_plan,
+                        analysis,
+                        function,
+                        instruction.operand,
+                    );
+                    const rhs_is_constant = staticMachineLocalHasSingleScalarConstantWriter(
+                        compiled_plan,
+                        analysis,
+                        function,
+                        instruction.aux,
+                    );
+                    const exact_copy_source: ?u16 = if (staticMachineLocalHasSingleZeroWriter(
+                        compiled_plan,
+                        analysis,
+                        function,
+                        instruction.operand,
+                    ))
+                        instruction.aux
+                    else if (staticMachineLocalHasSingleZeroWriter(
+                        compiled_plan,
+                        analysis,
+                        function,
+                        instruction.aux,
+                    ))
+                        instruction.operand
+                    else
+                        null;
+                    const is_cross_local_exact_copy = if (exact_copy_source) |source|
+                        source != instruction.dst and predicate_locals[source]
+                    else
+                        false;
+                    if (!is_cross_local_exact_copy and
+                        ((lhs_is_predicate and (rhs_is_predicate or rhs_is_constant)) or
+                            (rhs_is_predicate and lhs_is_constant)))
+                    {
+                        @compileError("Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals");
+                    }
+                },
+                .sub_one => {
+                    if (instruction.operand >= predicate_locals.len) {
+                        @compileError("Boundary StaticMachine v1 observed an invalid scalar-correlation local");
+                    }
+                    if (instruction.operand != instruction.dst and
+                        predicate_locals[instruction.operand])
+                    {
+                        @compileError("Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals");
+                    }
+                },
+                .compare_eq_zero, .sum_variant_is => {
+                    if (instruction.operand >= predicate_locals.len) {
+                        @compileError("Boundary StaticMachine v1 observed an invalid predicate-result correlation local");
+                    }
+                    if (instruction.operand != instruction.dst and
+                        predicate_locals[instruction.operand])
+                    {
+                        @compileError("Boundary StaticMachine v1 does not support boolean-result correlations between condition-predicate locals");
+                    }
+                },
+                else => {},
             }
             const copied_source: ?u16 = switch (instruction.kind) {
                 .add_const_i32 => if (instruction.aux == 0) instruction.operand else null,
@@ -3993,6 +4262,46 @@ fn validateStaticMachineRepresentableStateAuthority(
                     continue :prior_extract_scan;
                 }
                 @compileError("Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals");
+            }
+        }
+        helper_call_scan: for (
+            compiled_plan.instructions[function.first_instruction..instruction_end],
+            function.first_instruction..,
+        ) |instruction, instruction_index| {
+            if (!analysis.reachable_instructions[instruction_index] or
+                instruction.kind != .call_helper)
+            {
+                continue :helper_call_scan;
+            }
+            if (instruction.operand >= compiled_plan.functions.len) {
+                @compileError("Boundary StaticMachine v1 observed an invalid helper call");
+            }
+            const callee = compiled_plan.functions[instruction.operand];
+            if (callee.parameter_count != 0 and instruction.aux == std.math.maxInt(u16)) {
+                @compileError("Boundary StaticMachine v1 observed an invalid helper argument table");
+            }
+            first_parameter_scan: for (0..callee.parameter_count) |first_parameter| {
+                const first_predicate = staticMachineFunctionLocalIsConditionPredicate(
+                    compiled_plan,
+                    instruction.operand,
+                    @intCast(first_parameter),
+                );
+                if (!first_predicate) continue :first_parameter_scan;
+                const first_arg_index = std.math.add(usize, instruction.aux, first_parameter) catch
+                    @compileError("Boundary StaticMachine v1 observed an invalid helper argument table");
+                const first_source = planCallArgAt(compiled_plan, first_arg_index);
+                second_parameter_scan: for (first_parameter + 1..callee.parameter_count) |second_parameter| {
+                    if (!staticMachineFunctionLocalIsConditionPredicate(
+                        compiled_plan,
+                        instruction.operand,
+                        @intCast(second_parameter),
+                    )) continue :second_parameter_scan;
+                    const second_arg_index = std.math.add(usize, instruction.aux, second_parameter) catch
+                        @compileError("Boundary StaticMachine v1 observed an invalid helper argument table");
+                    if (first_source == planCallArgAt(compiled_plan, second_arg_index)) {
+                        @compileError("Boundary StaticMachine v1 does not support aliased helper predicate parameters");
+                    }
+                }
             }
         }
         if (function_index == compiled_plan.entry_index) continue;
