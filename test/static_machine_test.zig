@@ -783,6 +783,70 @@ fn correlatedAbsentLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan
     }) catch unreachable;
 }
 
+fn gatedPredicateAuthorityPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const first = boundary.ir.builder.local(root, 0);
+    const second = boundary.ir.builder.local(root, 1);
+    const condition = boundary.ir.builder.local(root, 2);
+    const instructions = [_]boundary.ir.plan.Instruction{
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = first.index },
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = second.index },
+        boundary.ir.builder.callOp(root, null, boundary.ir.builder.op(root, 0), null) catch unreachable,
+    };
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .parameter_count = 2,
+        .first_requirement = 0,
+        .requirement_count = 1,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 3,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 4,
+        .first_instruction = 0,
+        .instruction_count = @intCast(instructions.len),
+    }};
+    const requirements = [_]boundary.ir.plan.Requirement{.{
+        .label = "park",
+        .first_op = 0,
+        .op_count = 1,
+    }};
+    const ops = [_]boundary.ir.plan.Op{.{
+        .requirement_index = 0,
+        .op_name = "wait",
+        .mode = .transform,
+        .payload_codec = .unit,
+        .resume_codec = .unit,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{
+        .{ .first_instruction = 0, .instruction_count = 1, .terminator_index = 0 },
+        .{ .first_instruction = 1, .instruction_count = 1, .terminator_index = 1 },
+        .{ .first_instruction = 2, .instruction_count = 1, .terminator_index = 2 },
+        .{ .first_instruction = 3, .instruction_count = 0, .terminator_index = 3 },
+    };
+    const terminators = [_]boundary.ir.plan.Terminator{
+        .{ .kind = .branch_if, .primary = 1, .secondary = 3 },
+        .{ .kind = .branch_if, .primary = 3, .secondary = 2 },
+        .{ .kind = .return_unit },
+        .{ .kind = .return_unit },
+    };
+    return boundary.ir.builder.finish(.{
+        .label = label,
+        .ir_hash = 45,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &requirements,
+        .ops = &ops,
+        .outputs = &.{},
+        .locals = &.{ .{ .codec = .i32 }, .{ .codec = .i32 }, .{ .codec = .bool } },
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &instructions,
+    }) catch unreachable;
+}
+
 fn rewrittenPredicateAbsentLocalPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const input = boundary.ir.builder.local(root, 0);
@@ -2543,6 +2607,21 @@ const CorrelatedAbsentLocalProgram = boundary.program(
     CorrelatedAbsentLocalBody,
 );
 const CorrelatedAbsentLocalMachine = boundary.staticMachine(CorrelatedAbsentLocalProgram, .{});
+
+const GatedPredicateAuthorityBody = struct {
+    pub const compiled_plan = gatedPredicateAuthorityPlan(
+        "static-machine-gated-predicate-authority",
+    );
+};
+const GatedPredicateAuthorityProgram = boundary.program(
+    "static-machine-gated-predicate-authority",
+    struct {},
+    GatedPredicateAuthorityBody,
+);
+const GatedPredicateAuthorityMachine = boundary.staticMachine(
+    GatedPredicateAuthorityProgram,
+    .{},
+);
 
 const RewrittenPredicateAbsentLocalBody = struct {
     pub const compiled_plan = rewrittenPredicateAbsentLocalPlan(
@@ -5183,6 +5262,50 @@ test "StaticMachine rejects retained predicate authority that differs from decod
     try std.testing.expectError(
         error.ProgramContractViolation,
         CorrelatedAbsentLocalMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "StaticMachine rejects a forged earlier predicate that gates an operation suspension" {
+    const state = try GatedPredicateAuthorityMachine.initialState(
+        std.testing.allocator,
+        .{ @as(i32, 0), @as(i32, 1) },
+    );
+    defer GatedPredicateAuthorityMachine.deinitState(state);
+    var fuel: u64 = 100;
+    switch (try GatedPredicateAuthorityMachine.reduce(state, &fuel)) {
+        .request => {},
+        else => return error.UnexpectedTransition,
+    }
+    const encoded = try GatedPredicateAuthorityMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const restored = try GatedPredicateAuthorityMachine.decodeState(
+        std.testing.allocator,
+        encoded,
+    );
+    GatedPredicateAuthorityMachine.deinitState(restored);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const frame_offset = try singleFrameOffset(forged[0 .. forged.len - 8], 0);
+    const locals_count_offset = frame_offset + 6 * 8 + 2;
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        std.mem.readInt(u64, forged[locals_count_offset..][0..8], .little),
+    );
+    const first_value_offset = locals_count_offset + 8 + 2 + 1;
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        std.mem.readInt(i32, forged[first_value_offset..][0..4], .little),
+    );
+    std.mem.writeInt(i32, forged[first_value_offset..][0..4], 1, .little);
+    refreshStateChecksum(forged);
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        GatedPredicateAuthorityMachine.decodeState(std.testing.allocator, forged),
     );
 }
 

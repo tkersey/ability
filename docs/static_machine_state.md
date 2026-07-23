@@ -177,9 +177,14 @@ transfer the complementary relation exactly. An in-place boolean
 `compare_eq_zero` also transfers the exact complementary post-write source
 relation. Construction rejects an unchanged predicate revisited after an
 interleaved distinct predicate, cross-local predicate aliases, deterministic
-scalar or boolean correlations between predicate locals, known scalar-write
-predicate paths, aliased helper predicate parameters, and live after histories
-that would require simultaneous authority for distinct predicates.
+scalar or boolean correlations between predicate locals, repeated `add_i32`,
+`sub_one`, or same-helper derivations from unchanged inputs, aliased helper
+predicate parameters, and live after histories that would require simultaneous
+authority for distinct predicates. A bounded compile-time path analysis derives
+the truth of every predicate that uniquely gates each operation suspension.
+Canonical pending-state validation checks every such truth against its decoded
+source local, so a later predicate cannot erase an earlier gate. Construction
+rejects an operation site when no predicate-consistent path can reach it.
 Constant-backed `add_i32`, cross-local `sub_one`, and nonzero in-place
 `add_const_i32` forms are outside the v1 carrier; safe in-place selector
 countdowns remain admitted. Semantic no-op writes do not erase predicate

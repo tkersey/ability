@@ -3697,6 +3697,325 @@ fn staticMachineFunctionHasInterleavedPredicateRevisit(
     return false;
 }
 
+const PredicateAuthorityRequirement = enum(u2) {
+    none,
+    false_value,
+    true_value,
+};
+
+fn staticMachinePredicateAuthorityRequirements(
+    comptime compiled_plan: program_plan.ProgramPlan,
+    comptime nested_with_targets: anytype,
+    comptime analysis: anytype,
+    comptime operation_yield_sites: anytype,
+) [operation_yield_sites.len][
+    staticMachineMaximumConditionPredicateCount(
+        compiled_plan,
+    )
+]PredicateAuthorityRequirement {
+    @setEvalBranchQuota(10_000_000);
+    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
+    const maximum_predicate_count = staticMachineMaximumConditionPredicateCount(compiled_plan);
+    var requirements =
+        [_][maximum_predicate_count]PredicateAuthorityRequirement{
+            [_]PredicateAuthorityRequirement{.none} ** maximum_predicate_count,
+        } ** operation_yield_sites.len;
+    if (control_node_count == 0 or control_node_count > static_max_control_nodes) {
+        return requirements;
+    }
+    const gate_count = 3;
+    const source_validity_count = 2;
+    const source_truth_count = 2;
+    const cached_truth_count = 3;
+    const state_count = std.math.mul(
+        usize,
+        control_node_count,
+        gate_count * source_validity_count * source_truth_count *
+            cached_truth_count,
+    ) catch @compileError("Boundary StaticMachine v1 predicate-authority analysis overflowed");
+    if (state_count > static_max_control_work_units) {
+        @compileError("Boundary StaticMachine v1 predicate-authority analysis exceeds the v1 limit");
+    }
+    const StateIndex = std.math.IntFittingRange(0, state_count - 1);
+    const StateVisited = std.StaticBitSet(state_count);
+    const Gate = enum(u2) {
+        inactive,
+        false_value,
+        true_value,
+    };
+    const State = struct {
+        node: usize,
+        gate: Gate,
+        source_valid: bool,
+        source_truth: bool,
+        cached_truth: StaticMachineConditionValue,
+    };
+    const encodeState = struct {
+        fn call(state: State) usize {
+            var encoded = state.node;
+            encoded = encoded * gate_count + @intFromEnum(state.gate);
+            encoded = encoded * source_validity_count + @intFromBool(state.source_valid);
+            encoded = encoded * source_truth_count + @intFromBool(state.source_truth);
+            encoded = encoded * cached_truth_count + @intFromEnum(state.cached_truth);
+            return encoded;
+        }
+    }.call;
+    const decodeState = struct {
+        fn call(encoded_value: usize) State {
+            var encoded = encoded_value;
+            const cached_truth: StaticMachineConditionValue =
+                @enumFromInt(encoded % cached_truth_count);
+            encoded /= cached_truth_count;
+            const source_truth = encoded % source_truth_count != 0;
+            encoded /= source_truth_count;
+            const source_valid = encoded % source_validity_count != 0;
+            encoded /= source_validity_count;
+            const gate: Gate = @enumFromInt(encoded % gate_count);
+            encoded /= gate_count;
+            return .{
+                .node = encoded,
+                .gate = gate,
+                .source_valid = source_valid,
+                .source_truth = source_truth,
+                .cached_truth = cached_truth,
+            };
+        }
+    }.call;
+    const enqueue = struct {
+        fn call(
+            queue: *[state_count]StateIndex,
+            queue_len: *usize,
+            visited: *StateVisited,
+            state: State,
+        ) void {
+            const encoded = encodeState(state);
+            if (visited.isSet(encoded)) return;
+            visited.set(encoded);
+            queue[queue_len.*] = @intCast(encoded);
+            queue_len.* += 1;
+        }
+    }.call;
+    const advanceCandidateSource = struct {
+        fn call(
+            state: *State,
+            instruction: program_plan.Instruction,
+            candidate: StaticConditionPredicate,
+        ) bool {
+            switch (staticMachineInstructionPredicateWriteEffect(
+                instruction,
+                candidate,
+            ) catch return false) {
+                .unchanged => {},
+                .inverted => if (state.source_valid) {
+                    state.source_truth = !state.source_truth;
+                },
+                .known => |known| {
+                    state.gate = .inactive;
+                    state.source_valid = true;
+                    state.source_truth = known;
+                },
+                .unknown => {
+                    state.gate = .inactive;
+                    state.source_valid = false;
+                    state.source_truth = false;
+                },
+            }
+            return true;
+        }
+    }.call;
+
+    for (compiled_plan.functions, 0..) |function, function_index| {
+        if (!analysis.reachable_functions[function_index]) continue;
+        const predicate_count = staticMachineFunctionConditionPredicateCount(
+            compiled_plan,
+            function_index,
+        );
+        if (predicate_count == 0) continue;
+        const function_block_end = @as(usize, function.first_block) + function.block_count;
+        const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse
+            @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid function entry");
+        for (0..predicate_count) |candidate_index| {
+            const candidate = staticMachineConditionPredicateForIndex(
+                compiled_plan,
+                function_index,
+                candidate_index,
+            ) orelse @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid predicate");
+            var queue: [state_count]StateIndex = undefined;
+            var visited = StateVisited.initEmpty();
+            var queue_len: usize = 0;
+            var queue_index: usize = 0;
+            var reached_inactive = [_]bool{false} ** operation_yield_sites.len;
+            var reached_false = [_]bool{false} ** operation_yield_sites.len;
+            var reached_true = [_]bool{false} ** operation_yield_sites.len;
+            enqueue(&queue, &queue_len, &visited, .{
+                .node = entry_node,
+                .gate = .inactive,
+                .source_valid = false,
+                .source_truth = false,
+                .cached_truth = .unknown,
+            });
+
+            predicate_search: while (queue_index < queue_len) : (queue_index += 1) {
+                var state = decodeState(@intCast(queue[queue_index]));
+                site_search: inline for (operation_yield_sites, 0..) |site, site_index| {
+                    if (site.function_index != function_index or
+                        site.instruction_index != state.node)
+                    {
+                        continue :site_search;
+                    }
+                    switch (state.gate) {
+                        .inactive => reached_inactive[site_index] = true,
+                        .false_value => {
+                            reached_false[site_index] = true;
+                        },
+                        .true_value => {
+                            reached_true[site_index] = true;
+                        },
+                    }
+                }
+
+                if (state.node < compiled_plan.instructions.len) {
+                    var block_index: usize = function.first_block;
+                    const owner_block = while (block_index < function_block_end) : (block_index += 1) {
+                        const block = compiled_plan.blocks[block_index];
+                        const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                        if (state.node >= block.first_instruction and state.node < instruction_end) {
+                            break block_index;
+                        }
+                    } else @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid instruction owner");
+                    const instruction = compiled_plan.instructions[state.node];
+                    switch (instruction.kind) {
+                        .return_error => continue :predicate_search,
+                        .call_helper => if (instruction.operand >= compiled_plan.functions.len or
+                            !analysis.completion_functions[instruction.operand]) continue :predicate_search,
+                        .call_nested_with => {
+                            const target_index = nestedWithTargetIndexForMetadata(
+                                compiled_plan,
+                                nested_with_targets,
+                                instruction.string_literal,
+                            ) orelse continue :predicate_search;
+                            if (!analysis.completion_functions[target_index]) continue :predicate_search;
+                        },
+                        .call_op => {
+                            if (instruction.operand >= compiled_plan.ops.len) {
+                                @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid operation");
+                            }
+                            if (compiled_plan.ops[instruction.operand].mode == .abort) continue :predicate_search;
+                        },
+                        else => {},
+                    }
+
+                    const block = compiled_plan.blocks[owner_block];
+                    const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
+                    const next_node = if (state.node + 1 == instruction_end)
+                        compiled_plan.instructions.len + owner_block
+                    else
+                        state.node + 1;
+                    if (staticMachineConditionPredicateForInstruction(instruction)) |predicate| {
+                        if (predicate.eql(candidate)) {
+                            const truth_values = if (state.source_valid)
+                                [2]?bool{ state.source_truth, null }
+                            else
+                                [2]?bool{ false, true };
+                            candidate_truth_search: for (truth_values) |truth_optional| {
+                                const truth = truth_optional orelse continue :candidate_truth_search;
+                                var next_state = state;
+                                next_state.node = next_node;
+                                next_state.gate = if (truth) .true_value else .false_value;
+                                next_state.cached_truth = if (truth) .true_value else .false_value;
+                                next_state.source_valid = !staticMachineInstructionMayWriteLocal(
+                                    instruction,
+                                    predicate.operand,
+                                );
+                                next_state.source_truth = truth;
+                                if (instruction.kind == .compare_eq_zero and
+                                    instruction.dst == predicate.operand)
+                                {
+                                    next_state.source_valid = true;
+                                    next_state.source_truth = !truth;
+                                }
+                                enqueue(&queue, &queue_len, &visited, next_state);
+                            }
+                            continue :predicate_search;
+                        }
+
+                        const possible_truths = if (state.gate != .inactive and
+                            state.source_valid)
+                            staticMachinePredicateTruthPossibilities(
+                                compiled_plan,
+                                function_index,
+                                candidate,
+                                state.source_truth,
+                                predicate,
+                            ) catch @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid predicate relation")
+                        else
+                            [2]?bool{ false, true };
+                        relation_search: for (possible_truths) |truth_optional| {
+                            const truth = truth_optional orelse continue :relation_search;
+                            var next_state = state;
+                            next_state.node = next_node;
+                            next_state.cached_truth = if (truth) .true_value else .false_value;
+                            if (!advanceCandidateSource(&next_state, instruction, candidate)) {
+                                @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid predicate write");
+                            }
+                            enqueue(&queue, &queue_len, &visited, next_state);
+                        }
+                        continue :predicate_search;
+                    }
+
+                    state.node = next_node;
+                    if (!advanceCandidateSource(&state, instruction, candidate)) {
+                        @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid predicate write");
+                    }
+                    enqueue(&queue, &queue_len, &visited, state);
+                    continue :predicate_search;
+                }
+
+                const block_index = state.node - compiled_plan.instructions.len;
+                if (block_index < function.first_block or block_index >= function_block_end) {
+                    @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid block");
+                }
+                const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
+                const truth_values = switch (state.cached_truth) {
+                    .unknown => [2]?bool{ false, true },
+                    .false_value => [2]?bool{ false, null },
+                    .true_value => [2]?bool{ true, null },
+                };
+                branch_search: for (truth_values) |truth_optional| {
+                    const truth = truth_optional orelse continue :branch_search;
+                    const target = switch (terminator.kind) {
+                        .branch_if => if (truth) terminator.primary else terminator.secondary,
+                        .jump => terminator.primary,
+                        .return_unit, .return_value => continue :branch_search,
+                    };
+                    state.node = staticMachineFunctionBlockStartNode(
+                        compiled_plan,
+                        function_index,
+                        target,
+                    ) orelse @compileError("Boundary StaticMachine v1 predicate-authority analysis observed an invalid branch target");
+                    enqueue(&queue, &queue_len, &visited, state);
+                    if (terminator.kind == .jump) break :branch_search;
+                }
+            }
+
+            result_site_search: inline for (operation_yield_sites, 0..) |site, site_index| {
+                if (site.function_index != function_index or reached_inactive[site_index]) {
+                    continue :result_site_search;
+                }
+                if (!reached_false[site_index] and !reached_true[site_index]) {
+                    @compileError("Boundary StaticMachine v1 does not support an operation suspension that is unreachable under predicate authority");
+                }
+                if (reached_false[site_index] == reached_true[site_index]) {
+                    continue :result_site_search;
+                }
+                requirements[site_index][candidate_index] =
+                    if (reached_true[site_index]) .true_value else .false_value;
+            }
+        }
+    }
+    return requirements;
+}
+
 fn staticMachineLocalHasSingleScalarConstantWriter(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime analysis: anytype,
@@ -3725,7 +4044,7 @@ fn staticMachineLocalHasSingleScalarConstantWriter(
     return found;
 }
 
-fn staticMachineLocalHasSingleZeroWriter(
+fn staticMachineLocalHasOnlyZeroWriters(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime analysis: anytype,
     function: program_plan.FunctionPlan,
@@ -3742,7 +4061,6 @@ fn staticMachineLocalHasSingleZeroWriter(
         {
             continue;
         }
-        if (found) return false;
         found = true;
         switch (instruction.kind) {
             .const_i32 => if ((constI32Value(instruction) catch return false) != 0) return false,
@@ -3753,14 +4071,14 @@ fn staticMachineLocalHasSingleZeroWriter(
     return found;
 }
 
-fn staticMachineFunctionHasPathWithoutLocalWrite(
+fn staticMachineFunctionHasPathWithoutLocalWrites(
     comptime compiled_plan: program_plan.ProgramPlan,
     comptime nested_with_targets: anytype,
     comptime analysis: anytype,
     comptime function_index: usize,
     start_instruction_index: usize,
     target_instruction_index: usize,
-    local_index: u16,
+    comptime forbidden_locals: []const u16,
 ) bool {
     const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
     if (control_node_count == 0 or control_node_count > static_max_control_nodes or
@@ -3805,103 +4123,10 @@ fn staticMachineFunctionHasPathWithoutLocalWrite(
                 if (node >= block.first_instruction and node < instruction_end) break block;
             } else return false;
             const instruction = compiled_plan.instructions[node];
-            if (staticMachineInstructionMayWriteLocal(instruction, local_index)) continue :path_search;
-            switch (instruction.kind) {
-                .return_error => continue :path_search,
-                .call_helper => if (instruction.operand >= compiled_plan.functions.len or
-                    !analysis.completion_functions[instruction.operand]) continue :path_search,
-                .call_nested_with => {
-                    const target_index = nestedWithTargetIndexForMetadata(
-                        compiled_plan,
-                        nested_with_targets,
-                        instruction.string_literal,
-                    ) orelse continue :path_search;
-                    if (!analysis.completion_functions[target_index]) continue :path_search;
-                },
-                .call_op => {
-                    if (instruction.operand >= compiled_plan.ops.len) return false;
-                    if (compiled_plan.ops[instruction.operand].mode == .abort) continue :path_search;
-                },
-                else => {},
-            }
-            const instruction_end = @as(usize, owner_block.first_instruction) + owner_block.instruction_count;
-            const next_node = if (node + 1 == instruction_end)
-                compiled_plan.instructions.len + block_index
-            else
-                node + 1;
-            if (!visited.isSet(next_node)) {
-                visited.set(next_node);
-                queue[queue_len] = @intCast(next_node);
-                queue_len += 1;
-            }
-            continue :path_search;
-        }
-
-        const block_index = node - compiled_plan.instructions.len;
-        if (block_index < function.first_block or block_index >= function_block_end) return false;
-        const terminator = compiled_plan.terminators[compiled_plan.blocks[block_index].terminator_index];
-        const targets = switch (terminator.kind) {
-            .branch_if => [2]?u16{ terminator.primary, terminator.secondary },
-            .jump => [2]?u16{ terminator.primary, null },
-            .return_unit, .return_value => [2]?u16{ null, null },
-        };
-        target_search: for (targets) |target_optional| {
-            const target = target_optional orelse continue :target_search;
-            const next_node = staticMachineFunctionBlockStartNode(
-                compiled_plan,
-                function_index,
-                target,
-            ) orelse return false;
-            if (!visited.isSet(next_node)) {
-                visited.set(next_node);
-                queue[queue_len] = @intCast(next_node);
-                queue_len += 1;
-            }
-        }
-    }
-    return false;
-}
-
-fn staticMachineFunctionEntryReachesInstructionWithoutPredicate(
-    comptime compiled_plan: program_plan.ProgramPlan,
-    comptime nested_with_targets: anytype,
-    comptime analysis: anytype,
-    comptime function_index: usize,
-    target_instruction_index: usize,
-) bool {
-    const control_node_count = compiled_plan.instructions.len + compiled_plan.blocks.len;
-    if (control_node_count == 0 or
-        control_node_count > static_max_control_nodes or
-        function_index >= compiled_plan.functions.len)
-    {
-        return false;
-    }
-    const function = compiled_plan.functions[function_index];
-    const function_block_end = @as(usize, function.first_block) + function.block_count;
-    const entry_node = staticMachineFunctionEntryNode(compiled_plan, function_index) orelse
-        return false;
-    const StateIndex = std.math.IntFittingRange(0, control_node_count - 1);
-    const StateVisited = std.StaticBitSet(control_node_count);
-    var queue: [control_node_count]StateIndex = undefined;
-    var visited = StateVisited.initEmpty();
-    var queue_len: usize = 1;
-    var queue_index: usize = 0;
-    queue[0] = @intCast(entry_node);
-    visited.set(entry_node);
-
-    path_search: while (queue_index < queue_len) : (queue_index += 1) {
-        const node: usize = @intCast(queue[queue_index]);
-        if (node == target_instruction_index) return true;
-        if (node < compiled_plan.instructions.len) {
-            var block_index: usize = function.first_block;
-            const owner_block = while (block_index < function_block_end) : (block_index += 1) {
-                const block = compiled_plan.blocks[block_index];
-                const instruction_end = @as(usize, block.first_instruction) + block.instruction_count;
-                if (node >= block.first_instruction and node < instruction_end) break block;
-            } else return false;
-            const instruction = compiled_plan.instructions[node];
-            if (staticMachineConditionPredicateForInstruction(instruction) != null) {
-                continue :path_search;
+            for (forbidden_locals) |local_index| {
+                if (staticMachineInstructionMayWriteLocal(instruction, local_index)) {
+                    continue :path_search;
+                }
             }
             switch (instruction.kind) {
                 .return_error => continue :path_search,
@@ -3965,6 +4190,12 @@ fn validateStaticMachineRepresentableStateAuthority(
     comptime analysis: anytype,
     comptime operation_yield_sites: anytype,
 ) void {
+    _ = staticMachinePredicateAuthorityRequirements(
+        compiled_plan,
+        nested_with_targets,
+        analysis,
+        operation_yield_sites,
+    );
     for (compiled_plan.functions, 0..) |function, function_index| {
         if (!analysis.reachable_functions[function_index]) continue;
         if (staticMachineFunctionHasInterleavedPredicateRevisit(
@@ -3997,44 +4228,6 @@ fn validateStaticMachineRepresentableStateAuthority(
                 @compileError("Boundary StaticMachine v1 observed an invalid condition-predicate local");
             }
             predicate_locals[predicate.operand] = true;
-        }
-        known_writer_scan: for (
-            compiled_plan.instructions[function.first_instruction..instruction_end],
-            function.first_instruction..,
-        ) |writer, writer_index| {
-            if (!analysis.reachable_instructions[writer_index] or
-                (writer.kind != .const_i32 and writer.kind != .const_usize) or
-                writer.dst >= predicate_locals.len or
-                !predicate_locals[writer.dst])
-            {
-                continue :known_writer_scan;
-            }
-            predicate_scan: for (
-                compiled_plan.instructions[function.first_instruction..instruction_end],
-                function.first_instruction..,
-            ) |candidate, candidate_index| {
-                if (!analysis.reachable_instructions[candidate_index]) continue :predicate_scan;
-                const predicate = staticMachineConditionPredicateForInstruction(candidate) orelse
-                    continue :predicate_scan;
-                if (predicate.operand != writer.dst) continue :predicate_scan;
-                if (staticMachineFunctionEntryReachesInstructionWithoutPredicate(
-                    compiled_plan,
-                    nested_with_targets,
-                    analysis,
-                    function_index,
-                    writer_index,
-                ) and staticMachineFunctionHasPathWithoutLocalWrite(
-                    compiled_plan,
-                    nested_with_targets,
-                    analysis,
-                    function_index,
-                    writer_index,
-                    candidate_index,
-                    writer.dst,
-                )) {
-                    @compileError("Boundary StaticMachine v1 does not support condition predicates reached from a known scalar write");
-                }
-            }
         }
         exact_copy_scan: for (
             compiled_plan.instructions[function.first_instruction..instruction_end],
@@ -4076,14 +4269,14 @@ fn validateStaticMachineRepresentableStateAuthority(
                         function,
                         instruction.aux,
                     );
-                    const exact_copy_source: ?u16 = if (staticMachineLocalHasSingleZeroWriter(
+                    const exact_copy_source: ?u16 = if (staticMachineLocalHasOnlyZeroWriters(
                         compiled_plan,
                         analysis,
                         function,
                         instruction.operand,
                     ))
                         instruction.aux
-                    else if (staticMachineLocalHasSingleZeroWriter(
+                    else if (staticMachineLocalHasOnlyZeroWriters(
                         compiled_plan,
                         analysis,
                         function,
@@ -4102,6 +4295,48 @@ fn validateStaticMachineRepresentableStateAuthority(
                     {
                         @compileError("Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals");
                     }
+                    prior_add_scan: for (
+                        compiled_plan.instructions[function.first_instruction..instruction_index],
+                        function.first_instruction..,
+                    ) |prior, prior_index| {
+                        if (!analysis.reachable_instructions[prior_index] or
+                            prior.kind != .add_i32 or
+                            prior.dst == instruction.dst or
+                            prior.dst >= predicate_locals.len or
+                            !predicate_locals[prior.dst] or
+                            prior.dst == instruction.operand or
+                            prior.dst == instruction.aux or
+                            instruction.dst == instruction.operand or
+                            instruction.dst == instruction.aux)
+                        {
+                            continue :prior_add_scan;
+                        }
+                        const same_operands = (prior.operand == instruction.operand and
+                            prior.aux == instruction.aux) or
+                            (prior.operand == instruction.aux and
+                                prior.aux == instruction.operand);
+                        if (!same_operands) continue :prior_add_scan;
+                        if (!staticMachineFunctionHasPathWithoutLocalWrites(
+                            compiled_plan,
+                            nested_with_targets,
+                            analysis,
+                            function_index,
+                            prior_index,
+                            instruction_index,
+                            &.{ instruction.operand, instruction.aux },
+                        ) and !staticMachineFunctionHasPathWithoutLocalWrites(
+                            compiled_plan,
+                            nested_with_targets,
+                            analysis,
+                            function_index,
+                            instruction_index,
+                            prior_index,
+                            &.{ instruction.operand, instruction.aux },
+                        )) {
+                            continue :prior_add_scan;
+                        }
+                        @compileError("Boundary StaticMachine v1 does not support repeated add_i32 derivations between condition-predicate locals");
+                    }
                 },
                 .sub_one => {
                     if (instruction.operand >= predicate_locals.len) {
@@ -4111,6 +4346,43 @@ fn validateStaticMachineRepresentableStateAuthority(
                         predicate_locals[instruction.operand])
                     {
                         @compileError("Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals");
+                    }
+                    if (instruction.operand != instruction.dst) {
+                        prior_sub_one_scan: for (
+                            compiled_plan.instructions[function.first_instruction..instruction_index],
+                            function.first_instruction..,
+                        ) |prior, prior_index| {
+                            if (!analysis.reachable_instructions[prior_index] or
+                                prior.kind != .sub_one or
+                                prior.operand != instruction.operand or
+                                prior.dst == instruction.dst or
+                                prior.dst == instruction.operand or
+                                prior.dst >= predicate_locals.len or
+                                !predicate_locals[prior.dst])
+                            {
+                                continue :prior_sub_one_scan;
+                            }
+                            if (!staticMachineFunctionHasPathWithoutLocalWrites(
+                                compiled_plan,
+                                nested_with_targets,
+                                analysis,
+                                function_index,
+                                prior_index,
+                                instruction_index,
+                                &.{instruction.operand},
+                            ) and !staticMachineFunctionHasPathWithoutLocalWrites(
+                                compiled_plan,
+                                nested_with_targets,
+                                analysis,
+                                function_index,
+                                instruction_index,
+                                prior_index,
+                                &.{instruction.operand},
+                            )) {
+                                continue :prior_sub_one_scan;
+                            }
+                            @compileError("Boundary StaticMachine v1 does not support repeated sub_one derivations between condition-predicate locals");
+                        }
                     }
                 },
                 .compare_eq_zero, .sum_variant_is => {
@@ -4128,7 +4400,7 @@ fn validateStaticMachineRepresentableStateAuthority(
             const copied_source: ?u16 = switch (instruction.kind) {
                 .add_const_i32 => if (instruction.aux == 0) instruction.operand else null,
                 .add_i32 => if (instruction.operand < function.local_count and
-                    staticMachineLocalHasSingleZeroWriter(
+                    staticMachineLocalHasOnlyZeroWriters(
                         compiled_plan,
                         analysis,
                         function,
@@ -4136,7 +4408,7 @@ fn validateStaticMachineRepresentableStateAuthority(
                     ))
                     instruction.aux
                 else if (instruction.aux < function.local_count and
-                    staticMachineLocalHasSingleZeroWriter(
+                    staticMachineLocalHasOnlyZeroWriters(
                         compiled_plan,
                         analysis,
                         function,
@@ -4182,22 +4454,22 @@ fn validateStaticMachineRepresentableStateAuthority(
                     {
                         continue :prior_scalar_scan;
                     }
-                    if (!staticMachineFunctionHasPathWithoutLocalWrite(
+                    if (!staticMachineFunctionHasPathWithoutLocalWrites(
                         compiled_plan,
                         nested_with_targets,
                         analysis,
                         function_index,
                         prior_index,
                         instruction_index,
-                        source,
-                    ) and !staticMachineFunctionHasPathWithoutLocalWrite(
+                        &.{source},
+                    ) and !staticMachineFunctionHasPathWithoutLocalWrites(
                         compiled_plan,
                         nested_with_targets,
                         analysis,
                         function_index,
                         instruction_index,
                         prior_index,
-                        source,
+                        &.{source},
                     )) {
                         continue :prior_scalar_scan;
                     }
@@ -4223,6 +4495,56 @@ fn validateStaticMachineRepresentableStateAuthority(
                         @compileError("Boundary StaticMachine v1 does not support helper result correlations between condition-predicate locals");
                     }
                 }
+                const argument_locals = blk: {
+                    var locals: [callee.parameter_count]u16 = undefined;
+                    for (0..callee.parameter_count) |arg_index| {
+                        const call_arg_index = std.math.add(usize, instruction.aux, arg_index) catch
+                            @compileError("Boundary StaticMachine v1 observed an invalid helper argument table");
+                        locals[arg_index] = planCallArgAt(compiled_plan, call_arg_index);
+                    }
+                    break :blk locals;
+                };
+                prior_helper_scan: for (
+                    compiled_plan.instructions[function.first_instruction..instruction_index],
+                    function.first_instruction..,
+                ) |prior, prior_index| {
+                    if (!analysis.reachable_instructions[prior_index] or
+                        prior.kind != .call_helper or
+                        prior.operand != instruction.operand or
+                        prior.dst == instruction.dst or
+                        prior.dst >= predicate_locals.len or
+                        !predicate_locals[prior.dst])
+                    {
+                        continue :prior_helper_scan;
+                    }
+                    for (argument_locals, 0..) |source, arg_index| {
+                        const prior_arg_index = std.math.add(usize, prior.aux, arg_index) catch
+                            continue :prior_helper_scan;
+                        if (planCallArgAt(compiled_plan, prior_arg_index) != source) {
+                            continue :prior_helper_scan;
+                        }
+                    }
+                    if (!staticMachineFunctionHasPathWithoutLocalWrites(
+                        compiled_plan,
+                        nested_with_targets,
+                        analysis,
+                        function_index,
+                        prior_index,
+                        instruction_index,
+                        &argument_locals,
+                    ) and !staticMachineFunctionHasPathWithoutLocalWrites(
+                        compiled_plan,
+                        nested_with_targets,
+                        analysis,
+                        function_index,
+                        instruction_index,
+                        prior_index,
+                        &argument_locals,
+                    )) {
+                        continue :prior_helper_scan;
+                    }
+                    @compileError("Boundary StaticMachine v1 does not support repeated helper result derivations between condition-predicate locals");
+                }
             }
             if (instruction.kind != .product_extract_field and instruction.kind != .sum_extract_payload) {
                 continue :exact_copy_scan;
@@ -4242,22 +4564,22 @@ fn validateStaticMachineRepresentableStateAuthority(
                 {
                     continue :prior_extract_scan;
                 }
-                if (!staticMachineFunctionHasPathWithoutLocalWrite(
+                if (!staticMachineFunctionHasPathWithoutLocalWrites(
                     compiled_plan,
                     nested_with_targets,
                     analysis,
                     function_index,
                     prior_index,
                     instruction_index,
-                    instruction.operand,
-                ) and !staticMachineFunctionHasPathWithoutLocalWrite(
+                    &.{instruction.operand},
+                ) and !staticMachineFunctionHasPathWithoutLocalWrites(
                     compiled_plan,
                     nested_with_targets,
                     analysis,
                     function_index,
                     instruction_index,
                     prior_index,
-                    instruction.operand,
+                    &.{instruction.operand},
                 )) {
                     continue :prior_extract_scan;
                 }
@@ -6338,6 +6660,18 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
         canonical_plan_identity
     else
         compiled_plan.hash();
+    const maximum_predicate_count = staticMachineMaximumConditionPredicateCount(compiled_plan);
+    const site_predicate_requirements = if (canonical_request_identity)
+        staticMachinePredicateAuthorityRequirements(
+            compiled_plan,
+            nested_with_targets,
+            analysis,
+            operation_yield_sites,
+        )
+    else
+        [_][maximum_predicate_count]PredicateAuthorityRequirement{
+            [_]PredicateAuthorityRequirement{.none} ** maximum_predicate_count,
+        } ** operation_yield_sites.len;
 
     if (canonical_request_identity) comptime {
         for (compiled_plan.instructions, 0..) |instruction, instruction_index| {
@@ -10196,6 +10530,33 @@ fn ExecutableSessionForPlanWithSelectedIdentity(
             if (self.frames.len() == 0) return error.ProgramContractViolation;
             const active = self.frames.top();
             try validateActiveOperationFrame(active.*, pending);
+            if (comptime canonical_request_identity) {
+                if (pending.operation_site_index >= site_predicate_requirements.len) {
+                    return error.ProgramContractViolation;
+                }
+                const site = operation_yield_sites[pending.operation_site_index];
+                if (site.function_index != active.function_index) {
+                    return error.ProgramContractViolation;
+                }
+                const locals = self.scratch.frameLocalsConst(active.frame);
+                requirement_scan: for (0..maximum_predicate_count) |predicate_index| {
+                    const expected = site_predicate_requirements[pending.operation_site_index][predicate_index];
+                    if (expected == .none) continue :requirement_scan;
+                    const predicate = staticMachineConditionPredicateForRuntimeFunctionIndex(
+                        compiled_plan,
+                        active.function_index,
+                        predicate_index,
+                    ) orelse return error.ProgramContractViolation;
+                    const actual = try conditionPredicateTruthForLocals(
+                        active.function_index,
+                        predicate,
+                        locals,
+                    );
+                    if (actual != (expected == .true_value)) {
+                        return error.ProgramContractViolation;
+                    }
+                }
+            }
             if (pending.has_after and self.scratch.afterEntries().len >= session_after_stack_capacity) {
                 return error.ProgramContractViolation;
             }

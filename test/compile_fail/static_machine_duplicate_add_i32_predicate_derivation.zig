@@ -3,26 +3,26 @@ const boundary = @import("boundary");
 
 fn plan() boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
-    const source = boundary.ir.builder.local(root, 0);
-    const zero = boundary.ir.builder.local(root, 1);
-    const copy = boundary.ir.builder.local(root, 2);
-    const condition = boundary.ir.builder.local(root, 3);
+    const lhs = boundary.ir.builder.local(root, 0);
+    const rhs = boundary.ir.builder.local(root, 1);
+    const first = boundary.ir.builder.local(root, 2);
+    const second = boundary.ir.builder.local(root, 3);
+    const condition = boundary.ir.builder.local(root, 4);
     const instructions = [_]boundary.ir.plan.Instruction{
-        .{ .kind = .const_i32, .dst = zero.index, .operand = 0 },
-        .{ .kind = .const_i32, .dst = zero.index, .operand = 0 },
-        .{ .kind = .add_i32, .dst = copy.index, .operand = source.index, .aux = zero.index },
-        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = source.index },
-        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = copy.index },
+        .{ .kind = .add_i32, .dst = first.index, .operand = lhs.index, .aux = rhs.index },
+        .{ .kind = .add_i32, .dst = second.index, .operand = lhs.index, .aux = rhs.index },
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = first.index },
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = second.index },
     };
     const functions = [_]boundary.ir.plan.Function{.{
         .symbol_name = "run",
-        .parameter_count = 1,
+        .parameter_count = 2,
         .first_requirement = 0,
         .requirement_count = 0,
         .first_output = 0,
         .output_count = 0,
         .first_local = 0,
-        .local_count = 4,
+        .local_count = 5,
         .first_block = 0,
         .entry_block = 0,
         .block_count = 1,
@@ -36,7 +36,7 @@ fn plan() boundary.ir.ProgramPlan {
     }};
     const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_unit }};
     return boundary.ir.builder.finish(.{
-        .label = "static-machine-add-i32-predicate-copy",
+        .label = "static-machine-duplicate-add-i32-predicate-derivation",
         .ir_hash = 1,
         .entry = root,
         .functions = &functions,
@@ -44,6 +44,7 @@ fn plan() boundary.ir.ProgramPlan {
         .ops = &.{},
         .outputs = &.{},
         .locals = &.{
+            .{ .codec = .i32 },
             .{ .codec = .i32 },
             .{ .codec = .i32 },
             .{ .codec = .i32 },
@@ -58,7 +59,7 @@ fn plan() boundary.ir.ProgramPlan {
 const Body = struct {
     pub const compiled_plan = plan();
 };
-const Program = boundary.program("static-machine-add-i32-predicate-copy", struct {}, Body);
+const Program = boundary.program("static-machine-duplicate-add-i32-predicate-derivation", struct {}, Body);
 const Machine = boundary.staticMachine(Program, .{});
 
 comptime {

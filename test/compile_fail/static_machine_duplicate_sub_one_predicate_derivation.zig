@@ -4,15 +4,14 @@ const boundary = @import("boundary");
 fn plan() boundary.ir.ProgramPlan {
     const root = boundary.ir.builder.function(0);
     const source = boundary.ir.builder.local(root, 0);
-    const zero = boundary.ir.builder.local(root, 1);
-    const copy = boundary.ir.builder.local(root, 2);
+    const first = boundary.ir.builder.local(root, 1);
+    const second = boundary.ir.builder.local(root, 2);
     const condition = boundary.ir.builder.local(root, 3);
     const instructions = [_]boundary.ir.plan.Instruction{
-        .{ .kind = .const_i32, .dst = zero.index, .operand = 0 },
-        .{ .kind = .const_i32, .dst = zero.index, .operand = 0 },
-        .{ .kind = .add_i32, .dst = copy.index, .operand = source.index, .aux = zero.index },
-        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = source.index },
-        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = copy.index },
+        .{ .kind = .sub_one, .dst = first.index, .operand = source.index },
+        .{ .kind = .sub_one, .dst = second.index, .operand = source.index },
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = first.index },
+        .{ .kind = .compare_eq_zero, .dst = condition.index, .operand = second.index },
     };
     const functions = [_]boundary.ir.plan.Function{.{
         .symbol_name = "run",
@@ -36,7 +35,7 @@ fn plan() boundary.ir.ProgramPlan {
     }};
     const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_unit }};
     return boundary.ir.builder.finish(.{
-        .label = "static-machine-add-i32-predicate-copy",
+        .label = "static-machine-duplicate-sub-one-predicate-derivation",
         .ir_hash = 1,
         .entry = root,
         .functions = &functions,
@@ -58,7 +57,7 @@ fn plan() boundary.ir.ProgramPlan {
 const Body = struct {
     pub const compiled_plan = plan();
 };
-const Program = boundary.program("static-machine-add-i32-predicate-copy", struct {}, Body);
+const Program = boundary.program("static-machine-duplicate-sub-one-predicate-derivation", struct {}, Body);
 const Machine = boundary.staticMachine(Program, .{});
 
 comptime {
