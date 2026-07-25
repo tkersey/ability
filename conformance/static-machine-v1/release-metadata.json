@@ -15,7 +15,7 @@
     "files": [
       {
         "path": "README.md",
-        "sha256": "7a05067edd16af87616f68d6ffae87e7baf623c6e7153185d43f805c9f52aab8"
+        "sha256": "849fdd51cc1f3d1c79df59bdc122f41337868d4353d02108f22f0c3db585f93d"
       },
       {
         "path": "docs/release_hardening.md",

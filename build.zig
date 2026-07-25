@@ -1086,6 +1086,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const release_archive_metadata_mod = b.createModule(.{
+        .root_source_file = b.path("conformance/static-machine-v1/release_metadata.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
     const static_machine_release_mod = b.createModule(.{
         .root_source_file = b.path("conformance/static-machine-v1/release_test.zig"),
         .target = target,
@@ -1156,12 +1161,12 @@ pub fn build(b: *std.Build) void {
 
     const release_archive_check_mod = b.createModule(.{
         .root_source_file = b.path("conformance/static-machine-v1/release_archive_check.zig"),
-        .target = target,
+        .target = b.graph.host,
         .optimize = optimize,
     });
     release_archive_check_mod.addImport(
         "boundary_static_machine_release_metadata",
-        release_metadata_mod,
+        release_archive_metadata_mod,
     );
     const release_archive_checker = b.addExecutable(.{
         .name = "boundary-release-archive-check",

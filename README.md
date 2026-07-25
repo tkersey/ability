@@ -68,11 +68,7 @@ const boundary = @import("boundary");
 const Handlers = struct {
     authored: struct {
         pub fn dispatch(_: *const @This()) !i32 {
-            return 41;
-        }
-
-        pub fn afterDispatch(_: *const @This(), value: i32) !i32 {
-            return value + 1;
+            return 42;
         }
     },
 };
@@ -102,7 +98,7 @@ fn plan() boundary.ir.ProgramPlan {
         .instruction_count = @intCast(instructions.len),
     }};
     const requirements = [_]boundary.ir.plan.Requirement{.{ .label = "authored", .first_op = 0, .op_count = 1 }};
-    const ops = [_]boundary.ir.plan.Op{.{ .requirement_index = 0, .op_name = "authored", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = true }};
+    const ops = [_]boundary.ir.plan.Op{.{ .requirement_index = 0, .op_name = "authored", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = false }};
     const blocks = [_]boundary.ir.plan.Block{.{ .first_instruction = 0, .instruction_count = @intCast(instructions.len), .terminator_index = 0 }};
     const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_value }};
 

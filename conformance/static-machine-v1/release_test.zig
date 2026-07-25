@@ -22,6 +22,7 @@ const ValidationError = error{
     StaticMachineAbiMismatch,
     SupportMatrixMismatch,
     CompatibilityClaimMissing,
+    PrimaryWorldExampleMismatch,
 };
 
 const MatrixClaim = struct {
@@ -60,6 +61,13 @@ const required_compatibility_claims = [_][]const u8{
     "The focused release gate selects only registered `static_machine_*` compile-fail fixtures; it is representative rather than exhaustive, while the aggregate `compile-fail` gate retains the complete repository rejection corpus.",
 };
 
+const primary_world_example_claims = [_][]const u8{
+    "return 42;",
+    ".op_name = \"authored\", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = false",
+    "The supported portable path reuses the same validated program type:",
+    "`boundary.staticMachine` is the World Comptime v1 deployment surface.",
+};
+
 const supplement_sources = [_]struct {
     path: []const u8,
     bytes: []const u8,
@@ -94,6 +102,14 @@ fn validateCompatibilityDocument(document: []const u8) ValidationError!void {
     for (&required_compatibility_claims) |claim| {
         if (std.mem.find(u8, document, claim) == null) {
             return error.CompatibilityClaimMissing;
+        }
+    }
+}
+
+fn validatePrimaryWorldExample(document: []const u8) ValidationError!void {
+    for (&primary_world_example_claims) |claim| {
+        if (std.mem.find(u8, document, claim) == null) {
+            return error.PrimaryWorldExampleMismatch;
         }
     }
 }
@@ -146,6 +162,7 @@ fn validateMetadata(metadata: release_metadata.ReleaseMetadata) ValidationError!
     try validateMatrixClaims(abi.supported_contracts, &supported_claims, compatibility_bytes);
     try validateMatrixClaims(abi.unsupported_contracts, &unsupported_claims, compatibility_bytes);
     try validateCompatibilityDocument(compatibility_bytes);
+    try validatePrimaryWorldExample(readme_bytes);
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -267,6 +284,16 @@ test "release metadata falsifiers reject wrong code identity and conflated docum
                 "`debug_metadata` is not identity-bearing. " ++
                 "`maximum_frames` is an admission bound. " ++
                 "`maximum_state_bytes` is identity-bearing.",
+        ),
+    );
+
+    try std.testing.expectError(
+        error.PrimaryWorldExampleMismatch,
+        validatePrimaryWorldExample(
+            "return 41; " ++
+                ".op_name = \"authored\", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = true " ++
+                "The supported portable path reuses the same validated program type: " ++
+                "`boundary.staticMachine` is the World Comptime v1 deployment surface.",
         ),
     );
 }
