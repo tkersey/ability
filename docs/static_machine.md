@@ -4,6 +4,10 @@
 defunctionalized reducer for a type returned by `boundary.program`. It is the
 Boundary-to-World compile-time seam for World Comptime v1.
 
+`boundary.staticMachine` and `boundary.StaticMachineOptions` are supported
+public package-root declarations in Boundary v0.7.0. The ABI version exposed by
+every generated machine is `Machine.abi_version == 1`.
+
 ```zig
 const Program = boundary.program("example", Handlers, Body);
 const Machine = boundary.staticMachine(Program, .{
@@ -232,3 +236,9 @@ site sets for a legacy namespace-collision plan. Static sites retain the exact
 matching legacy fingerprint as provenance, even when corrected reachability
 changes their dense ordinal. World v1 must close `Machine.EffectRow`; it must
 not infer the static residual row from `Program.protocol`.
+
+The release-level support matrix is maintained in
+[static_machine_compatibility.md](static_machine_compatibility.md). The
+machine-readable Boundary v0.7.0 code identity and documentation-supplement
+identity are checked from
+`conformance/static-machine-v1/release-metadata.json`.

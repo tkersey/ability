@@ -1,0 +1,63 @@
+{
+  "schema": "boundary-static-machine-release/v1",
+  "code_archive": {
+    "tag": "v0.7.0",
+    "commit": "7f2472100454aa2cd5c62e07db0c1e23eaf46a77",
+    "url": "https://github.com/tkersey/boundary/archive/refs/tags/v0.7.0.tar.gz",
+    "sha256": "25e5bd5ed45aac023ef99beee93f675ea4efb3f6eb1e98d2a13040d7451f0e9a",
+    "zig_package_hash": "boundary-0.7.0-flclaCnjkABOSWaiSkxMBDQZsBEeA-Niai-l1u0q3A7_",
+    "zig_version": "0.16.0"
+  },
+  "documentation_supplement": {
+    "included_in_code_archive": false,
+    "identity_kind": "ordered-canonical-text-sha256-file-set-v1",
+    "publication_binding": "reviewed-release-closure-git-commit",
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "849fdd51cc1f3d1c79df59bdc122f41337868d4353d02108f22f0c3db585f93d"
+      },
+      {
+        "path": "docs/release_hardening.md",
+        "sha256": "f03799d6b5bba64b578eaa736de3d98beb77c712418cd4c26ef1d9c5e816f7ed"
+      },
+      {
+        "path": "docs/static_machine.md",
+        "sha256": "9c2e624621216bf45ab6972d7608a5c2aec8fe9adfda4a1bd07d2e32928b86ad"
+      },
+      {
+        "path": "docs/static_machine_compatibility.md",
+        "sha256": "918e1d85936eee1f4a8c781d5b9fd5a311250cf8da52eb79ff411ef3f23fa645"
+      }
+    ]
+  },
+  "static_machine_abi": {
+    "version": 1,
+    "constructor": "boundary.staticMachine",
+    "options": "boundary.StaticMachineOptions",
+    "state_encoding": "canonical_v1",
+    "world_ports": "explicit",
+    "compatibility_document": "docs/static_machine_compatibility.md",
+    "supported_contracts": [
+      "authentic-boundary-program",
+      "canonical-v1-state",
+      "explicit-world-ports",
+      "acyclic-static-helper-provider-graphs",
+      "admitted-scalar-product-sum-carriers",
+      "closed-authored-failure-set",
+      "bounded-frames-state-and-validation-work",
+      "native-and-wasm32-freestanding"
+    ],
+    "unsupported_contracts": [
+      "recursive-helper-provider-graphs",
+      "program-output-or-cleanup-hooks",
+      "mutable-string-list-carriers",
+      "comptime-struct-fields",
+      "non-exhaustive-enums",
+      "unrepresentable-compact-condition-histories",
+      "dynamic-provider-discovery",
+      "runtime-module-loading",
+      "v0-continuation-migration"
+    ]
+  }
+}

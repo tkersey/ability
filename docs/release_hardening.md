@@ -10,20 +10,57 @@ Run these before publishing a branch:
 
 ```sh
 zig version
-zig fmt --check build.zig src examples test bench
+zig fmt --check build.zig src examples test bench conformance
 git diff --check
+zig build check-boundary-static-machine-release
+zig build check-boundary-static-machine-release-falsifiers
+zig build check-boundary-static-machine-release-archive -Dboundary-release-archive=/path/to/boundary-v0.7.0.tar.gz
+sh conformance/static-machine-v1/release_archive_check_offline.sh zig /path/to/boundary-v0.7.0.tar.gz
+zig build check-boundary-static-machine-release-archive-falsifiers
 zig build --summary all
 zig build test --summary all
 zig build lint -- --max-warnings 0
 ```
 
-`zig build lint` reads `repo_zig_paths.txt` and also checks that every `.zig`
-file under `src`, `examples`, `test`, and `bench` appears in that manifest. Add
-new Zig files to the manifest in the same patch that adds the file.
+`zig build lint` checks `build.zig` and every Zig source under `src`,
+`examples`, `test`, `bench`, and `conformance`. Its path-coverage guard also
+checks that every `.zig` file under `src`, `examples`, `test`, and `bench`
+appears in `repo_zig_paths.txt`. Add new maintained source files to that
+manifest in the same patch that adds the file.
 
 `build.zig.zon` packages the maintained source, docs, examples, tests,
 benchmarks, and manifest. Keep package paths aligned with any new top-level
 surface that users need in source distributions.
+
+The Boundary v0.7.0 code archive is immutable. Release-closure documentation
+added after that tag is a distinct supplement and must not be described as
+bytes from the tagged archive. The checked receipt at
+`conformance/static-machine-v1/release-metadata.json` binds the tag target,
+archive URL, archive SHA-256, Zig package hash, public StaticMachine ABI, and an
+ordered canonical-text digest set for the supplement. Canonical text maps LF
+and CRLF materializations to LF before hashing and rejects bare carriage
+returns, so checkout configuration cannot alter the supplement identity. A
+publication receipt separately binds the reviewed release-closure commit. The
+focused release gate checks that receipt and its owner-derived ABI and matrix
+claims. The materialized-archive gate first admits the receipt through the
+fixed v0.7.0 identity oracle, then accepts only the typed
+`-Dboundary-release-archive` input. Its host verifier always reads the original
+operator-selected path, recomputes the current bytes' SHA-256, writes those
+admitted bytes to a private snapshot, checks Zig `0.16.0`, and asks that
+toolchain to recompute the package hash from that same snapshot. A functional
+cache falsifier repeats the gate after a same-size byte substitution with an
+aged mtime restored; the second invocation must reject the current bytes rather
+than reuse a stale build-cache snapshot.
+
+The `zig build` command requires the source package's declared build
+dependencies to have been materialized in the selected Zig cache. For
+network-free revalidation from a materialized Boundary source package, use
+`release_archive_check_offline.sh`; it builds a small process-group owner and
+the archive checker against fixed release metadata with isolated local and
+global caches, so it does not resolve `build.zig.zon` dependencies. The wrapper
+admits proof work only after verifying actual SIGINT delivery, terminates the
+verifier-owned process group before removing its proof root, and reports
+success only after the checker writes the canonical completion receipt.
 
 ## File classification
 
@@ -33,7 +70,8 @@ Public:
 - `src/boundary_shared.zig`
 - `src/effect/root.zig`
 - `src/ir_api.zig`
-- `src/program_api.zig`
+- `src/program_api.zig` through the public `boundary.program`,
+  `boundary.staticMachine`, and `boundary.StaticMachineOptions` aliases
 - `src/lowered_machine.zig` through the public `boundary.Runtime` alias
 
 Public-adjacent:
@@ -96,6 +134,10 @@ Tests:
   `docs/program_plan.md`
 - Custom effect authoring direction:
   `docs/custom_effect_authoring.md`
+- StaticMachine ABI v1 contract:
+  `docs/static_machine.md`
+- StaticMachine v1 support and compatibility matrix:
+  `docs/static_machine_compatibility.md`
 - Release/package/lint discipline and file classification:
   this document
 
@@ -123,5 +165,6 @@ Non-goals for release hardening:
 - Do not expose Artifact, VM, compile, parser, `effect.Define`, or `effect.ops`
   as public APIs.
 - Do not widen `ProgramValue`.
+- Do not widen StaticMachine v1 support as part of release hardening.
 - Do not remove compatibility built-ins until plan-native examples and tests are
   sufficient replacement evidence.

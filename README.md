@@ -7,12 +7,16 @@ The public package root is intentionally small:
 - `boundary.effect`
 - `boundary.ir`
 - `boundary.program`
+- `boundary.staticMachine`
+- `boundary.StaticMachineOptions`
 - `boundary.Runtime`
 
 `effect` defines the effect families. `ir` exposes the public ProgramPlan
 builder. `program` gives a reusable execution surface for one named compiled
-body. `Runtime` is the caller-owned local runtime used to run programs
-repeatedly.
+body. `staticMachine` turns that Program into a typed portable-state reducer for
+World Comptime v1. `StaticMachineOptions` fixes its state encoding, explicit
+world-port policy, resource limits, and optional debug metadata. `Runtime` is
+the caller-owned local runtime used to run programs repeatedly.
 
 Each concrete `Program` also exposes `Program.Evidence`, the canonical internal
 evidence kernel for versioned fingerprint domains, evidence refs, dependency
@@ -34,14 +38,6 @@ profile, replay recipe, and target certificate. See
 [docs/boundary_elaboration.md](docs/boundary_elaboration.md), plus
 [docs/boundary_normalization.md](docs/boundary_normalization.md) and
 [docs/world_surface.md](docs/world_surface.md).
-
-`Target.Module` packages that normalized semantic surface as a deterministic
-Certified Boundary Module image. Reference modules support compact same-target
-transfer; full modules support validation and inspection without the original
-comptime Target type; partial modules are fail-closed around explicit external
-dependencies. Boundary serializes the normalized semantic boundary as a module.
-World serializes execution timelines and supplies the world. See
-[docs/boundary_module.md](docs/boundary_module.md).
 
 ## Program
 
@@ -72,11 +68,7 @@ const boundary = @import("boundary");
 const Handlers = struct {
     authored: struct {
         pub fn dispatch(_: *const @This()) !i32 {
-            return 41;
-        }
-
-        pub fn afterDispatch(_: *const @This(), value: i32) !i32 {
-            return value + 1;
+            return 42;
         }
     },
 };
@@ -106,7 +98,7 @@ fn plan() boundary.ir.ProgramPlan {
         .instruction_count = @intCast(instructions.len),
     }};
     const requirements = [_]boundary.ir.plan.Requirement{.{ .label = "authored", .first_op = 0, .op_count = 1 }};
-    const ops = [_]boundary.ir.plan.Op{.{ .requirement_index = 0, .op_name = "authored", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = true }};
+    const ops = [_]boundary.ir.plan.Op{.{ .requirement_index = 0, .op_name = "authored", .mode = .transform, .payload_codec = .unit, .resume_codec = .i32, .has_after = false }};
     const blocks = [_]boundary.ir.plan.Block{.{ .first_instruction = 0, .instruction_count = @intCast(instructions.len), .terminator_index = 0 }};
     const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_value }};
 
@@ -140,6 +132,38 @@ pub fn main() !void {
     // result.value == 42
 }
 ```
+
+### Portable static state
+
+The supported portable path reuses the same validated program type:
+
+```zig
+const Program = boundary.program("demo", Handlers, Body);
+const Machine = boundary.staticMachine(Program, .{
+    .state_encoding = .canonical_v1,
+    .world_ports = .explicit,
+    .maximum_frames = 64,
+    .maximum_state_bytes = 1 << 20,
+});
+```
+
+`Program.Session` is the local, host-driven execution surface. It owns live
+interpreter state tied to a caller-owned `boundary.Runtime`. Use it for direct
+Zig execution, inspection, and programs outside the StaticMachine v1 admitted
+domain.
+
+`boundary.staticMachine` is the World Comptime v1 deployment surface. Its
+generated `State` can be encoded with the canonical v1 codec, decoded in a fresh
+process or WASM instance, validated against the machine contract, and resumed
+without a live `Runtime`. It does not broaden Program semantics: construction
+fails at comptime when the Program uses a carrier, control shape, provider
+graph, cleanup hook, or resource bound that StaticMachine v1 cannot represent
+exactly.
+
+See [docs/static_machine.md](docs/static_machine.md) for the API and state
+contract, and
+[docs/static_machine_compatibility.md](docs/static_machine_compatibility.md)
+for the ABI v1 support and compatibility matrix.
 
 The label must be non-empty. `Program.Result` exposes `value`, `outputs`, and
 `deinit()`. `Program.Session` exposes the same plan as a host-driven loop:
@@ -645,6 +669,21 @@ the scalar public carrier; typed product and sum payloads and resumes use the
 existing `Body.value_schema_types` schema registry, including after-continuation
 values. Result, output, and cleanup rules are the same `Program.Result` rules
 used by `Program.run`.
+
+## Advanced compatibility: Certified Boundary Modules
+
+`Target.Module` packages a normalized semantic surface as a deterministic
+Certified Boundary Module image. Reference modules support compact same-target
+transfer; full modules support validation and inspection without the original
+comptime Target type; partial modules are fail-closed around explicit external
+dependencies. This loaded-module deployment surface remains available for
+advanced and compatibility use, but it is not the World Comptime v1 application
+path. New portable applications should use
+`boundary.program -> boundary.staticMachine -> world.application`.
+
+Boundary serializes the normalized semantic boundary as a module. World
+serializes execution timelines and supplies the world. See
+[docs/boundary_module.md](docs/boundary_module.md).
 
 ## Effects
 

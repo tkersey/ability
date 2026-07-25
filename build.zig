@@ -24,6 +24,29 @@ const TestArgs = struct {
     passthrough: []const []const u8,
 };
 
+fn readBuildFile(b: *std.Build, path: []const u8) []const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        b.pathFromRoot(path),
+        b.allocator,
+        .limited(1024 * 1024),
+    ) catch |err| std.process.fatal("unable to read release input '{s}': {s}", .{
+        path,
+        @errorName(err),
+    });
+}
+
+fn absoluteBuildDirectoryPath(
+    b: *std.Build,
+    directory: std.Build.Cache.Directory,
+    label: []const u8,
+) []const u8 {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = directory.handle.realPath(b.graph.io, &buffer) catch |err|
+        std.process.fatal("unable to resolve {s}: {s}", .{ label, @errorName(err) });
+    return b.dupe(buffer[0..length]);
+}
+
 fn parseTestArgs(b: *std.Build) TestArgs {
     const args = b.args orelse return .{
         .filters = &.{},
@@ -148,10 +171,11 @@ fn addCompileFailArtifact(
     compile_fail_step: *std.Build.Step,
     root_module: *std.Build.Module,
     expected_error: []const u8,
-) void {
+) *std.Build.Step.Compile {
     const tests = b.addTest(.{ .root_module = root_module });
     tests.expect_errors = .{ .contains = expected_error };
     compile_fail_step.dependOn(&tests.step);
+    return tests;
 }
 
 fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
@@ -1042,7 +1066,16 @@ pub fn build(b: *std.Build) void {
     static_machine_step.dependOn(static_machine_wasm_step);
     check_step.dependOn(static_machine_wasm_step);
     const static_machine_parity_step = b.step("check-boundary-static-machine-parity", "Check Program.Session and StaticMachine semantic parity.");
-    static_machine_parity_step.dependOn(&run_static_machine_tests.step);
+    if (test_args.filters.len == 0 and test_args.passthrough.len == 0) {
+        static_machine_parity_step.dependOn(&run_static_machine_tests.step);
+    } else {
+        const static_machine_parity_tests = b.addTest(.{ .root_module = static_machine_tests_mod });
+        static_machine_parity_step.dependOn(&addRunArtifactWithArgs(
+            b,
+            static_machine_parity_tests,
+            proof_test_args.passthrough,
+        ).step);
+    }
     const static_agent_step = b.step("check-boundary-static-agent", "Check the StaticMachine agent fixture.");
     const static_agent_tests = b.addTest(.{
         .root_module = agent_loop_tests_mod,
@@ -1055,6 +1088,179 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"agent StaticMachine toolbox provider"},
     });
     static_provider_step.dependOn(&addRunArtifactWithArgs(b, static_provider_tests, test_args.passthrough).step);
+
+    const compile_fail_step = b.step("compile-fail", "Check expected public ProgramPlan compile diagnostics.");
+    const static_machine_compile_fail = b.step(
+        "compile-fail-static-machine",
+        "Check expected Boundary StaticMachine compile diagnostics.",
+    );
+    test_step.dependOn(compile_fail_step);
+
+    const release_metadata_mod = b.createModule(.{
+        .root_source_file = b.path("conformance/static-machine-v1/release_metadata.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const release_archive_metadata_mod = b.createModule(.{
+        .root_source_file = b.path("conformance/static-machine-v1/release_metadata.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const static_machine_release_mod = b.createModule(.{
+        .root_source_file = b.path("conformance/static-machine-v1/release_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const static_machine_release_sources = b.addOptions();
+    static_machine_release_sources.addOption(
+        []const u8,
+        "readme_bytes",
+        readBuildFile(b, "README.md"),
+    );
+    static_machine_release_sources.addOption(
+        []const u8,
+        "release_hardening_bytes",
+        readBuildFile(b, "docs/release_hardening.md"),
+    );
+    static_machine_release_sources.addOption(
+        []const u8,
+        "static_machine_bytes",
+        readBuildFile(b, "docs/static_machine.md"),
+    );
+    static_machine_release_sources.addOption(
+        []const u8,
+        "compatibility_bytes",
+        readBuildFile(b, "docs/static_machine_compatibility.md"),
+    );
+    static_machine_release_mod.addImport("boundary", boundary);
+    static_machine_release_mod.addImport(
+        "boundary_static_machine_release_metadata",
+        release_metadata_mod,
+    );
+    static_machine_release_mod.addOptions(
+        "boundary_static_machine_release_sources",
+        static_machine_release_sources,
+    );
+    const static_machine_release_tests = b.addTest(.{
+        .root_module = static_machine_release_mod,
+        .filters = proof_test_args.filters,
+    });
+    const run_static_machine_release = addRunArtifactWithArgs(
+        b,
+        static_machine_release_tests,
+        proof_test_args.passthrough,
+    );
+    const static_machine_release_step = b.step(
+        "check-boundary-static-machine-release",
+        "Check the Boundary v0.7.0 identity, public StaticMachine ABI, and compatibility matrix.",
+    );
+    static_machine_release_step.dependOn(&run_static_machine_release.step);
+    static_machine_release_step.dependOn(static_machine_parity_step);
+    static_machine_release_step.dependOn(static_machine_wasm_step);
+    static_machine_release_step.dependOn(static_machine_compile_fail);
+    check_step.dependOn(static_machine_release_step);
+
+    const release_falsifier_tests = b.addTest(.{
+        .root_module = static_machine_release_mod,
+        .filters = &.{"release metadata falsifiers"},
+    });
+    const release_falsifiers_step = b.step(
+        "check-boundary-static-machine-release-falsifiers",
+        "Check deliberate Boundary v0.7.0 identity and compatibility-matrix falsifiers.",
+    );
+    release_falsifiers_step.dependOn(&addRunArtifactWithArgs(
+        b,
+        release_falsifier_tests,
+        proof_test_args.passthrough,
+    ).step);
+
+    const release_archive_check_mod = b.createModule(.{
+        .root_source_file = b.path("conformance/static-machine-v1/release_archive_check.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    release_archive_check_mod.addImport(
+        "boundary_static_machine_release_metadata",
+        release_archive_metadata_mod,
+    );
+    const release_archive_checker = b.addExecutable(.{
+        .name = "boundary-release-archive-check",
+        .root_module = release_archive_check_mod,
+    });
+    const run_release_archive_checker = b.addRunArtifact(release_archive_checker);
+    run_release_archive_checker.addArg(b.graph.zig_exe);
+    const release_global_cache_path = absoluteBuildDirectoryPath(
+        b,
+        b.graph.global_cache_root,
+        "Zig global cache root",
+    );
+    const release_proof_root = absoluteBuildDirectoryPath(
+        b,
+        b.cache_root,
+        "Boundary release proof root",
+    );
+    const release_archive_path = b.option(
+        []const u8,
+        "boundary-release-archive",
+        "Path to the materialized Boundary v0.7.0 archive.",
+    );
+    if (release_archive_path) |archive_path| {
+        run_release_archive_checker.addArg(archive_path);
+        run_release_archive_checker.has_side_effects = true;
+    } else {
+        run_release_archive_checker.addArg("");
+    }
+    run_release_archive_checker.addArg(release_global_cache_path);
+    run_release_archive_checker.addArg(release_proof_root);
+    run_release_archive_checker.addArg("");
+    const release_archive_once_step = b.step(
+        "check-boundary-static-machine-release-archive-once",
+        "Run one current-byte Boundary v0.7.0 materialized archive identity check.",
+    );
+    release_archive_once_step.dependOn(&run_release_archive_checker.step);
+    const release_archive_step = b.step(
+        "check-boundary-static-machine-release-archive",
+        "Check a materialized Boundary v0.7.0 archive SHA-256 and Zig package hash.",
+    );
+    release_archive_step.dependOn(release_archive_once_step);
+    if (release_archive_path) |archive_path| {
+        const archive_cache_falsifier = b.addSystemCommand(&.{"sh"});
+        archive_cache_falsifier.addFileArg(
+            b.path("conformance/static-machine-v1/release_archive_cache_falsifier.sh"),
+        );
+        archive_cache_falsifier.addArg(b.graph.zig_exe);
+        archive_cache_falsifier.addDirectoryArg(b.path("."));
+        archive_cache_falsifier.addArg(archive_path);
+        archive_cache_falsifier.addArg(release_global_cache_path);
+        archive_cache_falsifier.has_side_effects = true;
+        release_archive_step.dependOn(&archive_cache_falsifier.step);
+    }
+
+    const archive_falsifier_tests = b.addTest(.{
+        .root_module = release_archive_check_mod,
+        .filters = &.{"release archive"},
+    });
+    const release_process_group_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/static-machine-v1/release_process_group.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const archive_falsifiers_step = b.step(
+        "check-boundary-static-machine-release-archive-falsifiers",
+        "Check deliberate Boundary v0.7.0 materialized-archive identity falsifiers.",
+    );
+    archive_falsifiers_step.dependOn(&addRunArtifactWithArgs(
+        b,
+        archive_falsifier_tests,
+        proof_test_args.passthrough,
+    ).step);
+    archive_falsifiers_step.dependOn(&addRunArtifactWithArgs(
+        b,
+        release_process_group_tests,
+        proof_test_args.passthrough,
+    ).step);
 
     const evidence_kernel_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/evidence_kernel_test.zig"),
@@ -1083,8 +1289,6 @@ pub fn build(b: *std.Build) void {
     const public_optional_tests = b.addTest(.{ .root_module = public_optional_tests_mod, .filters = test_args.filters });
     test_step.dependOn(&addRunArtifactWithArgs(b, public_optional_tests, test_args.passthrough).step);
 
-    const compile_fail_step = b.step("compile-fail", "Check expected public ProgramPlan compile diagnostics.");
-    test_step.dependOn(compile_fail_step);
     const compile_fail_specs = [_]struct {
         path: []const u8,
         expected_error: []const u8,
@@ -1577,7 +1781,15 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         compile_fail_mod.addImport("boundary", boundary);
-        addCompileFailArtifact(b, compile_fail_step, compile_fail_mod, spec.expected_error);
+        const compile_fail_test = addCompileFailArtifact(
+            b,
+            compile_fail_step,
+            compile_fail_mod,
+            spec.expected_error,
+        );
+        if (std.mem.startsWith(u8, spec.path, "test/compile_fail/static_machine_")) {
+            static_machine_compile_fail.dependOn(&compile_fail_test.step);
+        }
     }
 
     const examples = [_]struct {
@@ -1759,6 +1971,7 @@ pub fn build(b: *std.Build) void {
             b.path("examples"),
             b.path("test"),
             b.path("bench"),
+            b.path("conformance"),
         },
         .exclude = &.{},
     });
