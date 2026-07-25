@@ -12,6 +12,7 @@ repository_root=$2
 reviewed_archive=$3
 global_cache=$4
 proof_root=$(mktemp -d "${TMPDIR:-/tmp}/boundary-release-archive-cache.XXXXXX")
+proof_root=$(CDPATH= cd -- "$proof_root" && pwd)
 
 cleanup() {
     case "$proof_root" in

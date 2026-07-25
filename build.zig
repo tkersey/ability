@@ -1066,12 +1066,16 @@ pub fn build(b: *std.Build) void {
     static_machine_step.dependOn(static_machine_wasm_step);
     check_step.dependOn(static_machine_wasm_step);
     const static_machine_parity_step = b.step("check-boundary-static-machine-parity", "Check Program.Session and StaticMachine semantic parity.");
-    const static_machine_parity_tests = b.addTest(.{ .root_module = static_machine_tests_mod });
-    static_machine_parity_step.dependOn(&addRunArtifactWithArgs(
-        b,
-        static_machine_parity_tests,
-        proof_test_args.passthrough,
-    ).step);
+    if (test_args.filters.len == 0 and test_args.passthrough.len == 0) {
+        static_machine_parity_step.dependOn(&run_static_machine_tests.step);
+    } else {
+        const static_machine_parity_tests = b.addTest(.{ .root_module = static_machine_tests_mod });
+        static_machine_parity_step.dependOn(&addRunArtifactWithArgs(
+            b,
+            static_machine_parity_tests,
+            proof_test_args.passthrough,
+        ).step);
+    }
     const static_agent_step = b.step("check-boundary-static-agent", "Check the StaticMachine agent fixture.");
     const static_agent_tests = b.addTest(.{
         .root_module = agent_loop_tests_mod,
