@@ -1,6 +1,6 @@
-const std = @import("std");
 const boundary = @import("boundary");
 const release_sources = @import("boundary_static_machine_release_sources");
+const std = @import("std");
 
 const metadata_bytes = @embedFile("release-metadata.json");
 const readme_bytes = release_sources.readme_bytes;
@@ -55,32 +55,46 @@ const ValidationError = error{
     InvalidSchema,
     CodeArchiveIdentityMismatch,
     DocumentationIdentityConflated,
-    DocumentationIdentityIncomplete,
+    DocumentationIdentityInvalid,
     StaticMachineAbiMismatch,
     SupportMatrixMismatch,
+    CompatibilityClaimMissing,
 };
 
-const expected_supported = [_][]const u8{
-    "authentic-boundary-program",
-    "canonical-v1-state",
-    "explicit-world-ports",
-    "acyclic-static-helper-provider-graphs",
-    "admitted-scalar-product-sum-carriers",
-    "closed-authored-failure-set",
-    "bounded-frames-state-and-validation-work",
-    "native-and-wasm32-freestanding",
+const MatrixClaim = struct {
+    identifier: []const u8,
+    marker: []const u8,
 };
 
-const expected_unsupported = [_][]const u8{
-    "recursive-helper-provider-graphs",
-    "program-output-or-cleanup-hooks",
-    "mutable-string-list-carriers",
-    "comptime-struct-fields",
-    "non-exhaustive-enums",
-    "unrepresentable-compact-condition-histories",
-    "dynamic-provider-discovery",
-    "runtime-module-loading",
-    "v0-continuation-migration",
+const supported_claims = [_]MatrixClaim{
+    .{ .identifier = "authentic-boundary-program", .marker = "`authentic-boundary-program`: the input type is returned by `boundary.program`." },
+    .{ .identifier = "canonical-v1-state", .marker = "`canonical-v1-state`: state bytes use `.canonical_v1`." },
+    .{ .identifier = "explicit-world-ports", .marker = "`explicit-world-ports`: residual world ports use `.explicit`." },
+    .{ .identifier = "acyclic-static-helper-provider-graphs", .marker = "`acyclic-static-helper-provider-graphs`: helper and nested-provider frame graphs are static and acyclic." },
+    .{ .identifier = "admitted-scalar-product-sum-carriers", .marker = "`admitted-scalar-product-sum-carriers`: admitted scalar, product, and sum schemas retain their exact logical identities." },
+    .{ .identifier = "closed-authored-failure-set", .marker = "`closed-authored-failure-set`: `Body.Error` is closed and excludes reserved operational errors." },
+    .{ .identifier = "bounded-frames-state-and-validation-work", .marker = "`bounded-frames-state-and-validation-work`: frame admission, state bytes, and generated validation work are bounded." },
+    .{ .identifier = "native-and-wasm32-freestanding", .marker = "`native-and-wasm32-freestanding`: native and `wasm32-freestanding` compile gates are required." },
+};
+
+const unsupported_claims = [_]MatrixClaim{
+    .{ .identifier = "recursive-helper-provider-graphs", .marker = "`recursive-helper-provider-graphs`: rejected by StaticMachine v1." },
+    .{ .identifier = "program-output-or-cleanup-hooks", .marker = "`program-output-or-cleanup-hooks`: rejected by StaticMachine v1." },
+    .{ .identifier = "mutable-string-list-carriers", .marker = "`mutable-string-list-carriers`: rejected by StaticMachine v1." },
+    .{ .identifier = "comptime-struct-fields", .marker = "`comptime-struct-fields`: rejected by StaticMachine v1." },
+    .{ .identifier = "non-exhaustive-enums", .marker = "`non-exhaustive-enums`: rejected by StaticMachine v1." },
+    .{ .identifier = "unrepresentable-compact-condition-histories", .marker = "`unrepresentable-compact-condition-histories`: rejected by StaticMachine v1." },
+    .{ .identifier = "dynamic-provider-discovery", .marker = "`dynamic-provider-discovery`: outside StaticMachine v1." },
+    .{ .identifier = "runtime-module-loading", .marker = "`runtime-module-loading`: outside StaticMachine v1." },
+    .{ .identifier = "v0-continuation-migration", .marker = "`v0-continuation-migration`: no transparent migration is supported." },
+};
+
+const required_compatibility_claims = [_][]const u8{
+    "`debug_metadata` is diagnostic-only",
+    "`maximum_frames` is an admission bound",
+    "`maximum_state_bytes` is identity-bearing",
+    "World Application v1 accepts only machines whose",
+    "`Machine.EffectRow.after_site_count == 0`",
 };
 
 const supplement_sources = [_]struct {
@@ -102,19 +116,32 @@ fn parseMetadata(allocator: std.mem.Allocator) !std.json.Parsed(ReleaseMetadata)
     );
 }
 
-fn expectExactStrings(actual: []const []const u8, expected: []const []const u8) !void {
-    if (actual.len != expected.len) return error.SupportMatrixMismatch;
-    for (actual, expected) |actual_item, expected_item| {
-        if (!std.mem.eql(u8, actual_item, expected_item)) {
-            return error.SupportMatrixMismatch;
+fn sha256(bytes: []const u8) [64]u8 {
+    var digest: [32]u8 = @splat(0);
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn validateMatrixClaims(
+    actual: []const []const u8,
+    claims: []const MatrixClaim,
+    document: []const u8,
+) ValidationError!void {
+    if (actual.len != claims.len) return error.SupportMatrixMismatch;
+    for (actual, claims) |actual_id, claim| {
+        if (!std.mem.eql(u8, actual_id, claim.identifier)) return error.SupportMatrixMismatch;
+        if (std.mem.find(u8, document, claim.marker) == null) {
+            return error.CompatibilityClaimMissing;
         }
     }
 }
 
-fn sha256(bytes: []const u8) [64]u8 {
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    return std.fmt.bytesToHex(digest, .lower);
+fn validateCompatibilityDocument(document: []const u8) ValidationError!void {
+    for (&required_compatibility_claims) |claim| {
+        if (std.mem.find(u8, document, claim) == null) {
+            return error.CompatibilityClaimMissing;
+        }
+    }
 }
 
 fn validateMetadata(metadata: ReleaseMetadata) ValidationError!void {
@@ -140,14 +167,14 @@ fn validateMetadata(metadata: ReleaseMetadata) ValidationError!void {
         return error.DocumentationIdentityConflated;
     }
     if (supplement.files.len != supplement_sources.len) {
-        return error.DocumentationIdentityIncomplete;
+        return error.DocumentationIdentityInvalid;
     }
     for (supplement.files, supplement_sources) |file, source| {
         const digest = sha256(source.bytes);
         if (!std.mem.eql(u8, file.path, source.path) or
             !std.mem.eql(u8, file.sha256, &digest))
         {
-            return error.DocumentationIdentityIncomplete;
+            return error.DocumentationIdentityInvalid;
         }
     }
 
@@ -161,13 +188,63 @@ fn validateMetadata(metadata: ReleaseMetadata) ValidationError!void {
     {
         return error.StaticMachineAbiMismatch;
     }
-    try expectExactStrings(abi.supported_contracts, &expected_supported);
-    try expectExactStrings(abi.unsupported_contracts, &expected_unsupported);
+    try validateMatrixClaims(abi.supported_contracts, &supported_claims, compatibility_bytes);
+    try validateMatrixClaims(abi.unsupported_contracts, &unsupported_claims, compatibility_bytes);
+    try validateCompatibilityDocument(compatibility_bytes);
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
+    try std.testing.expect(std.mem.find(u8, haystack, needle) != null);
 }
+
+fn releaseUnitPlan() boundary.ir.ProgramPlan {
+    const root = boundary.ir.builder.function(0);
+    const functions = [_]boundary.ir.plan.Function{.{
+        .symbol_name = "run",
+        .value_codec = .unit,
+        .result_codec = .unit,
+        .parameter_count = 0,
+        .first_requirement = 0,
+        .requirement_count = 0,
+        .first_output = 0,
+        .output_count = 0,
+        .first_local = 0,
+        .local_count = 0,
+        .first_block = 0,
+        .entry_block = 0,
+        .block_count = 1,
+        .first_instruction = 0,
+        .instruction_count = 0,
+    }};
+    const blocks = [_]boundary.ir.plan.Block{.{
+        .first_instruction = 0,
+        .instruction_count = 0,
+        .terminator_index = 0,
+    }};
+    const terminators = [_]boundary.ir.plan.Terminator{.{ .kind = .return_unit }};
+    return boundary.ir.builder.finish(.{
+        .label = "boundary-release-owner-binding",
+        .ir_hash = 1,
+        .entry = root,
+        .functions = &functions,
+        .requirements = &.{},
+        .ops = &.{},
+        .outputs = &.{},
+        .locals = &.{},
+        .blocks = &blocks,
+        .terminators = &terminators,
+        .instructions = &.{},
+    }) catch |err| @compileError(@errorName(err));
+}
+
+const ReleaseProgram = boundary.program("boundary-release-owner-binding", struct {}, struct {
+    /// Authentic ProgramPlan compiled into the release ABI witness.
+    pub const compiled_plan = releaseUnitPlan();
+});
+const ReleaseMachine = boundary.staticMachine(ReleaseProgram, .{});
+const ReleaseDebugMachine = boundary.staticMachine(ReleaseProgram, .{ .debug_metadata = true });
+const ReleaseExpandedFramesMachine = boundary.staticMachine(ReleaseProgram, .{ .maximum_frames = 65 });
+const ReleaseExpandedStateMachine = boundary.staticMachine(ReleaseProgram, .{ .maximum_state_bytes = (1 << 20) + 1 });
 
 test "Boundary v0.7.0 StaticMachine release identity and public surface" {
     try std.testing.expect(@hasDecl(boundary, "staticMachine"));
@@ -176,6 +253,25 @@ test "Boundary v0.7.0 StaticMachine release identity and public surface" {
     var parsed = try parseMetadata(std.testing.allocator);
     defer parsed.deinit();
     try validateMetadata(parsed.value);
+
+    try std.testing.expectEqual(parsed.value.static_machine_abi.version, ReleaseMachine.abi_version);
+    try std.testing.expectEqual(ReleaseMachine.abi_version, ReleaseMachine.Manifest.abi);
+    try std.testing.expect(ReleaseMachine.Manifest.state_is_canonical_v1);
+    try std.testing.expect(ReleaseMachine.Manifest.ports_are_explicit);
+    try std.testing.expect(!ReleaseMachine.Manifest.includes_debug_metadata);
+    try std.testing.expect(ReleaseDebugMachine.Manifest.includes_debug_metadata);
+    try std.testing.expectEqual(
+        ReleaseMachine.Manifest.machine_contract_fingerprint,
+        ReleaseDebugMachine.Manifest.machine_contract_fingerprint,
+    );
+    try std.testing.expectEqual(
+        ReleaseMachine.Manifest.machine_contract_fingerprint,
+        ReleaseExpandedFramesMachine.Manifest.machine_contract_fingerprint,
+    );
+    try std.testing.expect(
+        ReleaseMachine.Manifest.machine_contract_fingerprint !=
+            ReleaseExpandedStateMachine.Manifest.machine_contract_fingerprint,
+    );
 
     try expectContains(readme_bytes, "boundary.program -> boundary.staticMachine -> world.application");
     try expectContains(readme_bytes, "Program.Session");
@@ -207,4 +303,9 @@ test "release metadata falsifiers reject wrong code identity and conflated docum
     unsupported_claim.static_machine_abi.unsupported_contracts =
         unsupported_claim.static_machine_abi.unsupported_contracts[0..8];
     try std.testing.expectError(error.SupportMatrixMismatch, validateMetadata(unsupported_claim));
+
+    try std.testing.expectError(
+        error.CompatibilityClaimMissing,
+        validateCompatibilityDocument("Fail-closed restrictions without owner-bound compatibility claims."),
+    );
 }

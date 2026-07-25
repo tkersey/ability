@@ -18,7 +18,7 @@
       },
       {
         "path": "docs/release_hardening.md",
-        "sha256": "6c9dcd673995a1fa2f87d8b63c627001b7ea1499f1c7d2925ead7a897b8f76e1"
+        "sha256": "6cd33b5739fcb4e04cd0ef7306196a5913f7826c74ce0b67b8fd62a835eb55b9"
       },
       {
         "path": "docs/static_machine.md",
@@ -26,7 +26,7 @@
       },
       {
         "path": "docs/static_machine_compatibility.md",
-        "sha256": "19d2032e6ea4e095a16a443049478b0c8f33c7ce3c04ee3623d487dd45fb777b"
+        "sha256": "f98ab80e017c9fb7f4fd1ced1c2fb0a5764b69d0a12910efa036907a703fd0d8"
       }
     ]
   },

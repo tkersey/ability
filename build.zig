@@ -1068,6 +1068,9 @@ pub fn build(b: *std.Build) void {
     });
     static_provider_step.dependOn(&addRunArtifactWithArgs(b, static_provider_tests, test_args.passthrough).step);
 
+    const compile_fail_step = b.step("compile-fail", "Check expected public ProgramPlan compile diagnostics.");
+    test_step.dependOn(compile_fail_step);
+
     const static_machine_release_mod = b.createModule(.{
         .root_source_file = b.path("conformance/static-machine-v1/release_test.zig"),
         .target = target,
@@ -1115,6 +1118,7 @@ pub fn build(b: *std.Build) void {
     static_machine_release_step.dependOn(&run_static_machine_release.step);
     static_machine_release_step.dependOn(static_machine_parity_step);
     static_machine_release_step.dependOn(static_machine_wasm_step);
+    static_machine_release_step.dependOn(compile_fail_step);
     check_step.dependOn(static_machine_release_step);
 
     const release_falsifier_tests = b.addTest(.{
@@ -1128,6 +1132,38 @@ pub fn build(b: *std.Build) void {
     release_falsifiers_step.dependOn(&addRunArtifactWithArgs(
         b,
         release_falsifier_tests,
+        test_args.passthrough,
+    ).step);
+
+    const release_archive_check_mod = b.createModule(.{
+        .root_source_file = b.path("conformance/static-machine-v1/release_archive_check.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const release_archive_checker = b.addExecutable(.{
+        .name = "boundary-release-archive-check",
+        .root_module = release_archive_check_mod,
+    });
+    const run_release_archive_checker = b.addRunArtifact(release_archive_checker);
+    run_release_archive_checker.addArg(b.graph.zig_exe);
+    if (b.args) |args| run_release_archive_checker.addArgs(args);
+    const release_archive_step = b.step(
+        "check-boundary-static-machine-release-archive",
+        "Check a materialized Boundary v0.7.0 archive SHA-256 and Zig package hash.",
+    );
+    release_archive_step.dependOn(&run_release_archive_checker.step);
+
+    const archive_falsifier_tests = b.addTest(.{
+        .root_module = release_archive_check_mod,
+        .filters = &.{"release archive falsifiers"},
+    });
+    const archive_falsifiers_step = b.step(
+        "check-boundary-static-machine-release-archive-falsifiers",
+        "Check deliberate Boundary v0.7.0 materialized-archive identity falsifiers.",
+    );
+    archive_falsifiers_step.dependOn(&addRunArtifactWithArgs(
+        b,
+        archive_falsifier_tests,
         test_args.passthrough,
     ).step);
 
@@ -1158,8 +1194,6 @@ pub fn build(b: *std.Build) void {
     const public_optional_tests = b.addTest(.{ .root_module = public_optional_tests_mod, .filters = test_args.filters });
     test_step.dependOn(&addRunArtifactWithArgs(b, public_optional_tests, test_args.passthrough).step);
 
-    const compile_fail_step = b.step("compile-fail", "Check expected public ProgramPlan compile diagnostics.");
-    test_step.dependOn(compile_fail_step);
     const compile_fail_specs = [_]struct {
         path: []const u8,
         expected_error: []const u8,
@@ -1834,6 +1868,7 @@ pub fn build(b: *std.Build) void {
             b.path("examples"),
             b.path("test"),
             b.path("bench"),
+            b.path("conformance"),
         },
         .exclude = &.{},
     });

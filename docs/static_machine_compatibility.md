@@ -32,7 +32,9 @@ release-closure commit.
 | Semantic parity authority | `Program.Session` on the admitted StaticMachine domain |
 
 World v1 closes `Machine.EffectRow`. It must not infer the residual static row
-from `Program.protocol`.
+from `Program.protocol`. World Application v1 accepts only machines whose
+`Machine.EffectRow.after_site_count == 0`; Boundary StaticMachine ABI v1 itself
+still admits statically known after sites.
 
 ## Supported domain
 
@@ -81,16 +83,52 @@ representation.
   pointers.
 - Live `State` handles remain machine-branded and single-owner.
 - Machine identity binds the admitted ProgramPlan, structured carriers, effect
-  row, options, limits, and corrected StaticMachine reachability.
+  row, `maximum_state_bytes`, and generated validation and reachability
+  authorities.
 - Nominal type renames preserve compatibility only when admitted carrier
   semantics are unchanged.
-- Logical field, enum discriminant, effect-site, option, or resource-limit
-  changes alter the machine contract.
+- Logical field, enum discriminant, effect-site, or identity-bearing limit
+  changes alter the machine contract. `maximum_state_bytes` is identity-bearing
+  because it bounds canonical state images.
+- `debug_metadata` is diagnostic-only: changing it does not alter the portable
+  contract fingerprint or canonical state bytes.
+- `maximum_frames` is an admission bound: it must cover the reachable
+  helper/provider depth, but increasing an already sufficient value does not
+  alter the portable contract fingerprint or canonical state bytes.
 - `Program.Session` retains native-width `usize`, dynamic completion behavior,
   and its legacy reachability interpretation. StaticMachine v1 does not silently
   inherit those behaviors.
 - No transparent migration from a v0 continuation or loaded module into a
   StaticMachine v1 state is supported.
+
+## Machine-checked release claims
+
+The focused release verifier binds the metadata identifiers below to these
+exact compatibility claims and to a generated `boundary.staticMachine` ABI
+witness.
+
+Supported:
+
+- `authentic-boundary-program`: the input type is returned by `boundary.program`.
+- `canonical-v1-state`: state bytes use `.canonical_v1`.
+- `explicit-world-ports`: residual world ports use `.explicit`.
+- `acyclic-static-helper-provider-graphs`: helper and nested-provider frame graphs are static and acyclic.
+- `admitted-scalar-product-sum-carriers`: admitted scalar, product, and sum schemas retain their exact logical identities.
+- `closed-authored-failure-set`: `Body.Error` is closed and excludes reserved operational errors.
+- `bounded-frames-state-and-validation-work`: frame admission, state bytes, and generated validation work are bounded.
+- `native-and-wasm32-freestanding`: native and `wasm32-freestanding` compile gates are required.
+
+Unsupported:
+
+- `recursive-helper-provider-graphs`: rejected by StaticMachine v1.
+- `program-output-or-cleanup-hooks`: rejected by StaticMachine v1.
+- `mutable-string-list-carriers`: rejected by StaticMachine v1.
+- `comptime-struct-fields`: rejected by StaticMachine v1.
+- `non-exhaustive-enums`: rejected by StaticMachine v1.
+- `unrepresentable-compact-condition-histories`: rejected by StaticMachine v1.
+- `dynamic-provider-discovery`: outside StaticMachine v1.
+- `runtime-module-loading`: outside StaticMachine v1.
+- `v0-continuation-migration`: no transparent migration is supported.
 
 ## Proof gates
 
@@ -100,10 +138,15 @@ zig build check-boundary-static-machine-parity
 zig build check-boundary-static-machine-wasm32
 zig build check-boundary-static-machine-release
 zig build check-boundary-static-machine-release-falsifiers
+zig build check-boundary-static-machine-release-archive -- /path/to/boundary-v0.7.0.tar.gz
+zig build check-boundary-static-machine-release-archive-falsifiers
 zig build check --summary all
 ```
 
-The release verifier checks the public declarations, exact code identity,
-documentation-supplement digests, required matrix claims, and negative
-falsifiers. The existing StaticMachine, parity, wasm32, and aggregate gates
-remain the semantic proof.
+The focused release verifier checks public declarations, recorded code
+identity, documentation-supplement digests, owner-bound matrix claims, the
+StaticMachine rejection corpus, and negative falsifiers. The materialized
+archive verifier independently recomputes the archive SHA-256 and asks the
+pinned Zig toolchain to recompute the package hash from local bytes; it needs no
+network after the archive is present. The existing StaticMachine, parity,
+wasm32, and aggregate gates remain the semantic proof.

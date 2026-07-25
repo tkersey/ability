@@ -10,18 +10,22 @@ Run these before publishing a branch:
 
 ```sh
 zig version
-zig fmt --check build.zig src examples test bench
+zig fmt --check build.zig src examples test bench conformance
 git diff --check
 zig build check-boundary-static-machine-release
 zig build check-boundary-static-machine-release-falsifiers
+zig build check-boundary-static-machine-release-archive -- /path/to/boundary-v0.7.0.tar.gz
+zig build check-boundary-static-machine-release-archive-falsifiers
 zig build --summary all
 zig build test --summary all
 zig build lint -- --max-warnings 0
 ```
 
-`zig build lint` reads `repo_zig_paths.txt` and also checks that every `.zig`
-file under `src`, `examples`, `test`, and `bench` appears in that manifest. Add
-new Zig files to the manifest in the same patch that adds the file.
+`zig build lint` checks `build.zig` and every Zig source under `src`,
+`examples`, `test`, `bench`, and `conformance`. Its path-coverage guard also
+checks that every `.zig` file under `src`, `examples`, `test`, and `bench`
+appears in `repo_zig_paths.txt`. Add new maintained source files to that
+manifest in the same patch that adds the file.
 
 `build.zig.zon` packages the maintained source, docs, examples, tests,
 benchmarks, and manifest. Keep package paths aligned with any new top-level
@@ -33,7 +37,10 @@ bytes from the tagged archive. The checked receipt at
 `conformance/static-machine-v1/release-metadata.json` binds the tag target,
 archive URL, archive SHA-256, Zig package hash, public StaticMachine ABI, and an
 ordered digest set for the supplement. A publication receipt separately binds
-the reviewed release-closure commit.
+the reviewed release-closure commit. The focused release gate checks that
+receipt and its owner-derived ABI and matrix claims. The materialized-archive
+gate consumes a local archive, recomputes its SHA-256, and asks the pinned Zig
+toolchain to recompute its package hash without requiring network access.
 
 ## File classification
 
