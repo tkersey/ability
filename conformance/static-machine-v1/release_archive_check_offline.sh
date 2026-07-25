@@ -10,18 +10,21 @@ fi
 zig_exe=$1
 reviewed_archive=$2
 case "$zig_exe" in
-    /*) ;;
-    */*)
-        zig_exe=$(
-            CDPATH= cd -- "$(dirname "$zig_exe")" &&
-                printf '%s/%s\n' "$PWD" "$(basename "$zig_exe")"
-        )
-        ;;
+    */*) ;;
     *)
         zig_exe=$(command -v "$zig_exe") || {
             printf 'zig executable not found: %s\n' "$zig_exe" >&2
             exit 2
         }
+        ;;
+esac
+case "$zig_exe" in
+    /*) ;;
+    *)
+        zig_exe=$(
+            CDPATH= cd -- "$(dirname "$zig_exe")" &&
+                printf '%s/%s\n' "$PWD" "$(basename "$zig_exe")"
+        )
         ;;
 esac
 case "$reviewed_archive" in
@@ -49,7 +52,6 @@ trap cleanup EXIT HUP INT TERM
 local_cache="$proof_root/local-cache"
 global_cache="$proof_root/global-cache"
 mkdir -p "$local_cache" "$global_cache"
-cd "$repository_root"
 
 "$zig_exe" run \
     --cache-dir "$local_cache" \
@@ -60,4 +62,5 @@ cd "$repository_root"
     -- \
     "$zig_exe" \
     "$reviewed_archive" \
-    "$global_cache"
+    "$global_cache" \
+    "$proof_root"

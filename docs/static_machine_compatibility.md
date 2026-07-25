@@ -141,6 +141,7 @@ zig build check-boundary-static-machine-release
 zig build check-boundary-static-machine-release-falsifiers
 zig build check-boundary-static-machine-release-archive -Dboundary-release-archive=/path/to/boundary-v0.7.0.tar.gz
 zig build check-boundary-static-machine-release-archive-falsifiers
+sh conformance/static-machine-v1/release_archive_check_offline.sh zig /path/to/boundary-v0.7.0.tar.gz
 zig build check --summary all
 ```
 
@@ -150,5 +151,9 @@ registered StaticMachine rejection corpus, and negative falsifiers. The
 materialized archive verifier snapshots one typed local input, recomputes its
 SHA-256, checks Zig `0.16.0`, and asks that toolchain to recompute the package
 hash from the same snapshot; it needs no network after the archive is present.
+The direct `release_archive_check_offline.sh` command is the dependency-free
+network-free proof for a freshly materialized source package. The corresponding
+`zig build` command remains the cache-materialized build-graph proof and may
+resolve declared build dependencies when its caches are empty.
 The existing StaticMachine, parity, wasm32, aggregate, and full `compile-fail`
 gates remain the semantic proof.

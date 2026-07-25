@@ -36,6 +36,17 @@ fn readBuildFile(b: *std.Build, path: []const u8) []const u8 {
     });
 }
 
+fn absoluteBuildDirectoryPath(
+    b: *std.Build,
+    directory: std.Build.Cache.Directory,
+    label: []const u8,
+) []const u8 {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = directory.handle.realPath(b.graph.io, &buffer) catch |err|
+        std.process.fatal("unable to resolve {s}: {s}", .{ label, @errorName(err) });
+    return b.dupe(buffer[0..length]);
+}
+
 fn parseTestArgs(b: *std.Build) TestArgs {
     const args = b.args orelse return .{
         .filters = &.{},
@@ -1174,13 +1185,16 @@ pub fn build(b: *std.Build) void {
     });
     const run_release_archive_checker = b.addRunArtifact(release_archive_checker);
     run_release_archive_checker.addArg(b.graph.zig_exe);
-    const configured_global_cache_path = b.graph.global_cache_root.path orelse ".";
-    const release_global_cache_path = if (std.Io.Dir.path.isAbsolute(
-        configured_global_cache_path,
-    ))
-        configured_global_cache_path
-    else
-        b.pathFromRoot(configured_global_cache_path);
+    const release_global_cache_path = absoluteBuildDirectoryPath(
+        b,
+        b.graph.global_cache_root,
+        "Zig global cache root",
+    );
+    const release_proof_root = absoluteBuildDirectoryPath(
+        b,
+        b.cache_root,
+        "Boundary release proof root",
+    );
     const release_archive_path = b.option(
         []const u8,
         "boundary-release-archive",
@@ -1193,6 +1207,7 @@ pub fn build(b: *std.Build) void {
         run_release_archive_checker.addArg("");
     }
     run_release_archive_checker.addArg(release_global_cache_path);
+    run_release_archive_checker.addArg(release_proof_root);
     const release_archive_once_step = b.step(
         "check-boundary-static-machine-release-archive-once",
         "Run one current-byte Boundary v0.7.0 materialized archive identity check.",

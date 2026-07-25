@@ -21,11 +21,14 @@ const ArchiveSnapshot = struct {
     directory_path: []u8,
     archive_path: []u8,
 
-    fn create(init: std.process.Init, archive_bytes: []const u8) !ArchiveSnapshot {
+    fn create(
+        init: std.process.Init,
+        temporary_root: []const u8,
+        archive_bytes: []const u8,
+    ) !ArchiveSnapshot {
         var random_bytes: [16]u8 = @splat(0);
         init.io.random(&random_bytes);
         const suffix = std.fmt.bytesToHex(random_bytes, .lower);
-        const temporary_root = init.environ_map.get("TMPDIR") orelse "/tmp";
         const directory_path = try std.fmt.allocPrint(
             init.gpa,
             "{s}/boundary-release-archive-{s}",
@@ -55,6 +58,21 @@ const ArchiveSnapshot = struct {
         });
         defer file.close(init.io);
         try file.writeStreamingAll(init.io, archive_bytes);
+
+        const build_path = try std.Io.Dir.path.join(
+            init.gpa,
+            &.{ directory_path, "build.zig" },
+        );
+        defer init.gpa.free(build_path);
+        var build_file = try std.Io.Dir.createFileAbsolute(init.io, build_path, .{
+            .exclusive = true,
+            .permissions = @enumFromInt(0o600),
+        });
+        defer build_file.close(init.io);
+        try build_file.writeStreamingAll(
+            init.io,
+            "pub fn build(_: *@import(\"std\").Build) void {}\n",
+        );
 
         return .{
             .directory_path = directory_path,
@@ -109,9 +127,11 @@ fn runZig(
     init: std.process.Init,
     argv: []const []const u8,
     failure_label: []const u8,
+    cwd: std.process.Child.Cwd,
 ) !std.process.RunResult {
     const result = try std.process.run(init.gpa, init.io, .{
         .argv = argv,
+        .cwd = cwd,
         .stdout_limit = .limited(1024),
         .stderr_limit = .limited(16 * 1024),
     });
@@ -130,6 +150,7 @@ fn verifyArchive(
     zig_exe: []const u8,
     archive_path: []const u8,
     global_cache_path: []const u8,
+    proof_root: []const u8,
 ) !void {
     var parsed = try release_metadata.parse(init.gpa);
     defer parsed.deinit();
@@ -142,7 +163,12 @@ fn verifyArchive(
         return error.MetadataIdentityMismatch;
     };
 
-    const version = try runZig(init, &.{ zig_exe, "version" }, "zig version");
+    const version = try runZig(
+        init,
+        &.{ zig_exe, "version" },
+        "zig version",
+        .inherit,
+    );
     defer init.gpa.free(version.stdout);
     defer init.gpa.free(version.stderr);
     verifyCommandOutput(
@@ -173,7 +199,7 @@ fn verifyArchive(
         return error.ArchiveSha256Mismatch;
     }
 
-    var snapshot = try ArchiveSnapshot.create(init, archive_bytes);
+    var snapshot = try ArchiveSnapshot.create(init, proof_root, archive_bytes);
     defer snapshot.deinit(init);
     const result = try runZig(
         init,
@@ -185,6 +211,7 @@ fn verifyArchive(
             snapshot.archive_path,
         },
         "zig fetch",
+        .{ .path = snapshot.directory_path },
     );
     defer init.gpa.free(result.stdout);
     defer init.gpa.free(result.stderr);
@@ -202,7 +229,6 @@ fn verifyArchive(
         );
         return err;
     };
-
 }
 
 /// Verifies one local Boundary v0.7.0 archive against both reviewed identities.
@@ -211,7 +237,7 @@ pub fn main(init: std.process.Init) anyerror!void {
     _ = args.next();
     const zig_exe = args.next() orelse {
         std.log.err(
-            "usage: boundary-release-archive-check <zig-exe> <archive-path> <global-cache-path>",
+            "usage: boundary-release-archive-check <zig-exe> <archive-path> <global-cache-path> <proof-root>",
             .{},
         );
         return error.InvalidArguments;
@@ -238,8 +264,25 @@ pub fn main(init: std.process.Init) anyerror!void {
         return error.InvalidArguments;
     };
     if (global_cache_path.len == 0) return error.InvalidArguments;
+    const proof_root = args.next() orelse {
+        std.log.err(
+            "missing proof root; the caller must provide an absolute writable workspace",
+            .{},
+        );
+        return error.InvalidArguments;
+    };
+    if (proof_root.len == 0 or !std.Io.Dir.path.isAbsolute(proof_root)) {
+        std.log.err("proof root must be an absolute writable directory", .{});
+        return error.InvalidArguments;
+    }
     if (args.next() != null) return error.InvalidArguments;
-    try verifyArchive(init, zig_exe, archive_path, global_cache_path);
+    try verifyArchive(
+        init,
+        zig_exe,
+        archive_path,
+        global_cache_path,
+        proof_root,
+    );
 }
 
 test "release archive falsifiers retain wrong byte and command identities" {
