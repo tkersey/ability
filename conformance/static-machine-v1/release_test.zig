@@ -1,8 +1,8 @@
 const boundary = @import("boundary");
+const release_metadata = @import("boundary_static_machine_release_metadata");
 const release_sources = @import("boundary_static_machine_release_sources");
 const std = @import("std");
 
-const metadata_bytes = @embedFile("release-metadata.json");
 const readme_bytes = release_sources.readme_bytes;
 const static_machine_bytes = release_sources.static_machine_bytes;
 const compatibility_bytes = release_sources.compatibility_bytes;
@@ -12,44 +12,7 @@ const expected_commit = "7f2472100454aa2cd5c62e07db0c1e23eaf46a77";
 const expected_archive_url = "https://github.com/tkersey/boundary/archive/refs/tags/v0.7.0.tar.gz";
 const expected_archive_sha256 = "25e5bd5ed45aac023ef99beee93f675ea4efb3f6eb1e98d2a13040d7451f0e9a";
 const expected_package_hash = "boundary-0.7.0-flclaCnjkABOSWaiSkxMBDQZsBEeA-Niai-l1u0q3A7_";
-
-const CodeArchive = struct {
-    tag: []const u8,
-    commit: []const u8,
-    url: []const u8,
-    sha256: []const u8,
-    zig_package_hash: []const u8,
-};
-
-const SupplementFile = struct {
-    path: []const u8,
-    sha256: []const u8,
-};
-
-const DocumentationSupplement = struct {
-    included_in_code_archive: bool,
-    identity_kind: []const u8,
-    publication_binding: []const u8,
-    files: []const SupplementFile,
-};
-
-const StaticMachineAbi = struct {
-    version: u32,
-    constructor: []const u8,
-    options: []const u8,
-    state_encoding: []const u8,
-    world_ports: []const u8,
-    compatibility_document: []const u8,
-    supported_contracts: []const []const u8,
-    unsupported_contracts: []const []const u8,
-};
-
-const ReleaseMetadata = struct {
-    schema: []const u8,
-    code_archive: CodeArchive,
-    documentation_supplement: DocumentationSupplement,
-    static_machine_abi: StaticMachineAbi,
-};
+const expected_zig_version = "0.16.0";
 
 const ValidationError = error{
     InvalidSchema,
@@ -90,11 +53,11 @@ const unsupported_claims = [_]MatrixClaim{
 };
 
 const required_compatibility_claims = [_][]const u8{
-    "`debug_metadata` is diagnostic-only",
-    "`maximum_frames` is an admission bound",
-    "`maximum_state_bytes` is identity-bearing",
-    "World Application v1 accepts only machines whose",
-    "`Machine.EffectRow.after_site_count == 0`",
+    "World Application v1 accepts only machines whose `Machine.EffectRow.after_site_count == 0`; Boundary StaticMachine ABI v1 itself still admits statically known after sites.",
+    "`debug_metadata` is diagnostic-only: changing it does not alter the portable contract fingerprint or canonical state bytes.",
+    "`maximum_frames` is an admission bound: it must cover the reachable helper/provider depth, but increasing an already sufficient value does not alter the portable contract fingerprint or canonical state bytes.",
+    "`maximum_state_bytes` is identity-bearing: changing it alters the machine contract because it bounds canonical state images.",
+    "The focused release gate selects only registered `static_machine_*` compile-fail fixtures; it is representative rather than exhaustive, while the aggregate `compile-fail` gate retains the complete repository rejection corpus.",
 };
 
 const supplement_sources = [_]struct {
@@ -106,15 +69,6 @@ const supplement_sources = [_]struct {
     .{ .path = "docs/static_machine.md", .bytes = static_machine_bytes },
     .{ .path = "docs/static_machine_compatibility.md", .bytes = compatibility_bytes },
 };
-
-fn parseMetadata(allocator: std.mem.Allocator) !std.json.Parsed(ReleaseMetadata) {
-    return std.json.parseFromSlice(
-        ReleaseMetadata,
-        allocator,
-        metadata_bytes,
-        .{ .ignore_unknown_fields = false },
-    );
-}
 
 fn sha256(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = @splat(0);
@@ -144,7 +98,7 @@ fn validateCompatibilityDocument(document: []const u8) ValidationError!void {
     }
 }
 
-fn validateMetadata(metadata: ReleaseMetadata) ValidationError!void {
+fn validateMetadata(metadata: release_metadata.ReleaseMetadata) ValidationError!void {
     if (!std.mem.eql(u8, metadata.schema, "boundary-static-machine-release/v1")) {
         return error.InvalidSchema;
     }
@@ -154,7 +108,8 @@ fn validateMetadata(metadata: ReleaseMetadata) ValidationError!void {
         !std.mem.eql(u8, archive.commit, expected_commit) or
         !std.mem.eql(u8, archive.url, expected_archive_url) or
         !std.mem.eql(u8, archive.sha256, expected_archive_sha256) or
-        !std.mem.eql(u8, archive.zig_package_hash, expected_package_hash))
+        !std.mem.eql(u8, archive.zig_package_hash, expected_package_hash) or
+        !std.mem.eql(u8, archive.zig_version, expected_zig_version))
     {
         return error.CodeArchiveIdentityMismatch;
     }
@@ -250,7 +205,7 @@ test "Boundary v0.7.0 StaticMachine release identity and public surface" {
     try std.testing.expect(@hasDecl(boundary, "staticMachine"));
     try std.testing.expect(@hasDecl(boundary, "StaticMachineOptions"));
 
-    var parsed = try parseMetadata(std.testing.allocator);
+    var parsed = try release_metadata.parse(std.testing.allocator);
     defer parsed.deinit();
     try validateMetadata(parsed.value);
 
@@ -282,7 +237,7 @@ test "Boundary v0.7.0 StaticMachine release identity and public surface" {
 }
 
 test "release metadata falsifiers reject wrong code identity and conflated documentation" {
-    var parsed = try parseMetadata(std.testing.allocator);
+    var parsed = try release_metadata.parse(std.testing.allocator);
     defer parsed.deinit();
 
     const valid = parsed.value;
@@ -306,6 +261,12 @@ test "release metadata falsifiers reject wrong code identity and conflated docum
 
     try std.testing.expectError(
         error.CompatibilityClaimMissing,
-        validateCompatibilityDocument("Fail-closed restrictions without owner-bound compatibility claims."),
+        validateCompatibilityDocument(
+            "World Application v1 accepts only machines whose after count is zero. " ++
+                "Boundary StaticMachine ABI v1 rejects after sites. " ++
+                "`debug_metadata` is not identity-bearing. " ++
+                "`maximum_frames` is an admission bound. " ++
+                "`maximum_state_bytes` is identity-bearing.",
+        ),
     );
 }

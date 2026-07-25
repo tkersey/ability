@@ -14,7 +14,7 @@ zig fmt --check build.zig src examples test bench conformance
 git diff --check
 zig build check-boundary-static-machine-release
 zig build check-boundary-static-machine-release-falsifiers
-zig build check-boundary-static-machine-release-archive -- /path/to/boundary-v0.7.0.tar.gz
+zig build check-boundary-static-machine-release-archive -Dboundary-release-archive=/path/to/boundary-v0.7.0.tar.gz
 zig build check-boundary-static-machine-release-archive-falsifiers
 zig build --summary all
 zig build test --summary all
@@ -39,8 +39,10 @@ archive URL, archive SHA-256, Zig package hash, public StaticMachine ABI, and an
 ordered digest set for the supplement. A publication receipt separately binds
 the reviewed release-closure commit. The focused release gate checks that
 receipt and its owner-derived ABI and matrix claims. The materialized-archive
-gate consumes a local archive, recomputes its SHA-256, and asks the pinned Zig
-toolchain to recompute its package hash without requiring network access.
+gate accepts only the typed `-Dboundary-release-archive` input, snapshots it in
+the build cache, recomputes its SHA-256, checks Zig `0.16.0`, and asks that
+toolchain to recompute the package hash from the same snapshot without
+requiring network access.
 
 ## File classification
 

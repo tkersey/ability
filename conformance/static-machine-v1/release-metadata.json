@@ -5,7 +5,8 @@
     "commit": "7f2472100454aa2cd5c62e07db0c1e23eaf46a77",
     "url": "https://github.com/tkersey/boundary/archive/refs/tags/v0.7.0.tar.gz",
     "sha256": "25e5bd5ed45aac023ef99beee93f675ea4efb3f6eb1e98d2a13040d7451f0e9a",
-    "zig_package_hash": "boundary-0.7.0-flclaCnjkABOSWaiSkxMBDQZsBEeA-Niai-l1u0q3A7_"
+    "zig_package_hash": "boundary-0.7.0-flclaCnjkABOSWaiSkxMBDQZsBEeA-Niai-l1u0q3A7_",
+    "zig_version": "0.16.0"
   },
   "documentation_supplement": {
     "included_in_code_archive": false,
@@ -18,7 +19,7 @@
       },
       {
         "path": "docs/release_hardening.md",
-        "sha256": "6cd33b5739fcb4e04cd0ef7306196a5913f7826c74ce0b67b8fd62a835eb55b9"
+        "sha256": "63da5ea86e21526ebb8cfcd55b8e7802f67ae5a548b47e2de8500582ede8b883"
       },
       {
         "path": "docs/static_machine.md",
@@ -26,7 +27,7 @@
       },
       {
         "path": "docs/static_machine_compatibility.md",
-        "sha256": "f98ab80e017c9fb7f4fd1ced1c2fb0a5764b69d0a12910efa036907a703fd0d8"
+        "sha256": "7b9ba666f6eeee4845d674a5a083c5d1a434be61e640d1cc65a0802d4a8fab13"
       }
     ]
   },
