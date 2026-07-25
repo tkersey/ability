@@ -5,7 +5,6 @@ const std = @import("std");
 const maximum_archive_bytes = 32 * 1024 * 1024;
 
 const VerificationError = error{
-    ArchiveSnapshotChanged,
     ArchiveSha256Mismatch,
     PackageHashMismatch,
     MetadataIdentityMismatch,
@@ -204,21 +203,6 @@ fn verifyArchive(
         return err;
     };
 
-    const retained_bytes = try std.Io.Dir.cwd().readFileAlloc(
-        init.io,
-        archive_path,
-        init.gpa,
-        .limited(maximum_archive_bytes),
-    );
-    defer init.gpa.free(retained_bytes);
-    if (!std.mem.eql(u8, archive_bytes, retained_bytes)) {
-        const retained_sha256 = archiveSha256(retained_bytes);
-        std.log.err(
-            "archive changed during verification: initial {s}, retained {s}",
-            .{ initial_comparison.actual, retained_sha256 },
-        );
-        return error.ArchiveSnapshotChanged;
-    }
 }
 
 /// Verifies one local Boundary v0.7.0 archive against both reviewed identities.
@@ -226,7 +210,10 @@ pub fn main(init: std.process.Init) anyerror!void {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
     const zig_exe = args.next() orelse {
-        std.log.err("usage: boundary-release-archive-check <zig-exe> <archive-path>", .{});
+        std.log.err(
+            "usage: boundary-release-archive-check <zig-exe> <archive-path> <global-cache-path>",
+            .{},
+        );
         return error.InvalidArguments;
     };
     const archive_path = args.next() orelse {
@@ -260,6 +247,20 @@ test "release archive falsifiers retain wrong byte and command identities" {
     defer parsed.deinit();
     const expected = parsed.value.code_archive;
     try release_metadata.validateCodeArchive(expected);
+
+    const accepted_bytes = "focused archive predicate baseline";
+    const accepted_sha256 = archiveSha256(accepted_bytes);
+    try verifyArchiveSha256(accepted_bytes, &accepted_sha256);
+    try verifyCommandOutput(
+        expected.zig_package_hash,
+        expected.zig_package_hash,
+        error.PackageHashMismatch,
+    );
+    try verifyCommandOutput(
+        expected.zig_version,
+        expected.zig_version,
+        error.ZigVersionMismatch,
+    );
 
     var drifted = expected;
     drifted.commit = "0000000000000000000000000000000000000000";

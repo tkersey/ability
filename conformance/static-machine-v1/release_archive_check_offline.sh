@@ -9,9 +9,34 @@ fi
 
 zig_exe=$1
 reviewed_archive=$2
+case "$zig_exe" in
+    /*) ;;
+    */*)
+        zig_exe=$(
+            CDPATH= cd -- "$(dirname "$zig_exe")" &&
+                printf '%s/%s\n' "$PWD" "$(basename "$zig_exe")"
+        )
+        ;;
+    *)
+        zig_exe=$(command -v "$zig_exe") || {
+            printf 'zig executable not found: %s\n' "$zig_exe" >&2
+            exit 2
+        }
+        ;;
+esac
+case "$reviewed_archive" in
+    /*) ;;
+    *)
+        reviewed_archive=$(
+            CDPATH= cd -- "$(dirname "$reviewed_archive")" &&
+                printf '%s/%s\n' "$PWD" "$(basename "$reviewed_archive")"
+        )
+        ;;
+esac
 script_directory=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 proof_root=$(mktemp -d "${TMPDIR:-/tmp}/boundary-release-archive-offline.XXXXXX")
+proof_root=$(CDPATH= cd -- "$proof_root" && pwd)
 
 cleanup() {
     case "$proof_root" in
@@ -24,17 +49,15 @@ trap cleanup EXIT HUP INT TERM
 local_cache="$proof_root/local-cache"
 global_cache="$proof_root/global-cache"
 mkdir -p "$local_cache" "$global_cache"
+cd "$repository_root"
 
-(
-    cd "$repository_root"
-    "$zig_exe" run \
-        --cache-dir "$local_cache" \
-        --global-cache-dir "$global_cache" \
-        --dep boundary_static_machine_release_metadata \
-        -Mroot=conformance/static-machine-v1/release_archive_check.zig \
-        -Mboundary_static_machine_release_metadata=conformance/static-machine-v1/release_metadata.zig \
-        -- \
-        "$zig_exe" \
-        "$reviewed_archive" \
-        "$global_cache"
-)
+"$zig_exe" run \
+    --cache-dir "$local_cache" \
+    --global-cache-dir "$global_cache" \
+    --dep boundary_static_machine_release_metadata \
+    -Mroot="$repository_root/conformance/static-machine-v1/release_archive_check.zig" \
+    -Mboundary_static_machine_release_metadata="$repository_root/conformance/static-machine-v1/release_metadata.zig" \
+    -- \
+    "$zig_exe" \
+    "$reviewed_archive" \
+    "$global_cache"
