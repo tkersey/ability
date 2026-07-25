@@ -12,6 +12,8 @@ Run these before publishing a branch:
 zig version
 zig fmt --check build.zig src examples test bench
 git diff --check
+zig build check-boundary-static-machine-release
+zig build check-boundary-static-machine-release-falsifiers
 zig build --summary all
 zig build test --summary all
 zig build lint -- --max-warnings 0
@@ -25,6 +27,14 @@ new Zig files to the manifest in the same patch that adds the file.
 benchmarks, and manifest. Keep package paths aligned with any new top-level
 surface that users need in source distributions.
 
+The Boundary v0.7.0 code archive is immutable. Release-closure documentation
+added after that tag is a distinct supplement and must not be described as
+bytes from the tagged archive. The checked receipt at
+`conformance/static-machine-v1/release-metadata.json` binds the tag target,
+archive URL, archive SHA-256, Zig package hash, public StaticMachine ABI, and an
+ordered digest set for the supplement. A publication receipt separately binds
+the reviewed release-closure commit.
+
 ## File classification
 
 Public:
@@ -33,7 +43,8 @@ Public:
 - `src/boundary_shared.zig`
 - `src/effect/root.zig`
 - `src/ir_api.zig`
-- `src/program_api.zig`
+- `src/program_api.zig` through the public `boundary.program`,
+  `boundary.staticMachine`, and `boundary.StaticMachineOptions` aliases
 - `src/lowered_machine.zig` through the public `boundary.Runtime` alias
 
 Public-adjacent:
@@ -96,6 +107,10 @@ Tests:
   `docs/program_plan.md`
 - Custom effect authoring direction:
   `docs/custom_effect_authoring.md`
+- StaticMachine ABI v1 contract:
+  `docs/static_machine.md`
+- StaticMachine v1 support and compatibility matrix:
+  `docs/static_machine_compatibility.md`
 - Release/package/lint discipline and file classification:
   this document
 
@@ -123,5 +138,6 @@ Non-goals for release hardening:
 - Do not expose Artifact, VM, compile, parser, `effect.Define`, or `effect.ops`
   as public APIs.
 - Do not widen `ProgramValue`.
+- Do not widen StaticMachine v1 support as part of release hardening.
 - Do not remove compatibility built-ins until plan-native examples and tests are
   sufficient replacement evidence.

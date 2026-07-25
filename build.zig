@@ -24,6 +24,18 @@ const TestArgs = struct {
     passthrough: []const []const u8,
 };
 
+fn readBuildFile(b: *std.Build, path: []const u8) []const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        b.pathFromRoot(path),
+        b.allocator,
+        .limited(1024 * 1024),
+    ) catch |err| std.process.fatal("unable to read release input '{s}': {s}", .{
+        path,
+        @errorName(err),
+    });
+}
+
 fn parseTestArgs(b: *std.Build) TestArgs {
     const args = b.args orelse return .{
         .filters = &.{},
@@ -1055,6 +1067,69 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"agent StaticMachine toolbox provider"},
     });
     static_provider_step.dependOn(&addRunArtifactWithArgs(b, static_provider_tests, test_args.passthrough).step);
+
+    const static_machine_release_mod = b.createModule(.{
+        .root_source_file = b.path("conformance/static-machine-v1/release_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const static_machine_release_sources = b.addOptions();
+    static_machine_release_sources.addOption(
+        []const u8,
+        "readme_bytes",
+        readBuildFile(b, "README.md"),
+    );
+    static_machine_release_sources.addOption(
+        []const u8,
+        "release_hardening_bytes",
+        readBuildFile(b, "docs/release_hardening.md"),
+    );
+    static_machine_release_sources.addOption(
+        []const u8,
+        "static_machine_bytes",
+        readBuildFile(b, "docs/static_machine.md"),
+    );
+    static_machine_release_sources.addOption(
+        []const u8,
+        "compatibility_bytes",
+        readBuildFile(b, "docs/static_machine_compatibility.md"),
+    );
+    static_machine_release_mod.addImport("boundary", boundary);
+    static_machine_release_mod.addOptions(
+        "boundary_static_machine_release_sources",
+        static_machine_release_sources,
+    );
+    const static_machine_release_tests = b.addTest(.{
+        .root_module = static_machine_release_mod,
+        .filters = test_args.filters,
+    });
+    const run_static_machine_release = addRunArtifactWithArgs(
+        b,
+        static_machine_release_tests,
+        test_args.passthrough,
+    );
+    const static_machine_release_step = b.step(
+        "check-boundary-static-machine-release",
+        "Check the Boundary v0.7.0 identity, public StaticMachine ABI, and compatibility matrix.",
+    );
+    static_machine_release_step.dependOn(&run_static_machine_release.step);
+    static_machine_release_step.dependOn(static_machine_parity_step);
+    static_machine_release_step.dependOn(static_machine_wasm_step);
+    check_step.dependOn(static_machine_release_step);
+
+    const release_falsifier_tests = b.addTest(.{
+        .root_module = static_machine_release_mod,
+        .filters = &.{"release metadata falsifiers"},
+    });
+    const release_falsifiers_step = b.step(
+        "check-boundary-static-machine-release-falsifiers",
+        "Check deliberate Boundary v0.7.0 identity and compatibility-matrix falsifiers.",
+    );
+    release_falsifiers_step.dependOn(&addRunArtifactWithArgs(
+        b,
+        release_falsifier_tests,
+        test_args.passthrough,
+    ).step);
 
     const evidence_kernel_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/evidence_kernel_test.zig"),
