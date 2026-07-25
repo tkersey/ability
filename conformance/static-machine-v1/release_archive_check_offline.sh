@@ -43,6 +43,7 @@ script_directory=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 proof_root=$(mktemp -d "${TMPDIR:-/tmp}/boundary-release-archive-offline.XXXXXX")
 proof_root=$(CDPATH= cd -- "$proof_root" && pwd)
+child_pid=
 
 cleanup() {
     case "$proof_root" in
@@ -51,12 +52,22 @@ cleanup() {
     esac
 }
 on_signal() {
-    exit "$1"
+    signal_status=$1
+    if [ -n "$child_pid" ]; then
+        kill -TERM "$child_pid" 2>/dev/null || :
+        wait "$child_pid" 2>/dev/null || :
+    fi
+    exit "$signal_status"
 }
 trap cleanup EXIT
 trap 'on_signal 129' HUP
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
+trap >"$proof_root/trap-state"
+if ! grep -Fq 'on_signal 130' "$proof_root/trap-state"; then
+    printf '%s\n' 'release archive check signal handler unavailable: INT' >&2
+    exit 2
+fi
 
 local_cache="$proof_root/local-cache"
 global_cache="$proof_root/global-cache"
@@ -72,4 +83,12 @@ mkdir -p "$local_cache" "$global_cache"
     "$zig_exe" \
     "$reviewed_archive" \
     "$global_cache" \
-    "$proof_root"
+    "$proof_root" &
+child_pid=$!
+if wait "$child_pid"; then
+    child_status=0
+else
+    child_status=$?
+fi
+child_pid=
+exit "$child_status"
