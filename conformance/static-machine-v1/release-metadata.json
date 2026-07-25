@@ -10,7 +10,7 @@
   },
   "documentation_supplement": {
     "included_in_code_archive": false,
-    "identity_kind": "ordered-sha256-file-set-v1",
+    "identity_kind": "ordered-canonical-text-sha256-file-set-v1",
     "publication_binding": "reviewed-release-closure-git-commit",
     "files": [
       {
@@ -19,7 +19,7 @@
       },
       {
         "path": "docs/release_hardening.md",
-        "sha256": "63da5ea86e21526ebb8cfcd55b8e7802f67ae5a548b47e2de8500582ede8b883"
+        "sha256": "94ac68a1faa6b250771a92923853a09afdbbc97c4feed54660f560401fcbecf9"
       },
       {
         "path": "docs/static_machine.md",

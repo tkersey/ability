@@ -8,17 +8,12 @@ const static_machine_bytes = release_sources.static_machine_bytes;
 const compatibility_bytes = release_sources.compatibility_bytes;
 const release_hardening_bytes = release_sources.release_hardening_bytes;
 
-const expected_commit = "7f2472100454aa2cd5c62e07db0c1e23eaf46a77";
-const expected_archive_url = "https://github.com/tkersey/boundary/archive/refs/tags/v0.7.0.tar.gz";
-const expected_archive_sha256 = "25e5bd5ed45aac023ef99beee93f675ea4efb3f6eb1e98d2a13040d7451f0e9a";
-const expected_package_hash = "boundary-0.7.0-flclaCnjkABOSWaiSkxMBDQZsBEeA-Niai-l1u0q3A7_";
-const expected_zig_version = "0.16.0";
-
 const ValidationError = error{
     InvalidSchema,
     CodeArchiveIdentityMismatch,
     DocumentationIdentityConflated,
     DocumentationIdentityInvalid,
+    InvalidTextLineEnding,
     StaticMachineAbiMismatch,
     SupportMatrixMismatch,
     CompatibilityClaimMissing,
@@ -78,9 +73,26 @@ const supplement_sources = [_]struct {
     .{ .path = "docs/static_machine_compatibility.md", .bytes = compatibility_bytes },
 };
 
-fn sha256(bytes: []const u8) [64]u8 {
+fn canonicalTextSha256(bytes: []const u8) ValidationError![64]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var segment_start: usize = 0;
+    var index: usize = 0;
+    while (index < bytes.len) {
+        if (bytes[index] != '\r') {
+            index += 1;
+            continue;
+        }
+        if (index + 1 >= bytes.len or bytes[index + 1] != '\n') {
+            return error.InvalidTextLineEnding;
+        }
+        hasher.update(bytes[segment_start..index]);
+        hasher.update("\n");
+        index += 2;
+        segment_start = index;
+    }
+    hasher.update(bytes[segment_start..]);
     var digest: [32]u8 = @splat(0);
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
 }
 
@@ -119,20 +131,16 @@ fn validateMetadata(metadata: release_metadata.ReleaseMetadata) ValidationError!
         return error.InvalidSchema;
     }
 
-    const archive = metadata.code_archive;
-    if (!std.mem.eql(u8, archive.tag, "v0.7.0") or
-        !std.mem.eql(u8, archive.commit, expected_commit) or
-        !std.mem.eql(u8, archive.url, expected_archive_url) or
-        !std.mem.eql(u8, archive.sha256, expected_archive_sha256) or
-        !std.mem.eql(u8, archive.zig_package_hash, expected_package_hash) or
-        !std.mem.eql(u8, archive.zig_version, expected_zig_version))
-    {
+    release_metadata.validateCodeArchive(metadata.code_archive) catch
         return error.CodeArchiveIdentityMismatch;
-    }
 
     const supplement = metadata.documentation_supplement;
     if (supplement.included_in_code_archive or
-        !std.mem.eql(u8, supplement.identity_kind, "ordered-sha256-file-set-v1") or
+        !std.mem.eql(
+            u8,
+            supplement.identity_kind,
+            "ordered-canonical-text-sha256-file-set-v1",
+        ) or
         !std.mem.eql(u8, supplement.publication_binding, "reviewed-release-closure-git-commit"))
     {
         return error.DocumentationIdentityConflated;
@@ -141,7 +149,7 @@ fn validateMetadata(metadata: release_metadata.ReleaseMetadata) ValidationError!
         return error.DocumentationIdentityInvalid;
     }
     for (supplement.files, supplement_sources) |file, source| {
-        const digest = sha256(source.bytes);
+        const digest = try canonicalTextSha256(source.bytes);
         if (!std.mem.eql(u8, file.path, source.path) or
             !std.mem.eql(u8, file.sha256, &digest))
         {
@@ -266,6 +274,14 @@ test "release metadata falsifiers reject wrong code identity and conflated docum
     var wrong_hash = valid;
     wrong_hash.code_archive.zig_package_hash = "boundary-floating-branch";
     try std.testing.expectError(error.CodeArchiveIdentityMismatch, validateMetadata(wrong_hash));
+
+    const lf_digest = try canonicalTextSha256("first\nsecond\n");
+    const crlf_digest = try canonicalTextSha256("first\r\nsecond\r\n");
+    try std.testing.expectEqualStrings(&lf_digest, &crlf_digest);
+    try std.testing.expectError(
+        error.InvalidTextLineEnding,
+        canonicalTextSha256("first\rsecond\n"),
+    );
 
     var conflated = valid;
     conflated.documentation_supplement.included_in_code_archive = true;

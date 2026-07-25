@@ -8,6 +8,7 @@ const VerificationError = error{
     ArchiveSnapshotChanged,
     ArchiveSha256Mismatch,
     PackageHashMismatch,
+    MetadataIdentityMismatch,
     ZigVersionMismatch,
     ZigFetchFailed,
 };
@@ -75,6 +76,13 @@ fn verifyArchive(
     var parsed = try release_metadata.parse(init.gpa);
     defer parsed.deinit();
     const expected = parsed.value.code_archive;
+    release_metadata.validateCodeArchive(expected) catch |err| {
+        std.log.err(
+            "release metadata does not match the fixed Boundary v0.7.0 oracle: {s}",
+            .{@errorName(err)},
+        );
+        return error.MetadataIdentityMismatch;
+    };
 
     const version = try runZig(init, &.{ zig_exe, "version" }, "zig version");
     defer init.gpa.free(version.stdout);
@@ -176,6 +184,13 @@ test "release archive falsifiers retain wrong byte and command identities" {
     var parsed = try release_metadata.parse(std.testing.allocator);
     defer parsed.deinit();
     const expected = parsed.value.code_archive;
+
+    var drifted = expected;
+    drifted.commit = "0000000000000000000000000000000000000000";
+    try std.testing.expectError(
+        error.CodeArchiveIdentityMismatch,
+        release_metadata.validateCodeArchive(drifted),
+    );
 
     const rejected_bytes = "not the reviewed archive";
     const archive_comparison = compareArchiveSha256(rejected_bytes, expected.sha256);

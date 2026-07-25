@@ -12,6 +12,30 @@ pub const CodeArchive = struct {
     zig_version: []const u8,
 };
 
+/// Fixed acceptance oracle for the reviewed Boundary v0.7.0 code archive.
+pub const reviewed_code_archive = CodeArchive{
+    .tag = "v0.7.0",
+    .commit = "7f2472100454aa2cd5c62e07db0c1e23eaf46a77",
+    .url = "https://github.com/tkersey/boundary/archive/refs/tags/v0.7.0.tar.gz",
+    .sha256 = "25e5bd5ed45aac023ef99beee93f675ea4efb3f6eb1e98d2a13040d7451f0e9a",
+    .zig_package_hash = "boundary-0.7.0-flclaCnjkABOSWaiSkxMBDQZsBEeA-Niai-l1u0q3A7_",
+    .zig_version = "0.16.0",
+};
+
+/// Rejects release metadata that differs from the fixed v0.7.0 oracle.
+pub fn validateCodeArchive(actual: CodeArchive) error{CodeArchiveIdentityMismatch}!void {
+    const expected = reviewed_code_archive;
+    if (!std.mem.eql(u8, actual.tag, expected.tag) or
+        !std.mem.eql(u8, actual.commit, expected.commit) or
+        !std.mem.eql(u8, actual.url, expected.url) or
+        !std.mem.eql(u8, actual.sha256, expected.sha256) or
+        !std.mem.eql(u8, actual.zig_package_hash, expected.zig_package_hash) or
+        !std.mem.eql(u8, actual.zig_version, expected.zig_version))
+    {
+        return error.CodeArchiveIdentityMismatch;
+    }
+}
+
 /// Binds one documentation-supplement path to its SHA-256 digest.
 pub const SupplementFile = struct {
     path: []const u8,

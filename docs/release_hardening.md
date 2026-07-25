@@ -36,13 +36,16 @@ added after that tag is a distinct supplement and must not be described as
 bytes from the tagged archive. The checked receipt at
 `conformance/static-machine-v1/release-metadata.json` binds the tag target,
 archive URL, archive SHA-256, Zig package hash, public StaticMachine ABI, and an
-ordered digest set for the supplement. A publication receipt separately binds
-the reviewed release-closure commit. The focused release gate checks that
-receipt and its owner-derived ABI and matrix claims. The materialized-archive
-gate accepts only the typed `-Dboundary-release-archive` input, snapshots it in
-the build cache, recomputes its SHA-256, checks Zig `0.16.0`, and asks that
-toolchain to recompute the package hash from the same snapshot without
-requiring network access.
+ordered canonical-text digest set for the supplement. Canonical text maps LF
+and CRLF materializations to LF before hashing and rejects bare carriage
+returns, so checkout configuration cannot alter the supplement identity. A
+publication receipt separately binds the reviewed release-closure commit. The
+focused release gate checks that receipt and its owner-derived ABI and matrix
+claims. The materialized-archive gate first admits the receipt through the
+fixed v0.7.0 identity oracle, then accepts only the typed
+`-Dboundary-release-archive` input, snapshots it in the build cache, recomputes
+its SHA-256, checks Zig `0.16.0`, and asks that toolchain to recompute the
+package hash from the same snapshot without requiring network access.
 
 ## File classification
 
