@@ -11,6 +11,9 @@ zig_exe=$1
 repository_root=$2
 reviewed_archive=$3
 global_cache=$4
+case "$reviewed_archive" in
+    -*) reviewed_archive="./$reviewed_archive" ;;
+esac
 proof_root=$(mktemp -d "${TMPDIR:-/tmp}/boundary-release-archive-cache.XXXXXX")
 proof_root=$(CDPATH= cd -- "$proof_root" && pwd)
 
@@ -20,7 +23,13 @@ cleanup() {
         *) printf 'refusing to remove unexpected proof root: %s\n' "$proof_root" >&2 ;;
     esac
 }
-trap cleanup EXIT HUP INT TERM
+on_signal() {
+    exit "$1"
+}
+trap cleanup EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 proof_archive="$proof_root/boundary-v0.7.0.tar.gz"
 mtime_reference="$proof_root/mtime-reference.tar.gz"

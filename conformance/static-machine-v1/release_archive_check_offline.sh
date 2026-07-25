@@ -28,6 +28,9 @@ case "$zig_exe" in
         ;;
 esac
 case "$reviewed_archive" in
+    -*) reviewed_archive="./$reviewed_archive" ;;
+esac
+case "$reviewed_archive" in
     /*) ;;
     *)
         reviewed_archive=$(
@@ -47,7 +50,13 @@ cleanup() {
         *) printf 'refusing to remove unexpected proof root: %s\n' "$proof_root" >&2 ;;
     esac
 }
-trap cleanup EXIT HUP INT TERM
+on_signal() {
+    exit "$1"
+}
+trap cleanup EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 local_cache="$proof_root/local-cache"
 global_cache="$proof_root/global-cache"
