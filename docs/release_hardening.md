@@ -43,9 +43,13 @@ publication receipt separately binds the reviewed release-closure commit. The
 focused release gate checks that receipt and its owner-derived ABI and matrix
 claims. The materialized-archive gate first admits the receipt through the
 fixed v0.7.0 identity oracle, then accepts only the typed
-`-Dboundary-release-archive` input, snapshots it in the build cache, recomputes
-its SHA-256, checks Zig `0.16.0`, and asks that toolchain to recompute the
-package hash from the same snapshot without requiring network access.
+`-Dboundary-release-archive` input. Its host verifier always runs against that
+original operator-selected path, recomputes the current bytes' SHA-256, checks
+Zig `0.16.0`, and asks that toolchain to recompute the package hash from the
+same retained bytes without requiring network access. A functional cache
+falsifier repeats the gate after a same-size byte substitution with an aged
+mtime restored; the second invocation must reject the current bytes rather than
+reuse a stale build-cache snapshot.
 
 ## File classification
 

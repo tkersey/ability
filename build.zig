@@ -1180,19 +1180,32 @@ pub fn build(b: *std.Build) void {
         "Path to the materialized Boundary v0.7.0 archive.",
     );
     if (release_archive_path) |archive_path| {
-        const archive_snapshot = b.addWriteFiles().addCopyFile(
-            .{ .cwd_relative = archive_path },
-            "boundary-v0.7.0.tar.gz",
-        );
-        run_release_archive_checker.addFileArg(archive_snapshot);
+        run_release_archive_checker.addArg(archive_path);
+        run_release_archive_checker.has_side_effects = true;
     } else {
         run_release_archive_checker.addArg("");
     }
+    const release_archive_once_step = b.step(
+        "check-boundary-static-machine-release-archive-once",
+        "Run one current-byte Boundary v0.7.0 materialized archive identity check.",
+    );
+    release_archive_once_step.dependOn(&run_release_archive_checker.step);
     const release_archive_step = b.step(
         "check-boundary-static-machine-release-archive",
         "Check a materialized Boundary v0.7.0 archive SHA-256 and Zig package hash.",
     );
-    release_archive_step.dependOn(&run_release_archive_checker.step);
+    release_archive_step.dependOn(release_archive_once_step);
+    if (release_archive_path) |archive_path| {
+        const archive_cache_falsifier = b.addSystemCommand(&.{"sh"});
+        archive_cache_falsifier.addFileArg(
+            b.path("conformance/static-machine-v1/release_archive_cache_falsifier.sh"),
+        );
+        archive_cache_falsifier.addArg(b.graph.zig_exe);
+        archive_cache_falsifier.addDirectoryArg(b.path("."));
+        archive_cache_falsifier.addArg(archive_path);
+        archive_cache_falsifier.has_side_effects = true;
+        release_archive_step.dependOn(&archive_cache_falsifier.step);
+    }
 
     const archive_falsifier_tests = b.addTest(.{
         .root_module = release_archive_check_mod,
