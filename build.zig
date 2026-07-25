@@ -1212,6 +1212,7 @@ pub fn build(b: *std.Build) void {
     }
     run_release_archive_checker.addArg(release_global_cache_path);
     run_release_archive_checker.addArg(release_proof_root);
+    run_release_archive_checker.addArg("");
     const release_archive_once_step = b.step(
         "check-boundary-static-machine-release-archive-once",
         "Run one current-byte Boundary v0.7.0 materialized archive identity check.",
@@ -1237,7 +1238,14 @@ pub fn build(b: *std.Build) void {
 
     const archive_falsifier_tests = b.addTest(.{
         .root_module = release_archive_check_mod,
-        .filters = &.{"release archive falsifiers"},
+        .filters = &.{"release archive"},
+    });
+    const release_process_group_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/static-machine-v1/release_process_group.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
     });
     const archive_falsifiers_step = b.step(
         "check-boundary-static-machine-release-archive-falsifiers",
@@ -1246,6 +1254,11 @@ pub fn build(b: *std.Build) void {
     archive_falsifiers_step.dependOn(&addRunArtifactWithArgs(
         b,
         archive_falsifier_tests,
+        proof_test_args.passthrough,
+    ).step);
+    archive_falsifiers_step.dependOn(&addRunArtifactWithArgs(
+        b,
+        release_process_group_tests,
         proof_test_args.passthrough,
     ).step);
 

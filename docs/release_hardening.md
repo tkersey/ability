@@ -55,9 +55,12 @@ than reuse a stale build-cache snapshot.
 The `zig build` command requires the source package's declared build
 dependencies to have been materialized in the selected Zig cache. For
 network-free revalidation from a materialized Boundary source package, use
-`release_archive_check_offline.sh`; it compiles only the archive checker and
-fixed release metadata with isolated local and global caches, so it does not
-resolve `build.zig.zon` dependencies.
+`release_archive_check_offline.sh`; it builds a small process-group owner and
+the archive checker against fixed release metadata with isolated local and
+global caches, so it does not resolve `build.zig.zon` dependencies. The wrapper
+admits proof work only after verifying actual SIGINT delivery, terminates the
+verifier-owned process group before removing its proof root, and reports
+success only after the checker writes the canonical completion receipt.
 
 ## File classification
 

@@ -3,6 +3,8 @@ const release_metadata = @import("boundary_static_machine_release_metadata");
 const std = @import("std");
 
 const maximum_archive_bytes = 32 * 1024 * 1024;
+const completion_receipt_name = "archive-check-complete";
+const completion_receipt_bytes = "boundary-release-archive-check/v1\n";
 
 const VerificationError = error{
     ArchiveSha256Mismatch,
@@ -231,13 +233,37 @@ fn verifyArchive(
     };
 }
 
+fn writeCompletionReceipt(
+    init: std.process.Init,
+    proof_root: []const u8,
+    receipt_path: []const u8,
+) !void {
+    if (receipt_path.len == 0) return;
+    const expected_path = try std.Io.Dir.path.join(
+        init.gpa,
+        &.{ proof_root, completion_receipt_name },
+    );
+    defer init.gpa.free(expected_path);
+    if (!std.Io.Dir.path.isAbsolute(receipt_path) or
+        !std.mem.eql(u8, receipt_path, expected_path))
+    {
+        return error.InvalidCompletionReceiptPath;
+    }
+    var receipt = try std.Io.Dir.createFileAbsolute(init.io, receipt_path, .{
+        .exclusive = true,
+        .permissions = @enumFromInt(0o600),
+    });
+    defer receipt.close(init.io);
+    try receipt.writeStreamingAll(init.io, completion_receipt_bytes);
+}
+
 /// Verifies one local Boundary v0.7.0 archive against both reviewed identities.
 pub fn main(init: std.process.Init) anyerror!void {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
     const zig_exe = args.next() orelse {
         std.log.err(
-            "usage: boundary-release-archive-check <zig-exe> <archive-path> <global-cache-path> <proof-root>",
+            "usage: boundary-release-archive-check <zig-exe> <archive-path> <global-cache-path> <proof-root> <completion-receipt-path-or-empty>",
             .{},
         );
         return error.InvalidArguments;
@@ -275,6 +301,10 @@ pub fn main(init: std.process.Init) anyerror!void {
         std.log.err("proof root must be an absolute writable directory", .{});
         return error.InvalidArguments;
     }
+    const completion_receipt_path = args.next() orelse {
+        std.log.err("missing completion receipt path; pass an empty value only for build-integrated verification", .{});
+        return error.InvalidArguments;
+    };
     if (args.next() != null) return error.InvalidArguments;
     try verifyArchive(
         init,
@@ -283,6 +313,7 @@ pub fn main(init: std.process.Init) anyerror!void {
         global_cache_path,
         proof_root,
     );
+    try writeCompletionReceipt(init, proof_root, completion_receipt_path);
 }
 
 test "release archive falsifiers retain wrong byte and command identities" {
@@ -336,5 +367,16 @@ test "release archive falsifiers retain wrong byte and command identities" {
             expected.zig_version,
             error.ZigVersionMismatch,
         ),
+    );
+}
+
+test "release archive completion receipt is canonical" {
+    try std.testing.expectEqualStrings(
+        "archive-check-complete",
+        completion_receipt_name,
+    );
+    try std.testing.expectEqualStrings(
+        "boundary-release-archive-check/v1\n",
+        completion_receipt_bytes,
     );
 }
