@@ -1,15 +1,16 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 3 ]; then
+if [ "$#" -ne 4 ]; then
     printf '%s\n' \
-        'usage: release_archive_cache_falsifier.sh <zig-exe> <repository-root> <reviewed-archive>' >&2
+        'usage: release_archive_cache_falsifier.sh <zig-exe> <repository-root> <reviewed-archive> <global-cache>' >&2
     exit 2
 fi
 
 zig_exe=$1
 repository_root=$2
 reviewed_archive=$3
+global_cache=$4
 proof_root=$(mktemp -d "${TMPDIR:-/tmp}/boundary-release-archive-cache.XXXXXX")
 
 cleanup() {
@@ -26,6 +27,7 @@ proof_output="$proof_root/rejected-output.txt"
 local_cache="$proof_root/local-cache"
 
 cp "$reviewed_archive" "$proof_archive"
+chmod u+w "$proof_archive"
 touch -t 202001010000 "$proof_archive"
 cp -p "$proof_archive" "$mtime_reference"
 
@@ -33,6 +35,7 @@ cp -p "$proof_archive" "$mtime_reference"
     cd "$repository_root"
     "$zig_exe" build \
         --cache-dir "$local_cache" \
+        --global-cache-dir "$global_cache" \
         check-boundary-static-machine-release-archive-once \
         -Dboundary-release-archive="$proof_archive"
 )
@@ -44,6 +47,7 @@ if (
     cd "$repository_root"
     "$zig_exe" build \
         --cache-dir "$local_cache" \
+        --global-cache-dir "$global_cache" \
         check-boundary-static-machine-release-archive-once \
         -Dboundary-release-archive="$proof_archive"
 ) >"$proof_output" 2>&1; then

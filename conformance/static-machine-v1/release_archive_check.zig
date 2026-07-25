@@ -18,6 +18,64 @@ const ArchiveSha256Comparison = struct {
     matches: bool,
 };
 
+const ArchiveSnapshot = struct {
+    directory_path: []u8,
+    archive_path: []u8,
+
+    fn create(init: std.process.Init, archive_bytes: []const u8) !ArchiveSnapshot {
+        var random_bytes: [16]u8 = @splat(0);
+        init.io.random(&random_bytes);
+        const suffix = std.fmt.bytesToHex(random_bytes, .lower);
+        const temporary_root = init.environ_map.get("TMPDIR") orelse "/tmp";
+        const directory_path = try std.fmt.allocPrint(
+            init.gpa,
+            "{s}/boundary-release-archive-{s}",
+            .{ temporary_root, suffix },
+        );
+        errdefer init.gpa.free(directory_path);
+        try std.Io.Dir.createDirAbsolute(
+            init.io,
+            directory_path,
+            @enumFromInt(0o700),
+        );
+        errdefer std.Io.Dir.cwd().deleteTree(init.io, directory_path) catch |err| {
+            std.log.warn(
+                "could not remove failed private archive snapshot {s}: {s}",
+                .{ directory_path, @errorName(err) },
+            );
+        };
+
+        const archive_path = try std.Io.Dir.path.join(
+            init.gpa,
+            &.{ directory_path, "boundary-v0.7.0.tar.gz" },
+        );
+        errdefer init.gpa.free(archive_path);
+        var file = try std.Io.Dir.createFileAbsolute(init.io, archive_path, .{
+            .exclusive = true,
+            .permissions = @enumFromInt(0o600),
+        });
+        defer file.close(init.io);
+        try file.writeStreamingAll(init.io, archive_bytes);
+
+        return .{
+            .directory_path = directory_path,
+            .archive_path = archive_path,
+        };
+    }
+
+    fn deinit(snapshot: *ArchiveSnapshot, init: std.process.Init) void {
+        std.Io.Dir.cwd().deleteTree(init.io, snapshot.directory_path) catch |err| {
+            std.log.warn(
+                "could not remove private archive snapshot {s}: {s}",
+                .{ snapshot.directory_path, @errorName(err) },
+            );
+        };
+        init.gpa.free(snapshot.archive_path);
+        init.gpa.free(snapshot.directory_path);
+        snapshot.* = undefined;
+    }
+};
+
 fn archiveSha256(bytes: []const u8) [64]u8 {
     var digest: [32]u8 = @splat(0);
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -72,6 +130,7 @@ fn verifyArchive(
     init: std.process.Init,
     zig_exe: []const u8,
     archive_path: []const u8,
+    global_cache_path: []const u8,
 ) !void {
     var parsed = try release_metadata.parse(init.gpa);
     defer parsed.deinit();
@@ -115,9 +174,17 @@ fn verifyArchive(
         return error.ArchiveSha256Mismatch;
     }
 
+    var snapshot = try ArchiveSnapshot.create(init, archive_bytes);
+    defer snapshot.deinit(init);
     const result = try runZig(
         init,
-        &.{ zig_exe, "fetch", archive_path },
+        &.{
+            zig_exe,
+            "fetch",
+            "--global-cache-dir",
+            global_cache_path,
+            snapshot.archive_path,
+        },
         "zig fetch",
     );
     defer init.gpa.free(result.stdout);
@@ -176,14 +243,23 @@ pub fn main(init: std.process.Init) anyerror!void {
         );
         return error.InvalidArguments;
     }
+    const global_cache_path = args.next() orelse {
+        std.log.err(
+            "missing global cache path; the caller must bind every nested Zig process to one cache",
+            .{},
+        );
+        return error.InvalidArguments;
+    };
+    if (global_cache_path.len == 0) return error.InvalidArguments;
     if (args.next() != null) return error.InvalidArguments;
-    try verifyArchive(init, zig_exe, archive_path);
+    try verifyArchive(init, zig_exe, archive_path, global_cache_path);
 }
 
 test "release archive falsifiers retain wrong byte and command identities" {
     var parsed = try release_metadata.parse(std.testing.allocator);
     defer parsed.deinit();
     const expected = parsed.value.code_archive;
+    try release_metadata.validateCodeArchive(expected);
 
     var drifted = expected;
     drifted.commit = "0000000000000000000000000000000000000000";

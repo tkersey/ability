@@ -1174,6 +1174,13 @@ pub fn build(b: *std.Build) void {
     });
     const run_release_archive_checker = b.addRunArtifact(release_archive_checker);
     run_release_archive_checker.addArg(b.graph.zig_exe);
+    const configured_global_cache_path = b.graph.global_cache_root.path orelse ".";
+    const release_global_cache_path = if (std.Io.Dir.path.isAbsolute(
+        configured_global_cache_path,
+    ))
+        configured_global_cache_path
+    else
+        b.pathFromRoot(configured_global_cache_path);
     const release_archive_path = b.option(
         []const u8,
         "boundary-release-archive",
@@ -1185,6 +1192,7 @@ pub fn build(b: *std.Build) void {
     } else {
         run_release_archive_checker.addArg("");
     }
+    run_release_archive_checker.addArg(release_global_cache_path);
     const release_archive_once_step = b.step(
         "check-boundary-static-machine-release-archive-once",
         "Run one current-byte Boundary v0.7.0 materialized archive identity check.",
@@ -1203,6 +1211,7 @@ pub fn build(b: *std.Build) void {
         archive_cache_falsifier.addArg(b.graph.zig_exe);
         archive_cache_falsifier.addDirectoryArg(b.path("."));
         archive_cache_falsifier.addArg(archive_path);
+        archive_cache_falsifier.addArg(release_global_cache_path);
         archive_cache_falsifier.has_side_effects = true;
         release_archive_step.dependOn(&archive_cache_falsifier.step);
     }

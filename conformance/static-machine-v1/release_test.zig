@@ -266,6 +266,7 @@ test "release metadata falsifiers reject wrong code identity and conflated docum
     defer parsed.deinit();
 
     const valid = parsed.value;
+    try validateMetadata(valid);
 
     var wrong_commit = valid;
     wrong_commit.code_archive.commit = "0000000000000000000000000000000000000000";

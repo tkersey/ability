@@ -15,6 +15,7 @@ git diff --check
 zig build check-boundary-static-machine-release
 zig build check-boundary-static-machine-release-falsifiers
 zig build check-boundary-static-machine-release-archive -Dboundary-release-archive=/path/to/boundary-v0.7.0.tar.gz
+sh conformance/static-machine-v1/release_archive_check_offline.sh zig /path/to/boundary-v0.7.0.tar.gz
 zig build check-boundary-static-machine-release-archive-falsifiers
 zig build --summary all
 zig build test --summary all
@@ -43,13 +44,20 @@ publication receipt separately binds the reviewed release-closure commit. The
 focused release gate checks that receipt and its owner-derived ABI and matrix
 claims. The materialized-archive gate first admits the receipt through the
 fixed v0.7.0 identity oracle, then accepts only the typed
-`-Dboundary-release-archive` input. Its host verifier always runs against that
-original operator-selected path, recomputes the current bytes' SHA-256, checks
-Zig `0.16.0`, and asks that toolchain to recompute the package hash from the
-same retained bytes without requiring network access. A functional cache
-falsifier repeats the gate after a same-size byte substitution with an aged
-mtime restored; the second invocation must reject the current bytes rather than
-reuse a stale build-cache snapshot.
+`-Dboundary-release-archive` input. Its host verifier always reads the original
+operator-selected path, recomputes the current bytes' SHA-256, writes those
+admitted bytes to a private snapshot, checks Zig `0.16.0`, and asks that
+toolchain to recompute the package hash from that same snapshot. A functional
+cache falsifier repeats the gate after a same-size byte substitution with an
+aged mtime restored; the second invocation must reject the current bytes rather
+than reuse a stale build-cache snapshot.
+
+The `zig build` command requires the source package's declared build
+dependencies to have been materialized in the selected Zig cache. For
+network-free revalidation from a materialized Boundary source package, use
+`release_archive_check_offline.sh`; it compiles only the archive checker and
+fixed release metadata with isolated local and global caches, so it does not
+resolve `build.zig.zon` dependencies.
 
 ## File classification
 
