@@ -1,0 +1,300 @@
+const cir = @import("control_ir");
+const program_v2 = @import("program_v2");
+const std = @import("std");
+
+const state_header_length: usize = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
+const frame_header_length: usize = 4 + 4;
+const first_environment_offset = state_header_length + frame_header_length;
+
+const Choice = union(enum) {
+    left: u32,
+    right: u32,
+};
+
+const Left = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity = "test.constructor-invariant.left.v1";
+    pub const Payload = Choice;
+    pub const Resume = u32;
+};
+
+const Right = struct {
+    pub const id: u32 = 1;
+    pub const semantic_identity = "test.constructor-invariant.right.v1";
+    pub const Payload = Choice;
+    pub const Resume = u32;
+};
+
+const choice_type: cir.ValueType = .{ .schema = 0 };
+const bool_type: cir.ValueType = .{ .scalar = .boolean };
+const u32_type: cir.ValueType = .{ .scalar = .u32 };
+const sum_value_types = [_]cir.ValueType{
+    choice_type,
+    bool_type,
+    u32_type,
+};
+const sum_entry_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .{ .sum_tag_is = 0 },
+    },
+};
+const sum_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const sum_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &sum_entry_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 1,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &sum_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 1,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &sum_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{2},
+        .terminator = .{ .return_value = 2 },
+    },
+};
+
+const SumBody = struct {
+    pub const InitialArgs = Choice;
+    pub const Result = u32;
+    pub const Failure = enum {
+        rejected,
+    };
+    pub const effect_sites = .{ Left, Right };
+    pub const schema_types = .{Choice};
+    pub const control_ir: cir.Program = .{
+        .label = "sum-case-constructor-invariant",
+        .value_types = &sum_value_types,
+        .blocks = &sum_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const SumProgram = program_v2.program(
+    "sum-case-constructor-invariant",
+    SumBody,
+);
+const SumMachine = SumProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+const Maybe = ?void;
+
+const Some = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity = "test.constructor-invariant.some.v1";
+    pub const Payload = Maybe;
+    pub const Resume = u32;
+};
+
+const None = struct {
+    pub const id: u32 = 1;
+    pub const semantic_identity = "test.constructor-invariant.none.v1";
+    pub const Payload = Maybe;
+    pub const Resume = u32;
+};
+
+const maybe_type: cir.ValueType = .{ .schema = 0 };
+const optional_value_types = [_]cir.ValueType{
+    maybe_type,
+    bool_type,
+    u32_type,
+};
+const optional_entry_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .optional_is_some,
+    },
+};
+const optional_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const optional_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &optional_entry_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 1,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &optional_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 1,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &optional_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{2},
+        .terminator = .{ .return_value = 2 },
+    },
+};
+
+const OptionalBody = struct {
+    pub const InitialArgs = Maybe;
+    pub const Result = u32;
+    pub const Failure = enum {
+        rejected,
+    };
+    pub const effect_sites = .{ Some, None };
+    pub const schema_types = .{Maybe};
+    pub const control_ir: cir.Program = .{
+        .label = "optional-case-constructor-invariant",
+        .value_types = &optional_value_types,
+        .blocks = &optional_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const OptionalProgram = program_v2.program(
+    "optional-case-constructor-invariant",
+    OptionalBody,
+);
+const OptionalMachine = OptionalProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+test "sum branches persist the source case and reject a forged local path" {
+    const awaiting_left = &SumProgram.rnf.constructors[2];
+    try std.testing.expectEqual(@as(usize, 1), awaiting_left.environment_len);
+    try std.testing.expectEqual(
+        @as(cir.ValueId, 0),
+        awaiting_left.environment[0].value,
+    );
+    try std.testing.expectEqual(@as(usize, 1), awaiting_left.invariant_len);
+    switch (awaiting_left.invariants[0]) {
+        .sum_case => |term| {
+            try std.testing.expectEqual(@as(cir.ValueId, 0), term.value);
+            try std.testing.expectEqual(@as(u16, 0), term.case_index);
+            try std.testing.expect(term.equal);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const state = try SumMachine.initialState(
+        std.testing.allocator,
+        .{ .left = 7 },
+    );
+    defer SumMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try SumMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try SumMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset..][0..4],
+        1,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        SumMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "optional branches use the same canonical sum-case invariant" {
+    const awaiting_some = &OptionalProgram.rnf.constructors[2];
+    try std.testing.expectEqual(@as(usize, 1), awaiting_some.environment_len);
+    try std.testing.expectEqual(
+        @as(cir.ValueId, 0),
+        awaiting_some.environment[0].value,
+    );
+    switch (awaiting_some.invariants[0]) {
+        .sum_case => |term| {
+            try std.testing.expectEqual(@as(u16, 1), term.case_index);
+            try std.testing.expect(term.equal);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const state = try OptionalMachine.initialState(
+        std.testing.allocator,
+        @as(Maybe, {}),
+    );
+    defer OptionalMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try OptionalMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try OptionalMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    forged[first_environment_offset] = 0;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OptionalMachine.decodeState(std.testing.allocator, forged),
+    );
+}

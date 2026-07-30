@@ -1,33 +1,43 @@
-const shared = @import("boundary_shared");
+const agent_profile = @import("agent_profile");
+const control_ir = @import("control_ir");
+const driver = @import("driver");
+const effect_v2 = @import("effect_v2");
+const machine = @import("machine");
+const portable_value = @import("portable_value");
+const program_v2 = @import("program_v2");
 
-/// Public effect namespace.
-pub const effect = shared.effect;
-/// Public Agent Profile v0 construction namespace.
-pub const Agent = shared.Agent;
-/// Public ProgramPlan builder namespace.
-pub const ir = shared.ir;
-/// Canonical runtime handle for local program execution.
-pub const Runtime = shared.Runtime;
-/// Declare one reusable explicit effect program.
-pub const program = shared.program;
-/// Generate a typed defunctionalized StaticMachine for a Boundary program.
-pub const staticMachine = shared.staticMachine;
-/// Compile-time controls for boundary.staticMachine.
-pub const StaticMachineOptions = shared.StaticMachineOptions;
-/// Canonical v0 protocol manifest namespace.
-pub const Protocol = shared.Protocol;
-/// Boundary protocol manifest binary format version.
-pub const boundary_protocol_manifest_format_version = shared.boundary_protocol_manifest_format_version;
-/// Boundary protocol manifest fingerprint version.
-pub const boundary_protocol_manifest_fingerprint_version = shared.boundary_protocol_manifest_fingerprint_version;
+/// Public typed residual-effect authoring namespace.
+pub const effect = effect_v2;
+/// Public canonical portable-value and codec namespace.
+pub const schema = portable_value;
+/// Advanced typed source/control authoring namespace.
+pub const ir = control_ir;
+/// Declare one typed Boundary source program with one Machine meaning.
+pub const program = program_v2.program;
+/// Local driver over the same compiled Machine used by World.
+pub const Driver = driver.Driver;
+/// Optional agent profile over the sole Program compiler.
+pub const Agent = agent_profile;
+/// Canonical bounded byte sequence.
+pub const Bytes = portable_value.Bytes;
+/// Canonical bounded UTF-8 text.
+pub const Text = portable_value.Text;
+/// Canonical bounded vector.
+pub const Vector = portable_value.Vector;
+/// Identity-bearing Machine compiler options.
+pub const MachineOptions = machine.Options;
 
-test {
-    _ = Runtime;
-    _ = Agent;
-    _ = program;
-    _ = staticMachine;
-    _ = StaticMachineOptions;
-    _ = effect;
-    _ = ir;
-    _ = Protocol;
+test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
+    const std = @import("std");
+
+    try std.testing.expect(@hasDecl(@This(), "program"));
+    try std.testing.expect(@hasDecl(@This(), "Driver"));
+    try std.testing.expect(@hasDecl(@This(), "Agent"));
+    try std.testing.expect(@hasDecl(@This(), "effect"));
+    try std.testing.expect(@hasDecl(@This(), "schema"));
+    try std.testing.expect(@hasDecl(@This(), "ir"));
+    try std.testing.expect(!@hasDecl(@This(), "Runtime"));
+    try std.testing.expect(!@hasDecl(@This(), "staticMachine"));
+    try std.testing.expect(!@hasDecl(@This(), "StaticMachineOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "Protocol"));
 }
