@@ -1,4 +1,5 @@
 const cir = @import("control_ir");
+const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
@@ -571,6 +572,491 @@ const ConstantOptionalMachine = ConstantOptionalProgram.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+const RetainedProduct = struct {
+    selected: u32,
+    retained: u32,
+};
+
+const ProductLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.product-extract.v1";
+    pub const Payload = RetainedProduct;
+    pub const Resume = u32;
+};
+
+const product_type: cir.ValueType = .{ .schema = 0 };
+const product_extract_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .{ .product_extract = 0 },
+    },
+    .{
+        .kind = .compare_eq_zero,
+        .result = 2,
+        .operands = &.{1},
+        .operation = .compare_eq_zero,
+    },
+};
+const product_extract_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const product_extract_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &product_extract_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 2,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .fail = 0 },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &product_extract_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{3},
+        .terminator = .{ .return_value = 3 },
+    },
+};
+
+const ProductExtractBody = struct {
+    pub const InitialArgs = RetainedProduct;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{ProductLookup};
+    pub const schema_types = .{RetainedProduct};
+    pub const control_ir: cir.Program = .{
+        .label = "product-extract-constructor-invariant",
+        .value_types = &.{ product_type, u32_type, bool_type, u32_type },
+        .blocks = &product_extract_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const ProductExtractProgram = program_v2.program(
+    "product-extract-constructor-invariant",
+    ProductExtractBody,
+);
+const ProductExtractMachine = ProductExtractProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+const SumExtractLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.sum-extract.v1";
+    pub const Payload = Choice;
+    pub const Resume = u32;
+};
+
+const sum_extract_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .{ .sum_extract = 0 },
+    },
+    .{
+        .kind = .compare_eq_zero,
+        .result = 2,
+        .operands = &.{1},
+        .operation = .compare_eq_zero,
+    },
+};
+const sum_extract_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const sum_extract_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &sum_extract_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 2,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .fail = 0 },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &sum_extract_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{3},
+        .terminator = .{ .return_value = 3 },
+    },
+};
+
+const SumExtractBody = struct {
+    pub const InitialArgs = Choice;
+    pub const Result = u32;
+    pub const Failure = enum { rejected, invalid_variant };
+    pub const effect_sites = .{SumExtractLookup};
+    pub const schema_types = .{Choice};
+    pub const control_ir: cir.Program = .{
+        .label = "sum-extract-constructor-invariant",
+        .value_types = &.{ choice_type, u32_type, bool_type, u32_type },
+        .blocks = &sum_extract_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const SumExtractProgram = program_v2.program(
+    "sum-extract-constructor-invariant",
+    SumExtractBody,
+);
+const SumExtractMachine = SumExtractProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+const LengthVector = portable_value.Vector(u32, 4);
+
+const VectorLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.vector-length.v1";
+    pub const Payload = LengthVector;
+    pub const Resume = u32;
+};
+
+const vector_type: cir.ValueType = .{ .schema = 0 };
+const vector_length_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .vector_length,
+    },
+    .{
+        .kind = .compare_eq_zero,
+        .result = 2,
+        .operands = &.{1},
+        .operation = .compare_eq_zero,
+    },
+};
+const vector_length_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const vector_length_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &vector_length_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 2,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .fail = 0 },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &vector_length_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{3},
+        .terminator = .{ .return_value = 3 },
+    },
+};
+
+const VectorLengthBody = struct {
+    pub const InitialArgs = LengthVector;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{VectorLookup};
+    pub const schema_types = .{LengthVector};
+    pub const control_ir: cir.Program = .{
+        .label = "vector-length-constructor-invariant",
+        .value_types = &.{ vector_type, u32_type, bool_type, u32_type },
+        .blocks = &vector_length_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const VectorLengthProgram = program_v2.program(
+    "vector-length-constructor-invariant",
+    VectorLengthBody,
+);
+const VectorLengthMachine = VectorLengthProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+fn BoundedLengthWitness(
+    comptime Bounded: type,
+    comptime operation: cir.InstructionOperation,
+    comptime label: []const u8,
+    comptime site_identity: []const u8,
+) type {
+    return struct {
+        const Lookup = struct {
+            pub const id: u32 = 0;
+            pub const semantic_identity = site_identity;
+            pub const Payload = Bounded;
+            pub const Resume = u32;
+        };
+        const instructions = [_]cir.Instruction{
+            .{
+                .kind = .pure,
+                .result = 1,
+                .operands = &.{0},
+                .operation = operation,
+            },
+            .{
+                .kind = .compare_eq_zero,
+                .result = 2,
+                .operands = &.{1},
+                .operation = .compare_eq_zero,
+            },
+        };
+        const resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+        const blocks = [_]cir.Block{
+            .{
+                .id = 0,
+                .parameters = &.{0},
+                .instructions = &instructions,
+                .terminator = .{ .branch = .{
+                    .condition = 2,
+                    .then_edge = .{ .target = 1 },
+                    .else_edge = .{ .target = 2 },
+                } },
+            },
+            .{ .id = 1, .terminator = .{ .fail = 0 } },
+            .{
+                .id = 2,
+                .terminator = .{ .@"suspend" = .{
+                    .kind = .effect,
+                    .site_id = 0,
+                    .request_values = &.{0},
+                    .continuation = .{
+                        .target = 3,
+                        .arguments = &resume_arguments,
+                    },
+                    .resume_type = u32_type,
+                } },
+            },
+            .{
+                .id = 3,
+                .parameters = &.{3},
+                .terminator = .{ .return_value = 3 },
+            },
+        };
+        pub const Body = struct {
+            pub const InitialArgs = Bounded;
+            pub const Result = u32;
+            pub const Failure = enum { rejected };
+            pub const effect_sites = .{Lookup};
+            pub const schema_types = .{Bounded};
+            pub const control_ir: cir.Program = .{
+                .label = label,
+                .value_types = &.{ vector_type, u32_type, bool_type, u32_type },
+                .blocks = &blocks,
+                .entry = 0,
+                .result_type = u32_type,
+            };
+        };
+        pub const Program = program_v2.program(label, Body);
+        pub const Machine = Program.compile(.{
+            .maximum_frames = 4,
+            .maximum_state_bytes = 4096,
+            .maximum_machine_fuel = 32,
+        });
+    };
+}
+
+const TextLengthWitness = BoundedLengthWitness(
+    portable_value.Text(8),
+    .text_length,
+    "text-length-constructor-invariant",
+    "test.constructor-invariant.text-length.v1",
+);
+const BytesLengthWitness = BoundedLengthWitness(
+    portable_value.Bytes(8),
+    .bytes_length,
+    "bytes-length-constructor-invariant",
+    "test.constructor-invariant.bytes-length.v1",
+);
+
+const BooleanConstantLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.boolean-constant.v1";
+    pub const Payload = bool;
+    pub const Resume = u32;
+};
+
+const boolean_constant_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 0,
+        .operation = .{ .constant = 0 },
+    },
+};
+const boolean_constant_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const boolean_constant_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &boolean_constant_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 0,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &boolean_constant_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .fail = 0 },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{1},
+        .terminator = .{ .return_value = 1 },
+    },
+};
+
+const BooleanConstantBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const constants = .{true};
+    pub const effect_sites = .{BooleanConstantLookup};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "boolean-constant-constructor-invariant",
+        .value_types = &.{ bool_type, u32_type },
+        .blocks = &boolean_constant_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const BooleanConstantProgram = program_v2.program(
+    "boolean-constant-constructor-invariant",
+    BooleanConstantBody,
+);
+const BooleanConstantMachine = BooleanConstantProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+fn ClassificationOnlyProgram(comptime role: cir.BlockRole) type {
+    return struct {
+        const entry_instructions = [_]cir.Instruction{
+            .{
+                .kind = .constant,
+                .result = 0,
+                .operation = .{ .constant = 0 },
+            },
+        };
+        const edge_arguments = [_]cir.EdgeArgument{.{ .value = 0 }};
+        const blocks = [_]cir.Block{
+            .{
+                .id = 0,
+                .instructions = &entry_instructions,
+                .terminator = .{ .jump = .{
+                    .target = 1,
+                    .arguments = &edge_arguments,
+                } },
+            },
+            .{
+                .id = 1,
+                .role = role,
+                .parameters = &.{1},
+                .terminator = .{ .return_value = 1 },
+            },
+        };
+        const Body = struct {
+            pub const InitialArgs = void;
+            pub const Result = u32;
+            pub const Failure = enum { rejected };
+            pub const constants = .{@as(u32, 7)};
+            pub const effect_sites = .{};
+            pub const schema_types = .{};
+            pub const control_ir: cir.Program = .{
+                .label = "classification-only-identity",
+                .value_types = &.{ u32_type, u32_type },
+                .blocks = &blocks,
+                .entry = 0,
+                .result_type = u32_type,
+            };
+        };
+        pub const Program = program_v2.program(
+            "classification-only-identity",
+            Body,
+        );
+        pub const Machine = Program.compile(.{
+            .maximum_frames = 4,
+            .maximum_state_bytes = 4096,
+            .maximum_machine_fuel = 32,
+        });
+    };
+}
+
+const SegmentClassification = ClassificationOnlyProgram(.segment);
+const LoopClassification = ClassificationOnlyProgram(.loop_header);
+
 test "sum branches persist the source case and reject a forged local path" {
     const awaiting_left = &SumProgram.rnf.constructors[2];
     try std.testing.expectEqual(@as(usize, 1), awaiting_left.environment_len);
@@ -612,6 +1098,32 @@ test "sum branches persist the source case and reject a forged local path" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         SumMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "public resume consumes only preallocated response authority" {
+    try std.testing.expect(!@hasDecl(SumMachine, "commitPreparedResume"));
+    const resume_info = @typeInfo(@TypeOf(SumMachine.@"resume")).@"fn";
+    try std.testing.expectEqual(@as(usize, 2), resume_info.params.len);
+    try std.testing.expect(resume_info.params[0].type.? ==
+        SumMachine.PreparedResume);
+
+    const state = try SumMachine.initialState(
+        std.testing.allocator,
+        .{ .left = 7 },
+    );
+    defer SumMachine.deinitState(state);
+    var fuel: u64 = 8;
+    const request = switch (try SumMachine.step(state, &fuel)) {
+        .request => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const prepared_resume = try SumMachine.prepareResume(state, request);
+    defer SumMachine.deinitPreparedResume(prepared_resume);
+    try SumMachine.@"resume"(prepared_resume, @as(u32, 11));
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        SumMachine.@"resume"(prepared_resume, @as(u32, 11)),
     );
 }
 
@@ -875,4 +1387,359 @@ test "algebraic constants have canonical sum-case witnesses" {
             else => return error.TestUnexpectedResult,
         };
     }
+}
+
+test "retained product extracts are authenticated locally" {
+    const awaiting = blk: {
+        for (ProductExtractProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 2 and
+                constructor.kind == .await_effect)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_extract = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .product_extract_result => |definition| {
+            saw_extract = definition.result == 1 and
+                definition.product == 0 and
+                definition.field_index == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_extract);
+
+    const state = try ProductExtractMachine.initialState(
+        std.testing.allocator,
+        .{ .selected = 1, .retained = 9 },
+    );
+    defer ProductExtractMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try ProductExtractMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try ProductExtractMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset + 8 ..][0..4],
+        2,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        ProductExtractMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "retained sum extracts are authenticated locally" {
+    const awaiting = blk: {
+        for (SumExtractProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 2 and
+                constructor.kind == .await_effect)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_extract = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .sum_extract_result => |definition| {
+            saw_extract = definition.result == 1 and
+                definition.sum == 0 and
+                definition.case_index == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_extract);
+
+    const state = try SumExtractMachine.initialState(
+        std.testing.allocator,
+        .{ .left = 1 },
+    );
+    defer SumExtractMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try SumExtractMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try SumExtractMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset + 8 ..][0..4],
+        2,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        SumExtractMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "Boolean constants retain canonical definition witnesses" {
+    const awaiting = blk: {
+        for (BooleanConstantProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 1 and
+                constructor.kind == .await_effect)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_constant = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .value_constant => |definition| {
+            saw_constant = definition.result == 0 and
+                switch (definition.contents) {
+                    .boolean => |contents| contents,
+                    else => false,
+                };
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_constant);
+
+    const state = try BooleanConstantMachine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer BooleanConstantMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try BooleanConstantMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try BooleanConstantMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    forged[first_environment_offset] = 0;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        BooleanConstantMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "bounded collection lengths are authenticated locally" {
+    const awaiting = blk: {
+        for (VectorLengthProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 2 and
+                constructor.kind == .await_effect)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_length = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .bounded_length_result => |definition| {
+            saw_length = definition.result == 1 and definition.bounded == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_length);
+
+    var initial = LengthVector.empty();
+    try initial.push(7);
+    const state = try VectorLengthMachine.initialState(
+        std.testing.allocator,
+        initial,
+    );
+    defer VectorLengthMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try VectorLengthMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try VectorLengthMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    const vector_bytes = try portable_value.encodedSize(LengthVector, initial);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset + vector_bytes ..][0..4],
+        2,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        VectorLengthMachine.decodeState(std.testing.allocator, forged),
+    );
+
+    inline for (.{ TextLengthWitness, BytesLengthWitness }) |Witness| {
+        const bounded_awaiting = blk: {
+            for (Witness.Program.rnf.constructorSlice()) |*constructor| {
+                if (constructor.source_block == 2 and
+                    constructor.kind == .await_effect)
+                {
+                    break :blk constructor;
+                }
+            }
+            return error.TestExpectedEqual;
+        };
+        var bounded_saw_length = false;
+        for (bounded_awaiting.invariantTerms()) |term| switch (term) {
+            .bounded_length_result => |definition| {
+                bounded_saw_length = definition.result == 1 and
+                    definition.bounded == 0;
+            },
+            else => {},
+        };
+        try std.testing.expect(bounded_saw_length);
+
+        const bounded_initial = try Witness.Body.InitialArgs.fromSlice("x");
+        const bounded_state = try Witness.Machine.initialState(
+            std.testing.allocator,
+            bounded_initial,
+        );
+        defer Witness.Machine.deinitState(bounded_state);
+        var bounded_fuel: u64 = 8;
+        _ = switch (try Witness.Machine.step(
+            bounded_state,
+            &bounded_fuel,
+        )) {
+            .request => |request| request,
+            else => return error.TestUnexpectedResult,
+        };
+        const bounded_encoded = try Witness.Machine.encodeState(
+            std.testing.allocator,
+            bounded_state,
+        );
+        defer std.testing.allocator.free(bounded_encoded);
+        const bounded_forged = try std.testing.allocator.dupe(
+            u8,
+            bounded_encoded,
+        );
+        defer std.testing.allocator.free(bounded_forged);
+        const bounded_bytes = try portable_value.encodedSize(
+            Witness.Body.InitialArgs,
+            bounded_initial,
+        );
+        std.mem.writeInt(
+            u32,
+            bounded_forged[first_environment_offset + bounded_bytes ..][0..4],
+            2,
+            .little,
+        );
+        try std.testing.expectError(
+            error.ProgramContractViolation,
+            Witness.Machine.decodeState(
+                std.testing.allocator,
+                bounded_forged,
+            ),
+        );
+    }
+}
+
+test "diagnostic constructor classifications do not alter Machine identity" {
+    try std.testing.expectEqualSlices(
+        u8,
+        &SegmentClassification.Machine.Manifest.machine_contract_digest,
+        &LoopClassification.Machine.Manifest.machine_contract_digest,
+    );
+
+    const segment_state = try SegmentClassification.Machine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer SegmentClassification.Machine.deinitState(segment_state);
+    const loop_state = try LoopClassification.Machine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer LoopClassification.Machine.deinitState(loop_state);
+    var segment_fuel: u64 = 2;
+    try std.testing.expectEqual(
+        .yielded,
+        std.meta.activeTag(try SegmentClassification.Machine.step(
+            segment_state,
+            &segment_fuel,
+        )),
+    );
+    var loop_fuel: u64 = 2;
+    try std.testing.expectEqual(
+        .yielded,
+        std.meta.activeTag(try LoopClassification.Machine.step(
+            loop_state,
+            &loop_fuel,
+        )),
+    );
+    const segment_bytes = try SegmentClassification.Machine.encodeState(
+        std.testing.allocator,
+        segment_state,
+    );
+    defer std.testing.allocator.free(segment_bytes);
+    const loop_bytes = try LoopClassification.Machine.encodeState(
+        std.testing.allocator,
+        loop_state,
+    );
+    defer std.testing.allocator.free(loop_bytes);
+    try std.testing.expectEqualSlices(u8, segment_bytes, loop_bytes);
+
+    inline for (.{ SegmentClassification, LoopClassification }) |Witness| {
+        const state = try Witness.Machine.initialState(
+            std.testing.allocator,
+            {},
+        );
+        defer Witness.Machine.deinitState(state);
+        var fuel: u64 = 8;
+        const result = switch (try Witness.Machine.step(state, &fuel)) {
+            .done => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer result.deinit();
+        try std.testing.expectEqual(@as(u32, 7), result.value().*);
+    }
+}
+
+test "zero caller fuel preserves the exact constructor state" {
+    const state = try SegmentClassification.Machine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer SegmentClassification.Machine.deinitState(state);
+    const before = try SegmentClassification.Machine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(before);
+    var caller_fuel: u64 = 0;
+    try std.testing.expectEqual(
+        .yielded,
+        std.meta.activeTag(try SegmentClassification.Machine.step(
+            state,
+            &caller_fuel,
+        )),
+    );
+    const after = try SegmentClassification.Machine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectEqual(@as(u64, 0), caller_fuel);
 }

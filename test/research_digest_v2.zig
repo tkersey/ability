@@ -377,9 +377,13 @@ test "Research Digest v2 formats capability data inside the Machine" {
         .title = try Title.fromSlice("Beta"),
         .summary = try Summary.fromSlice("Second"),
     });
-    try DigestMachine.@"resume"(
+    const prepared_resume = try DigestMachine.prepareResume(
         pending_state,
         request,
+    );
+    defer DigestMachine.deinitPreparedResume(prepared_resume);
+    try DigestMachine.@"resume"(
+        prepared_resume,
         ResearchResponse{ .items = items },
     );
 

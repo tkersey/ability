@@ -69,7 +69,7 @@ pub fn Driver(comptime Machine: type) type {
                                 .request = request,
                                 .err = err,
                             } };
-                            try Machine.commitPreparedResume(
+                            try Machine.@"resume"(
                                 prepared_resume,
                                 response,
                             );

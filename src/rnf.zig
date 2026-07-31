@@ -99,6 +99,20 @@ pub const InvariantTerm = union(enum) {
         then_value: control_ir.ValueId,
         else_value: control_ir.ValueId,
     },
+    product_extract_result: struct {
+        result: control_ir.ValueId,
+        product: control_ir.ValueId,
+        field_index: u16,
+    },
+    sum_extract_result: struct {
+        result: control_ir.ValueId,
+        sum: control_ir.ValueId,
+        case_index: u16,
+    },
+    bounded_length_result: struct {
+        result: control_ir.ValueId,
+        bounded: control_ir.ValueId,
+    },
     integer_unary_result: struct {
         result: control_ir.ValueId,
         operand: control_ir.ValueId,
@@ -157,6 +171,9 @@ pub const InvariantTerm = union(enum) {
             .value_copy => |term| term.result,
             .value_constant => |term| term.result,
             .value_select => |term| term.result,
+            .product_extract_result => |term| term.result,
+            .sum_extract_result => |term| term.result,
+            .bounded_length_result => |term| term.result,
             .integer_unary_result => |term| term.result,
             .integer_binary_result => |term| term.result,
             .integer_convert_result => |term| term.result,
@@ -200,6 +217,15 @@ pub const InvariantTerm = union(enum) {
                 changed = required.insert(term.condition) or changed;
                 changed = required.insert(term.then_value) or changed;
                 changed = required.insert(term.else_value) or changed;
+            },
+            .product_extract_result => |term| {
+                changed = required.insert(term.product) or changed;
+            },
+            .sum_extract_result => |term| {
+                changed = required.insert(term.sum) or changed;
+            },
+            .bounded_length_result => |term| {
+                changed = required.insert(term.bounded) or changed;
             },
             .integer_unary_result => |term| {
                 changed = required.insert(term.operand) or changed;
@@ -262,6 +288,18 @@ pub const InvariantTerm = union(enum) {
                 _ = required.insert(term.condition);
                 _ = required.insert(term.then_value);
                 _ = required.insert(term.else_value);
+            },
+            .product_extract_result => |term| {
+                _ = required.insert(term.result);
+                _ = required.insert(term.product);
+            },
+            .sum_extract_result => |term| {
+                _ = required.insert(term.result);
+                _ = required.insert(term.sum);
+            },
+            .bounded_length_result => |term| {
+                _ = required.insert(term.result);
+                _ = required.insert(term.bounded);
             },
             .integer_unary_result => |term| {
                 _ = required.insert(term.result);
@@ -344,6 +382,23 @@ pub const InvariantTerm = union(enum) {
                     term.condition == other_term.condition and
                     term.then_value == other_term.then_value and
                     term.else_value == other_term.else_value,
+                else => false,
+            },
+            .product_extract_result => |term| switch (other) {
+                .product_extract_result => |other_term| term.result == other_term.result and
+                    term.product == other_term.product and
+                    term.field_index == other_term.field_index,
+                else => false,
+            },
+            .sum_extract_result => |term| switch (other) {
+                .sum_extract_result => |other_term| term.result == other_term.result and
+                    term.sum == other_term.sum and
+                    term.case_index == other_term.case_index,
+                else => false,
+            },
+            .bounded_length_result => |term| switch (other) {
+                .bounded_length_result => |other_term| term.result == other_term.result and
+                    term.bounded == other_term.bounded,
                 else => false,
             },
             .integer_unary_result => |term| switch (other) {
@@ -731,6 +786,10 @@ fn evaluate(term: InvariantTerm, bindings: []const InvariantBinding) Error!void 
                     definition.else_value,
             ) orelse return error.MissingInvariantValue,
         ),
+        .product_extract_result,
+        .sum_extract_result,
+        .bounded_length_result,
+        => return error.InvalidInvariantValue,
         .integer_unary_result => |definition| integerUnaryInvariantHolds(
             bindingFor(bindings, definition.result) orelse
                 return error.MissingInvariantValue,
@@ -1237,6 +1296,44 @@ pub fn NormalForm(
                         }
                     }
                     break :blk false;
+                },
+                .product_extract_result => |left_term| blk: {
+                    const right_term = right.product_extract_result;
+                    const left_result = canonical_values.ordinal(left_term.result);
+                    const right_result = canonical_values.ordinal(right_term.result);
+                    if (left_result != right_result) {
+                        break :blk left_result < right_result;
+                    }
+                    const left_product = canonical_values.ordinal(left_term.product);
+                    const right_product = canonical_values.ordinal(right_term.product);
+                    if (left_product != right_product) {
+                        break :blk left_product < right_product;
+                    }
+                    break :blk left_term.field_index < right_term.field_index;
+                },
+                .sum_extract_result => |left_term| blk: {
+                    const right_term = right.sum_extract_result;
+                    const left_result = canonical_values.ordinal(left_term.result);
+                    const right_result = canonical_values.ordinal(right_term.result);
+                    if (left_result != right_result) {
+                        break :blk left_result < right_result;
+                    }
+                    const left_sum = canonical_values.ordinal(left_term.sum);
+                    const right_sum = canonical_values.ordinal(right_term.sum);
+                    if (left_sum != right_sum) {
+                        break :blk left_sum < right_sum;
+                    }
+                    break :blk left_term.case_index < right_term.case_index;
+                },
+                .bounded_length_result => |left_term| blk: {
+                    const right_term = right.bounded_length_result;
+                    const left_result = canonical_values.ordinal(left_term.result);
+                    const right_result = canonical_values.ordinal(right_term.result);
+                    if (left_result != right_result) {
+                        break :blk left_result < right_result;
+                    }
+                    break :blk canonical_values.ordinal(left_term.bounded) <
+                        canonical_values.ordinal(right_term.bounded);
                 },
                 .integer_unary_result => |left_term| blk: {
                     const right_term = right.integer_unary_result;
@@ -1923,6 +2020,86 @@ pub fn NormalForm(
                         }
                     }
                 },
+                .product_extract_result => |definition| {
+                    const results = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.result,
+                    );
+                    const products = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.product,
+                    );
+                    for (results.slice()) |result_value| {
+                        for (products.slice()) |product| try result.insert(.{
+                            .product_extract_result = .{
+                                .result = result_value,
+                                .product = product,
+                                .field_index = definition.field_index,
+                            },
+                        });
+                    }
+                },
+                .sum_extract_result => |definition| {
+                    const results = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.result,
+                    );
+                    const sums = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.sum,
+                    );
+                    for (results.slice()) |result_value| {
+                        for (sums.slice()) |sum| try result.insert(.{
+                            .sum_extract_result = .{
+                                .result = result_value,
+                                .sum = sum,
+                                .case_index = definition.case_index,
+                            },
+                        });
+                    }
+                },
+                .bounded_length_result => |definition| {
+                    const results = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.result,
+                    );
+                    const bounded_values = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.bounded,
+                    );
+                    for (results.slice()) |result_value| {
+                        for (bounded_values.slice()) |bounded| try result.insert(.{
+                            .bounded_length_result = .{
+                                .result = result_value,
+                                .bounded = bounded,
+                            },
+                        });
+                    }
+                },
                 .integer_unary_result => |definition| {
                     const results = projectValues(
                         program,
@@ -2202,6 +2379,21 @@ pub fn NormalForm(
                 return;
             }
             switch (instruction.operation) {
+                .constant => {
+                    if (value >= constant_values.len) {
+                        return error.UnsupportedInvariantDefinition;
+                    }
+                    const contents = constant_values[@intCast(value)] orelse
+                        return error.UnsupportedInvariantDefinition;
+                    switch (contents) {
+                        .boolean => {},
+                        else => return error.UnsupportedInvariantDefinition,
+                    }
+                    try facts.insert(.{ .value_constant = .{
+                        .result = value,
+                        .contents = contents,
+                    } });
+                },
                 .copy => {
                     try facts.insert(.{ .boolean_copy = .{
                         .result = value,
@@ -2512,12 +2704,50 @@ pub fn NormalForm(
                     } });
                     return true;
                 },
-                // Aggregate eliminations expose an already-authoritative
-                // portable value. The extracted value is therefore the local
-                // root when liveness does not retain the aggregate itself.
-                .product_extract,
-                .sum_extract,
-                => true,
+                .product_extract => |field_index| {
+                    try facts.insert(.{ .product_extract_result = .{
+                        .result = value,
+                        .product = instruction.operands[0],
+                        .field_index = field_index,
+                    } });
+                    if (!try collectValueDefinition(
+                        program,
+                        constant_values,
+                        instruction.operands[0],
+                        facts,
+                        visited,
+                    )) return error.UnsupportedInvariantDefinition;
+                    return true;
+                },
+                .sum_extract => |case_index| {
+                    try facts.insert(.{ .sum_extract_result = .{
+                        .result = value,
+                        .sum = instruction.operands[0],
+                        .case_index = case_index,
+                    } });
+                    if (!try collectValueDefinition(
+                        program,
+                        constant_values,
+                        instruction.operands[0],
+                        facts,
+                        visited,
+                    )) return error.UnsupportedInvariantDefinition;
+                    return true;
+                },
+                .vector_length, .text_length, .bytes_length => {
+                    try facts.insert(.{ .bounded_length_result = .{
+                        .result = value,
+                        .bounded = instruction.operands[0],
+                    } });
+                    if (!try collectValueDefinition(
+                        program,
+                        constant_values,
+                        instruction.operands[0],
+                        facts,
+                        visited,
+                    )) return error.UnsupportedInvariantDefinition;
+                    return true;
+                },
                 else => error.UnsupportedInvariantDefinition,
             };
         }

@@ -159,8 +159,8 @@ pub fn Text(comptime maximum_bytes: usize) type {
 
         /// Copy one valid UTF-8 string into bounded owned storage.
         pub fn fromSlice(value: []const u8) Error!Self {
-            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
             if (value.len > maximum_bytes) return error.CapacityExceeded;
+            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
             var result = Self.empty();
             @memcpy(result.storage[0..value.len], value);
             result.logical_length = @intCast(value.len);
@@ -181,14 +181,14 @@ pub fn Text(comptime maximum_bytes: usize) type {
         /// Append valid UTF-8 atomically.
         pub fn append(self: *Self, suffix: []const u8) Error!void {
             if (self.logical_length > maximum_bytes) return error.Malformed;
-            if (!std.unicode.utf8ValidateSlice(self.slice())) {
-                return error.InvalidUtf8;
-            }
-            if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
             const start: usize = @intCast(self.logical_length);
             const end = std.math.add(usize, start, suffix.len) catch
                 return error.CapacityExceeded;
             if (end > maximum_bytes) return error.CapacityExceeded;
+            if (!std.unicode.utf8ValidateSlice(self.slice())) {
+                return error.InvalidUtf8;
+            }
+            if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
             @memcpy(self.storage[start..end], suffix);
             self.logical_length = @intCast(end);
         }
@@ -1368,8 +1368,20 @@ test "all required scalar and algebraic forms round-trip canonically" {
 
 test "Text mutation is UTF-8 checked and transactional on capacity overflow" {
     const Value = Text(4);
+    const oversized_invalid = [_]u8{0xff} ** 5;
+    try std.testing.expectError(
+        error.CapacityExceeded,
+        Value.fromSlice(&oversized_invalid),
+    );
+
     var value = try Value.fromSlice("ab");
     try std.testing.expectError(error.CapacityExceeded, value.append("€"));
+    try std.testing.expectEqualStrings("ab", value.slice());
+    const append_oversized_invalid = [_]u8{0xff} ** 3;
+    try std.testing.expectError(
+        error.CapacityExceeded,
+        value.append(&append_oversized_invalid),
+    );
     try std.testing.expectEqualStrings("ab", value.slice());
     try std.testing.expectError(error.InvalidUtf8, value.append("\xff"));
     try std.testing.expectEqualStrings("ab", value.slice());

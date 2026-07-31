@@ -296,9 +296,13 @@ test "agent loop survives repeated typed effect boundaries" {
         else => return error.TestUnexpectedResult,
     }
     try freshInstance(&state);
-    try AgentMachine.@"resume"(
+    const first_prepared_resume = try AgentMachine.prepareResume(
         state,
         first_model,
+    );
+    defer AgentMachine.deinitPreparedResume(first_prepared_resume);
+    try AgentMachine.@"resume"(
+        first_prepared_resume,
         Action{ .tool = 9 },
     );
 
@@ -312,7 +316,9 @@ test "agent loop survives repeated typed effect boundaries" {
         else => return error.TestUnexpectedResult,
     }
     try freshInstance(&state);
-    try AgentMachine.@"resume"(state, tool, @as(u32, 42));
+    const tool_prepared_resume = try AgentMachine.prepareResume(state, tool);
+    defer AgentMachine.deinitPreparedResume(tool_prepared_resume);
+    try AgentMachine.@"resume"(tool_prepared_resume, @as(u32, 42));
 
     const second_model = switch (try AgentMachine.step(state, &fuel)) {
         .request => |request| request,
@@ -335,11 +341,7 @@ test "agent loop survives repeated typed effect boundaries" {
     defer std.testing.allocator.free(before_stale);
     try std.testing.expectError(
         error.ProgramContractViolation,
-        AgentMachine.@"resume"(
-            state,
-            first_model,
-            Action{ .final = 99 },
-        ),
+        AgentMachine.prepareResume(state, first_model),
     );
     const after_stale = try AgentMachine.encodeState(
         std.testing.allocator,
@@ -348,9 +350,13 @@ test "agent loop survives repeated typed effect boundaries" {
     defer std.testing.allocator.free(after_stale);
     try std.testing.expectEqualSlices(u8, before_stale, after_stale);
 
-    try AgentMachine.@"resume"(
+    const second_prepared_resume = try AgentMachine.prepareResume(
         state,
         second_model,
+    );
+    defer AgentMachine.deinitPreparedResume(second_prepared_resume);
+    try AgentMachine.@"resume"(
+        second_prepared_resume,
         Action{ .final = 77 },
     );
     const done = switch (try AgentMachine.step(state, &fuel)) {

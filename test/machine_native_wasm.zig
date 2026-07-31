@@ -127,8 +127,12 @@ pub export fn boundaryMachineParityRun() u32 {
     {
         return 0;
     }
-    ParityMachine.@"resume"(restored_state, current, @as(u32, 42)) catch
-        return 0;
+    const prepared_resume = ParityMachine.prepareResume(
+        restored_state,
+        current,
+    ) catch return 0;
+    defer ParityMachine.deinitPreparedResume(prepared_resume);
+    ParityMachine.@"resume"(prepared_resume, @as(u32, 42)) catch return 0;
 
     const done = switch (ParityMachine.step(restored_state, &caller_fuel) catch
         return 0) {

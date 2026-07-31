@@ -341,7 +341,7 @@ test "Program.compile generates direct exact-live RNF Machine" {
     forged.identity.digest[0] ^= 1;
     try std.testing.expectError(
         error.ProgramContractViolation,
-        CompiledMachine.@"resume"(state, forged, @as(u32, 42)),
+        CompiledMachine.prepareResume(state, forged),
     );
     const unchanged = try CompiledMachine.current(state);
     try std.testing.expectEqualSlices(
@@ -349,7 +349,9 @@ test "Program.compile generates direct exact-live RNF Machine" {
         &request.identity.digest,
         &unchanged.identity.digest,
     );
-    try CompiledMachine.@"resume"(state, request, @as(u32, 42));
+    const prepared_resume = try CompiledMachine.prepareResume(state, request);
+    defer CompiledMachine.deinitPreparedResume(prepared_resume);
+    try CompiledMachine.@"resume"(prepared_resume, @as(u32, 42));
     const done = switch (try CompiledMachine.step(state, &fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,
@@ -735,11 +737,16 @@ test "resume validates a future-dead response before consuming the request" {
         .request => |value| value,
         else => return error.TestUnexpectedResult,
     };
+    const prepared_resume = try IgnoredResponseMachine.prepareResume(
+        state,
+        request,
+    );
+    defer IgnoredResponseMachine.deinitPreparedResume(prepared_resume);
     var malformed = Text4.empty();
     malformed.logical_length = 5;
     try std.testing.expectError(
         error.ProgramContractViolation,
-        IgnoredResponseMachine.@"resume"(state, request, malformed),
+        IgnoredResponseMachine.@"resume"(prepared_resume, malformed),
     );
     const unchanged = try IgnoredResponseMachine.current(state);
     try std.testing.expectEqualSlices(
@@ -749,8 +756,7 @@ test "resume validates a future-dead response before consuming the request" {
     );
 
     try IgnoredResponseMachine.@"resume"(
-        state,
-        request,
+        prepared_resume,
         try Text4.fromSlice("ok"),
     );
     const done = switch (try IgnoredResponseMachine.step(state, &fuel)) {

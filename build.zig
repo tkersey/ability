@@ -298,6 +298,10 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    constructor_invariants.addImport(
+        "portable_value",
+        host_core.portable_value,
+    );
     const recursion = programTestModule(
         b,
         host_core,
@@ -394,6 +398,7 @@ pub fn build(b: *std.Build) void {
         "Check the generated direct Boundary Machine ABI v2 reducer.",
     );
     addTestArtifact(b, machine_step, core.machine);
+    addTestArtifact(b, machine_step, constructor_invariants);
     addTestArtifact(b, machine_step, program_compile);
     addTestArtifact(b, machine_step, program_dynamic_fuel);
     addTestArtifact(b, machine_step, program_residual_effects);
@@ -753,6 +758,10 @@ pub fn build(b: *std.Build) void {
         .{
             "test/compile_fail/undersized_machine_state.zig",
             "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
+        },
+        .{
+            "test/compile_fail/machine_state_below_entry_environment.zig",
+            "Boundary Machine maximum_state_bytes must admit the initial RNF environment",
         },
     }) |case| {
         addExpectedCompileFailure(

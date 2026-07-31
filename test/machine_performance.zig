@@ -110,9 +110,13 @@ pub export fn boundaryMachinePerformanceOneEffect() u32 {
         .s0 => |value| value.len(),
     };
     if (restored_payload_length != payload_length) return 0;
-    PerformanceMachine.@"resume"(
+    const prepared_resume = PerformanceMachine.prepareResume(
         restored_state,
         restored_request,
+    ) catch return 0;
+    defer PerformanceMachine.deinitPreparedResume(prepared_resume);
+    PerformanceMachine.@"resume"(
+        prepared_resume,
         @as(i32, @intCast(payload_length)),
     ) catch return 0;
 

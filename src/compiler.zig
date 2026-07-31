@@ -1714,6 +1714,20 @@ fn semanticHashInvariant(
             semanticHashU16(hasher, canonical.valueId(definition.then_value));
             semanticHashU16(hasher, canonical.valueId(definition.else_value));
         },
+        .product_extract_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.product));
+            semanticHashU16(hasher, definition.field_index);
+        },
+        .sum_extract_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.sum));
+            semanticHashU16(hasher, definition.case_index);
+        },
+        .bounded_length_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.bounded));
+        },
         .integer_unary_result => |definition| {
             semanticHashU16(hasher, canonical.valueId(definition.result));
             semanticHashU16(hasher, canonical.valueId(definition.operand));
@@ -1903,7 +1917,6 @@ fn compilerSemanticDigest(
             &hasher,
             canonical.functionId(block.function_id),
         );
-        semanticHashU8(&hasher, @intCast(@intFromEnum(block.role)));
         semanticHashU32(&hasher, @intCast(block.parameters.len));
         for (block.parameters) |parameter| {
             semanticHashU16(&hasher, canonical.valueId(parameter));
@@ -1939,10 +1952,6 @@ fn compilerSemanticDigest(
     );
     for (normal_form.constructorSlice()) |constructor| {
         semanticHashU32(&hasher, constructor.id);
-        semanticHashU8(
-            &hasher,
-            @intCast(@intFromEnum(constructor.kind)),
-        );
         semanticHashU8(
             &hasher,
             @intCast(@intFromEnum(constructor.origin)),
@@ -2062,6 +2071,26 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         semantic_canonicalization,
     );
     const FrameType = frameType(Body, program, normal_form);
+    const initial_constructor_index = comptime blk: {
+        for (0..normal_form.constructor_count) |index| {
+            const constructor = normal_form.constructors[index];
+            if (constructor.source_block == program.entry and
+                constructor.resume_target == program.entry and
+                constructor.origin == .block_entry and
+                constructor.kind != .await_effect and
+                constructor.kind != .caller_fuel_yield)
+            {
+                break :blk index;
+            }
+        }
+        @compileError(
+            "RNF is missing a direct constructor for the Control IR entry block",
+        );
+    };
+    const InitialEnvironment = @FieldType(
+        FrameType,
+        constructorName(initial_constructor_index),
+    );
     const ValueCatalog = valueCatalogType(
         Body,
         program,
@@ -2087,6 +2116,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         const Self = @This();
 
         pub const Frame = FrameType;
+        pub const minimum_initial_environment_bytes =
+            portable_value.minimumEncodedSize(InitialEnvironment);
         pub const InitialArgs = Body.InitialArgs;
         pub const Result = Body.Result;
         pub const Failure = Body.Failure;
@@ -3390,6 +3421,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         fn planConstructor(
             comptime constructor_id: usize,
             environment: anytype,
+            accepted_cost: u64,
         ) Plan {
             const constructor = comptime normal_form.constructors[constructor_id];
             if (constructor.kind == .await_effect or
@@ -3400,13 +3432,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             var store: SegmentStore(constructor_id) = undefined;
             loadEnvironment(constructor_id, environment, &store);
             const block = comptime program.blocks[constructor.source_block];
-            const fuel_cost = preflightCostConstructor(
-                constructor_id,
-                environment,
-            );
             if (executeInstructions(block, &store)) |failure| {
                 return .{
-                    .cost = fuel_cost,
+                    .cost = accepted_cost,
                     .transition = .{ .failed = failure },
                 };
             }
@@ -3503,7 +3531,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     .failed = failureFromTag(Body, failure),
                 },
             };
-            return .{ .cost = fuel_cost, .transition = transition };
+            return .{ .cost = accepted_cost, .transition = transition };
         }
 
         pub fn initial(args: InitialArgs) Frame {
@@ -3537,11 +3565,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
-        pub fn plan(frame: Frame) Plan {
+        pub fn plan(frame: Frame, accepted_cost: u64) Plan {
             return switch (frame) {
                 inline else => |environment, tag| planConstructor(
                     comptime @intFromEnum(tag),
                     environment,
+                    accepted_cost,
                 ),
             };
         }
@@ -3821,6 +3850,47 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                                 valueName(definition.else_value),
                             ),
                     ),
+                    .product_extract_result => |definition| blk: {
+                        const product = @field(
+                            environment,
+                            valueName(definition.product),
+                        );
+                        const Product = @TypeOf(product);
+                        const field = std.meta.fields(Product)[
+                            definition.field_index
+                        ];
+                        break :blk portable_value.eqlValue(
+                            field.type,
+                            @field(environment, valueName(definition.result)),
+                            @field(product, field.name),
+                        );
+                    },
+                    .sum_extract_result => |definition| blk: {
+                        const sum = @field(
+                            environment,
+                            valueName(definition.sum),
+                        );
+                        const Sum = @TypeOf(sum);
+                        const Tag = @typeInfo(Sum).@"union".tag_type.?;
+                        const field = std.meta.fields(Sum)[
+                            definition.case_index
+                        ];
+                        if (std.meta.activeTag(sum) != @field(Tag, field.name)) {
+                            break :blk false;
+                        }
+                        break :blk portable_value.eqlValue(
+                            field.type,
+                            @field(environment, valueName(definition.result)),
+                            @field(sum, field.name),
+                        );
+                    },
+                    .bounded_length_result => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == @field(
+                        environment,
+                        valueName(definition.bounded),
+                    ).len(),
                     .integer_unary_result => |definition| rnf.integerUnaryDefinitionHolds(
                         @field(environment, valueName(definition.result)),
                         @field(environment, valueName(definition.operand)),

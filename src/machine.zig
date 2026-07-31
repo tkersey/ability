@@ -247,6 +247,23 @@ pub fn Machine(
                 "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
             );
         }
+        const minimum_initial_environment_bytes =
+            if (hasDeclSafe(Definition, "minimum_initial_environment_bytes"))
+                Definition.minimum_initial_environment_bytes
+            else
+                0;
+        const minimum_initial_state_bytes = std.math.add(
+            usize,
+            state_header_length + frame_header_length,
+            minimum_initial_environment_bytes,
+        ) catch @compileError(
+            "Boundary Machine initial RNF environment size overflows usize",
+        );
+        if (options.maximum_state_bytes < minimum_initial_state_bytes) {
+            @compileError(
+                "Boundary Machine maximum_state_bytes must admit the initial RNF environment",
+            );
+        }
     }
 
     const Frame = Definition.Frame;
@@ -1278,7 +1295,7 @@ pub fn Machine(
 
         /// Apply one typed response to an already allocated candidate and
         /// commit it without further allocation.
-        pub fn commitPreparedResume(
+        pub fn @"resume"(
             prepared_resume: PreparedResume,
             response: anytype,
         ) Error!void {
@@ -1319,6 +1336,12 @@ pub fn Machine(
             const original = storedConst(state);
             try validate(original);
             if (try currentFrom(original) != null) return error.ProgramContractViolation;
+            const original_frame = try top(original);
+            const original_minimum_cost = Definition.minimumCost(original_frame);
+            if (original_minimum_cost == 0) {
+                return error.ProgramContractViolation;
+            }
+            if (caller_fuel.* < original_minimum_cost) return .yielded;
 
             var candidate = original.*;
             candidate.frames = try original.frames.cloneForStep(
@@ -1357,7 +1380,7 @@ pub fn Machine(
                     caller_fuel.* = remaining_fuel;
                     return .{ .failed = .execution_budget_exceeded };
                 }
-                const plan = Definition.plan(frame);
+                const plan = Definition.plan(frame, cost);
                 if (plan.cost != cost) return error.ProgramContractViolation;
                 remaining_fuel -= cost;
                 candidate.cumulative_fuel = next_total;
@@ -1476,17 +1499,6 @@ pub fn Machine(
                     },
                 }
             }
-        }
-
-        /// Resume one exact pending request transactionally.
-        pub fn @"resume"(
-            state: State,
-            request: Request,
-            response: anytype,
-        ) Error!void {
-            const prepared_resume = try prepareResume(state, request);
-            defer deinitPreparedResume(prepared_resume);
-            try commitPreparedResume(prepared_resume, response);
         }
 
         /// Validate one live, nonterminal state without advancing.
@@ -1627,11 +1639,11 @@ const TestDefinition = struct {
         return 1;
     }
 
-    fn plan(frame: Frame) struct {
+    fn plan(frame: Frame, accepted_cost: u64) struct {
         cost: u64,
         transition: Transition,
     } {
-        return .{ .cost = 1, .transition = switch (frame) {
+        return .{ .cost = accepted_cost, .transition = switch (frame) {
             .entry => |environment| .{ .request = .{
                 .awaiting = .{ .await_increment = .{
                     .current = environment.seed,
@@ -1765,12 +1777,12 @@ const BudgetTestDefinition = struct {
         return 1;
     }
 
-    fn plan(frame: Frame) struct {
+    fn plan(frame: Frame, accepted_cost: u64) struct {
         cost: u64,
         transition: Transition,
     } {
         return .{
-            .cost = 1,
+            .cost = accepted_cost,
             .transition = switch (frame) {
                 .entry => .{ .next = .{ .finish = .{} } },
                 .finish => .{ .done = 42 },
@@ -1836,11 +1848,11 @@ const LargeFrameDefinition = struct {
         return 1;
     }
 
-    fn plan(_: Frame) struct {
+    fn plan(_: Frame, accepted_cost: u64) struct {
         cost: u64,
         transition: Transition,
     } {
-        return .{ .cost = 1, .transition = .{ .done = {} } };
+        return .{ .cost = accepted_cost, .transition = .{ .done = {} } };
     }
 
     fn current(_: Frame) ?Request {
@@ -1903,11 +1915,11 @@ const MalformedRequestDefinition = struct {
         return 1;
     }
 
-    fn plan(frame: Frame) struct {
+    fn plan(frame: Frame, accepted_cost: u64) struct {
         cost: u64,
         transition: Transition,
     } {
-        return .{ .cost = 1, .transition = switch (frame) {
+        return .{ .cost = accepted_cost, .transition = switch (frame) {
             .entry => .{ .request = .{
                 .awaiting = .{ .awaiting_lookup = .{} },
                 .request = .{ .lookup = lookup },
@@ -1981,11 +1993,11 @@ const UnresumableRequestDefinition = struct {
         return 1;
     }
 
-    fn plan(frame: Frame) struct {
+    fn plan(frame: Frame, accepted_cost: u64) struct {
         cost: u64,
         transition: Transition,
     } {
-        return .{ .cost = 1, .transition = switch (frame) {
+        return .{ .cost = accepted_cost, .transition = switch (frame) {
             .entry => .{ .request = .{
                 .awaiting = .{ .awaiting = .{} },
                 .request = .{ .lookup = {} },
@@ -2042,6 +2054,7 @@ const CostPreflightDefinition = struct {
     };
     const Transition = Reduction(Frame, Request, Result, Failure);
     const contract_bytes = "test-direct-rnf\x00cost-preflight";
+    var cost_calls: usize = 0;
     var plan_calls: usize = 0;
 
     fn initial(_: InitialArgs) Frame {
@@ -2053,16 +2066,17 @@ const CostPreflightDefinition = struct {
     }
 
     fn cost(_: Frame) u64 {
+        cost_calls += 1;
         return 5;
     }
 
-    fn plan(_: Frame) struct {
+    fn plan(_: Frame, accepted_cost: u64) struct {
         cost: u64,
         transition: Transition,
     } {
         plan_calls += 1;
         return .{
-            .cost = 5,
+            .cost = accepted_cost,
             .transition = .{ .done = {} },
         };
     }
@@ -2091,6 +2105,92 @@ const CostPreflightDefinition = struct {
 
     fn validateStack(frames: []const Frame) error{ProgramContractViolation}!void {
         if (frames.len != 1) return error.ProgramContractViolation;
+    }
+};
+
+const ZeroFuelStackDefinition = struct {
+    const Frame = union(enum) {
+        entry: struct {},
+        parent: struct {},
+        child: struct {},
+    };
+    const InitialArgs = void;
+    const Result = void;
+    const Failure = enum { rejected };
+    const Request = void;
+    const EffectRow = struct {
+        pub const operation_site_count: usize = 0;
+        pub const after_site_count: usize = 0;
+    };
+    const Transition = ReductionWithReturns(
+        Frame,
+        Request,
+        Result,
+        Failure,
+        void,
+    );
+    const contract_bytes = "test-direct-rnf\x00zero-fuel-stack";
+
+    fn initial(_: InitialArgs) Frame {
+        return .{ .entry = .{} };
+    }
+
+    fn minimumCost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn cost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn plan(frame: Frame, accepted_cost: u64) struct {
+        cost: u64,
+        transition: Transition,
+    } {
+        return .{
+            .cost = accepted_cost,
+            .transition = switch (frame) {
+                .entry => .{ .call = .{
+                    .return_frame = .{ .parent = .{} },
+                    .callee = .{ .child = .{} },
+                } },
+                .parent => .{ .done = {} },
+                .child => .{ .return_value = {} },
+            },
+        };
+    }
+
+    fn current(_: Frame) ?Request {
+        return null;
+    }
+
+    fn @"resume"(
+        _: Frame,
+        _: Request,
+        _: anytype,
+    ) error{ProgramContractViolation}!Frame {
+        return error.ProgramContractViolation;
+    }
+
+    fn requestEql(_: Request, _: Request) bool {
+        return true;
+    }
+
+    fn requestSiteDigest(_: Request) [32]u8 {
+        return [_]u8{0} ** 32;
+    }
+
+    fn validateFrame(_: Frame) error{ProgramContractViolation}!void {}
+
+    fn validateStack(frames: []const Frame) error{ProgramContractViolation}!void {
+        if (frames.len == 1) return;
+        if (frames.len == 2 and
+            std.meta.activeTag(frames[0]) == .parent and
+            std.meta.activeTag(frames[1]) == .child)
+        {
+            return;
+        }
+        return error.ProgramContractViolation;
     }
 };
 
@@ -2163,20 +2263,25 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     stale.sequence += 1;
     try std.testing.expectError(
         error.ProgramContractViolation,
-        TestMachine.@"resume"(resumed_state, stale, @as(u32, 4)),
+        TestMachine.prepareResume(resumed_state, stale),
     );
+    const first_prepared_resume = try TestMachine.prepareResume(
+        resumed_state,
+        first,
+    );
+    defer TestMachine.deinitPreparedResume(first_prepared_resume);
     try std.testing.expectError(
         error.ProgramContractViolation,
-        TestMachine.@"resume"(resumed_state, first, @as(u16, 4)),
+        TestMachine.@"resume"(first_prepared_resume, @as(u16, 4)),
     );
     try std.testing.expect(TestDefinition.requestEql(
         first.value,
         (try TestMachine.current(resumed_state)).value,
     ));
-    try TestMachine.@"resume"(resumed_state, first, @as(u32, 4));
+    try TestMachine.@"resume"(first_prepared_resume, @as(u32, 4));
     try std.testing.expectError(
         error.ProgramContractViolation,
-        TestMachine.@"resume"(resumed_state, first, @as(u32, 4)),
+        TestMachine.@"resume"(first_prepared_resume, @as(u32, 4)),
     );
 
     const second = switch (try TestMachine.step(resumed_state, &fuel)) {
@@ -2188,7 +2293,12 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
         @as(u32, 4),
         second.value.increment.payload,
     );
-    try TestMachine.@"resume"(resumed_state, second, @as(u32, 5));
+    const second_prepared_resume = try TestMachine.prepareResume(
+        resumed_state,
+        second,
+    );
+    defer TestMachine.deinitPreparedResume(second_prepared_resume);
+    try TestMachine.@"resume"(second_prepared_resume, @as(u32, 5));
 
     const done = switch (try TestMachine.step(resumed_state, &fuel)) {
         .done => |result| result,
@@ -2309,9 +2419,14 @@ test "request identity binds the complete canonical continuation" {
     ));
     try std.testing.expectError(
         error.ProgramContractViolation,
-        TestMachine.@"resume"(second_state, first_request, @as(u32, 4)),
+        TestMachine.prepareResume(second_state, first_request),
     );
-    try TestMachine.@"resume"(second_state, second_request, @as(u32, 4));
+    const prepared_resume = try TestMachine.prepareResume(
+        second_state,
+        second_request,
+    );
+    defer TestMachine.deinitPreparedResume(prepared_resume);
+    try TestMachine.@"resume"(prepared_resume, @as(u32, 4));
 }
 
 test "live frame storage scales with logical frames, not maximum capacity" {
@@ -2384,7 +2499,7 @@ test "Machine validates untrusted request payloads before equality" {
 
     try std.testing.expectError(
         error.ProgramContractViolation,
-        RequestMachine.@"resume"(state, forged, {}),
+        RequestMachine.prepareResume(state, forged),
     );
     const current = try RequestMachine.current(state);
     try std.testing.expect(MalformedRequestDefinition.requestEql(
@@ -2486,12 +2601,16 @@ test "Machine terminal result allocation failure is retryable" {
         .request => |request| request,
         else => return error.TestUnexpectedResult,
     };
-    try TestMachine.@"resume"(state, first, @as(u32, 4));
+    const first_prepared_resume = try TestMachine.prepareResume(state, first);
+    defer TestMachine.deinitPreparedResume(first_prepared_resume);
+    try TestMachine.@"resume"(first_prepared_resume, @as(u32, 4));
     const second = switch (try TestMachine.step(state, &caller_fuel)) {
         .request => |request| request,
         else => return error.TestUnexpectedResult,
     };
-    try TestMachine.@"resume"(state, second, @as(u32, 5));
+    const second_prepared_resume = try TestMachine.prepareResume(state, second);
+    defer TestMachine.deinitPreparedResume(second_prepared_resume);
+    try TestMachine.@"resume"(second_prepared_resume, @as(u32, 5));
 
     const before = try TestMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(before);
@@ -2542,6 +2661,7 @@ test "caller fuel preflight does not execute the segment plan" {
         .maximum_machine_fuel = 8,
     });
     CostPreflightDefinition.plan_calls = 0;
+    CostPreflightDefinition.cost_calls = 0;
     const state = try PreflightMachine.initialState(std.testing.allocator, {});
     defer PreflightMachine.deinitState(state);
     var insufficient_fuel: u64 = 4;
@@ -2554,6 +2674,10 @@ test "caller fuel preflight does not execute the segment plan" {
         @as(usize, 0),
         CostPreflightDefinition.plan_calls,
     );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        CostPreflightDefinition.cost_calls,
+    );
 
     var sufficient_fuel: u64 = 5;
     const done = switch (try PreflightMachine.step(state, &sufficient_fuel)) {
@@ -2565,6 +2689,43 @@ test "caller fuel preflight does not execute the segment plan" {
         @as(usize, 1),
         CostPreflightDefinition.plan_calls,
     );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        CostPreflightDefinition.cost_calls,
+    );
+}
+
+test "zero caller fuel yields a multi-frame state without allocation" {
+    const ZeroFuelMachine = Machine(ZeroFuelStackDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 8,
+    });
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const state = try ZeroFuelMachine.initialState(failing.allocator(), {});
+    defer ZeroFuelMachine.deinitState(state);
+    var setup_fuel: u64 = 1;
+    try std.testing.expectEqual(
+        ZeroFuelMachine.Outcome.yielded,
+        try ZeroFuelMachine.step(state, &setup_fuel),
+    );
+    const before = try ZeroFuelMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+
+    failing.fail_index = failing.allocations;
+    var no_fuel: u64 = 0;
+    try std.testing.expectEqual(
+        ZeroFuelMachine.Outcome.yielded,
+        try ZeroFuelMachine.step(state, &no_fuel),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u64, 0), no_fuel);
+    const after = try ZeroFuelMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 test "cumulative fuel overflow fails before segment execution" {
