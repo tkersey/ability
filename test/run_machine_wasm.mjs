@@ -12,19 +12,28 @@ if (WebAssembly.Module.imports(module).length !== 0) {
 }
 
 const instance = await WebAssembly.instantiate(module, {});
-const length = instance.exports.boundaryMachineParityRun();
-const pointer = instance.exports.boundaryMachineParityOutputPointer();
-if (
-  typeof length !== "number" ||
-  typeof pointer !== "number" ||
-  length === 0
-) {
-  throw new Error("Boundary Machine wasm parity witness failed");
+
+function observe(runName, pointerName) {
+  const length = instance.exports[runName]();
+  const pointer = instance.exports[pointerName]();
+  if (
+    typeof length !== "number" ||
+    typeof pointer !== "number" ||
+    length === 0
+  ) {
+    throw new Error(`Boundary Machine wasm parity witness failed: ${runName}`);
+  }
+  return Buffer.from(
+    new Uint8Array(instance.exports.memory.buffer, pointer, length),
+  );
 }
 
-const output = new Uint8Array(
-  instance.exports.memory.buffer,
-  pointer,
-  length,
+const machineOutput = observe(
+  "boundaryMachineParityRun",
+  "boundaryMachineParityOutputPointer",
 );
-process.stdout.write(output);
+const portableValueOutput = observe(
+  "boundaryMachineValueParityRun",
+  "boundaryMachineValueParityOutputPointer",
+);
+process.stdout.write(Buffer.concat([machineOutput, portableValueOutput]));

@@ -441,7 +441,7 @@ pub fn build(b: *std.Build) void {
         b.graph.host,
         .ReleaseSafe,
         false,
-        false,
+        true,
     );
     const parity_native_runner = b.createModule(.{
         .root_source_file = b.path("test/run_machine_native.zig"),
@@ -470,7 +470,7 @@ pub fn build(b: *std.Build) void {
         wasm_target,
         .ReleaseSmall,
         false,
-        false,
+        true,
     );
     const wasm_executable = b.addExecutable(.{
         .name = "boundary-machine-wasm-parity",

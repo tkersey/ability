@@ -640,6 +640,7 @@ fn multiplyMaximum(comptime left: usize, comptime right: usize) usize {
 
 /// Compute the maximum canonical encoded size from contract-bearing bounds.
 pub fn maximumEncodedSize(comptime T: type) usize {
+    @setEvalBranchQuota(1_000_000);
     comptime assertPortable(T);
     if (comptime isBytes(T) or isText(T)) {
         return addMaximum(4, T.maximum_length);
@@ -1018,6 +1019,57 @@ test "portable schema identity is structural and capacity-bearing" {
     ));
 }
 
+test "all required scalar and algebraic forms round-trip canonically" {
+    const Exhaustive = enum(u16) {
+        zero = 0,
+        high = 513,
+    };
+    const Sum = union(enum) {
+        unit: void,
+        signed: i16,
+        text: Text(8),
+    };
+    const Value = struct {
+        unit: void,
+        boolean: bool,
+        i8_value: i8,
+        i16_value: i16,
+        i32_value: i32,
+        i64_value: i64,
+        u8_value: u8,
+        u16_value: u16,
+        u32_value: u32,
+        u64_value: u64,
+        array: [3]u16,
+        enumeration: Exhaustive,
+        sum: Sum,
+        optional: ?i32,
+    };
+    const value: Value = .{
+        .unit = {},
+        .boolean = true,
+        .i8_value = -8,
+        .i16_value = -16,
+        .i32_value = -32,
+        .i64_value = -64,
+        .u8_value = 8,
+        .u16_value = 16,
+        .u32_value = 32,
+        .u64_value = 64,
+        .array = .{ 3, 5, 8 },
+        .enumeration = .high,
+        .sum = .{ .text = try Text(8).fromSlice("sum") },
+        .optional = -7,
+    };
+
+    var bytes: [maximumEncodedSize(Value)]u8 = undefined;
+    const length = try encode(Value, value, &bytes);
+    const decoded = try decodeExact(Value, bytes[0..length]);
+    try std.testing.expect(eqlValue(Value, value, decoded));
+    try std.testing.expectEqual(@as(u16, 513), @intFromEnum(decoded.enumeration));
+    try std.testing.expectEqualStrings("sum", decoded.sum.text.slice());
+}
+
 test "Text mutation is UTF-8 checked and transactional on capacity overflow" {
     const Value = Text(4);
     var value = try Value.fromSlice("ab");
@@ -1091,6 +1143,23 @@ test "malformed bounded lengths tags UTF-8 and trailing bytes fail closed" {
     try std.testing.expectError(
         error.TrailingBytes,
         decodeExact(u8, &.{ 7, 0 }),
+    );
+
+    const Exhaustive = enum {
+        first,
+        second,
+    };
+    try std.testing.expectError(
+        error.InvalidTag,
+        decodeExact(Exhaustive, &.{ 2, 0, 0, 0 }),
+    );
+    const Sum = union(enum) {
+        empty: void,
+        value: u8,
+    };
+    try std.testing.expectError(
+        error.InvalidTag,
+        decodeExact(Sum, &.{ 2, 0, 0, 0 }),
     );
 }
 
