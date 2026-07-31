@@ -87,6 +87,19 @@ fn oneEffectLifecycle() !u64 {
     return payload.len();
 }
 
+fn decodeLifecycle(encoded: []const u8) !u64 {
+    const state = try PerformanceMachine.decodeState(
+        std.testing.allocator,
+        encoded,
+    );
+    defer PerformanceMachine.deinitState(state);
+    const request = try PerformanceMachine.current(state);
+    const payload = switch (request.value) {
+        .s0 => |value| value,
+    };
+    return payload.len();
+}
+
 fn median(input: [sample_count]u64) u64 {
     var sorted = input;
     var index: usize = 1;
@@ -136,13 +149,36 @@ test "RNF performance current one effect lifecycle" {
     );
     defer std.testing.allocator.free(encoded);
 
+    var decode_warmup_checksum: u64 = 0;
+    for (0..warmup_iterations) |_| {
+        decode_warmup_checksum +%= try decodeLifecycle(encoded);
+    }
+    std.mem.doNotOptimizeAway(decode_warmup_checksum);
+
+    var decode_samples: [sample_count]u64 = undefined;
+    var decode_checksum: u64 = 0;
+    for (&decode_samples) |*sample| {
+        const start = std.Io.Timestamp.now(std.testing.io, .boot);
+        for (0..measured_iterations) |_| {
+            decode_checksum +%= try decodeLifecycle(encoded);
+        }
+        sample.* = @intCast(
+            start.durationTo(
+                std.Io.Timestamp.now(std.testing.io, .boot),
+            ).toNanoseconds(),
+        );
+    }
+
     const expected_checksum =
         @as(u64, measured_iterations) * sample_count * 7;
     try std.testing.expectEqual(expected_checksum, checksum);
+    try std.testing.expectEqual(expected_checksum, decode_checksum);
     std.debug.print(
         "boundary_performance_v1 implementation=rnf state_bytes={d} " ++
             "iterations={d} sample_ns=[{d},{d},{d},{d},{d}] " ++
-            "median_ns={d} checksum={d}\n",
+            "median_ns={d} checksum={d} " ++
+            "decode_sample_ns=[{d},{d},{d},{d},{d}] " ++
+            "decode_median_ns={d} decode_checksum={d}\n",
         .{
             encoded.len,
             measured_iterations,
@@ -153,6 +189,13 @@ test "RNF performance current one effect lifecycle" {
             samples[4],
             median(samples),
             checksum,
+            decode_samples[0],
+            decode_samples[1],
+            decode_samples[2],
+            decode_samples[3],
+            decode_samples[4],
+            median(decode_samples),
+            decode_checksum,
         },
     );
 }

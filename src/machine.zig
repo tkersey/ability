@@ -287,10 +287,12 @@ pub fn Machine(
         /// Private live ownership carrier. Canonical ABL_RNF2 bytes remain the
         /// transferable authority; allocator-backed storage owns exactly the
         /// logical typed frames needed by the direct reducer.
-        const FrameStack = struct {
+        const FrameStack = union(enum) {
             const Stack = @This();
 
-            list: std.ArrayList(Frame) = .empty,
+            empty,
+            one: Frame,
+            many: std.ArrayList(Frame),
 
             fn initUninitialized(
                 allocator: std.mem.Allocator,
@@ -299,21 +301,21 @@ pub fn Machine(
                 if (logical_length > options.maximum_frames) {
                     return error.ProgramContractViolation;
                 }
+                if (logical_length == 0) return .empty;
+                if (logical_length == 1) return .{ .one = undefined };
                 var list = std.ArrayList(Frame).initCapacity(
                     allocator,
                     @intCast(logical_length),
                 ) catch return error.OutOfMemory;
                 list.items.len = @intCast(logical_length);
-                return .{ .list = list };
+                return .{ .many = list };
             }
 
             fn initOne(
-                allocator: std.mem.Allocator,
+                _: std.mem.Allocator,
                 frame: Frame,
             ) Error!Stack {
-                var result = try initUninitialized(allocator, 1);
-                result.list.items[0] = frame;
-                return result;
+                return .{ .one = frame };
             }
 
             fn clone(
@@ -321,51 +323,77 @@ pub fn Machine(
                 allocator: std.mem.Allocator,
             ) Error!Stack {
                 if (!self.consistent()) return error.ProgramContractViolation;
-                return .{
-                    .list = self.list.clone(allocator) catch
-                        return error.OutOfMemory,
+                return switch (self.*) {
+                    .empty => .empty,
+                    .one => |frame| .{ .one = frame },
+                    .many => |list| .{
+                        .many = list.clone(allocator) catch
+                            return error.OutOfMemory,
+                    },
                 };
             }
 
             fn deinit(self: *Stack, allocator: std.mem.Allocator) void {
-                self.list.deinit(allocator);
-                self.* = .{};
+                switch (self.*) {
+                    .many => |*list| list.deinit(allocator),
+                    .empty, .one => {},
+                }
+                self.* = .empty;
             }
 
             fn take(self: *Stack) Stack {
                 const result = self.*;
-                self.* = .{};
+                self.* = .empty;
                 return result;
             }
 
             fn consistent(self: *const Stack) bool {
-                if (comptime @sizeOf(Frame) == 0) {
-                    return self.list.items.len <= options.maximum_frames;
-                }
-                return self.list.items.len <= options.maximum_frames and
-                    self.list.capacity == self.list.items.len;
+                return switch (self.*) {
+                    .empty => true,
+                    .one => options.maximum_frames >= 1,
+                    .many => |list| list.items.len >= 2 and
+                        list.items.len <= options.maximum_frames and
+                        (@sizeOf(Frame) == 0 or
+                            list.capacity == list.items.len),
+                };
             }
 
             fn len(self: *const Stack) u32 {
-                return @intCast(self.list.items.len);
+                return switch (self.*) {
+                    .empty => 0,
+                    .one => 1,
+                    .many => |list| @intCast(list.items.len),
+                };
             }
 
             fn slice(self: *const Stack) []const Frame {
-                return self.list.items;
+                return switch (self.*) {
+                    .empty => &.{},
+                    .one => @as(*const [1]Frame, @ptrCast(&self.one)),
+                    .many => |list| list.items,
+                };
             }
 
             fn get(self: *const Stack, index: u32) ?Frame {
                 if (index >= self.len() or !self.consistent()) {
                     return null;
                 }
-                return self.list.items[@intCast(index)];
+                return switch (self.*) {
+                    .one => self.one,
+                    .many => |list| list.items[@intCast(index)],
+                    .empty => null,
+                };
             }
 
             fn set(self: *Stack, index: u32, frame: Frame) Error!void {
                 if (index >= self.len() or !self.consistent()) {
                     return error.ProgramContractViolation;
                 }
-                self.list.items[@intCast(index)] = frame;
+                switch (self.*) {
+                    .one => self.one = frame,
+                    .many => |*list| list.items[@intCast(index)] = frame,
+                    .empty => unreachable,
+                }
             }
 
             fn push(
@@ -376,27 +404,56 @@ pub fn Machine(
                 if (!self.consistent() or self.len() == options.maximum_frames) {
                     return error.ProgramContractViolation;
                 }
-                self.list.ensureTotalCapacityPrecise(
-                    allocator,
-                    self.list.items.len + 1,
-                ) catch return error.OutOfMemory;
-                self.list.appendAssumeCapacity(frame);
+                switch (self.*) {
+                    .empty => return error.ProgramContractViolation,
+                    .one => |first| {
+                        var list = std.ArrayList(Frame).initCapacity(
+                            allocator,
+                            2,
+                        ) catch return error.OutOfMemory;
+                        list.appendAssumeCapacity(first);
+                        list.appendAssumeCapacity(frame);
+                        self.* = .{ .many = list };
+                    },
+                    .many => |*list| {
+                        list.ensureTotalCapacityPrecise(
+                            allocator,
+                            list.items.len + 1,
+                        ) catch return error.OutOfMemory;
+                        list.appendAssumeCapacity(frame);
+                    },
+                }
             }
 
             fn pop(
                 self: *Stack,
                 allocator: std.mem.Allocator,
             ) Error!Frame {
-                if (!self.consistent() or self.list.items.len == 0) {
+                if (!self.consistent() or self.len() == 0) {
                     return error.ProgramContractViolation;
                 }
-                const next_length = self.list.items.len - 1;
-                const result = self.list.items[next_length];
-                self.list.shrinkAndFreePrecise(
-                    allocator,
-                    next_length,
-                ) catch return error.OutOfMemory;
-                return result;
+                return switch (self.*) {
+                    .empty => unreachable,
+                    .one => |frame| blk: {
+                        self.* = .empty;
+                        break :blk frame;
+                    },
+                    .many => |*list| blk: {
+                        const next_length = list.items.len - 1;
+                        const result = list.items[next_length];
+                        if (next_length == 1) {
+                            const first = list.items[0];
+                            list.deinit(allocator);
+                            self.* = .{ .one = first };
+                        } else {
+                            list.shrinkAndFreePrecise(
+                                allocator,
+                                next_length,
+                            ) catch return error.OutOfMemory;
+                        }
+                        break :blk result;
+                    },
+                };
             }
         };
 
@@ -1035,7 +1092,7 @@ pub fn Machine(
                 .cumulative_fuel = cumulative_fuel,
                 .frames = frames,
             };
-            frames = .{};
+            frames = .empty;
             errdefer value.frames.deinit(allocator);
             try validate(&value);
             return own(allocator, &value);
@@ -1727,7 +1784,7 @@ test "Machine terminal result allocation failure is retryable" {
     const before = try TestMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(before);
     const fuel_before = caller_fuel;
-    failing.fail_index = failing.allocations + 1;
+    failing.fail_index = failing.allocations;
     try std.testing.expectError(
         error.OutOfMemory,
         TestMachine.step(state, &caller_fuel),

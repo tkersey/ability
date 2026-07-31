@@ -80,7 +80,9 @@ Focused gates include `check-boundary-machine`, `check-boundary-rnf`,
 `check-boundary-machine-state`, `check-boundary-machine-malformed`,
 `check-boundary-machine-native-wasm`,
 `check-boundary-machine-no-interpreter`, and
-`check-boundary-machine-deletion`.
+`check-boundary-machine-deletion`. The aggregate also runs the real v0.7
+performance comparison and emits the Boundary-owned completion fields through
+`check-boundary-machine-receipt`.
 
 Boundary 1.0 is source- and state-incompatible with Boundary 0.7. The immutable
 0.7 release remains the compatibility implementation; Boundary 1.0 contains no

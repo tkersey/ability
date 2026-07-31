@@ -563,6 +563,27 @@ pub fn build(b: *std.Build) void {
     );
     performance_falsifier_step.dependOn(&performance_falsifier_command.step);
 
+    const receipt_command = b.addSystemCommand(&.{"sh"});
+    receipt_command.addFileArg(
+        b.path("conformance/rnf-v1/check_receipt.sh"),
+    );
+    inline for (.{
+        control_step,
+        values_step,
+        state_step,
+        recursion_step,
+        after_step,
+        no_interpreter_step,
+        deletion_step,
+    }) |dependency| {
+        receipt_command.step.dependOn(dependency);
+    }
+    const receipt_step = b.step(
+        "check-boundary-machine-receipt",
+        "Emit the Boundary-owned completion receipt fields after their proofs.",
+    );
+    receipt_step.dependOn(&receipt_command.step);
+
     const compile_fail_step = b.step(
         "compile-fail",
         "Check fail-closed Boundary compiler admission.",
@@ -668,7 +689,9 @@ pub fn build(b: *std.Build) void {
         compile_fail_step,
         examples_step,
         lint_step,
+        performance_step,
         performance_falsifier_step,
+        receipt_step,
     }) |dependency| {
         check_step.dependOn(dependency);
     }
