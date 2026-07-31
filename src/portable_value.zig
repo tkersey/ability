@@ -298,6 +298,7 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         /// Compare logical elements structurally.
         pub fn eql(self: *const Self, other: *const Self) bool {
             if (self.logical_length != other.logical_length) return false;
+            if (comptime maximumEncodedSize(Element) == 0) return true;
             for (self.slice(), other.slice()) |left, right| {
                 if (!eqlValue(Element, left, right)) return false;
             }
@@ -570,6 +571,7 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
     }
     if (comptime isVector(T)) {
         if (value.logical_length > T.maximum_length) return error.Malformed;
+        if (comptime maximumEncodedSize(T.ElementType) == 0) return 4;
         var total: usize = 4;
         for (value.slice()) |item| {
             total = try checkedAdd(total, try encodedSize(T.ElementType, item));
@@ -705,6 +707,7 @@ fn encodeInto(comptime T: type, value: T, writer: *Writer) Error!void {
     }
     if (comptime isVector(T)) {
         writer.writeInt(u32, value.logical_length);
+        if (comptime maximumEncodedSize(T.ElementType) == 0) return;
         for (value.slice()) |item| try encodeInto(T.ElementType, item, writer);
         return;
     }
@@ -1091,13 +1094,22 @@ test "malformed bounded lengths tags UTF-8 and trailing bytes fail closed" {
     );
 }
 
-test "zero-width vector decode is constant in declared logical length" {
+test "zero-width vector codec and equality are constant in logical length" {
     const Values = Vector(void, 1_000_000);
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, Values.maximum_length, .little);
     const decoded = try decodeExact(Values, &bytes);
     try std.testing.expectEqual(@as(u32, 1_000_000), decoded.len());
     try std.testing.expectEqual(@as(usize, 4), maximumEncodedSize(Values));
+    try std.testing.expectEqual(@as(usize, 4), try encodedSize(Values, decoded));
+
+    var encoded: [4]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        try encode(Values, decoded, &encoded),
+    );
+    try std.testing.expectEqualSlices(u8, &bytes, &encoded);
+    try std.testing.expect(decoded.eql(&decoded));
 }
 
 test "Research Digest bounds are representable without target-width values" {

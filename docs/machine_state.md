@@ -28,6 +28,11 @@ Encoding stores logical lengths and live values only. It contains no pointers,
 allocator capacities, padding, nominal type names, function/block/instruction
 cursors, local-slot bitmaps, condition caches, or generic after stack.
 
+The allocator-backed live state is a private ownership carrier, not a second
+portable representation. It allocates exactly the logical typed frame count;
+`maximum_frames` is an admission bound and never becomes spare inline storage.
+Candidate transitions clone only those logical frames before commit.
+
 Decode is fail-closed. It checks the exact Machine digest, versions, total
 length, frame bounds, dense constructor schemas, portable-value bounds,
 constructor-local invariants, stack compatibility, pending-request state, fuel

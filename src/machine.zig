@@ -246,7 +246,6 @@ pub fn Machine(
     }
 
     const Frame = Definition.Frame;
-    const FrameStack = portable_value.Vector(Frame, options.maximum_frames);
     const digest = contractDigest(Definition, options);
 
     return struct {
@@ -283,6 +282,122 @@ pub fn Machine(
         pub const Error = portable_value.Error || error{
             OutOfMemory,
             ProgramContractViolation,
+        };
+
+        /// Private live ownership carrier. Canonical ABL_RNF2 bytes remain the
+        /// transferable authority; allocator-backed storage owns exactly the
+        /// logical typed frames needed by the direct reducer.
+        const FrameStack = struct {
+            const Stack = @This();
+
+            list: std.ArrayList(Frame) = .empty,
+
+            fn initUninitialized(
+                allocator: std.mem.Allocator,
+                logical_length: u32,
+            ) Error!Stack {
+                if (logical_length > options.maximum_frames) {
+                    return error.ProgramContractViolation;
+                }
+                var list = std.ArrayList(Frame).initCapacity(
+                    allocator,
+                    @intCast(logical_length),
+                ) catch return error.OutOfMemory;
+                list.items.len = @intCast(logical_length);
+                return .{ .list = list };
+            }
+
+            fn initOne(
+                allocator: std.mem.Allocator,
+                frame: Frame,
+            ) Error!Stack {
+                var result = try initUninitialized(allocator, 1);
+                result.list.items[0] = frame;
+                return result;
+            }
+
+            fn clone(
+                self: *const Stack,
+                allocator: std.mem.Allocator,
+            ) Error!Stack {
+                if (!self.consistent()) return error.ProgramContractViolation;
+                return .{
+                    .list = self.list.clone(allocator) catch
+                        return error.OutOfMemory,
+                };
+            }
+
+            fn deinit(self: *Stack, allocator: std.mem.Allocator) void {
+                self.list.deinit(allocator);
+                self.* = .{};
+            }
+
+            fn take(self: *Stack) Stack {
+                const result = self.*;
+                self.* = .{};
+                return result;
+            }
+
+            fn consistent(self: *const Stack) bool {
+                if (comptime @sizeOf(Frame) == 0) {
+                    return self.list.items.len <= options.maximum_frames;
+                }
+                return self.list.items.len <= options.maximum_frames and
+                    self.list.capacity == self.list.items.len;
+            }
+
+            fn len(self: *const Stack) u32 {
+                return @intCast(self.list.items.len);
+            }
+
+            fn slice(self: *const Stack) []const Frame {
+                return self.list.items;
+            }
+
+            fn get(self: *const Stack, index: u32) ?Frame {
+                if (index >= self.len() or !self.consistent()) {
+                    return null;
+                }
+                return self.list.items[@intCast(index)];
+            }
+
+            fn set(self: *Stack, index: u32, frame: Frame) Error!void {
+                if (index >= self.len() or !self.consistent()) {
+                    return error.ProgramContractViolation;
+                }
+                self.list.items[@intCast(index)] = frame;
+            }
+
+            fn push(
+                self: *Stack,
+                allocator: std.mem.Allocator,
+                frame: Frame,
+            ) Error!void {
+                if (!self.consistent() or self.len() == options.maximum_frames) {
+                    return error.ProgramContractViolation;
+                }
+                self.list.ensureTotalCapacityPrecise(
+                    allocator,
+                    self.list.items.len + 1,
+                ) catch return error.OutOfMemory;
+                self.list.appendAssumeCapacity(frame);
+            }
+
+            fn pop(
+                self: *Stack,
+                allocator: std.mem.Allocator,
+            ) Error!Frame {
+                if (!self.consistent() or self.list.items.len == 0) {
+                    return error.ProgramContractViolation;
+                }
+                const next_length = self.list.items.len - 1;
+                const result = self.list.items[next_length];
+                self.list.shrinkAndFreePrecise(
+                    allocator,
+                    next_length,
+                ) catch return error.OutOfMemory;
+                return result;
+            }
         };
 
         const StoredState = struct {
@@ -369,15 +484,16 @@ pub fn Machine(
             return @ptrCast(@alignCast(state));
         }
 
-        fn own(allocator: std.mem.Allocator, value: StoredState) Error!State {
+        fn own(allocator: std.mem.Allocator, value: *StoredState) Error!State {
             const result = allocator.create(StoredState) catch return error.OutOfMemory;
-            result.* = value;
+            result.* = value.*;
+            result.frames = value.frames.take();
             return @ptrCast(result);
         }
 
         fn topIndex(value: *const StoredState) Error!u32 {
-            if (value.frames.logical_length == 0) return error.ProgramContractViolation;
-            return value.frames.logical_length - 1;
+            if (value.frames.len() == 0) return error.ProgramContractViolation;
+            return value.frames.len() - 1;
         }
 
         fn top(value: *const StoredState) Error!Frame {
@@ -386,8 +502,7 @@ pub fn Machine(
         }
 
         fn setTop(value: *StoredState, frame: Frame) Error!void {
-            value.frames.set(try topIndex(value), frame) catch
-                return error.ProgramContractViolation;
+            try value.frames.set(try topIndex(value), frame);
         }
 
         fn frameId(frame: Frame) Error!u32 {
@@ -535,7 +650,7 @@ pub fn Machine(
         }
 
         fn stateSize(value: *const StoredState) Error!usize {
-            if (value.terminal or value.frames.logical_length == 0) {
+            if (value.terminal or value.frames.len() == 0) {
                 return error.ProgramContractViolation;
             }
             var total: usize = state_header_length;
@@ -551,8 +666,9 @@ pub fn Machine(
 
         fn validate(value: *const StoredState) Error!void {
             if (value.terminal) return error.ProgramContractViolation;
-            if (value.frames.logical_length == 0 or
-                value.frames.logical_length > options.maximum_frames or
+            if (!value.frames.consistent() or
+                value.frames.len() == 0 or
+                value.frames.len() > options.maximum_frames or
                 value.cumulative_fuel > options.maximum_machine_fuel or
                 value.sequence > value.cumulative_fuel)
             {
@@ -573,8 +689,11 @@ pub fn Machine(
             }
         }
 
-        fn commit(state: State, candidate: *const StoredState) void {
-            stored(state).* = candidate.*;
+        fn commit(state: State, candidate: *StoredState) void {
+            const destination = stored(state);
+            destination.frames.deinit(destination.allocator);
+            destination.* = candidate.*;
+            destination.frames = candidate.frames.take();
         }
 
         /// Construct the initial nonempty continuation stack.
@@ -582,15 +701,16 @@ pub fn Machine(
             allocator: std.mem.Allocator,
             args: InitialArgs,
         ) Error!State {
-            var frames = FrameStack.empty();
-            frames.push(Definition.initial(args)) catch
-                return error.ProgramContractViolation;
-            const value: StoredState = .{
+            var value: StoredState = .{
                 .allocator = allocator,
-                .frames = frames,
+                .frames = try FrameStack.initOne(
+                    allocator,
+                    Definition.initial(args),
+                ),
             };
+            errdefer value.frames.deinit(allocator);
             try validate(&value);
-            return own(allocator, value);
+            return own(allocator, &value);
         }
 
         /// Clone one live state into an independent allocator owner.
@@ -601,13 +721,16 @@ pub fn Machine(
             try validate(storedConst(state));
             var copy = storedConst(state).*;
             copy.allocator = allocator;
-            return own(allocator, copy);
+            copy.frames = try storedConst(state).frames.clone(allocator);
+            errdefer copy.frames.deinit(allocator);
+            return own(allocator, &copy);
         }
 
         /// Release one live Machine state.
         pub fn deinitState(state: State) void {
             const value = stored(state);
             const allocator = value.allocator;
+            value.frames.deinit(allocator);
             allocator.destroy(value);
         }
 
@@ -620,7 +743,7 @@ pub fn Machine(
 
         fn commitYield(
             state: State,
-            candidate: *const StoredState,
+            candidate: *StoredState,
             caller_fuel: *u64,
             remaining_fuel: u64,
         ) Error!Outcome {
@@ -636,23 +759,22 @@ pub fn Machine(
             try validate(original);
             if (try currentFrom(original) != null) return error.ProgramContractViolation;
 
-            const candidate = original.allocator.create(StoredState) catch
-                return error.OutOfMemory;
-            defer original.allocator.destroy(candidate);
-            candidate.* = original.*;
+            var candidate = original.*;
+            candidate.frames = try original.frames.clone(original.allocator);
+            defer candidate.frames.deinit(candidate.allocator);
             var remaining_fuel = caller_fuel.*;
 
             while (true) {
-                const frame = try top(candidate);
+                const frame = try top(&candidate);
                 const minimum_cost = Definition.minimumCost(frame);
                 if (minimum_cost == 0) return error.ProgramContractViolation;
                 if (remaining_fuel < minimum_cost) {
-                    return commitYield(state, candidate, caller_fuel, remaining_fuel);
+                    return commitYield(state, &candidate, caller_fuel, remaining_fuel);
                 }
                 const cost = Definition.cost(frame);
                 if (cost < minimum_cost) return error.ProgramContractViolation;
                 if (remaining_fuel < cost) {
-                    return commitYield(state, candidate, caller_fuel, remaining_fuel);
+                    return commitYield(state, &candidate, caller_fuel, remaining_fuel);
                 }
                 const next_total = std.math.add(
                     u64,
@@ -660,13 +782,13 @@ pub fn Machine(
                     cost,
                 ) catch {
                     candidate.terminal = true;
-                    commit(state, candidate);
+                    commit(state, &candidate);
                     caller_fuel.* = remaining_fuel;
                     return .{ .failed = .execution_budget_exceeded };
                 };
                 if (next_total > options.maximum_machine_fuel) {
                     candidate.terminal = true;
-                    commit(state, candidate);
+                    commit(state, &candidate);
                     caller_fuel.* = remaining_fuel;
                     return .{ .failed = .execution_budget_exceeded };
                 }
@@ -678,70 +800,72 @@ pub fn Machine(
                 const action = plan.transition;
                 switch (action) {
                     .yielded => |next_frame| {
-                        try setTop(candidate, next_frame);
+                        try setTop(&candidate, next_frame);
                         return commitYield(
                             state,
-                            candidate,
+                            &candidate,
                             caller_fuel,
                             remaining_fuel,
                         );
                     },
                     .next => |next_frame| {
-                        try setTop(candidate, next_frame);
-                        try validate(candidate);
+                        try setTop(&candidate, next_frame);
+                        try validate(&candidate);
                     },
                     .call => |call| {
-                        if (candidate.frames.logical_length == options.maximum_frames) {
+                        if (candidate.frames.len() == options.maximum_frames) {
                             return .{ .failed = .frame_depth_exceeded };
                         }
-                        try setTop(candidate, call.return_frame);
-                        candidate.frames.push(call.callee) catch
-                            return error.ProgramContractViolation;
-                        try validate(candidate);
+                        try setTop(&candidate, call.return_frame);
+                        try candidate.frames.push(
+                            candidate.allocator,
+                            call.callee,
+                        );
+                        try validate(&candidate);
                     },
                     .return_to => |return_frame| {
-                        if (candidate.frames.logical_length < 2) {
+                        if (candidate.frames.len() < 2) {
                             return error.ProgramContractViolation;
                         }
-                        _ = candidate.frames.pop();
-                        try setTop(candidate, return_frame);
-                        try validate(candidate);
+                        _ = try candidate.frames.pop(candidate.allocator);
+                        try setTop(&candidate, return_frame);
+                        try validate(&candidate);
                     },
                     .return_value => |return_value| {
-                        if (candidate.frames.logical_length < 2) {
+                        if (candidate.frames.len() < 2) {
                             return error.ProgramContractViolation;
                         }
                         if (comptime hasDeclSafe(Definition, "applyReturn")) {
                             const parent_index =
-                                candidate.frames.logical_length - 2;
+                                candidate.frames.len() - 2;
                             const parent = candidate.frames.get(parent_index) orelse
                                 return error.ProgramContractViolation;
                             const return_frame = Definition.applyReturn(
                                 parent,
                                 return_value,
                             ) catch return error.ProgramContractViolation;
-                            _ = candidate.frames.pop();
-                            try setTop(candidate, return_frame);
-                            try validate(candidate);
+                            _ = try candidate.frames.pop(candidate.allocator);
+                            try setTop(&candidate, return_frame);
+                            try validate(&candidate);
                         } else {
                             return error.ProgramContractViolation;
                         }
                     },
                     .request => |request| {
-                        try setTop(candidate, request.awaiting);
+                        try setTop(&candidate, request.awaiting);
                         candidate.sequence = std.math.add(
                             u64,
                             candidate.sequence,
                             1,
                         ) catch return error.ProgramContractViolation;
-                        try validate(candidate);
+                        try validate(&candidate);
                         const outcome_request = try makeRequest(
                             candidate.allocator,
                             candidate.sequence,
                             try frameId(request.awaiting),
                             request.request,
                         );
-                        const reconstructed = (try currentFrom(candidate)) orelse
+                        const reconstructed = (try currentFrom(&candidate)) orelse
                             return error.ProgramContractViolation;
                         if (reconstructed.sequence != outcome_request.sequence or
                             reconstructed.constructor_id != outcome_request.constructor_id or
@@ -756,7 +880,7 @@ pub fn Machine(
                         {
                             return error.ProgramContractViolation;
                         }
-                        commit(state, candidate);
+                        commit(state, &candidate);
                         caller_fuel.* = remaining_fuel;
                         return .{ .request = outcome_request };
                     },
@@ -768,13 +892,13 @@ pub fn Machine(
                             .result = result,
                         };
                         candidate.terminal = true;
-                        commit(state, candidate);
+                        commit(state, &candidate);
                         caller_fuel.* = remaining_fuel;
                         return .{ .done = owned };
                     },
                     .failed => |failure| {
                         candidate.terminal = true;
-                        commit(state, candidate);
+                        commit(state, &candidate);
                         caller_fuel.* = remaining_fuel;
                         return .{ .failed = .{ .authored = failure } };
                     },
@@ -802,6 +926,8 @@ pub fn Machine(
             }
 
             var candidate = original.*;
+            candidate.frames = try original.frames.clone(original.allocator);
+            defer candidate.frames.deinit(candidate.allocator);
             const next_frame = Definition.@"resume"(
                 try top(&candidate),
                 request.value,
@@ -838,7 +964,7 @@ pub fn Machine(
             writer.write(&digest);
             writer.writeInt(u64, value.sequence);
             writer.writeInt(u64, value.cumulative_fuel);
-            writer.writeInt(u32, value.frames.logical_length);
+            writer.writeInt(u32, value.frames.len());
             writer.writeInt(u32, 0);
             for (value.frames.slice()) |frame| {
                 const environment_length = try portable_value.unionPayloadEncodedSize(
@@ -886,8 +1012,12 @@ pub fn Machine(
                 return error.ProgramContractViolation;
             }
 
-            var frames = FrameStack.empty();
-            for (0..frame_count) |_| {
+            var frames = try FrameStack.initUninitialized(
+                allocator,
+                frame_count,
+            );
+            errdefer frames.deinit(allocator);
+            for (0..frame_count) |frame_index| {
                 const constructor_id = try reader.readInt(u32);
                 const environment_length = try reader.readInt(u32);
                 const environment = try reader.read(@intCast(environment_length));
@@ -896,17 +1026,19 @@ pub fn Machine(
                     constructor_id,
                     environment,
                 ) catch return error.ProgramContractViolation;
-                frames.push(frame) catch return error.ProgramContractViolation;
+                try frames.set(@intCast(frame_index), frame);
             }
             if (reader.index != bytes.len) return error.ProgramContractViolation;
-            const value: StoredState = .{
+            var value: StoredState = .{
                 .allocator = allocator,
                 .sequence = sequence,
                 .cumulative_fuel = cumulative_fuel,
                 .frames = frames,
             };
+            frames = .{};
+            errdefer value.frames.deinit(allocator);
             try validate(&value);
-            return own(allocator, value);
+            return own(allocator, &value);
         }
     };
 }
@@ -1110,6 +1242,71 @@ const BudgetTestDefinition = struct {
                 .finish => .{ .done = 42 },
             },
         };
+    }
+
+    fn current(_: Frame) ?Request {
+        return null;
+    }
+
+    fn @"resume"(
+        _: Frame,
+        _: Request,
+        _: anytype,
+    ) error{ProgramContractViolation}!Frame {
+        return error.ProgramContractViolation;
+    }
+
+    fn requestEql(_: Request, _: Request) bool {
+        return true;
+    }
+
+    fn requestSiteDigest(_: Request) [32]u8 {
+        return [_]u8{0} ** 32;
+    }
+
+    fn validateFrame(_: Frame) error{ProgramContractViolation}!void {}
+
+    fn validateStack(frames: []const Frame) error{ProgramContractViolation}!void {
+        if (frames.len != 1) return error.ProgramContractViolation;
+    }
+};
+
+const LargeFrameText = portable_value.Text(128 << 10);
+
+const LargeFrameDefinition = struct {
+    const Frame = union(enum) {
+        entry: struct {
+            payload: LargeFrameText,
+        },
+    };
+    const InitialArgs = void;
+    const Result = void;
+    const Failure = enum { rejected };
+    const Request = void;
+    const EffectRow = struct {
+        pub const operation_site_count: usize = 0;
+        pub const after_site_count: usize = 0;
+    };
+    const Transition = Reduction(Frame, Request, Result, Failure);
+    const contract_bytes = "test-direct-rnf\x00exact-logical-frame-storage";
+
+    fn initial(_: InitialArgs) Frame {
+        return .{ .entry = .{ .payload = LargeFrameText.empty() } };
+    }
+
+    fn minimumCost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn cost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn plan(_: Frame) struct {
+        cost: u64,
+        transition: Transition,
+    } {
+        return .{ .cost = 1, .transition = .{ .done = {} } };
     }
 
     fn current(_: Frame) ?Request {
@@ -1387,6 +1584,56 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 5), done.value().*);
+}
+
+test "live frame storage scales with logical frames, not maximum capacity" {
+    const LargeFrameMachine = Machine(LargeFrameDefinition, .{
+        .maximum_frames = 64,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 8,
+    });
+    const backing = try std.testing.allocator.alloc(u8, 512 << 10);
+    defer std.testing.allocator.free(backing);
+    var fixed = std.heap.FixedBufferAllocator.init(backing);
+
+    const state = try LargeFrameMachine.initialState(fixed.allocator(), {});
+    defer LargeFrameMachine.deinitState(state);
+    try LargeFrameMachine.validateState(state);
+
+    var caller_fuel: u64 = 1;
+    const done = switch (try LargeFrameMachine.step(state, &caller_fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u64, 0), caller_fuel);
+}
+
+test "cloned Machine state owns an independent logical frame stack" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    const original = try TestMachine.initialState(std.testing.allocator, 7);
+    defer TestMachine.deinitState(original);
+    const clone = try TestMachine.cloneState(std.testing.allocator, original);
+    defer TestMachine.deinitState(clone);
+
+    const before = try TestMachine.encodeState(std.testing.allocator, original);
+    defer std.testing.allocator.free(before);
+    var caller_fuel: u64 = 1;
+    _ = switch (try TestMachine.step(clone, &caller_fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const after = try TestMachine.encodeState(std.testing.allocator, original);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        TestMachine.current(original),
+    );
 }
 
 test "Machine validates untrusted request payloads before equality" {
