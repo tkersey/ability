@@ -3521,10 +3521,13 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         const expected_function = suspension.callee_function.?;
                         break :blk switch (return_value) {
                             inline else => |payload, return_tag| return_blk: {
+                                const returned_dense_index: usize =
+                                    comptime @intFromEnum(return_tag) + 1;
                                 const returned_function: control_ir.FunctionId =
-                                    comptime @intCast(
-                                        @intFromEnum(return_tag) + 1,
-                                    );
+                                    comptime semantic_canonicalization
+                                        .function_dense_to_source[
+                                        returned_dense_index
+                                    ];
                                 if (comptime returned_function !=
                                     expected_function)
                                 {

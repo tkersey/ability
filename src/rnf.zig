@@ -1088,19 +1088,6 @@ pub fn NormalForm(
                 .resume_target = resume_target,
             };
             var required = environment_set;
-            const source_function_id =
-                program.blocks[@intCast(source_block)].function_id;
-            if (source_function_id != 0) {
-                const source_function = try program.function(
-                    source_function_id,
-                );
-                const entry = program.blocks[
-                    @intCast(source_function.entry)
-                ];
-                for (entry.parameters) |parameter| {
-                    _ = required.insert(parameter);
-                }
-            }
             var ordered_invariants = invariants;
             ordered_invariants.canonicalize(canonical_values);
             if (comptime maximum_invariant_terms == 0) {
@@ -2045,16 +2032,6 @@ pub fn NormalForm(
                             );
                         for (suspension.request_values) |value| {
                             _ = environment.insert(value);
-                        }
-                        if (suspension.kind == .call) {
-                            for (suspension.callee.?.arguments) |argument| {
-                                switch (argument) {
-                                    .value => |value| {
-                                        _ = environment.insert(value);
-                                    },
-                                    .@"resume" => unreachable,
-                                }
-                            }
                         }
                         try result.appendConstructor(
                             program,

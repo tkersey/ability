@@ -549,6 +549,36 @@ test "multi-frame commits reuse fixed-buffer transaction storage" {
     }
 }
 
+test "fixed-buffer state owns every recursive growth predecessor" {
+    const RecursiveMachine = Program.compile(.{
+        .maximum_frames = 16,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 128,
+    });
+    const backing = try std.testing.allocator.alloc(u8, 2 << 20);
+    defer std.testing.allocator.free(backing);
+    var fixed = std.heap.FixedBufferAllocator.init(backing);
+    const state = try RecursiveMachine.initialState(fixed.allocator(), 8);
+
+    var done: ?*RecursiveMachine.OwnedResult = null;
+    for (0..128) |_| {
+        var caller_fuel: u64 = 4;
+        switch (try RecursiveMachine.step(state, &caller_fuel)) {
+            .yielded => try RecursiveMachine.validateState(state),
+            .done => |result| {
+                done = result;
+                break;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    const result = done orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 36), result.value().*);
+    result.deinit();
+    RecursiveMachine.deinitState(state);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
+}
+
 test "fixed-buffer decoded terminal state fully releases in ownership order" {
     const RecursiveMachine = Program.compile(.{
         .maximum_frames = 8,
@@ -589,6 +619,31 @@ test "fixed-buffer decoded terminal state fully releases in ownership order" {
     done.deinit();
     RecursiveMachine.deinitState(restored);
     try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
+
+    const state_first_backing = try std.testing.allocator.alloc(u8, 512 << 10);
+    defer std.testing.allocator.free(state_first_backing);
+    var state_first_fixed = std.heap.FixedBufferAllocator.init(
+        state_first_backing,
+    );
+    const state_first = try RecursiveMachine.decodeState(
+        state_first_fixed.allocator(),
+        encoded,
+    );
+    var state_first_fuel: u64 = 32;
+    const state_first_done = switch (try RecursiveMachine.step(
+        state_first,
+        &state_first_fuel,
+    )) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    RecursiveMachine.deinitState(state_first);
+    try std.testing.expectEqual(@as(u32, 6), state_first_done.value().*);
+    state_first_done.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        state_first_fixed.end_index,
+    );
 }
 
 test "decode allocation follows logical frames instead of configured ceiling" {

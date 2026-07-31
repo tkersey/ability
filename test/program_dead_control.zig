@@ -270,6 +270,160 @@ fn BodyWithDeadHelper() type {
     };
 }
 
+fn BodyWithDeadCallArgument() type {
+    return struct {
+        const HugeArgument = [8192]u8;
+        const call_arguments = [_]cir.EdgeArgument{.{ .value = 0 }};
+        const return_arguments = [_]cir.EdgeArgument{.@"resume"};
+        const helper_instructions = [_]cir.Instruction{.{
+            .kind = .constant,
+            .result = 2,
+            .operation = .{ .constant = 0 },
+        }};
+        const blocks = [_]cir.Block{
+            .{
+                .id = 0,
+                .parameters = &.{0},
+                .terminator = .{ .@"suspend" = .{
+                    .kind = .call,
+                    .callee_function = 1,
+                    .callee = .{
+                        .target = 1,
+                        .arguments = &call_arguments,
+                    },
+                    .continuation = .{
+                        .target = 2,
+                        .arguments = &return_arguments,
+                    },
+                    .resume_type = u32_type,
+                } },
+            },
+            .{
+                .id = 1,
+                .function_id = 1,
+                .parameters = &.{1},
+                .instructions = &helper_instructions,
+                .terminator = .{ .return_to_caller = 2 },
+            },
+            .{
+                .id = 2,
+                .role = .terminal_handoff,
+                .parameters = &.{3},
+                .terminator = .{ .return_value = 3 },
+            },
+        };
+
+        pub const InitialArgs = HugeArgument;
+        pub const Result = u32;
+        pub const Failure = enum {
+            rejected,
+        };
+        pub const constants = .{@as(u32, 7)};
+        pub const effect_sites = .{};
+        pub const schema_types = .{HugeArgument};
+        pub const control_ir: cir.Program = .{
+            .label = "dead-call-argument",
+            .value_types = &.{
+                .{ .schema = 0 },
+                .{ .schema = 0 },
+                u32_type,
+                u32_type,
+            },
+            .blocks = &blocks,
+            .entry = 0,
+            .result_type = u32_type,
+            .functions = &.{
+                .{
+                    .id = 0,
+                    .entry = 0,
+                    .result_type = u32_type,
+                },
+                .{
+                    .id = 1,
+                    .entry = 1,
+                    .result_type = u32_type,
+                },
+            },
+        };
+    };
+}
+
+fn ReachableHelperAfterDeadBody() type {
+    return struct {
+        const call_arguments = [_]cir.EdgeArgument{.{ .value = 0 }};
+        const return_arguments = [_]cir.EdgeArgument{.@"resume"};
+        const blocks = [_]cir.Block{
+            .{
+                .id = 0,
+                .parameters = &.{0},
+                .terminator = .{ .@"suspend" = .{
+                    .kind = .call,
+                    .callee_function = 2,
+                    .callee = .{
+                        .target = 2,
+                        .arguments = &call_arguments,
+                    },
+                    .continuation = .{
+                        .target = 3,
+                        .arguments = &return_arguments,
+                    },
+                    .resume_type = u32_type,
+                } },
+            },
+            .{
+                .id = 1,
+                .function_id = 1,
+                .parameters = &.{1},
+                .terminator = .{ .return_to_caller = 1 },
+            },
+            .{
+                .id = 2,
+                .function_id = 2,
+                .parameters = &.{2},
+                .terminator = .{ .return_to_caller = 2 },
+            },
+            .{
+                .id = 3,
+                .role = .terminal_handoff,
+                .parameters = &.{3},
+                .terminator = .{ .return_value = 3 },
+            },
+        };
+
+        pub const InitialArgs = u32;
+        pub const Result = u32;
+        pub const Failure = enum {
+            rejected,
+        };
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "reachable-helper-after-dead",
+            .value_types = &.{ u32_type, u32_type, u32_type, u32_type },
+            .blocks = &blocks,
+            .entry = 0,
+            .result_type = u32_type,
+            .functions = &.{
+                .{
+                    .id = 0,
+                    .entry = 0,
+                    .result_type = u32_type,
+                },
+                .{
+                    .id = 1,
+                    .entry = 1,
+                    .result_type = u32_type,
+                },
+                .{
+                    .id = 2,
+                    .entry = 2,
+                    .result_type = u32_type,
+                },
+            },
+        };
+    };
+}
+
 const options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
@@ -297,6 +451,14 @@ const CanonicalDefinition = compiler.DefinitionFor(
 const DeadHelperDefinition = compiler.DefinitionFor(
     "dead-helper-control",
     BodyWithDeadHelper(),
+);
+const DeadCallArgumentProgram = program_v2.program(
+    "dead-call-argument",
+    BodyWithDeadCallArgument(),
+);
+const ReachableAfterDeadProgram = program_v2.program(
+    "reachable-helper-after-dead",
+    ReachableHelperAfterDeadBody(),
 );
 
 test "unreachable control creates no constructor, authority, or identity delta" {
@@ -363,4 +525,46 @@ test "unreachable helper results do not enter the generated return carrier" {
         @sizeOf(CanonicalDefinition.Plan),
         @sizeOf(DeadHelperDefinition.Plan),
     );
+}
+
+test "helper continuations omit future-dead call arguments" {
+    var saw_await_call = false;
+    var saw_helper_entry = false;
+    for (DeadCallArgumentProgram.rnf.constructorSlice()) |constructor| {
+        if (constructor.origin == .suspension and
+            constructor.source_block == 0)
+        {
+            saw_await_call = true;
+            for (constructor.environmentFields()) |field| {
+                try std.testing.expect(field.value != 0);
+            }
+        }
+        if (constructor.origin == .block_entry and
+            constructor.source_block == 1)
+        {
+            saw_helper_entry = true;
+            for (constructor.environmentFields()) |field| {
+                try std.testing.expect(field.value != 1);
+            }
+        }
+    }
+    try std.testing.expect(saw_await_call);
+    try std.testing.expect(saw_helper_entry);
+}
+
+test "dense return tags map through reachable source functions" {
+    const ReachableAfterDead = ReachableAfterDeadProgram.compile(options);
+    const state = try ReachableAfterDead.initialState(
+        std.testing.allocator,
+        17,
+    );
+    defer ReachableAfterDead.deinitState(state);
+
+    var fuel: u64 = 8;
+    const done = switch (try ReachableAfterDead.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 17), done.value().*);
 }
