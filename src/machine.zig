@@ -553,7 +553,8 @@ pub fn Machine(
             if (value.terminal) return error.ProgramContractViolation;
             if (value.frames.logical_length == 0 or
                 value.frames.logical_length > options.maximum_frames or
-                value.cumulative_fuel > options.maximum_machine_fuel)
+                value.cumulative_fuel > options.maximum_machine_fuel or
+                value.sequence > value.cumulative_fuel)
             {
                 return error.ProgramContractViolation;
             }
@@ -563,6 +564,10 @@ pub fn Machine(
             }
             Definition.validateStack(value.frames.slice()) catch
                 return error.ProgramContractViolation;
+            const frame = try top(value);
+            if (Definition.current(frame) != null and value.sequence == 0) {
+                return error.ProgramContractViolation;
+            }
             if (try stateSize(value) > options.maximum_state_bytes) {
                 return error.ProgramContractViolation;
             }
@@ -1582,6 +1587,60 @@ test "cumulative fuel overflow fails before segment execution" {
         try OverflowMachine.step(state, &caller_fuel),
     );
     try std.testing.expectEqual(@as(u64, 1), caller_fuel);
+}
+
+test "decode rejects impossible request sequence and fuel histories" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const initial = try TestMachine.initialState(std.testing.allocator, 3);
+    defer TestMachine.deinitState(initial);
+    const initial_bytes = try TestMachine.encodeState(
+        std.testing.allocator,
+        initial,
+    );
+    defer std.testing.allocator.free(initial_bytes);
+    var forged_initial: [4096]u8 = undefined;
+    @memcpy(forged_initial[0..initial_bytes.len], initial_bytes);
+    const sequence_offset = state_magic.len + 2 + 2 + 32;
+    std.mem.writeInt(
+        u64,
+        forged_initial[sequence_offset..][0..8],
+        1,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        TestMachine.decodeState(
+            std.testing.allocator,
+            forged_initial[0..initial_bytes.len],
+        ),
+    );
+
+    var caller_fuel: u64 = 2;
+    _ = try TestMachine.step(initial, &caller_fuel);
+    const parked_bytes = try TestMachine.encodeState(
+        std.testing.allocator,
+        initial,
+    );
+    defer std.testing.allocator.free(parked_bytes);
+    var forged_parked: [4096]u8 = undefined;
+    @memcpy(forged_parked[0..parked_bytes.len], parked_bytes);
+    std.mem.writeInt(
+        u64,
+        forged_parked[sequence_offset..][0..8],
+        0,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        TestMachine.decodeState(
+            std.testing.allocator,
+            forged_parked[0..parked_bytes.len],
+        ),
+    );
 }
 
 test "Machine identity binds semantics and excludes debug metadata" {

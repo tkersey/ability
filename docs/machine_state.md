@@ -31,7 +31,9 @@ cursors, local-slot bitmaps, condition caches, or generic after stack.
 Decode is fail-closed. It checks the exact Machine digest, versions, total
 length, frame bounds, dense constructor schemas, portable-value bounds,
 constructor-local invariants, stack compatibility, pending-request state, fuel
-arithmetic, and trailing bytes. Decode executes no effects or user callbacks.
+arithmetic, and trailing bytes. Sequence cannot exceed cumulative fuel, and a
+parked request must have a nonzero sequence. Decode executes no effects or user
+callbacks.
 
 State bytes are compatible only when the Machine contract digest is identical.
 There is no automatic migration from `ABL_STM1`.
