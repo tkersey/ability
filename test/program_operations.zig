@@ -160,3 +160,77 @@ test "compiled pure operations construct products vectors and text" {
     try std.testing.expectEqualStrings("alpha", result.digest.slice());
     try std.testing.expectEqual(@as(u32, 8), result.total);
 }
+
+const failure_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .terminator = .{ .fail = 7 },
+    },
+};
+
+fn FailureBody(comptime FailureType: type) type {
+    return struct {
+        pub const InitialArgs = void;
+        pub const Result = void;
+        pub const Failure = FailureType;
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "non-dense-failure-tags",
+            .value_types = &.{},
+            .blocks = &failure_blocks,
+            .entry = 0,
+            .result_type = .{ .scalar = .unit },
+        };
+    };
+}
+
+const FailureA = enum(u16) {
+    rejected = 7,
+    other = 11,
+};
+const FailureB = enum(u16) {
+    other = 7,
+    rejected = 11,
+};
+const FailureMachineA =
+    program_v2.program("non-dense-failure-tags", FailureBody(FailureA))
+        .compile(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 1024,
+        .maximum_machine_fuel = 8,
+    });
+const FailureMachineB =
+    program_v2.program("non-dense-failure-tags", FailureBody(FailureB))
+        .compile(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 1024,
+        .maximum_machine_fuel = 8,
+    });
+
+test "non-dense failure tags retain name-bound runtime and identity semantics" {
+    const state = try FailureMachineA.initialState(std.testing.allocator, {});
+    defer FailureMachineA.deinitState(state);
+    var fuel: u64 = 1;
+    switch (try FailureMachineA.step(state, &fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |authored| {
+                try std.testing.expectEqual(
+                    @as(u16, 7),
+                    @intFromEnum(authored),
+                );
+                try std.testing.expectEqualStrings(
+                    "rejected",
+                    @tagName(authored),
+                );
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &FailureMachineA.Manifest.machine_contract_digest,
+        &FailureMachineB.Manifest.machine_contract_digest,
+    ));
+}

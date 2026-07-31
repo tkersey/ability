@@ -623,39 +623,51 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
 }
 
 fn addMaximum(comptime left: usize, comptime right: usize) usize {
-    return std.math.add(usize, left, right) catch
+    if (right > std.math.maxInt(usize) - left) {
         @compileError("Boundary portable maximum encoded size overflows usize");
+    }
+    return left + right;
+}
+
+fn multiplyMaximum(comptime left: usize, comptime right: usize) usize {
+    if (left != 0 and right > std.math.maxInt(usize) / left) {
+        @compileError("Boundary portable maximum encoded size overflows usize");
+    }
+    return left * right;
 }
 
 /// Compute the maximum canonical encoded size from contract-bearing bounds.
 pub fn maximumEncodedSize(comptime T: type) usize {
     comptime assertPortable(T);
-    if (isBytes(T) or isText(T)) return addMaximum(4, T.maximum_length);
-    if (isVector(T)) return addMaximum(
+    if (comptime isBytes(T) or isText(T)) {
+        return addMaximum(4, T.maximum_length);
+    }
+    if (comptime isVector(T)) return addMaximum(
         4,
-        std.math.mul(usize, T.maximum_length, maximumEncodedSize(T.ElementType)) catch
-            @compileError("Boundary portable vector maximum encoded size overflows usize"),
+        multiplyMaximum(
+            T.maximum_length,
+            maximumEncodedSize(T.ElementType),
+        ),
     );
     return switch (@typeInfo(T)) {
         .void => 0,
         .bool => 1,
         .int => |info| @divExact(info.bits, 8),
-        .array => |info| std.math.mul(
-            usize,
+        .array => |info| multiplyMaximum(
             info.len,
             maximumEncodedSize(info.child),
-        ) catch @compileError("Boundary portable array maximum encoded size overflows usize"),
+        ),
         .optional => |info| addMaximum(1, maximumEncodedSize(info.child)),
         .@"enum" => 4,
         .@"struct" => |info| blk: {
-            var total: usize = 0;
+            comptime var total: usize = 0;
             inline for (info.fields) |field| {
                 total = addMaximum(total, maximumEncodedSize(field.type));
             }
             break :blk total;
         },
         .@"union" => |info| blk: {
-            var maximum: usize = 0;
+            comptime var maximum: usize = 0;
             inline for (info.fields) |field| {
                 maximum = @max(maximum, maximumEncodedSize(field.type));
             }
@@ -780,6 +792,10 @@ fn decodeFrom(comptime T: type, reader: *Reader) Error!T {
         const length = try reader.readInt(u32);
         if (length > T.maximum_length) return error.CapacityExceeded;
         var result = T.empty();
+        if (comptime maximumEncodedSize(T.ElementType) == 0) {
+            result.logical_length = length;
+            return result;
+        }
         for (0..length) |_| try result.push(try decodeFrom(T.ElementType, reader));
         return result;
     }
@@ -1073,6 +1089,15 @@ test "malformed bounded lengths tags UTF-8 and trailing bytes fail closed" {
         error.TrailingBytes,
         decodeExact(u8, &.{ 7, 0 }),
     );
+}
+
+test "zero-width vector decode is constant in declared logical length" {
+    const Values = Vector(void, 1_000_000);
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, Values.maximum_length, .little);
+    const decoded = try decodeExact(Values, &bytes);
+    try std.testing.expectEqual(@as(u32, 1_000_000), decoded.len());
+    try std.testing.expectEqual(@as(usize, 4), maximumEncodedSize(Values));
 }
 
 test "Research Digest bounds are representable without target-width values" {

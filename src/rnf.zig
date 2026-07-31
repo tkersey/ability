@@ -116,6 +116,7 @@ pub const Error = control_ir.ValidationError || error{
     MissingInvariantValue,
     InvalidInvariantValue,
     InvariantViolation,
+    PathFactsDidNotConverge,
 };
 
 fn bindingFor(
@@ -275,42 +276,12 @@ fn definingInstruction(
 fn factForBranch(
     program: control_ir.Program,
     branch: control_ir.Branch,
-    target: control_ir.BlockId,
+    expected: bool,
 ) ?InvariantTerm {
-    const selected_edge = if (edgeTargets(branch.then_edge, target))
-        branch.then_edge
-    else if (edgeTargets(branch.else_edge, target))
-        branch.else_edge
-    else
-        return null;
-    const expected = edgeTargets(branch.then_edge, target);
-    const target_block = program.blocks[selected_edge.target];
-    const Projection = struct {
-        fn value(
-            edge: control_ir.Edge,
-            block: control_ir.Block,
-            source: control_ir.ValueId,
-        ) control_ir.ValueId {
-            for (edge.arguments, block.parameters) |argument, parameter| {
-                switch (argument) {
-                    .value => |value_id| {
-                        if (value_id == source) return parameter;
-                    },
-                    .@"resume" => {},
-                }
-            }
-            return source;
-        }
-    };
-
     if (definingInstruction(program, branch.condition)) |instruction| {
         if (instruction.kind == .compare_eq_zero and instruction.operands.len == 1) {
             return .{ .integer_zero = .{
-                .value = Projection.value(
-                    selected_edge,
-                    target_block,
-                    instruction.operands[0],
-                ),
+                .value = instruction.operands[0],
                 .equal = expected,
             } };
         }
@@ -322,16 +293,8 @@ fn factForBranch(
             .integer_greater_than,
             .integer_greater_equal,
             => return .{ .integer_relation = .{
-                .left = Projection.value(
-                    selected_edge,
-                    target_block,
-                    instruction.operands[0],
-                ),
-                .right = Projection.value(
-                    selected_edge,
-                    target_block,
-                    instruction.operands[1],
-                ),
+                .left = instruction.operands[0],
+                .right = instruction.operands[1],
                 .relation = switch (instruction.operation) {
                     .integer_equal => .equal,
                     .integer_not_equal => .not_equal,
@@ -344,20 +307,12 @@ fn factForBranch(
                 .expected = expected,
             } },
             .sum_tag_is => |case_index| return .{ .sum_case = .{
-                .value = Projection.value(
-                    selected_edge,
-                    target_block,
-                    instruction.operands[0],
-                ),
+                .value = instruction.operands[0],
                 .case_index = case_index,
                 .equal = expected,
             } },
             .optional_is_some => return .{ .sum_case = .{
-                .value = Projection.value(
-                    selected_edge,
-                    target_block,
-                    instruction.operands[0],
-                ),
+                .value = instruction.operands[0],
                 .case_index = 1,
                 .equal = expected,
             } },
@@ -365,46 +320,9 @@ fn factForBranch(
         }
     }
     return .{ .boolean = .{
-        .value = Projection.value(
-            selected_edge,
-            target_block,
-            branch.condition,
-        ),
+        .value = branch.condition,
         .expected = expected,
     } };
-}
-
-fn immediateInvariant(
-    program: control_ir.Program,
-    target: control_ir.BlockId,
-    reachability: anytype,
-) ?InvariantTerm {
-    var result: ?InvariantTerm = null;
-    var predecessor_count: usize = 0;
-    for (program.blocks) |block| {
-        if (!reachability.contains(block.id)) continue;
-        switch (block.terminator) {
-            .branch => |branch| {
-                if (!edgeTargets(branch.then_edge, target) and
-                    !edgeTargets(branch.else_edge, target)) continue;
-                const fact = factForBranch(program, branch, target) orelse return null;
-                predecessor_count += 1;
-                if (result) |existing| {
-                    if (!existing.eql(fact)) return null;
-                } else {
-                    result = fact;
-                }
-            },
-            .jump => |edge| {
-                if (edgeTargets(edge, target)) return null;
-            },
-            .@"suspend" => |suspension| {
-                if (edgeTargets(suspension.continuation, target)) return null;
-            },
-            .return_value, .return_to_caller, .fail => {},
-        }
-    }
-    return if (predecessor_count == 0) null else result;
 }
 
 /// One bounded compiler result containing canonical dense constructors.
@@ -422,9 +340,179 @@ pub fn NormalForm(
     );
     const Liveness = control_ir.Liveness(maximum_values, maximum_blocks);
     const ReachabilityType = control_ir.Reachability(maximum_blocks);
+    const CanonicalValues = struct {
+        values: [maximum_values]control_ir.ValueId = undefined,
+        present: [maximum_values]bool =
+            [_]bool{false} ** maximum_values,
+        len: usize = 0,
+
+        fn bind(self: *@This(), value: control_ir.ValueId) void {
+            if (self.present[@intCast(value)]) return;
+            self.present[@intCast(value)] = true;
+            self.values[self.len] = value;
+            self.len += 1;
+        }
+
+        fn analyze(
+            program: control_ir.Program,
+            reachability: ReachabilityType,
+        ) @This() {
+            var result: @This() = .{};
+            for (0..reachability.count) |dense_block_index| {
+                const source_block = reachability.sourceId(
+                    @intCast(dense_block_index),
+                ) orelse unreachable;
+                const block = program.blocks[@intCast(source_block)];
+                for (block.parameters) |parameter| result.bind(parameter);
+                for (block.instructions) |instruction| {
+                    result.bind(instruction.result);
+                }
+            }
+            return result;
+        }
+
+        fn ordinal(
+            self: @This(),
+            value: control_ir.ValueId,
+        ) usize {
+            for (self.values[0..self.len], 0..) |candidate, index| {
+                if (candidate == value) return index;
+            }
+            unreachable;
+        }
+    };
+    const FactSet = struct {
+        terms: [maximum_invariant_terms]InvariantTerm = undefined,
+        len: usize = 0,
+
+        fn contains(self: @This(), term: InvariantTerm) bool {
+            for (self.terms[0..self.len]) |existing| {
+                if (existing.eql(term)) return true;
+            }
+            return false;
+        }
+
+        fn insert(self: *@This(), term: InvariantTerm) Error!void {
+            if (self.contains(term)) return;
+            if (comptime maximum_invariant_terms == 0) {
+                return error.TooManyInvariantTerms;
+            }
+            if (self.len == maximum_invariant_terms) {
+                return error.TooManyInvariantTerms;
+            }
+            self.terms[self.len] = term;
+            self.len += 1;
+        }
+
+        fn intersection(self: @This(), other: @This()) @This() {
+            if (comptime maximum_invariant_terms == 0) return .{};
+            var result: @This() = .{};
+            for (self.terms[0..self.len]) |term| {
+                if (!other.contains(term)) continue;
+                result.terms[result.len] = term;
+                result.len += 1;
+            }
+            return result;
+        }
+
+        fn eql(self: @This(), other: @This()) bool {
+            if (self.len != other.len) return false;
+            for (self.terms[0..self.len]) |term| {
+                if (!other.contains(term)) return false;
+            }
+            return true;
+        }
+
+        fn termLessThan(
+            canonical_values: CanonicalValues,
+            left: InvariantTerm,
+            right: InvariantTerm,
+        ) bool {
+            const left_tag = @intFromEnum(std.meta.activeTag(left));
+            const right_tag = @intFromEnum(std.meta.activeTag(right));
+            if (left_tag != right_tag) return left_tag < right_tag;
+            return switch (left) {
+                .boolean => |left_term| blk: {
+                    const right_term = right.boolean;
+                    const left_value = canonical_values.ordinal(left_term.value);
+                    const right_value = canonical_values.ordinal(right_term.value);
+                    if (left_value != right_value) {
+                        break :blk left_value < right_value;
+                    }
+                    break :blk @intFromBool(left_term.expected) <
+                        @intFromBool(right_term.expected);
+                },
+                .integer_zero => |left_term| blk: {
+                    const right_term = right.integer_zero;
+                    const left_value = canonical_values.ordinal(left_term.value);
+                    const right_value = canonical_values.ordinal(right_term.value);
+                    if (left_value != right_value) {
+                        break :blk left_value < right_value;
+                    }
+                    break :blk @intFromBool(left_term.equal) <
+                        @intFromBool(right_term.equal);
+                },
+                .integer_relation => |left_term| blk: {
+                    const right_term = right.integer_relation;
+                    const left_left = canonical_values.ordinal(left_term.left);
+                    const right_left = canonical_values.ordinal(right_term.left);
+                    if (left_left != right_left) {
+                        break :blk left_left < right_left;
+                    }
+                    const left_right = canonical_values.ordinal(left_term.right);
+                    const right_right = canonical_values.ordinal(right_term.right);
+                    if (left_right != right_right) {
+                        break :blk left_right < right_right;
+                    }
+                    const left_relation = @intFromEnum(left_term.relation);
+                    const right_relation = @intFromEnum(right_term.relation);
+                    if (left_relation != right_relation) {
+                        break :blk left_relation < right_relation;
+                    }
+                    break :blk @intFromBool(left_term.expected) <
+                        @intFromBool(right_term.expected);
+                },
+                .sum_case => |left_term| blk: {
+                    const right_term = right.sum_case;
+                    const left_value = canonical_values.ordinal(left_term.value);
+                    const right_value = canonical_values.ordinal(right_term.value);
+                    if (left_value != right_value) {
+                        break :blk left_value < right_value;
+                    }
+                    if (left_term.case_index != right_term.case_index) {
+                        break :blk left_term.case_index < right_term.case_index;
+                    }
+                    break :blk @intFromBool(left_term.equal) <
+                        @intFromBool(right_term.equal);
+                },
+            };
+        }
+
+        fn canonicalize(
+            self: *@This(),
+            canonical_values: CanonicalValues,
+        ) void {
+            if (comptime maximum_invariant_terms == 0) return;
+            var index: usize = 1;
+            while (index < self.len) : (index += 1) {
+                const term = self.terms[index];
+                var insertion = index;
+                while (insertion > 0 and termLessThan(
+                    canonical_values,
+                    term,
+                    self.terms[insertion - 1],
+                )) : (insertion -= 1) {
+                    self.terms[insertion] = self.terms[insertion - 1];
+                }
+                self.terms[insertion] = term;
+            }
+        }
+    };
 
     return struct {
         const Self = @This();
+        const CanonicalValueOrder = CanonicalValues;
+        const InvariantFactSet = FactSet;
 
         constructors: [maximum_constructors]ConstructorType = undefined,
         constructor_count: usize = 0,
@@ -472,7 +560,8 @@ pub fn NormalForm(
             source_block: control_ir.BlockId,
             resume_target: ?control_ir.BlockId,
             environment_set: Set,
-            invariant: ?InvariantTerm,
+            invariants: FactSet,
+            canonical_values: CanonicalValues,
         ) Error!void {
             if (self.constructor_count == maximum_constructors) {
                 return error.TooManyConstructors;
@@ -484,20 +573,22 @@ pub fn NormalForm(
                 .resume_target = resume_target,
             };
             var required = environment_set;
-            if (invariant) |term| {
-                term.addRequired(&required);
-                if (comptime maximum_invariant_terms == 0) {
+            var ordered_invariants = invariants;
+            ordered_invariants.canonicalize(canonical_values);
+            if (comptime maximum_invariant_terms == 0) {
+                if (ordered_invariants.len != 0) {
                     return error.TooManyInvariantTerms;
                 }
-                if (constructor.invariant_len == maximum_invariant_terms) {
-                    return error.TooManyInvariantTerms;
+            } else {
+                for (ordered_invariants.terms[0..ordered_invariants.len]) |term| {
+                    term.addRequired(&required);
+                    constructor.invariants[constructor.invariant_len] = term;
+                    constructor.invariant_len += 1;
                 }
-                constructor.invariants[constructor.invariant_len] = term;
-                constructor.invariant_len += 1;
             }
 
-            for (required.bits[0..program.value_types.len], 0..) |present, value_index| {
-                if (!present) continue;
+            for (canonical_values.values[0..canonical_values.len]) |value| {
+                if (!required.contains(value)) continue;
                 if (comptime maximum_environment_fields == 0) {
                     return error.TooManyEnvironmentFields;
                 }
@@ -505,8 +596,8 @@ pub fn NormalForm(
                     return error.TooManyEnvironmentFields;
                 }
                 constructor.environment[constructor.environment_len] = .{
-                    .value = @intCast(value_index),
-                    .value_type = program.value_types[value_index],
+                    .value = value,
+                    .value_type = program.value_types[@intCast(value)],
                 };
                 constructor.environment_len += 1;
             }
@@ -517,6 +608,253 @@ pub fn NormalForm(
             self.constructor_count += 1;
         }
 
+        fn projectValue(
+            program: control_ir.Program,
+            source_block: control_ir.Block,
+            edge: control_ir.Edge,
+            value: control_ir.ValueId,
+        ) ?control_ir.ValueId {
+            const target = program.blocks[@intCast(edge.target)];
+            for (edge.arguments, target.parameters) |argument, parameter| {
+                switch (argument) {
+                    .value => |argument_value| {
+                        if (argument_value == value) return parameter;
+                    },
+                    .@"resume" => {},
+                }
+            }
+            for (target.parameters) |parameter| {
+                if (parameter == value) return null;
+            }
+            if (source_block.function_id == target.function_id) return value;
+            return null;
+        }
+
+        fn projectTerm(
+            program: control_ir.Program,
+            source_block: control_ir.Block,
+            edge: control_ir.Edge,
+            term: InvariantTerm,
+        ) ?InvariantTerm {
+            return switch (term) {
+                .boolean => |predicate| .{ .boolean = .{
+                    .value = projectValue(
+                        program,
+                        source_block,
+                        edge,
+                        predicate.value,
+                    ) orelse return null,
+                    .expected = predicate.expected,
+                } },
+                .integer_zero => |predicate| .{ .integer_zero = .{
+                    .value = projectValue(
+                        program,
+                        source_block,
+                        edge,
+                        predicate.value,
+                    ) orelse return null,
+                    .equal = predicate.equal,
+                } },
+                .integer_relation => |predicate| .{ .integer_relation = .{
+                    .left = projectValue(
+                        program,
+                        source_block,
+                        edge,
+                        predicate.left,
+                    ) orelse return null,
+                    .right = projectValue(
+                        program,
+                        source_block,
+                        edge,
+                        predicate.right,
+                    ) orelse return null,
+                    .relation = predicate.relation,
+                    .expected = predicate.expected,
+                } },
+                .sum_case => |predicate| .{ .sum_case = .{
+                    .value = projectValue(
+                        program,
+                        source_block,
+                        edge,
+                        predicate.value,
+                    ) orelse return null,
+                    .case_index = predicate.case_index,
+                    .equal = predicate.equal,
+                } },
+            };
+        }
+
+        fn transferFacts(
+            program: control_ir.Program,
+            source_block: control_ir.Block,
+            edge: control_ir.Edge,
+            source_facts: FactSet,
+            generated: ?InvariantTerm,
+        ) Error!FactSet {
+            var result: FactSet = .{};
+            for (source_facts.terms[0..source_facts.len]) |term| {
+                const projected = projectTerm(
+                    program,
+                    source_block,
+                    edge,
+                    term,
+                ) orelse continue;
+                try result.insert(projected);
+            }
+            if (generated) |term| {
+                const projected = projectTerm(
+                    program,
+                    source_block,
+                    edge,
+                    term,
+                ) orelse return result;
+                try result.insert(projected);
+            }
+            return result;
+        }
+
+        fn meetIncoming(
+            next: *FactSet,
+            saw_predecessor: *bool,
+            candidate: FactSet,
+        ) void {
+            if (!saw_predecessor.*) {
+                next.* = candidate;
+                saw_predecessor.* = true;
+                return;
+            }
+            next.* = next.intersection(candidate);
+        }
+
+        fn considerEdge(
+            program: control_ir.Program,
+            source_block: control_ir.Block,
+            source_facts: FactSet,
+            edge: control_ir.Edge,
+            generated: ?InvariantTerm,
+            target: control_ir.BlockId,
+            next: *FactSet,
+            saw_predecessor: *bool,
+        ) Error!void {
+            if (!edgeTargets(edge, target)) return;
+            const candidate = try transferFacts(
+                program,
+                source_block,
+                edge,
+                source_facts,
+                generated,
+            );
+            meetIncoming(next, saw_predecessor, candidate);
+        }
+
+        fn incomingFacts(
+            program: control_ir.Program,
+            reachability: ReachabilityType,
+            current: [maximum_blocks]FactSet,
+            target: control_ir.BlockId,
+        ) Error!FactSet {
+            var next: FactSet = .{};
+            var saw_predecessor = false;
+            for (program.blocks) |source_block| {
+                if (!reachability.contains(source_block.id)) continue;
+                const source_facts = current[@intCast(source_block.id)];
+                switch (source_block.terminator) {
+                    .jump => |edge| try considerEdge(
+                        program,
+                        source_block,
+                        source_facts,
+                        edge,
+                        null,
+                        target,
+                        &next,
+                        &saw_predecessor,
+                    ),
+                    .branch => |branch| {
+                        try considerEdge(
+                            program,
+                            source_block,
+                            source_facts,
+                            branch.then_edge,
+                            factForBranch(program, branch, true),
+                            target,
+                            &next,
+                            &saw_predecessor,
+                        );
+                        try considerEdge(
+                            program,
+                            source_block,
+                            source_facts,
+                            branch.else_edge,
+                            factForBranch(program, branch, false),
+                            target,
+                            &next,
+                            &saw_predecessor,
+                        );
+                    },
+                    .@"suspend" => |suspension| {
+                        if (suspension.callee) |callee| {
+                            try considerEdge(
+                                program,
+                                source_block,
+                                source_facts,
+                                callee,
+                                null,
+                                target,
+                                &next,
+                                &saw_predecessor,
+                            );
+                        }
+                        try considerEdge(
+                            program,
+                            source_block,
+                            source_facts,
+                            suspension.continuation,
+                            null,
+                            target,
+                            &next,
+                            &saw_predecessor,
+                        );
+                    },
+                    .return_value, .return_to_caller, .fail => {},
+                }
+            }
+            return next;
+        }
+
+        fn analyzePathFacts(
+            program: control_ir.Program,
+            reachability: ReachabilityType,
+        ) Error![maximum_blocks]FactSet {
+            var result = [_]FactSet{.{}} ** maximum_blocks;
+            const maximum_iterations =
+                program.blocks.len * (maximum_invariant_terms + 1) + 1;
+            var iteration: usize = 0;
+            while (iteration < maximum_iterations) : (iteration += 1) {
+                var changed = false;
+                var next = result;
+                for (program.blocks) |block| {
+                    if (!reachability.contains(block.id) or
+                        block.id == program.entry)
+                    {
+                        continue;
+                    }
+                    const facts = try incomingFacts(
+                        program,
+                        reachability,
+                        result,
+                        block.id,
+                    );
+                    if (!next[@intCast(block.id)].eql(facts)) {
+                        next[@intCast(block.id)] = facts;
+                        changed = true;
+                    }
+                }
+                result = next;
+                if (!changed) return result;
+            }
+            return error.PathFactsDidNotConverge;
+        }
+
         /// Synthesize entry, persisted block, and suspension constructors from
         /// one already computed root-reachable control graph.
         pub fn synthesizeReachable(
@@ -524,6 +862,11 @@ pub fn NormalForm(
             reachability: ReachabilityType,
         ) Error!Self {
             const liveness = try Liveness.analyze(program);
+            const path_facts = try analyzePathFacts(program, reachability);
+            const canonical_values = CanonicalValues.analyze(
+                program,
+                reachability,
+            );
             var result: Self = .{};
             const entry_index: usize = @intCast(program.entry);
             try result.appendConstructor(
@@ -532,17 +875,16 @@ pub fn NormalForm(
                 program.entry,
                 program.entry,
                 liveness.entry_live[entry_index],
-                null,
+                .{},
+                canonical_values,
             );
 
-            for (program.blocks) |block| {
-                if (!reachability.contains(block.id)) continue;
+            for (0..reachability.count) |dense_block_index| {
+                const source_block = reachability.sourceId(
+                    @intCast(dense_block_index),
+                ) orelse unreachable;
+                const block = program.blocks[@intCast(source_block)];
                 const block_index: usize = @intCast(block.id);
-                const invariant = immediateInvariant(
-                    program,
-                    block.id,
-                    reachability,
-                );
                 if (block.id != program.entry) {
                     try result.appendConstructor(
                         program,
@@ -550,7 +892,8 @@ pub fn NormalForm(
                         block.id,
                         block.id,
                         liveness.entry_live[block_index],
-                        invariant,
+                        path_facts[block_index],
+                        canonical_values,
                     );
                 }
                 switch (block.terminator) {
@@ -577,7 +920,13 @@ pub fn NormalForm(
                                 block.id,
                             suspension.continuation.target,
                             environment,
-                            if (persists_continuation) null else invariant,
+                            path_facts[
+                                @intCast(if (persists_continuation)
+                                    suspension.continuation.target
+                                else
+                                    block.id)
+                            ],
+                            canonical_values,
                         );
                     },
                     else => {},
@@ -783,4 +1132,423 @@ test "RNF hash-conses exact duplicate checkpoint futures" {
         if (constructor.kind == .caller_fuel_yield) checkpoint_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), checkpoint_count);
+}
+
+test "RNF meets both arms when one branch targets the same constructor" {
+    const bool_type: control_ir.ValueType = .{ .scalar = .boolean };
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const arguments = [_]control_ir.EdgeArgument{.{ .value = 1 }};
+    const blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 0, 1 },
+            .terminator = .{ .branch = .{
+                .condition = 0,
+                .then_edge = .{ .target = 1, .arguments = &arguments },
+                .else_edge = .{ .target = 1, .arguments = &arguments },
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{2},
+            .terminator = .{ .return_value = 2 },
+        },
+    };
+    const program: control_ir.Program = .{
+        .label = "shared-branch-target",
+        .value_types = &.{ bool_type, u32_type, u32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+
+    const normal_form = try NormalForm(8, 4, 8, 8, 4).synthesize(program);
+    for (normal_form.constructorSlice()) |constructor| {
+        if (constructor.source_block != 1) continue;
+        try std.testing.expectEqual(@as(usize, 0), constructor.invariant_len);
+        return;
+    }
+    return error.TestExpectedEqual;
+}
+
+test "RNF propagates branch facts through transparent jumps" {
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const bool_type: control_ir.ValueType = .{ .scalar = .boolean };
+    const instructions = [_]control_ir.Instruction{.{
+        .kind = .compare_eq_zero,
+        .result = 1,
+        .operands = &.{0},
+    }};
+    const blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .instructions = &instructions,
+            .terminator = .{ .branch = .{
+                .condition = 1,
+                .then_edge = .{ .target = 1 },
+                .else_edge = .{ .target = 3 },
+            } },
+        },
+        .{
+            .id = 1,
+            .terminator = .{ .jump = .{ .target = 2 } },
+        },
+        .{
+            .id = 2,
+            .terminator = .{ .return_value = 0 },
+        },
+        .{
+            .id = 3,
+            .terminator = .{ .return_value = 0 },
+        },
+    };
+    const program: control_ir.Program = .{
+        .label = "transparent-jump-fact",
+        .value_types = &.{ u32_type, bool_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+
+    const normal_form = try NormalForm(8, 8, 8, 8, 4).synthesize(program);
+    for (normal_form.constructorSlice()) |constructor| {
+        if (constructor.source_block != 2) continue;
+        try std.testing.expectEqual(@as(usize, 1), constructor.invariant_len);
+        const term = constructor.invariantTerms()[0];
+        try std.testing.expect(term.eql(.{ .integer_zero = .{
+            .value = 0,
+            .equal = true,
+        } }));
+        return;
+    }
+    return error.TestExpectedEqual;
+}
+
+test "RNF projects caller path facts into helper entry parameters" {
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const bool_type: control_ir.ValueType = .{ .scalar = .boolean };
+    const condition_instructions = [_]control_ir.Instruction{.{
+        .kind = .compare_eq_zero,
+        .result = 1,
+        .operands = &.{0},
+    }};
+    const call_arguments = [_]control_ir.EdgeArgument{.{ .value = 0 }};
+    const resume_arguments = [_]control_ir.EdgeArgument{.@"resume"};
+    const blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .instructions = &condition_instructions,
+            .terminator = .{ .branch = .{
+                .condition = 1,
+                .then_edge = .{ .target = 1 },
+                .else_edge = .{ .target = 2 },
+            } },
+        },
+        .{
+            .id = 1,
+            .terminator = .{ .@"suspend" = .{
+                .kind = .call,
+                .callee_function = 1,
+                .callee = .{
+                    .target = 3,
+                    .arguments = &call_arguments,
+                },
+                .continuation = .{
+                    .target = 4,
+                    .arguments = &resume_arguments,
+                },
+                .resume_type = u32_type,
+            } },
+        },
+        .{
+            .id = 2,
+            .terminator = .{ .return_value = 0 },
+        },
+        .{
+            .id = 3,
+            .function_id = 1,
+            .parameters = &.{2},
+            .terminator = .{ .return_to_caller = 2 },
+        },
+        .{
+            .id = 4,
+            .parameters = &.{3},
+            .terminator = .{ .return_value = 3 },
+        },
+    };
+    const functions = [_]control_ir.Function{
+        .{ .id = 0, .entry = 0, .result_type = u32_type },
+        .{ .id = 1, .entry = 3, .result_type = u32_type },
+    };
+    const program: control_ir.Program = .{
+        .label = "call-entry-path-fact",
+        .value_types = &.{ u32_type, bool_type, u32_type, u32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = u32_type,
+        .functions = &functions,
+    };
+
+    const normal_form = try NormalForm(8, 8, 12, 8, 4).synthesize(program);
+    for (normal_form.constructorSlice()) |constructor| {
+        if (constructor.source_block != 3) continue;
+        try std.testing.expectEqual(@as(usize, 1), constructor.invariant_len);
+        const term = constructor.invariantTerms()[0];
+        try std.testing.expect(term.eql(.{ .integer_zero = .{
+            .value = 2,
+            .equal = true,
+        } }));
+        return;
+    }
+    return error.TestExpectedEqual;
+}
+
+test "RNF constructor order follows canonical control traversal" {
+    const bool_type: control_ir.ValueType = .{ .scalar = .boolean };
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const arguments = [_]control_ir.EdgeArgument{.{ .value = 1 }};
+    const left_blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 0, 1 },
+            .terminator = .{ .branch = .{
+                .condition = 0,
+                .then_edge = .{ .target = 1, .arguments = &arguments },
+                .else_edge = .{ .target = 2, .arguments = &arguments },
+            } },
+        },
+        .{
+            .id = 1,
+            .role = .loop_header,
+            .parameters = &.{2},
+            .terminator = .{ .return_value = 2 },
+        },
+        .{
+            .id = 2,
+            .role = .terminal_handoff,
+            .parameters = &.{3},
+            .terminator = .{ .return_value = 3 },
+        },
+    };
+    const right_blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 0, 1 },
+            .terminator = .{ .branch = .{
+                .condition = 0,
+                .then_edge = .{ .target = 2, .arguments = &arguments },
+                .else_edge = .{ .target = 1, .arguments = &arguments },
+            } },
+        },
+        .{
+            .id = 1,
+            .role = .terminal_handoff,
+            .parameters = &.{2},
+            .terminator = .{ .return_value = 2 },
+        },
+        .{
+            .id = 2,
+            .role = .loop_header,
+            .parameters = &.{3},
+            .terminator = .{ .return_value = 3 },
+        },
+    };
+    const value_types = [_]control_ir.ValueType{
+        bool_type,
+        u32_type,
+        u32_type,
+        u32_type,
+    };
+    const left_program: control_ir.Program = .{
+        .label = "canonical-block-order-left",
+        .value_types = &value_types,
+        .blocks = &left_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+    const right_program: control_ir.Program = .{
+        .label = "canonical-block-order-right",
+        .value_types = &value_types,
+        .blocks = &right_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+
+    const left = try NormalForm(8, 8, 8, 8, 4).synthesize(left_program);
+    const right = try NormalForm(8, 8, 8, 8, 4).synthesize(right_program);
+    try std.testing.expectEqual(left.constructor_count, right.constructor_count);
+    for (left.constructorSlice(), right.constructorSlice()) |
+        left_constructor,
+        right_constructor,
+    | {
+        try std.testing.expectEqual(
+            left_constructor.kind,
+            right_constructor.kind,
+        );
+        try std.testing.expectEqual(
+            left_constructor.environment_len,
+            right_constructor.environment_len,
+        );
+    }
+}
+
+test "RNF environment order follows canonical definition order" {
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const i32_type: control_ir.ValueType = .{ .scalar = .i32 };
+    const left_arguments = [_]control_ir.EdgeArgument{
+        .{ .value = 0 },
+        .{ .value = 1 },
+    };
+    const right_arguments = [_]control_ir.EdgeArgument{
+        .{ .value = 1 },
+        .{ .value = 0 },
+    };
+    const left_instructions = [_]control_ir.Instruction{.{
+        .kind = .pure,
+        .result = 4,
+        .operands = &.{ 2, 3 },
+    }};
+    const right_instructions = [_]control_ir.Instruction{.{
+        .kind = .pure,
+        .result = 4,
+        .operands = &.{ 3, 2 },
+    }};
+    const left_blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 0, 1 },
+            .terminator = .{ .jump = .{
+                .target = 1,
+                .arguments = &left_arguments,
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{ 2, 3 },
+            .instructions = &left_instructions,
+            .terminator = .{ .return_value = 4 },
+        },
+    };
+    const right_blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 1, 0 },
+            .terminator = .{ .jump = .{
+                .target = 1,
+                .arguments = &right_arguments,
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{ 3, 2 },
+            .instructions = &right_instructions,
+            .terminator = .{ .return_value = 4 },
+        },
+    };
+    const left_program: control_ir.Program = .{
+        .label = "canonical-value-order-left",
+        .value_types = &.{ u32_type, i32_type, u32_type, i32_type, u32_type },
+        .blocks = &left_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+    const right_program: control_ir.Program = .{
+        .label = "canonical-value-order-right",
+        .value_types = &.{ i32_type, u32_type, i32_type, u32_type, u32_type },
+        .blocks = &right_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+
+    const left = try NormalForm(8, 4, 8, 8, 4).synthesize(left_program);
+    const right = try NormalForm(8, 4, 8, 8, 4).synthesize(right_program);
+    const left_target = left.constructors[1];
+    const right_target = right.constructors[1];
+    try std.testing.expectEqual(@as(usize, 2), left_target.environment_len);
+    try std.testing.expectEqual(
+        left_target.environment_len,
+        right_target.environment_len,
+    );
+    for (
+        left_target.environmentFields(),
+        right_target.environmentFields(),
+    ) |left_field, right_field| {
+        try std.testing.expect(left_field.value_type.eql(right_field.value_type));
+    }
+    try std.testing.expect(left_target.environment[0].value_type.eql(u32_type));
+    try std.testing.expect(left_target.environment[1].value_type.eql(i32_type));
+}
+
+test "RNF drops facts whose target parameter is rebound" {
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const source_blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .jump = .{ .target = 1 } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{1},
+            .terminator = .{ .return_value = 1 },
+        },
+    };
+    const rebound_arguments = [_]control_ir.EdgeArgument{
+        .{ .value = 2 },
+    };
+    const program: control_ir.Program = .{
+        .label = "rebound-parameter-fact",
+        .value_types = &.{ u32_type, u32_type, u32_type },
+        .blocks = &source_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+    const Form = NormalForm(4, 4, 4, 4, 2);
+    const projected = Form.projectTerm(
+        program,
+        source_blocks[1],
+        .{
+            .target = 1,
+            .arguments = &rebound_arguments,
+        },
+        .{ .integer_zero = .{
+            .value = 1,
+            .equal = true,
+        } },
+    );
+    try std.testing.expectEqual(@as(?InvariantTerm, null), projected);
+}
+
+test "RNF canonicalizes invariant conjunction order" {
+    const Form = NormalForm(4, 4, 4, 4, 4);
+    var canonical_values: Form.CanonicalValueOrder = .{};
+    canonical_values.bind(2);
+    canonical_values.bind(0);
+    canonical_values.bind(1);
+
+    const first: InvariantTerm = .{ .integer_zero = .{
+        .value = 0,
+        .equal = true,
+    } };
+    const second: InvariantTerm = .{ .boolean = .{
+        .value = 2,
+        .expected = false,
+    } };
+    var left: Form.InvariantFactSet = .{};
+    try left.insert(first);
+    try left.insert(second);
+    var right: Form.InvariantFactSet = .{};
+    try right.insert(second);
+    try right.insert(first);
+
+    left.canonicalize(canonical_values);
+    right.canonicalize(canonical_values);
+    for (left.terms[0..left.len], right.terms[0..right.len]) |
+        left_term,
+        right_term,
+    | {
+        try std.testing.expect(left_term.eql(right_term));
+    }
 }

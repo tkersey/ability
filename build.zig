@@ -615,6 +615,28 @@ pub fn build(b: *std.Build) void {
         );
     }
 
+    inline for (.{
+        program_operations,
+        integer_boolean_operations,
+        algebraic_collection_operations,
+        research_digest,
+        program_compile,
+        program_dynamic_fuel,
+        program_residual_effects,
+        program_effect_morphism,
+        program_effect_handler,
+        program_dead_control,
+        constructor_invariants,
+        recursion,
+        after,
+        machine_yield,
+        agent_loop,
+    }) |integration_module| {
+        addTestArtifact(b, test_step, integration_module);
+    }
+    test_step.dependOn(compile_fail_step);
+    test_step.dependOn(parity_step);
+
     const format_command = b.addSystemCommand(&.{
         "zig",
         "fmt",

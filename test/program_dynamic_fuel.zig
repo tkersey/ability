@@ -56,44 +56,48 @@ const Machine = program_v2.program("dynamic-fuel", Body).compile(.{
     .maximum_machine_fuel = 64,
 });
 
-test "canonical dynamic size changes fuel without changing transactional yield" {
-    const short = try Text.fromSlice("a");
-    const short_state = try Machine.initialState(std.testing.allocator, short);
-    defer Machine.deinitState(short_state);
-    var short_fuel: u64 = 7;
-    const short_done = switch (try Machine.step(short_state, &short_fuel)) {
-        .done => |result| result,
-        else => return error.TestUnexpectedResult,
-    };
-    defer short_done.deinit();
-    try std.testing.expectEqual(@as(u64, 0), short_fuel);
-    try std.testing.expectEqualStrings("a!", short_done.value().slice());
-
-    const long = try Text.fromSlice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN");
-    const long_state = try Machine.initialState(std.testing.allocator, long);
-    defer Machine.deinitState(long_state);
-    const before = try Machine.encodeState(std.testing.allocator, long_state);
+fn requiredFuel(input: Text, expected: []const u8) !u64 {
+    const state = try Machine.initialState(std.testing.allocator, input);
+    defer Machine.deinitState(state);
+    const before = try Machine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(before);
 
-    var insufficient_fuel: u64 = 7;
-    try std.testing.expectEqual(
-        Machine.Outcome.yielded,
-        try Machine.step(long_state, &insufficient_fuel),
-    );
-    try std.testing.expectEqual(@as(u64, 7), insufficient_fuel);
-    const after = try Machine.encodeState(std.testing.allocator, long_state);
-    defer std.testing.allocator.free(after);
-    try std.testing.expectEqualSlices(u8, before, after);
+    var supplied: u64 = 0;
+    while (supplied <= 64) : (supplied += 1) {
+        var fuel = supplied;
+        switch (try Machine.step(state, &fuel)) {
+            .yielded => {
+                try std.testing.expectEqual(supplied, fuel);
+                const after = try Machine.encodeState(
+                    std.testing.allocator,
+                    state,
+                );
+                defer std.testing.allocator.free(after);
+                try std.testing.expectEqualSlices(u8, before, after);
+            },
+            .done => |result| {
+                defer result.deinit();
+                try std.testing.expectEqual(@as(u64, 0), fuel);
+                try std.testing.expectEqualStrings(
+                    expected,
+                    result.value().slice(),
+                );
+                return supplied;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    return error.TestUnexpectedResult;
+}
 
-    var exact_fuel: u64 = 11;
-    const long_done = switch (try Machine.step(long_state, &exact_fuel)) {
-        .done => |result| result,
-        else => return error.TestUnexpectedResult,
-    };
-    defer long_done.deinit();
-    try std.testing.expectEqual(@as(u64, 0), exact_fuel);
-    try std.testing.expectEqualStrings(
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN!",
-        long_done.value().slice(),
+test "canonical dynamic size changes fuel without changing transactional yield" {
+    const short_fuel = try requiredFuel(
+        try Text.fromSlice("a"),
+        "a!",
     );
+    const long_fuel = try requiredFuel(
+        try Text.fromSlice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN"),
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN!",
+    );
+    try std.testing.expect(long_fuel > short_fuel);
 }

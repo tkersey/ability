@@ -265,6 +265,41 @@ test "Program.compile identity derives from semantics and excludes labels" {
     );
 }
 
+test "debug metadata exposes a diagnostic constructor source map" {
+    const DebugMachine = Program.compile(.{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+        .debug_metadata = true,
+    });
+
+    try std.testing.expect(DebugMachine.Manifest.includes_debug_metadata);
+    try std.testing.expectEqualSlices(
+        u8,
+        &CompiledMachine.Manifest.machine_contract_digest,
+        &DebugMachine.Manifest.machine_contract_digest,
+    );
+    try std.testing.expectEqualStrings(
+        "typed-lookup",
+        DebugMachine.debug_metadata.program_label,
+    );
+    try std.testing.expectEqual(
+        Program.rnf.constructor_count,
+        DebugMachine.debug_metadata.constructors.len,
+    );
+    for (
+        DebugMachine.debug_metadata.constructors,
+        0..,
+    ) |constructor, index| {
+        try std.testing.expectEqual(
+            @as(u32, @intCast(index)),
+            constructor.constructor_id,
+        );
+        try std.testing.expect(constructor.name.len != 0);
+        try std.testing.expect(constructor.kind.len != 0);
+    }
+}
+
 test "Driver handles effects without owning another reducer" {
     const LocalDriver = driver.Driver(CompiledMachine);
     var local = try LocalDriver.init(std.testing.allocator, 9);
@@ -286,5 +321,54 @@ test "Driver handles effects without owning another reducer" {
         else => return error.TestUnexpectedResult,
     };
     defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 18), done.value().*);
+}
+
+test "Driver returns the exact pending request and retries handler errors" {
+    const LocalDriver = driver.Driver(CompiledMachine);
+    var local = try LocalDriver.init(std.testing.allocator, 9);
+    defer local.deinit();
+    var handler = struct {
+        attempts: u8 = 0,
+
+        pub fn handle(
+            self: *@This(),
+            comptime tag: anytype,
+            payload: anytype,
+        ) error{Transient}!switch (tag) {
+            .s0 => u32,
+        } {
+            self.attempts += 1;
+            if (self.attempts == 1) return error.Transient;
+            return payload * 2;
+        }
+    }{};
+
+    var fuel: u64 = 8;
+    const handler_error = switch (try local.run(&handler, &fuel)) {
+        .handler_error => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(error.Transient, handler_error.err);
+    switch (handler_error.request.value) {
+        .s0 => |payload| try std.testing.expectEqual(@as(u32, 9), payload),
+    }
+    const parked = try CompiledMachine.current(local.state);
+    try std.testing.expectEqual(
+        parked.sequence,
+        handler_error.request.sequence,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &parked.identity.digest,
+        &handler_error.request.identity.digest,
+    );
+
+    const done = switch (try local.run(&handler, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u8, 2), handler.attempts);
     try std.testing.expectEqual(@as(u32, 18), done.value().*);
 }

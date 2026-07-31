@@ -76,6 +76,7 @@ fn requireDefinition(comptime Definition: type) void {
         "contract_bytes",
         "initial",
         "minimumCost",
+        "cost",
         "plan",
         "current",
         "resume",
@@ -223,6 +224,14 @@ pub fn Machine(
         portable_value.assertPortable(Definition.Frame);
         portable_value.assertPortable(Definition.Request);
         portable_value.assertPortable(Definition.Result);
+        if (options.debug_metadata and
+            (!@hasDecl(Definition, "DebugMetadata") or
+                !@hasDecl(Definition, "debug_metadata")))
+        {
+            @compileError(
+                "debug_metadata requires compiler-generated diagnostic metadata",
+            );
+        }
         if (options.maximum_frames == 0) {
             @compileError("Boundary Machine maximum_frames must be positive");
         }
@@ -255,6 +264,15 @@ pub fn Machine(
         pub const RequestValue = Definition.Request;
         /// Static residual effect row.
         pub const EffectRow = Definition.EffectRow;
+        /// Diagnostic-only source and constructor map when requested.
+        pub const DebugMetadata = if (options.debug_metadata)
+            Definition.DebugMetadata
+        else
+            void;
+        /// Diagnostic payload excluded from Machine semantic identity.
+        pub const debug_metadata: DebugMetadata = if (options.debug_metadata)
+            Definition.debug_metadata
+        else {};
         /// Program-authored and Machine-owned deterministic failures.
         pub const Failure = union(enum) {
             authored: Definition.Failure,
@@ -477,6 +495,14 @@ pub fn Machine(
                 std.mem.eql(u8, &left.digest, &right.digest);
         }
 
+        fn validateRequestValue(request_value: RequestValue) Error!void {
+            if (RequestValue == void) return error.ProgramContractViolation;
+            _ = portable_value.encodedSize(
+                RequestValue,
+                request_value,
+            ) catch return error.ProgramContractViolation;
+        }
+
         fn makeRequest(
             allocator: std.mem.Allocator,
             sequence: u64,
@@ -618,8 +644,7 @@ pub fn Machine(
                 if (remaining_fuel < minimum_cost) {
                     return commitYield(state, candidate, caller_fuel, remaining_fuel);
                 }
-                const plan = Definition.plan(frame);
-                const cost = plan.cost;
+                const cost = Definition.cost(frame);
                 if (cost < minimum_cost) return error.ProgramContractViolation;
                 if (remaining_fuel < cost) {
                     return commitYield(state, candidate, caller_fuel, remaining_fuel);
@@ -628,13 +653,20 @@ pub fn Machine(
                     u64,
                     candidate.cumulative_fuel,
                     cost,
-                ) catch options.maximum_machine_fuel +| 1;
+                ) catch {
+                    candidate.terminal = true;
+                    commit(state, candidate);
+                    caller_fuel.* = remaining_fuel;
+                    return .{ .failed = .execution_budget_exceeded };
+                };
                 if (next_total > options.maximum_machine_fuel) {
                     candidate.terminal = true;
                     commit(state, candidate);
                     caller_fuel.* = remaining_fuel;
                     return .{ .failed = .execution_budget_exceeded };
                 }
+                const plan = Definition.plan(frame);
+                if (plan.cost != cost) return error.ProgramContractViolation;
                 remaining_fuel -= cost;
                 candidate.cumulative_fuel = next_total;
 
@@ -753,6 +785,7 @@ pub fn Machine(
         ) Error!void {
             const original = storedConst(state);
             try validate(original);
+            try validateRequestValue(request.value);
             const expected = (try currentFrom(original)) orelse
                 return error.ProgramContractViolation;
             if (expected.sequence != request.sequence or
@@ -904,12 +937,22 @@ const TestDefinition = struct {
     };
     const Transition = Reduction(Frame, Request, Result, Failure);
     const contract_bytes = "test-direct-rnf\x00entry\x00loop-header\x00await-increment";
+    const DebugMetadata = struct {
+        program_label: []const u8,
+    };
+    const debug_metadata: DebugMetadata = .{
+        .program_label = "test-direct-rnf",
+    };
 
     fn initial(seed: InitialArgs) Frame {
         return .{ .entry = .{ .seed = seed } };
     }
 
     fn minimumCost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn cost(_: Frame) u64 {
         return 1;
     }
 
@@ -1013,6 +1056,7 @@ const AlternateTestDefinition = struct {
     const contract_bytes = "test-direct-rnf\x00semantic-alternative";
     const initial = TestDefinition.initial;
     const minimumCost = TestDefinition.minimumCost;
+    const cost = TestDefinition.cost;
     const plan = TestDefinition.plan;
     const current = TestDefinition.current;
     const @"resume" = TestDefinition.@"resume";
@@ -1046,6 +1090,10 @@ const BudgetTestDefinition = struct {
         return 1;
     }
 
+    fn cost(_: Frame) u64 {
+        return 1;
+    }
+
     fn plan(frame: Frame) struct {
         cost: u64,
         transition: Transition,
@@ -1056,6 +1104,152 @@ const BudgetTestDefinition = struct {
                 .entry => .{ .next = .{ .finish = .{} } },
                 .finish => .{ .done = 42 },
             },
+        };
+    }
+
+    fn current(_: Frame) ?Request {
+        return null;
+    }
+
+    fn @"resume"(
+        _: Frame,
+        _: Request,
+        _: anytype,
+    ) error{ProgramContractViolation}!Frame {
+        return error.ProgramContractViolation;
+    }
+
+    fn requestEql(_: Request, _: Request) bool {
+        return true;
+    }
+
+    fn requestSiteDigest(_: Request) [32]u8 {
+        return [_]u8{0} ** 32;
+    }
+
+    fn validateFrame(_: Frame) error{ProgramContractViolation}!void {}
+
+    fn validateStack(frames: []const Frame) error{ProgramContractViolation}!void {
+        if (frames.len != 1) return error.ProgramContractViolation;
+    }
+};
+
+const MalformedRequestText = portable_value.Text(8);
+
+const MalformedRequestDefinition = struct {
+    const Frame = union(enum) {
+        entry: struct {},
+        awaiting_lookup: struct {},
+    };
+    const InitialArgs = void;
+    const Result = void;
+    const Failure = enum { rejected };
+    const Request = union(enum) {
+        lookup: MalformedRequestText,
+    };
+    const EffectRow = struct {
+        pub const operation_site_count: usize = 1;
+        pub const after_site_count: usize = 0;
+    };
+    const Transition = Reduction(Frame, Request, Result, Failure);
+    const contract_bytes = "test-direct-rnf\x00malformed-request";
+    const lookup = MalformedRequestText.fromSlice("lookup") catch unreachable;
+
+    fn initial(_: InitialArgs) Frame {
+        return .{ .entry = .{} };
+    }
+
+    fn minimumCost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn cost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn plan(frame: Frame) struct {
+        cost: u64,
+        transition: Transition,
+    } {
+        return .{ .cost = 1, .transition = switch (frame) {
+            .entry => .{ .request = .{
+                .awaiting = .{ .awaiting_lookup = .{} },
+                .request = .{ .lookup = lookup },
+            } },
+            .awaiting_lookup => unreachable,
+        } };
+    }
+
+    fn current(frame: Frame) ?Request {
+        return switch (frame) {
+            .entry => null,
+            .awaiting_lookup => .{ .lookup = lookup },
+        };
+    }
+
+    fn @"resume"(
+        frame: Frame,
+        _: Request,
+        response: anytype,
+    ) error{ProgramContractViolation}!Frame {
+        if (@TypeOf(response) != void) return error.ProgramContractViolation;
+        return switch (frame) {
+            .awaiting_lookup => .{ .entry = .{} },
+            .entry => error.ProgramContractViolation,
+        };
+    }
+
+    fn requestEql(left: Request, right: Request) bool {
+        return portable_value.eqlValue(Request, left, right);
+    }
+
+    fn requestSiteDigest(_: Request) [32]u8 {
+        return [_]u8{0x51} ** 32;
+    }
+
+    fn validateFrame(_: Frame) error{ProgramContractViolation}!void {}
+
+    fn validateStack(frames: []const Frame) error{ProgramContractViolation}!void {
+        if (frames.len != 1) return error.ProgramContractViolation;
+    }
+};
+
+const CostPreflightDefinition = struct {
+    const Frame = union(enum) {
+        entry: struct {},
+    };
+    const InitialArgs = void;
+    const Result = void;
+    const Failure = enum { rejected };
+    const Request = void;
+    const EffectRow = struct {
+        pub const operation_site_count: usize = 0;
+        pub const after_site_count: usize = 0;
+    };
+    const Transition = Reduction(Frame, Request, Result, Failure);
+    const contract_bytes = "test-direct-rnf\x00cost-preflight";
+    var plan_calls: usize = 0;
+
+    fn initial(_: InitialArgs) Frame {
+        return .{ .entry = .{} };
+    }
+
+    fn minimumCost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn cost(_: Frame) u64 {
+        return 5;
+    }
+
+    fn plan(_: Frame) struct {
+        cost: u64,
+        transition: Transition,
+    } {
+        plan_calls += 1;
+        return .{
+            .cost = 5,
+            .transition = .{ .done = {} },
         };
     }
 
@@ -1190,6 +1384,35 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     try std.testing.expectEqual(@as(u32, 5), done.value().*);
 }
 
+test "Machine validates untrusted request payloads before equality" {
+    const RequestMachine = Machine(MalformedRequestDefinition, .{
+        .maximum_frames = 1,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 8,
+    });
+    const state = try RequestMachine.initialState(std.testing.allocator, {});
+    defer RequestMachine.deinitState(state);
+    var caller_fuel: u64 = 1;
+    var forged = switch (try RequestMachine.step(state, &caller_fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    switch (forged.value) {
+        .lookup => |*text| text.logical_length =
+            MalformedRequestText.maximum_length + 1,
+    }
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        RequestMachine.@"resume"(state, forged, {}),
+    );
+    const current = try RequestMachine.current(state);
+    try std.testing.expect(MalformedRequestDefinition.requestEql(
+        current.value,
+        .{ .lookup = MalformedRequestDefinition.lookup },
+    ));
+}
+
 test "Machine candidate allocation failure preserves state and caller fuel" {
     const TestMachine = Machine(TestDefinition, .{
         .maximum_frames = 4,
@@ -1291,6 +1514,76 @@ test "terminal budget failure retains prior segment charges" {
     try std.testing.expectEqual(@as(u64, 4), caller_fuel);
 }
 
+test "caller fuel preflight does not execute the segment plan" {
+    const PreflightMachine = Machine(CostPreflightDefinition, .{
+        .maximum_frames = 1,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 8,
+    });
+    CostPreflightDefinition.plan_calls = 0;
+    const state = try PreflightMachine.initialState(std.testing.allocator, {});
+    defer PreflightMachine.deinitState(state);
+    var insufficient_fuel: u64 = 4;
+
+    try std.testing.expectEqual(
+        PreflightMachine.Outcome.yielded,
+        try PreflightMachine.step(state, &insufficient_fuel),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        CostPreflightDefinition.plan_calls,
+    );
+
+    var sufficient_fuel: u64 = 5;
+    const done = switch (try PreflightMachine.step(state, &sufficient_fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        CostPreflightDefinition.plan_calls,
+    );
+}
+
+test "cumulative fuel overflow fails before segment execution" {
+    const OverflowMachine = Machine(BudgetTestDefinition, .{
+        .maximum_frames = 1,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = std.math.maxInt(u64),
+    });
+    const initial = try OverflowMachine.initialState(std.testing.allocator, {});
+    defer OverflowMachine.deinitState(initial);
+    const encoded = try OverflowMachine.encodeState(
+        std.testing.allocator,
+        initial,
+    );
+    defer std.testing.allocator.free(encoded);
+    var forged: [4096]u8 = undefined;
+    @memcpy(forged[0..encoded.len], encoded);
+    const cumulative_fuel_offset = state_magic.len + 2 + 2 + 32 + 8;
+    std.mem.writeInt(
+        u64,
+        forged[cumulative_fuel_offset..][0..8],
+        std.math.maxInt(u64),
+        .little,
+    );
+    const state = try OverflowMachine.decodeState(
+        std.testing.allocator,
+        forged[0..encoded.len],
+    );
+    defer OverflowMachine.deinitState(state);
+    var caller_fuel: u64 = 1;
+
+    try std.testing.expectEqual(
+        OverflowMachine.Outcome{
+            .failed = .execution_budget_exceeded,
+        },
+        try OverflowMachine.step(state, &caller_fuel),
+    );
+    try std.testing.expectEqual(@as(u64, 1), caller_fuel);
+}
+
 test "Machine identity binds semantics and excludes debug metadata" {
     const options_without_debug: Options = .{
         .maximum_frames = 4,
@@ -1315,6 +1608,11 @@ test "Machine identity binds semantics and excludes debug metadata" {
         u8,
         &BaseMachine.Manifest.machine_contract_digest,
         &DebugMachine.Manifest.machine_contract_digest,
+    );
+    try std.testing.expect(DebugMachine.Manifest.includes_debug_metadata);
+    try std.testing.expectEqualStrings(
+        "test-direct-rnf",
+        DebugMachine.debug_metadata.program_label,
     );
     try std.testing.expect(!std.mem.eql(
         u8,

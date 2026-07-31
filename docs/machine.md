@@ -37,13 +37,17 @@ contract-bound execution limit. A segment computes and checks its cost before
 authoritative mutation. The default static cost is one unit for the terminator
 plus one unit for each Control IR instruction; authored block costs may raise
 but never undercut that floor. The generated direct reducer adds one
-deterministic fuel unit per started 16 canonical bytes for every
-variable-encoded instruction operand and successful result. It produces the
-transition and exact charge together in a transactional plan; insufficient
-caller fuel discards that plan and yields at the same constructor, while an
-exhausted Machine budget terminates with `execution_budget_exceeded`. If
-earlier segments completed in the same call, their exact charges remain
-reflected in both cumulative Machine fuel and the remaining caller quantum.
+deterministic fuel unit per started 16 canonical bytes for the persisted
+environment and every variable-encoded instruction operand and prospective
+result. Before executing the segment, a generated resource-shape pass starts
+from the exact environment and propagates canonical encoded sizes through the
+closed instruction sequence. It uses exact subvalue sizes when they are
+available and contract-bounded upper estimates otherwise; it does not construct
+the result or invoke the segment plan. Insufficient caller fuel therefore
+yields at the same constructor before reducer execution, while an exhausted
+Machine budget terminates with `execution_budget_exceeded`. If earlier segments
+completed in the same call, their exact scheduled charges remain reflected in
+both cumulative Machine fuel and the remaining caller quantum.
 
 An authored explicit yield commits the already-lowered continuation constructor
 and returns `yielded` immediately. A compiler-inserted caller-fuel checkpoint

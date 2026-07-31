@@ -292,6 +292,10 @@ pub const ValidationError = error{
     InvalidInstruction,
     InvalidCondition,
     InvalidReturn,
+    CrossFunctionEdge,
+    CrossFunctionValue,
+    NonDominatingDefinition,
+    DominanceDidNotConverge,
     LivenessDidNotConverge,
 };
 
@@ -523,6 +527,70 @@ fn validateEdge(
     if ((resume_type != null) != saw_resume) return error.InvalidResume;
 }
 
+const DefinitionSite = struct {
+    block: BlockId,
+    function: FunctionId,
+    instruction_index: ?usize,
+};
+
+fn isIntraFunctionSuccessor(block: Block, target: BlockId) bool {
+    return switch (block.terminator) {
+        .jump => |edge| edge.target == target,
+        .branch => |branch| branch.then_edge.target == target or
+            branch.else_edge.target == target,
+        .@"suspend" => |suspension| suspension.continuation.target == target,
+        .return_value, .return_to_caller, .fail => false,
+    };
+}
+
+fn validateUse(
+    comptime maximum_values: usize,
+    comptime maximum_blocks: usize,
+    definitions: [maximum_values]?DefinitionSite,
+    dominators: [maximum_blocks][maximum_blocks]bool,
+    block: Block,
+    instruction_index: usize,
+    value: ValueId,
+) ValidationError!void {
+    const definition = definitions[@intCast(value)] orelse
+        return error.MissingDefinition;
+    if (definition.function != block.function_id) {
+        return error.CrossFunctionValue;
+    }
+    if (definition.block == block.id) {
+        const definition_index = definition.instruction_index orelse return;
+        if (definition_index >= instruction_index) {
+            return error.NonDominatingDefinition;
+        }
+        return;
+    }
+    if (!dominators[@intCast(block.id)][@intCast(definition.block)]) {
+        return error.NonDominatingDefinition;
+    }
+}
+
+fn validateEdgeUses(
+    comptime maximum_values: usize,
+    comptime maximum_blocks: usize,
+    definitions: [maximum_values]?DefinitionSite,
+    dominators: [maximum_blocks][maximum_blocks]bool,
+    block: Block,
+    edge: Edge,
+) ValidationError!void {
+    for (edge.arguments) |argument| switch (argument) {
+        .value => |value| try validateUse(
+            maximum_values,
+            maximum_blocks,
+            definitions,
+            dominators,
+            block,
+            block.instructions.len,
+            value,
+        ),
+        .@"resume" => {},
+    };
+}
+
 /// Validate one Control IR function before data-flow analysis.
 pub fn validate(
     comptime maximum_values: usize,
@@ -552,25 +620,35 @@ pub fn validate(
         }
     }
 
-    var defined = [_]bool{false} ** maximum_values;
+    var definitions = [_]?DefinitionSite{null} ** maximum_values;
     for (program.blocks, 0..) |block, block_index| {
         if (block.id != block_index) return error.InvalidBlock;
         _ = try program.function(block.function_id);
         for (block.parameters) |parameter| {
             try validateValue(program, parameter);
             const index: usize = @intCast(parameter);
-            if (defined[index]) return error.DuplicateDefinition;
-            defined[index] = true;
+            if (definitions[index] != null) return error.DuplicateDefinition;
+            definitions[index] = .{
+                .block = block.id,
+                .function = block.function_id,
+                .instruction_index = null,
+            };
         }
-        for (block.instructions) |instruction| {
+        for (block.instructions, 0..) |instruction, instruction_index| {
             try validateValue(program, instruction.result);
             const result_index: usize = @intCast(instruction.result);
-            if (defined[result_index]) return error.DuplicateDefinition;
-            defined[result_index] = true;
+            if (definitions[result_index] != null) {
+                return error.DuplicateDefinition;
+            }
+            definitions[result_index] = .{
+                .block = block.id,
+                .function = block.function_id,
+                .instruction_index = instruction_index,
+            };
         }
     }
-    for (defined[0..program.value_types.len]) |present| {
-        if (!present) return error.MissingDefinition;
+    for (definitions[0..program.value_types.len]) |definition| {
+        if (definition == null) return error.MissingDefinition;
     }
 
     for (program.blocks) |block| {
@@ -689,7 +767,14 @@ pub fn validate(
         }
 
         switch (block.terminator) {
-            .jump => |edge| try validateEdge(program, edge, false, null),
+            .jump => |edge| {
+                try validateEdge(program, edge, false, null);
+                if (program.blocks[@intCast(edge.target)].function_id !=
+                    block.function_id)
+                {
+                    return error.CrossFunctionEdge;
+                }
+            },
             .branch => |branch| {
                 try validateValue(program, branch.condition);
                 if (!program.value_types[@intCast(branch.condition)].isBoolean()) {
@@ -697,6 +782,13 @@ pub fn validate(
                 }
                 try validateEdge(program, branch.then_edge, false, null);
                 try validateEdge(program, branch.else_edge, false, null);
+                if (program.blocks[@intCast(branch.then_edge.target)].function_id !=
+                    block.function_id or
+                    program.blocks[@intCast(branch.else_edge.target)].function_id !=
+                        block.function_id)
+                {
+                    return error.CrossFunctionEdge;
+                }
             },
             .@"suspend" => |suspension| {
                 for (suspension.request_values) |value| try validateValue(program, value);
@@ -714,6 +806,11 @@ pub fn validate(
                             true,
                             suspension.resume_type,
                         );
+                        if (program.blocks[
+                            @intCast(suspension.continuation.target)
+                        ].function_id != block.function_id) {
+                            return error.CrossFunctionEdge;
+                        }
                     },
                     .call => {
                         if (suspension.site_id != null or
@@ -723,6 +820,9 @@ pub fn validate(
                         }
                         const callee_function_id = suspension.callee_function orelse
                             return error.InvalidInstruction;
+                        if (callee_function_id == 0) {
+                            return error.InvalidFunction;
+                        }
                         const callee = suspension.callee orelse
                             return error.InvalidInstruction;
                         const function = try program.function(callee_function_id);
@@ -741,6 +841,11 @@ pub fn validate(
                             true,
                             suspension.resume_type,
                         );
+                        if (program.blocks[
+                            @intCast(suspension.continuation.target)
+                        ].function_id != block.function_id) {
+                            return error.CrossFunctionEdge;
+                        }
                     },
                     .explicit_yield, .caller_fuel => {
                         if (suspension.site_id != null or
@@ -757,6 +862,11 @@ pub fn validate(
                             false,
                             null,
                         );
+                        if (program.blocks[
+                            @intCast(suspension.continuation.target)
+                        ].function_id != block.function_id) {
+                            return error.CrossFunctionEdge;
+                        }
                     },
                 }
             },
@@ -781,6 +891,210 @@ pub fn validate(
                     return error.InvalidReturn;
                 }
             },
+            .fail => {},
+        }
+    }
+
+    var entry_reachable = [_]bool{false} ** maximum_blocks;
+    if (program.functions.len == 0) {
+        entry_reachable[@intCast(program.entry)] = true;
+    } else {
+        for (program.functions) |function| {
+            entry_reachable[@intCast(function.entry)] = true;
+        }
+    }
+    var reachability_iteration: usize = 0;
+    while (reachability_iteration <= program.blocks.len) : (reachability_iteration += 1) {
+        var changed = false;
+        for (program.blocks) |block| {
+            if (!entry_reachable[@intCast(block.id)]) continue;
+            for (program.blocks) |candidate| {
+                if (candidate.function_id != block.function_id or
+                    entry_reachable[@intCast(candidate.id)] or
+                    !isIntraFunctionSuccessor(block, candidate.id))
+                {
+                    continue;
+                }
+                entry_reachable[@intCast(candidate.id)] = true;
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    } else return error.DominanceDidNotConverge;
+
+    var dominators =
+        [_][maximum_blocks]bool{
+            [_]bool{false} ** maximum_blocks,
+        } ** maximum_blocks;
+    for (program.blocks) |block| {
+        const function = try program.function(block.function_id);
+        if (!entry_reachable[@intCast(block.id)] or
+            block.id == function.entry)
+        {
+            dominators[@intCast(block.id)][@intCast(block.id)] = true;
+            continue;
+        }
+        for (program.blocks) |candidate| {
+            if (candidate.function_id == block.function_id and
+                entry_reachable[@intCast(candidate.id)])
+            {
+                dominators[@intCast(block.id)][@intCast(candidate.id)] = true;
+            }
+        }
+    }
+
+    var dominance_iteration: usize = 0;
+    while (dominance_iteration <= program.blocks.len) : (dominance_iteration += 1) {
+        var changed = false;
+        for (program.blocks) |block| {
+            const function = try program.function(block.function_id);
+            if (!entry_reachable[@intCast(block.id)] or
+                block.id == function.entry)
+            {
+                continue;
+            }
+
+            var next = [_]bool{false} ** maximum_blocks;
+            var saw_predecessor = false;
+            for (program.blocks) |predecessor| {
+                if (!entry_reachable[@intCast(predecessor.id)] or
+                    predecessor.function_id != block.function_id or
+                    !isIntraFunctionSuccessor(predecessor, block.id))
+                {
+                    continue;
+                }
+                if (!saw_predecessor) {
+                    next = dominators[@intCast(predecessor.id)];
+                    saw_predecessor = true;
+                } else {
+                    for (&next, dominators[@intCast(predecessor.id)]) |
+                        *present,
+                        predecessor_present,
+                    | {
+                        present.* = present.* and predecessor_present;
+                    }
+                }
+            }
+            if (!saw_predecessor) {
+                next = [_]bool{false} ** maximum_blocks;
+            }
+            next[@intCast(block.id)] = true;
+            if (!std.mem.eql(
+                bool,
+                &dominators[@intCast(block.id)],
+                &next,
+            )) {
+                dominators[@intCast(block.id)] = next;
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    } else return error.DominanceDidNotConverge;
+
+    for (program.blocks) |block| {
+        for (block.instructions, 0..) |instruction, instruction_index| {
+            for (instruction.operands) |operand| {
+                try validateUse(
+                    maximum_values,
+                    maximum_blocks,
+                    definitions,
+                    dominators,
+                    block,
+                    instruction_index,
+                    operand,
+                );
+            }
+        }
+
+        switch (block.terminator) {
+            .jump => |edge| try validateEdgeUses(
+                maximum_values,
+                maximum_blocks,
+                definitions,
+                dominators,
+                block,
+                edge,
+            ),
+            .branch => |branch| {
+                try validateUse(
+                    maximum_values,
+                    maximum_blocks,
+                    definitions,
+                    dominators,
+                    block,
+                    block.instructions.len,
+                    branch.condition,
+                );
+                try validateEdgeUses(
+                    maximum_values,
+                    maximum_blocks,
+                    definitions,
+                    dominators,
+                    block,
+                    branch.then_edge,
+                );
+                try validateEdgeUses(
+                    maximum_values,
+                    maximum_blocks,
+                    definitions,
+                    dominators,
+                    block,
+                    branch.else_edge,
+                );
+            },
+            .@"suspend" => |suspension| {
+                for (suspension.request_values) |value| {
+                    try validateUse(
+                        maximum_values,
+                        maximum_blocks,
+                        definitions,
+                        dominators,
+                        block,
+                        block.instructions.len,
+                        value,
+                    );
+                }
+                if (suspension.callee) |callee| {
+                    try validateEdgeUses(
+                        maximum_values,
+                        maximum_blocks,
+                        definitions,
+                        dominators,
+                        block,
+                        callee,
+                    );
+                }
+                try validateEdgeUses(
+                    maximum_values,
+                    maximum_blocks,
+                    definitions,
+                    dominators,
+                    block,
+                    suspension.continuation,
+                );
+            },
+            .return_value => |maybe_value| {
+                if (maybe_value) |value| {
+                    try validateUse(
+                        maximum_values,
+                        maximum_blocks,
+                        definitions,
+                        dominators,
+                        block,
+                        block.instructions.len,
+                        value,
+                    );
+                }
+            },
+            .return_to_caller => |value| try validateUse(
+                maximum_values,
+                maximum_blocks,
+                definitions,
+                dominators,
+                block,
+                block.instructions.len,
+                value,
+            ),
             .fail => {},
         }
     }
@@ -1013,4 +1327,397 @@ test "validation rejects resume placeholders on ordinary edges" {
     };
 
     try std.testing.expectError(error.InvalidResume, validate(8, 4, program));
+}
+
+test "validation rejects same-block use before definition" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const instructions = [_]Instruction{
+        .{ .kind = .copy, .result = 1, .operands = &.{2} },
+        .{ .kind = .constant, .result = 2 },
+    };
+    const blocks = [_]Block{.{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &instructions,
+        .terminator = .{ .return_value = 1 },
+    }};
+    const program: Program = .{
+        .label = "same-block-use-before-definition",
+        .value_types = &.{ i32_type, i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+    };
+
+    try std.testing.expectError(
+        error.NonDominatingDefinition,
+        validate(8, 4, program),
+    );
+}
+
+test "validation rejects branch-local definition after merge" {
+    const bool_type: ValueType = .{ .scalar = .boolean };
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const then_instructions = [_]Instruction{
+        .{ .kind = .constant, .result = 1 },
+    };
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .branch = .{
+                .condition = 0,
+                .then_edge = .{ .target = 1 },
+                .else_edge = .{ .target = 2 },
+            } },
+        },
+        .{
+            .id = 1,
+            .instructions = &then_instructions,
+            .terminator = .{ .jump = .{ .target = 3 } },
+        },
+        .{
+            .id = 2,
+            .terminator = .{ .jump = .{ .target = 3 } },
+        },
+        .{
+            .id = 3,
+            .terminator = .{ .return_value = 1 },
+        },
+    };
+    const program: Program = .{
+        .label = "branch-local-after-merge",
+        .value_types = &.{ bool_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+    };
+
+    try std.testing.expectError(
+        error.NonDominatingDefinition,
+        validate(8, 8, program),
+    );
+}
+
+test "validation accepts a definition from a dominating block" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .jump = .{ .target = 1 } },
+        },
+        .{
+            .id = 1,
+            .terminator = .{ .return_value = 0 },
+        },
+    };
+    const program: Program = .{
+        .label = "dominating-definition",
+        .value_types = &.{i32_type},
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+    };
+
+    try validate(4, 4, program);
+}
+
+test "validation rejects ordinary cross-function edges" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const arguments = [_]EdgeArgument{.{ .value = 0 }};
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .jump = .{
+                .target = 1,
+                .arguments = &arguments,
+            } },
+        },
+        .{
+            .id = 1,
+            .function_id = 1,
+            .parameters = &.{1},
+            .terminator = .{ .return_to_caller = 1 },
+        },
+    };
+    const functions = [_]Function{
+        .{ .id = 0, .entry = 0, .result_type = i32_type },
+        .{ .id = 1, .entry = 1, .result_type = i32_type },
+    };
+    const program: Program = .{
+        .label = "cross-function-jump",
+        .value_types = &.{ i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+        .functions = &functions,
+    };
+
+    try std.testing.expectError(
+        error.CrossFunctionEdge,
+        validate(4, 4, program),
+    );
+}
+
+test "validation rejects cross-function suspension continuations" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const resume_arguments = [_]EdgeArgument{.@"resume"};
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .@"suspend" = .{
+                .kind = .effect,
+                .site_id = 0,
+                .request_values = &.{0},
+                .continuation = .{
+                    .target = 1,
+                    .arguments = &resume_arguments,
+                },
+                .resume_type = i32_type,
+            } },
+        },
+        .{
+            .id = 1,
+            .function_id = 1,
+            .parameters = &.{1},
+            .terminator = .{ .return_to_caller = 1 },
+        },
+    };
+    const functions = [_]Function{
+        .{ .id = 0, .entry = 0, .result_type = i32_type },
+        .{ .id = 1, .entry = 1, .result_type = i32_type },
+    };
+    const program: Program = .{
+        .label = "cross-function-continuation",
+        .value_types = &.{ i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+        .functions = &functions,
+    };
+
+    try std.testing.expectError(
+        error.CrossFunctionEdge,
+        validate(4, 4, program),
+    );
+}
+
+test "validation rejects calls to the root function" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const call_arguments = [_]EdgeArgument{.{ .value = 0 }};
+    const resume_arguments = [_]EdgeArgument{.@"resume"};
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .@"suspend" = .{
+                .kind = .call,
+                .callee_function = 0,
+                .callee = .{
+                    .target = 0,
+                    .arguments = &call_arguments,
+                },
+                .continuation = .{
+                    .target = 1,
+                    .arguments = &resume_arguments,
+                },
+                .resume_type = i32_type,
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{1},
+            .terminator = .{ .return_value = 1 },
+        },
+    };
+    const program: Program = .{
+        .label = "root-call",
+        .value_types = &.{ i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+    };
+
+    try std.testing.expectError(error.InvalidFunction, validate(4, 4, program));
+}
+
+test "validation accepts a typed helper call and caller continuation" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const call_arguments = [_]EdgeArgument{.{ .value = 0 }};
+    const resume_arguments = [_]EdgeArgument{.@"resume"};
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .@"suspend" = .{
+                .kind = .call,
+                .callee_function = 1,
+                .callee = .{
+                    .target = 2,
+                    .arguments = &call_arguments,
+                },
+                .continuation = .{
+                    .target = 1,
+                    .arguments = &resume_arguments,
+                },
+                .resume_type = i32_type,
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{1},
+            .terminator = .{ .return_value = 1 },
+        },
+        .{
+            .id = 2,
+            .function_id = 1,
+            .parameters = &.{2},
+            .terminator = .{ .return_to_caller = 2 },
+        },
+    };
+    const functions = [_]Function{
+        .{ .id = 0, .entry = 0, .result_type = i32_type },
+        .{ .id = 1, .entry = 2, .result_type = i32_type },
+    };
+    const program: Program = .{
+        .label = "typed-helper-call",
+        .value_types = &.{ i32_type, i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+        .functions = &functions,
+    };
+
+    try validate(8, 8, program);
+}
+
+test "validation rejects caller values used directly inside a helper" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const call_arguments = [_]EdgeArgument{.{ .value = 0 }};
+    const resume_arguments = [_]EdgeArgument{.@"resume"};
+    const helper_instructions = [_]Instruction{
+        .{ .kind = .copy, .result = 3, .operands = &.{0} },
+    };
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .@"suspend" = .{
+                .kind = .call,
+                .callee_function = 1,
+                .callee = .{
+                    .target = 2,
+                    .arguments = &call_arguments,
+                },
+                .continuation = .{
+                    .target = 1,
+                    .arguments = &resume_arguments,
+                },
+                .resume_type = i32_type,
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{1},
+            .terminator = .{ .return_value = 1 },
+        },
+        .{
+            .id = 2,
+            .function_id = 1,
+            .parameters = &.{2},
+            .instructions = &helper_instructions,
+            .terminator = .{ .return_to_caller = 3 },
+        },
+    };
+    const functions = [_]Function{
+        .{ .id = 0, .entry = 0, .result_type = i32_type },
+        .{ .id = 1, .entry = 2, .result_type = i32_type },
+    };
+    const program: Program = .{
+        .label = "cross-function-value",
+        .value_types = &.{ i32_type, i32_type, i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+        .functions = &functions,
+    };
+
+    try std.testing.expectError(
+        error.CrossFunctionValue,
+        validate(8, 8, program),
+    );
+}
+
+test "unreachable predecessors do not remove live dominators" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const dead_instructions = [_]Instruction{
+        .{ .kind = .constant, .result = 1 },
+    };
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .jump = .{ .target = 1 } },
+        },
+        .{
+            .id = 1,
+            .terminator = .{ .return_value = 0 },
+        },
+        .{
+            .id = 2,
+            .instructions = &dead_instructions,
+            .terminator = .{ .jump = .{ .target = 1 } },
+        },
+    };
+    const program: Program = .{
+        .label = "dead-predecessor",
+        .value_types = &.{ i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+    };
+
+    try validate(4, 4, program);
+}
+
+test "unreachable components cannot lend cross-block definitions" {
+    const i32_type: ValueType = .{ .scalar = .i32 };
+    const dead_entry_instructions = [_]Instruction{
+        .{ .kind = .constant, .result = 1 },
+    };
+    const dead_use_instructions = [_]Instruction{
+        .{ .kind = .copy, .result = 2, .operands = &.{1} },
+    };
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .return_value = 0 },
+        },
+        .{
+            .id = 1,
+            .instructions = &dead_entry_instructions,
+            .terminator = .{ .jump = .{ .target = 2 } },
+        },
+        .{
+            .id = 2,
+            .instructions = &dead_use_instructions,
+            .terminator = .{ .jump = .{ .target = 1 } },
+        },
+    };
+    const program: Program = .{
+        .label = "dead-cross-block-definition",
+        .value_types = &.{ i32_type, i32_type, i32_type },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = i32_type,
+    };
+
+    try std.testing.expectError(
+        error.NonDominatingDefinition,
+        validate(4, 8, program),
+    );
 }

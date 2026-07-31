@@ -377,7 +377,7 @@ test "Research Digest v2 formats capability data inside the Machine" {
         ResearchResponse{ .items = items },
     );
 
-    var loop_fuel: u64 = 17;
+    var loop_fuel: u64 = 24;
     switch (try DigestMachine.step(pending_state, &loop_fuel)) {
         .yielded => {},
         else => return error.TestUnexpectedResult,

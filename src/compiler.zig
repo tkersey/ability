@@ -114,12 +114,17 @@ fn structForValues(
     return @Struct(.auto, null, &names, &types, &attributes);
 }
 
-fn storeType(comptime Body: type, comptime program: control_ir.Program) type {
-    var fields: [program.value_types.len]rnf.EnvironmentField = undefined;
-    inline for (program.value_types, 0..) |value_type, index| {
-        fields[index] = .{
-            .value = @intCast(index),
-            .value_type = value_type,
+fn storeType(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime canonical: anytype,
+) type {
+    var fields: [canonical.value_count]rnf.EnvironmentField = undefined;
+    inline for (0..canonical.value_count) |dense_index| {
+        const source_value = canonical.value_dense_to_source[dense_index];
+        fields[dense_index] = .{
+            .value = source_value,
+            .value_type = program.value_types[source_value],
         };
     }
     return structForValues(Body, program, &fields);
@@ -461,6 +466,15 @@ fn failureNamed(comptime Body: type, comptime name: []const u8) Body.Failure {
         }
     }
     @compileError("Body.Failure must declare " ++ name);
+}
+
+fn failureFromTag(comptime Body: type, comptime tag: u16) Body.Failure {
+    inline for (std.meta.fields(Body.Failure)) |field| {
+        if (field.value == tag) {
+            return @field(Body.Failure, field.name);
+        }
+    }
+    unreachable;
 }
 
 fn minimumBlockCost(comptime block: control_ir.Block) u64 {
@@ -1185,7 +1199,11 @@ fn validateBody(
             .return_to_caller => {},
             .fail => |failure| {
                 const failure_fields = @typeInfo(Body.Failure).@"enum".fields;
-                if (failure >= failure_fields.len) {
+                var tag_exists = false;
+                inline for (failure_fields) |field| {
+                    if (field.value == failure) tag_exists = true;
+                }
+                if (!tag_exists) {
                     @compileError("Control IR failure tag is outside Body.Failure");
                 }
             },
@@ -1470,12 +1488,19 @@ fn compilerSemanticDigest(
     semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v2");
     semanticHashBytes(
         &hasher,
-        "segment-fuel=static-floor-plus-dynamic-canonical-input-output-v1",
+        "segment-fuel=preflight-resource-shape-v3",
     );
     semanticHashU64(&hasher, dynamic_fuel_quantum_bytes);
     semanticHashSchema(Body.InitialArgs, &hasher);
     semanticHashSchema(Body.Result, &hasher);
     semanticHashSchema(Body.Failure, &hasher);
+    semanticHashBytes(&hasher, "failure-name-tag-map-v1");
+    const failure_fields = @typeInfo(Body.Failure).@"enum".fields;
+    semanticHashU32(&hasher, @intCast(failure_fields.len));
+    inline for (failure_fields) |field| {
+        semanticHashBytes(&hasher, field.name);
+        semanticHashU32(&hasher, @intCast(field.value));
+    }
 
     semanticHashU32(&hasher, @intCast(residual_effects.residual_count));
     inline for (0..residual_effects.residual_count) |residual_ordinal| {
@@ -1666,7 +1691,20 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         semantic_canonicalization,
     );
     const FrameType = frameType(Body, program, normal_form);
-    const Store = storeType(Body, program);
+    const Store = storeType(
+        Body,
+        program,
+        semantic_canonicalization,
+    );
+    comptime {
+        if (@typeInfo(Store).@"struct".fields.len !=
+            semantic_canonicalization.value_count)
+        {
+            @compileError(
+                "generated Store must contain exactly the reachable values",
+            );
+        }
+    }
     const RequestType = requestType(Body, residual_effects);
     const ReturnValueType = returnValueType(Body, program);
 
@@ -1728,6 +1766,41 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         pub const contract_bytes = semantic_digest[0..];
         pub const control = program;
         pub const rnf_value = normal_form;
+        pub const DebugConstructorMetadata = struct {
+            constructor_id: u32,
+            name: []const u8,
+            kind: []const u8,
+            source_block: control_ir.BlockId,
+            source_function: control_ir.FunctionId,
+            resume_target: ?control_ir.BlockId,
+        };
+        pub const DebugMetadata = struct {
+            program_label: []const u8,
+            constructors: [normal_form.constructor_count]DebugConstructorMetadata,
+        };
+        pub const debug_metadata: DebugMetadata = blk: {
+            var constructors: [normal_form.constructor_count]DebugConstructorMetadata =
+                undefined;
+            for (
+                normal_form.constructorSlice(),
+                0..,
+            ) |constructor, index| {
+                constructors[index] = .{
+                    .constructor_id = constructor.id,
+                    .name = constructorName(index),
+                    .kind = @tagName(constructor.kind),
+                    .source_block = constructor.source_block,
+                    .source_function = program.blocks[
+                        constructor.source_block
+                    ].function_id,
+                    .resume_target = constructor.resume_target,
+                };
+            }
+            break :blk .{
+                .program_label = label,
+                .constructors = constructors,
+            };
+        };
         pub const reachable_block_count = reachability.count;
         pub const reachable_value_count =
             semantic_canonicalization.value_count;
@@ -1882,12 +1955,22 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             total.* +|= amount;
         }
 
-        fn dynamicValueCost(comptime T: type, value: T) u64 {
-            if (comptime !hasDynamicEncodedSize(T)) return 0;
+        fn encodedBytes(comptime T: type, value: T) u64 {
             const size = portable_value.encodedSize(T, value) catch
                 return std.math.maxInt(u64);
-            const canonical_bytes = std.math.cast(u64, size) orelse
+            return std.math.cast(u64, size) orelse
                 return std.math.maxInt(u64);
+        }
+
+        fn maximumEncodedBytes(comptime T: type) u64 {
+            return comptime std.math.cast(
+                u64,
+                portable_value.maximumEncodedSize(T),
+            ) orelse std.math.maxInt(u64);
+        }
+
+        fn dynamicBytesCost(comptime T: type, canonical_bytes: u64) u64 {
+            if (comptime !hasDynamicEncodedSize(T)) return 0;
             return std.math.divCeil(
                 u64,
                 canonical_bytes,
@@ -1895,41 +1978,257 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             ) catch std.math.maxInt(u64);
         }
 
-        fn addInstructionOperandCost(
-            comptime instruction: control_ir.Instruction,
-            store: *const Store,
-            total: *u64,
-        ) void {
-            inline for (instruction.operands) |operand| {
-                const name = comptime valueName(operand);
-                const Operand = @FieldType(Store, name);
-                addFuelCost(
-                    total,
-                    dynamicValueCost(Operand, @field(store, name)),
-                );
-            }
+        fn boundedBytes(
+            comptime T: type,
+            candidate: u64,
+        ) u64 {
+            return @min(maximumEncodedBytes(T), candidate);
         }
 
-        fn addInstructionResultCost(
+        fn combinedSequenceBytes(
+            comptime T: type,
+            prefix: u64,
+            suffixes: []const u64,
+        ) u64 {
+            var result = prefix;
+            for (suffixes) |suffix| {
+                result +|= suffix -| 4;
+            }
+            return boundedBytes(T, result);
+        }
+
+        fn definingInstructionInBlock(
+            comptime block: control_ir.Block,
+            comptime value: control_ir.ValueId,
+        ) ?control_ir.Instruction {
+            inline for (block.instructions) |instruction| {
+                if (instruction.result == value) return instruction;
+            }
+            return null;
+        }
+
+        fn exactVectorElementBytes(
+            comptime block: control_ir.Block,
+            comptime value: control_ir.ValueId,
+            environment: anytype,
+        ) ?u64 {
+            const instruction = comptime definingInstructionInBlock(
+                block,
+                value,
+            ) orelse return null;
+            if (instruction.operation != .vector_get or
+                instruction.operands.len != 2)
+            {
+                return null;
+            }
+            const vector_name = comptime valueName(instruction.operands[0]);
+            const index_name = comptime valueName(instruction.operands[1]);
+            const Environment = @TypeOf(environment);
+            if (comptime !@hasField(Environment, vector_name) or
+                !@hasField(Environment, index_name))
+            {
+                return null;
+            }
+            const vector = @field(environment, vector_name);
+            const element = vector.get(@field(environment, index_name)) orelse
+                return null;
+            return encodedBytes(@TypeOf(element), element);
+        }
+
+        fn exactProductFieldBytes(
+            comptime block: control_ir.Block,
+            comptime product_value: control_ir.ValueId,
+            comptime field_index: usize,
+            environment: anytype,
+            sizes: *const [limits.maximum_values]u64,
+        ) ?u64 {
+            const product_name = comptime valueName(product_value);
+            const Product = @FieldType(Store, product_name);
+            const field = std.meta.fields(Product)[field_index];
+            const Environment = @TypeOf(environment);
+            if (comptime @hasField(Environment, product_name)) {
+                const product = @field(environment, product_name);
+                return encodedBytes(
+                    field.type,
+                    @field(product, field.name),
+                );
+            }
+            const instruction = comptime definingInstructionInBlock(
+                block,
+                product_value,
+            ) orelse return null;
+            return switch (instruction.operation) {
+                .copy => exactProductFieldBytes(
+                    block,
+                    instruction.operands[0],
+                    field_index,
+                    environment,
+                    sizes,
+                ),
+                .product_construct => sizes[
+                    @intCast(instruction.operands[field_index])
+                ],
+                .product_replace => |replaced_index| if (replaced_index == field_index)
+                    sizes[@intCast(instruction.operands[1])]
+                else
+                    exactProductFieldBytes(
+                        block,
+                        instruction.operands[0],
+                        field_index,
+                        environment,
+                        sizes,
+                    ),
+                .vector_get => blk: {
+                    const vector_name = comptime valueName(
+                        instruction.operands[0],
+                    );
+                    const index_name = comptime valueName(
+                        instruction.operands[1],
+                    );
+                    if (comptime !@hasField(Environment, vector_name) or
+                        !@hasField(Environment, index_name))
+                    {
+                        break :blk null;
+                    }
+                    const vector = @field(environment, vector_name);
+                    const element = vector.get(
+                        @field(environment, index_name),
+                    ) orelse break :blk null;
+                    break :blk encodedBytes(
+                        field.type,
+                        @field(element, field.name),
+                    );
+                },
+                else => null,
+            };
+        }
+
+        fn resultEncodedBytes(
+            comptime block: control_ir.Block,
             comptime instruction: control_ir.Instruction,
-            store: *const Store,
-            total: *u64,
-        ) void {
-            const name = comptime valueName(instruction.result);
-            const ResultType = @FieldType(Store, name);
-            addFuelCost(
-                total,
-                dynamicValueCost(ResultType, @field(store, name)),
-            );
+            environment: anytype,
+            sizes: *const [limits.maximum_values]u64,
+        ) u64 {
+            const result_name = comptime valueName(instruction.result);
+            const ResultType = @FieldType(Store, result_name);
+            const maximum = maximumEncodedBytes(ResultType);
+            return switch (instruction.operation) {
+                .metadata => unreachable,
+                .constant => |constant_index| encodedBytes(
+                    ResultType,
+                    Body.constants[constant_index],
+                ),
+                .copy => sizes[@intCast(instruction.operands[0])],
+                .product_construct => blk: {
+                    var total: u64 = 0;
+                    inline for (instruction.operands) |operand| {
+                        total +|= sizes[@intCast(operand)];
+                    }
+                    break :blk boundedBytes(ResultType, total);
+                },
+                .product_extract => |field_index| exactProductFieldBytes(
+                    block,
+                    instruction.operands[0],
+                    field_index,
+                    environment,
+                    sizes,
+                ) orelse maximum,
+                .product_replace => maximum,
+                .sum_construct => boundedBytes(
+                    ResultType,
+                    4 +| if (instruction.operands.len == 0)
+                        0
+                    else
+                        sizes[@intCast(instruction.operands[0])],
+                ),
+                .sum_extract => maximum,
+                .optional_none => 1,
+                .optional_some => boundedBytes(
+                    ResultType,
+                    1 +| sizes[@intCast(instruction.operands[0])],
+                ),
+                .select => @max(
+                    sizes[@intCast(instruction.operands[1])],
+                    sizes[@intCast(instruction.operands[2])],
+                ),
+                .vector_empty, .text_empty, .bytes_empty => 4,
+                .vector_get => exactVectorElementBytes(
+                    block,
+                    instruction.result,
+                    environment,
+                ) orelse maximum,
+                .vector_set => maximum,
+                .vector_push => boundedBytes(
+                    ResultType,
+                    sizes[@intCast(instruction.operands[0])] +|
+                        sizes[@intCast(instruction.operands[1])],
+                ),
+                .vector_pop => maximum,
+                .vector_truncate => @min(
+                    maximum,
+                    sizes[@intCast(instruction.operands[0])],
+                ),
+                .vector_clear => 4,
+                .text_append, .bytes_append => combinedSequenceBytes(
+                    ResultType,
+                    sizes[@intCast(instruction.operands[0])],
+                    &.{sizes[@intCast(instruction.operands[1])]},
+                ),
+                .text_append_scalar => boundedBytes(
+                    ResultType,
+                    sizes[@intCast(instruction.operands[0])] +| 4,
+                ),
+                .text_append_unsigned, .text_append_signed => boundedBytes(
+                    ResultType,
+                    sizes[@intCast(instruction.operands[0])] +| 20,
+                ),
+                .text_copy, .bytes_copy => @min(
+                    maximum,
+                    sizes[@intCast(instruction.operands[0])],
+                ),
+                .text_join => combinedSequenceBytes(
+                    ResultType,
+                    sizes[@intCast(instruction.operands[0])],
+                    &.{
+                        sizes[@intCast(instruction.operands[1])],
+                        sizes[@intCast(instruction.operands[2])],
+                    },
+                ),
+                .compare_eq_zero,
+                .integer_add,
+                .integer_subtract,
+                .integer_multiply,
+                .integer_divide,
+                .integer_remainder,
+                .integer_negate,
+                .integer_equal,
+                .integer_not_equal,
+                .integer_less_than,
+                .integer_less_equal,
+                .integer_greater_than,
+                .integer_greater_equal,
+                .integer_bit_not,
+                .integer_bit_and,
+                .integer_bit_or,
+                .integer_bit_xor,
+                .integer_convert,
+                .boolean_not,
+                .boolean_and,
+                .boolean_or,
+                .sum_tag_is,
+                .optional_is_some,
+                .vector_length,
+                .text_compare,
+                .bytes_compare,
+                => maximum,
+            };
         }
 
         fn executeInstructions(
             comptime block: control_ir.Block,
             store: *Store,
-            fuel_cost: *u64,
         ) ?Failure {
             inline for (block.instructions) |instruction| {
-                addInstructionOperandCost(instruction, store, fuel_cost);
                 const result_name = comptime valueName(instruction.result);
                 switch (instruction.operation) {
                     .metadata => unreachable,
@@ -2517,7 +2816,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         };
                     },
                 }
-                addInstructionResultCost(instruction, store, fuel_cost);
             }
             return null;
         }
@@ -2577,6 +2875,59 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             );
         }
 
+        fn preflightCostConstructor(
+            comptime constructor_id: usize,
+            environment: anytype,
+        ) u64 {
+            const constructor = comptime normal_form.constructors[constructor_id];
+            var fuel_cost = baseCostForConstructor(constructor_id);
+            if (constructor.kind == .await_effect or
+                isAwaitCallConstructor(constructor_id))
+            {
+                return fuel_cost;
+            }
+            var sizes = [_]u64{0} ** limits.maximum_values;
+            inline for (0..constructor.environment_len) |field_index| {
+                const field = comptime constructor.environment[field_index];
+                const name = comptime valueName(field.value);
+                const Value = @FieldType(Store, name);
+                const size = encodedBytes(Value, @field(environment, name));
+                sizes[@intCast(field.value)] = size;
+                addFuelCost(
+                    &fuel_cost,
+                    dynamicBytesCost(Value, size),
+                );
+            }
+            const block = comptime program.blocks[constructor.source_block];
+            inline for (block.instructions) |instruction| {
+                inline for (instruction.operands) |operand| {
+                    const name = comptime valueName(operand);
+                    const Operand = @FieldType(Store, name);
+                    addFuelCost(
+                        &fuel_cost,
+                        dynamicBytesCost(
+                            Operand,
+                            sizes[@intCast(operand)],
+                        ),
+                    );
+                }
+                const result_name = comptime valueName(instruction.result);
+                const ResultType = @FieldType(Store, result_name);
+                const result_size = resultEncodedBytes(
+                    block,
+                    instruction,
+                    environment,
+                    &sizes,
+                );
+                sizes[@intCast(instruction.result)] = result_size;
+                addFuelCost(
+                    &fuel_cost,
+                    dynamicBytesCost(ResultType, result_size),
+                );
+            }
+            return fuel_cost;
+        }
+
         fn planConstructor(
             comptime constructor_id: usize,
             environment: anytype,
@@ -2590,8 +2941,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             var store: Store = undefined;
             loadEnvironment(constructor_id, environment, &store);
             const block = comptime program.blocks[constructor.source_block];
-            var fuel_cost = baseCostForConstructor(constructor_id);
-            if (executeInstructions(block, &store, &fuel_cost)) |failure| {
+            const fuel_cost = preflightCostConstructor(
+                constructor_id,
+                environment,
+            );
+            if (executeInstructions(block, &store)) |failure| {
                 return .{
                     .cost = fuel_cost,
                     .transition = .{ .failed = failure },
@@ -2686,7 +3040,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     block.function_id,
                     @field(store, valueName(value)),
                 ) },
-                .fail => |failure| .{ .failed = @enumFromInt(failure) },
+                .fail => |failure| .{
+                    .failed = failureFromTag(Body, failure),
+                },
             };
             return .{ .cost = fuel_cost, .transition = transition };
         }
@@ -2706,6 +3062,15 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const constructor_id: usize = comptime @intFromEnum(tag);
                     return baseCostForConstructor(constructor_id);
                 },
+            };
+        }
+
+        pub fn cost(frame: Frame) u64 {
+            return switch (frame) {
+                inline else => |environment, tag| preflightCostConstructor(
+                    comptime @intFromEnum(tag),
+                    environment,
+                ),
             };
         }
 

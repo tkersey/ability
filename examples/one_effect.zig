@@ -79,6 +79,7 @@ pub fn main() !void {
         .done => |value| value,
         .yielded => return error.UnexpectedYield,
         .failed => return error.UnexpectedMachineFailure,
+        .handler_error => |failure| return failure.err,
     };
     defer result.deinit();
 

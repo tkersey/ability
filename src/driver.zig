@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// Construct a semantics-free local owner and typed effect driver.
 pub fn Driver(comptime Machine: type) type {
     return struct {
@@ -8,14 +10,18 @@ pub fn Driver(comptime Machine: type) type {
             yielded,
             done: *Machine.OwnedResult,
             failed: Machine.Failure,
+            handler_error: struct {
+                request: Machine.Request,
+                err: anyerror,
+            },
         };
 
-        allocator: @import("std").mem.Allocator,
+        allocator: std.mem.Allocator,
         state: Machine.State,
 
         /// Initialize the same Machine state used by World execution.
         pub fn init(
-            allocator: @import("std").mem.Allocator,
+            allocator: std.mem.Allocator,
             args: Machine.InitialArgs,
         ) Machine.Error!Self {
             return .{
@@ -36,23 +42,37 @@ pub fn Driver(comptime Machine: type) type {
             handlers: anytype,
             caller_fuel: *u64,
         ) anyerror!Outcome {
+            var pending_request: ?Machine.Request =
+                Machine.current(self.state) catch |err| switch (err) {
+                    error.ProgramContractViolation => null,
+                    else => return err,
+                };
             while (true) {
+                if (pending_request) |request| {
+                    if (comptime Machine.RequestValue == void) {
+                        return error.ProgramContractViolation;
+                    }
+                    switch (request.value) {
+                        inline else => |payload, tag| {
+                            const response = handlers.handle(
+                                tag,
+                                payload,
+                            ) catch |err| return .{ .handler_error = .{
+                                .request = request,
+                                .err = err,
+                            } };
+                            try Machine.@"resume"(
+                                self.state,
+                                request,
+                                response,
+                            );
+                        },
+                    }
+                    pending_request = null;
+                    continue;
+                }
                 switch (try Machine.step(self.state, caller_fuel)) {
-                    .request => |request| {
-                        if (Machine.RequestValue == void) {
-                            return error.ProgramContractViolation;
-                        }
-                        switch (request.value) {
-                            inline else => |payload, tag| {
-                                const response = try handlers.handle(tag, payload);
-                                try Machine.@"resume"(
-                                    self.state,
-                                    request,
-                                    response,
-                                );
-                            },
-                        }
-                    },
+                    .request => |request| pending_request = request,
                     .yielded => return .yielded,
                     .done => |result| return .{ .done = result },
                     .failed => |failure| return .{ .failed = failure },
