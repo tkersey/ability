@@ -84,6 +84,12 @@ Focused gates include `check-boundary-machine`, `check-boundary-rnf`,
 performance comparison and emits the Boundary-owned completion fields through
 `check-boundary-machine-receipt`.
 
+The aggregate is a release-owner gate and its historical performance lane
+requires a tagged Boundary checkout with local `.git` metadata and the reviewed
+`v0.7.0` tag. Extracted package consumers can run the focused current-version
+gates, but a package without repository history cannot authenticate or claim
+the immutable v0.7 comparison.
+
 Boundary 1.0 is source- and state-incompatible with Boundary 0.7. The immutable
 0.7 release remains the compatibility implementation; Boundary 1.0 contains no
 legacy runtime or automatic continuation migration.

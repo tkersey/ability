@@ -3,6 +3,25 @@ set -eu
 
 baseline_tag=v0.7.0
 baseline_commit=7f2472100454aa2cd5c62e07db0c1e23eaf46a77
+release_checkout_error='Boundary release performance proof requires a tagged Boundary source checkout with local .git metadata'
+
+require_release_checkout() {
+    checkout_root=$1
+    if ! test -e "$checkout_root/.git"; then
+        echo "$release_checkout_error" >&2
+        return 1
+    fi
+    if ! resolved_checkout_root=$(
+        git -C "$checkout_root" rev-parse --show-toplevel 2>/dev/null
+    ); then
+        echo "$release_checkout_error" >&2
+        return 1
+    fi
+    if test "$resolved_checkout_root" != "$checkout_root"; then
+        echo "$release_checkout_error" >&2
+        return 1
+    fi
+}
 
 within_ratio() {
     candidate=$1
@@ -18,6 +37,12 @@ self_test() {
         { echo "performance ratio exact limit was rejected" >&2; exit 1; }
     if within_ratio 126 100 125 100; then
         echo "performance runtime regression was accepted" >&2
+        exit 1
+    fi
+    within_ratio 125 100 125 100 ||
+        { echo "decode runtime exact limit was rejected" >&2; exit 1; }
+    if within_ratio 126 100 125 100; then
+        echo "decode runtime regression was accepted" >&2
         exit 1
     fi
     within_ratio 125 100 125 100 ||
@@ -44,30 +69,46 @@ self_test() {
         echo "semantic-module non-reduction was accepted" >&2
         exit 1
     fi
+    node "$script_directory/measure_wasm.mjs" --self-test |
+        grep -qx 'wasm_measurement_falsifier=pass'
+    if missing_checkout_output=$(
+        require_release_checkout "$script_directory" 2>&1
+    ); then
+        echo "package-only performance proof invocation was accepted" >&2
+        exit 1
+    fi
+    printf '%s\n' "$missing_checkout_output" |
+        grep -Fqx "$release_checkout_error"
     echo "boundary_performance_falsifiers=pass"
 }
 
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if test "${1:-}" = "--self-test"; then
     self_test
     exit 0
 fi
 
-if test "$#" -ne 2; then
-    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM" >&2
+if test "$#" -ne 3; then
+    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM ZIG_EXE" >&2
     exit 2
 fi
 
 current_test=$1
 current_wasm=$2
-script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+zig_exe=$3
 repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 
 test -x "$current_test"
 test -f "$current_wasm"
+test -x "$zig_exe"
 
-actual_baseline_commit=$(
-    git -C "$repository_root" rev-parse "${baseline_tag}^{commit}"
-)
+require_release_checkout "$repository_root"
+if ! actual_baseline_commit=$(
+    git -C "$repository_root" rev-parse "${baseline_tag}^{commit}" 2>/dev/null
+); then
+    echo "Boundary release performance proof requires local tag $baseline_tag" >&2
+    exit 1
+fi
 if test "$actual_baseline_commit" != "$baseline_commit"; then
     echo "Boundary v0.7.0 does not resolve to the reviewed baseline" >&2
     exit 1
@@ -99,7 +140,7 @@ patch -s -d "$baseline_source" -p1 \
 
 if ! baseline_output=$(
     cd "$baseline_source"
-    zig build check-boundary-static-machine \
+    "$zig_exe" build check-boundary-static-machine \
         -Doptimize=ReleaseFast \
         --summary all -- \
         --test-filter "RNF performance baseline one effect lifecycle" 2>&1
@@ -183,10 +224,11 @@ test "$baseline_decode_checksum" -eq "$baseline_checksum"
 test "$current_decode_checksum" -eq "$baseline_decode_checksum"
 test "$current_state" -le "$baseline_state"
 within_ratio "$current_median" "$baseline_median" 125 100
+within_ratio "$current_decode_median" "$baseline_decode_median" 125 100
 
 if ! install_output=$(
     cd "$baseline_source"
-    zig build install -Doptimize=ReleaseFast
+    "$zig_exe" build install -Doptimize=ReleaseFast
   2>&1
 ); then
     printf '%s\n' "$install_output" >&2
@@ -208,7 +250,7 @@ baseline_wasm_step_ns=$(
 current_wasm_step_ns=$(
     node "$script_directory/measure_wasm.mjs" \
         "$current_wasm" \
-        boundaryMachineParityRun
+        boundaryMachinePerformanceOneEffect
 )
 require_uint baseline_wasm_step_ns "$baseline_wasm_step_ns"
 require_uint current_wasm_step_ns "$current_wasm_step_ns"
@@ -238,6 +280,7 @@ echo "boundary_performance_status=pass baseline_release=$baseline_tag" \
     "current_median_ns=$current_median" \
     "baseline_decode_median_ns=$baseline_decode_median" \
     "current_decode_median_ns=$current_decode_median" \
+    "decode_runtime_ratio_limit=1.25" \
     "runtime_ratio_limit=1.25" \
     "baseline_wasm_step_ns=$baseline_wasm_step_ns" \
     "current_wasm_step_ns=$current_wasm_step_ns" \
@@ -245,5 +288,6 @@ echo "boundary_performance_status=pass baseline_release=$baseline_tag" \
     "baseline_wasm_bytes=$baseline_wasm_bytes" \
     "current_wasm_bytes=$current_wasm_bytes" \
     "wasm_ratio_limit=1.50" \
+    "current_wasm_witness=machine-performance-one-effect" \
     "baseline_runtime_semantic_modules=$baseline_runtime_semantic_modules" \
     "current_runtime_semantic_modules=$current_runtime_semantic_modules"

@@ -75,4 +75,7 @@ then compares paired native lifecycle and decode medians, import-free WASM
 lifecycle medians, canonical parked-state size, one-effect WASM size, and
 runtime-semantic module count against the specified hard gates. This bounded
 reference is conformance-only: no legacy runtime source or reducer is imported
-into the production module graph.
+into the production module graph. Because the proof authenticates and exports
+the historical tag, it runs only from a tagged Boundary source checkout with
+local `.git` metadata. Extracted package consumers retain the current-version
+focused proofs but cannot reproduce or claim the historical release comparison.

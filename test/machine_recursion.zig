@@ -192,11 +192,77 @@ const Body = struct {
 
 const Program = program_v2.program("bounded-recursive-helper", Body);
 
+const self_target_call_arguments = [_]cir.EdgeArgument{.{ .value = 0 }};
+const self_target_return_arguments = [_]cir.EdgeArgument{.@"resume"};
+const self_target_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 1,
+                .arguments = &self_target_call_arguments,
+            },
+            .continuation = .{
+                .target = 0,
+                .arguments = &self_target_return_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 1,
+        .function_id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .return_to_caller = 1 },
+    },
+};
+
+const SelfTargetBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum {
+        arithmetic_overflow,
+    };
+    pub const constants = .{};
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "self-target-call-continuation",
+        .value_types = &.{
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+        },
+        .blocks = &self_target_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+        .functions = &.{
+            .{
+                .id = 0,
+                .entry = 0,
+                .result_type = .{ .scalar = .u32 },
+            },
+            .{
+                .id = 1,
+                .entry = 1,
+                .result_type = .{ .scalar = .u32 },
+            },
+        },
+    };
+};
+
+const SelfTargetProgram = program_v2.program(
+    "self-target-call-continuation",
+    SelfTargetBody,
+);
+
 test "compiled bounded recursive frames survive canonical round trip" {
     var call_return_count: usize = 0;
     for (Program.rnf.constructorSlice()) |constructor| {
         if (constructor.kind == .call_return and
-            constructor.resume_target != constructor.source_block)
+            constructor.origin == .suspension)
         {
             call_return_count += 1;
         }
@@ -234,6 +300,79 @@ test "compiled bounded recursive frames survive canonical round trip" {
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 6), done.value().*);
     try std.testing.expectEqual(@as(u64, 7), completion_fuel);
+}
+
+test "multi-frame commits reuse fixed-buffer transaction storage" {
+    const RecursiveMachine = Program.compile(.{
+        .maximum_frames = 8,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const backing = try std.testing.allocator.alloc(u8, 512 << 10);
+    defer std.testing.allocator.free(backing);
+    var fixed = std.heap.FixedBufferAllocator.init(backing);
+    const state = try RecursiveMachine.initialState(fixed.allocator(), 3);
+    defer RecursiveMachine.deinitState(state);
+
+    var enter_helper_fuel: u64 = 1;
+    try std.testing.expectEqual(
+        RecursiveMachine.Outcome.yielded,
+        try RecursiveMachine.step(state, &enter_helper_fuel),
+    );
+    const retained_high_water = fixed.end_index;
+
+    for (0..32) |_| {
+        var no_fuel: u64 = 0;
+        try std.testing.expectEqual(
+            RecursiveMachine.Outcome.yielded,
+            try RecursiveMachine.step(state, &no_fuel),
+        );
+        try std.testing.expectEqual(
+            retained_high_water,
+            fixed.end_index,
+        );
+    }
+}
+
+test "call continuation may return to its own source block" {
+    var block_entry_count: usize = 0;
+    var suspension_count: usize = 0;
+    for (SelfTargetProgram.rnf.constructorSlice()) |constructor| {
+        if (constructor.source_block != 0 or constructor.resume_target != 0) {
+            continue;
+        }
+        switch (constructor.origin) {
+            .block_entry => block_entry_count += 1,
+            .suspension => suspension_count += 1,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), block_entry_count);
+    try std.testing.expectEqual(@as(usize, 1), suspension_count);
+
+    const SelfTargetMachine = SelfTargetProgram.compile(.{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 8,
+    });
+    const state = try SelfTargetMachine.initialState(std.testing.allocator, 7);
+    defer SelfTargetMachine.deinitState(state);
+
+    var caller_fuel: u64 = 1;
+    try std.testing.expectEqual(
+        SelfTargetMachine.Outcome.yielded,
+        try SelfTargetMachine.step(state, &caller_fuel),
+    );
+    const encoded = try SelfTargetMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const restored = try SelfTargetMachine.decodeState(
+        std.testing.allocator,
+        encoded,
+    );
+    defer SelfTargetMachine.deinitState(restored);
+    try SelfTargetMachine.validateState(restored);
 }
 
 test "compiled frame-depth failure preserves state and caller fuel" {

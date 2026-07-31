@@ -96,6 +96,45 @@ fn typeForValue(comptime Body: type, comptime value_type: control_ir.ValueType) 
     };
 }
 
+fn validateValueTypeReference(
+    comptime Body: type,
+    comptime value_type: control_ir.ValueType,
+) void {
+    switch (value_type) {
+        .scalar => {},
+        .schema => |index| {
+            if (index >= Body.schema_types.len) {
+                @compileError(
+                    "Control IR value type schema index is out of bounds",
+                );
+            }
+        },
+    }
+}
+
+fn validateDeclaredValueTypes(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+) void {
+    inline for (program.value_types) |value_type| {
+        validateValueTypeReference(Body, value_type);
+    }
+    validateValueTypeReference(Body, program.result_type);
+    inline for (program.functions) |function| {
+        validateValueTypeReference(Body, function.result_type);
+    }
+    inline for (program.blocks) |block| {
+        switch (block.terminator) {
+            .@"suspend" => |suspension| {
+                if (suspension.resume_type) |resume_type| {
+                    validateValueTypeReference(Body, resume_type);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
 fn structForValues(
     comptime Body: type,
     comptime program: control_ir.Program,
@@ -439,24 +478,7 @@ fn isBytes(comptime T: type) bool {
 }
 
 fn hasDynamicEncodedSize(comptime T: type) bool {
-    if (isBytes(T) or isText(T) or isVector(T)) return true;
-    return switch (@typeInfo(T)) {
-        .array => |info| hasDynamicEncodedSize(info.child),
-        .optional => |info| hasDynamicEncodedSize(info.child),
-        .@"struct" => |info| blk: {
-            inline for (info.fields) |field| {
-                if (hasDynamicEncodedSize(field.type)) break :blk true;
-            }
-            break :blk false;
-        },
-        .@"union" => |info| blk: {
-            inline for (info.fields) |field| {
-                if (hasDynamicEncodedSize(field.type)) break :blk true;
-            }
-            break :blk false;
-        },
-        else => false,
-    };
+    return portable_value.hasVariableEncodedSize(T);
 }
 
 fn failureNamed(comptime Body: type, comptime name: []const u8) Body.Failure {
@@ -1017,6 +1039,7 @@ fn validateBody(
             @compileError("Boundary source Body is missing " ++ name);
         }
     }
+    validateDeclaredValueTypes(Body, program);
     control_ir.validate(
         limits.maximum_values,
         limits.maximum_blocks,
@@ -1467,6 +1490,29 @@ fn semanticHashInvariant(
             );
             semanticHashBool(hasher, predicate.expected);
         },
+        .boolean_copy => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.source));
+        },
+        .boolean_not => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.operand));
+        },
+        .boolean_binary => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.left));
+            semanticHashU16(hasher, canonical.valueId(definition.right));
+            semanticHashU8(
+                hasher,
+                @intCast(@intFromEnum(definition.operation)),
+            );
+        },
+        .boolean_select => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.condition));
+            semanticHashU16(hasher, canonical.valueId(definition.then_value));
+            semanticHashU16(hasher, canonical.valueId(definition.else_value));
+        },
         .integer_zero => |predicate| {
             semanticHashU16(
                 hasher,
@@ -1474,11 +1520,24 @@ fn semanticHashInvariant(
             );
             semanticHashBool(hasher, predicate.equal);
         },
+        .integer_zero_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.value));
+        },
         .integer_relation => |predicate| {
             semanticHashU16(hasher, canonical.valueId(predicate.left));
             semanticHashU16(hasher, canonical.valueId(predicate.right));
             semanticHashU8(hasher, @intCast(@intFromEnum(predicate.relation)));
             semanticHashBool(hasher, predicate.expected);
+        },
+        .integer_relation_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.left));
+            semanticHashU16(hasher, canonical.valueId(definition.right));
+            semanticHashU8(
+                hasher,
+                @intCast(@intFromEnum(definition.relation)),
+            );
         },
         .sum_case => |predicate| {
             semanticHashU16(
@@ -1487,6 +1546,11 @@ fn semanticHashInvariant(
             );
             semanticHashU16(hasher, predicate.case_index);
             semanticHashBool(hasher, predicate.equal);
+        },
+        .sum_case_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.value));
+            semanticHashU16(hasher, definition.case_index);
         },
     }
 }
@@ -1620,6 +1684,10 @@ fn compilerSemanticDigest(
         semanticHashU8(
             &hasher,
             @intCast(@intFromEnum(constructor.kind)),
+        );
+        semanticHashU8(
+            &hasher,
+            @intCast(@intFromEnum(constructor.origin)),
         );
         semanticHashU16(
             &hasher,
@@ -1806,6 +1874,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             constructor_id: u32,
             name: []const u8,
             kind: []const u8,
+            origin: []const u8,
             source_block: control_ir.BlockId,
             source_function: control_ir.FunctionId,
             resume_target: ?control_ir.BlockId,
@@ -1825,6 +1894,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     .constructor_id = constructor.id,
                     .name = constructorName(index),
                     .kind = @tagName(constructor.kind),
+                    .origin = @tagName(constructor.origin),
                     .source_block = constructor.source_block,
                     .source_function = program.blocks[
                         constructor.source_block
@@ -1851,6 +1921,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 const constructor = comptime normal_form.constructors[index];
                 if (constructor.source_block == block_id and
                     constructor.resume_target == block_id and
+                    constructor.origin == .block_entry and
                     constructor.kind != .await_effect and
                     constructor.kind != .caller_fuel_yield)
                 {
@@ -2785,7 +2856,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             store,
                             valueName(instruction.operands[1]),
                         );
-                        @field(store, result_name) = switch (left.order(&right)) {
+                        @field(store, result_name) = switch (std.mem.order(
+                            u8,
+                            left.slice(),
+                            right.slice(),
+                        )) {
                             .lt => -1,
                             .eq => 0,
                             .gt => 1,
@@ -2876,7 +2951,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             store,
                             valueName(instruction.operands[1]),
                         );
-                        @field(store, result_name) = switch (left.order(&right)) {
+                        @field(store, result_name) = switch (std.mem.order(
+                            u8,
+                            left.slice(),
+                            right.slice(),
+                        )) {
                             .lt => -1,
                             .eq => 0,
                             .gt => 1,
@@ -2940,7 +3019,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         fn isAwaitCallConstructor(comptime constructor_id: usize) bool {
             const constructor = comptime normal_form.constructors[constructor_id];
             if (constructor.kind != .call_return or
-                constructor.resume_target == constructor.source_block)
+                constructor.origin != .suspension)
             {
                 return false;
             }
@@ -3197,6 +3276,42 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
+        pub fn maximumResumeFramePayloadSize(
+            frame: Frame,
+            request: Request,
+        ) error{ProgramContractViolation}!usize {
+            if (Request == void) return error.ProgramContractViolation;
+            const expected = current(frame) orelse
+                return error.ProgramContractViolation;
+            if (!requestEql(expected, request)) {
+                return error.ProgramContractViolation;
+            }
+            return switch (frame) {
+                inline else => |_, tag| blk: {
+                    const constructor_id: usize = comptime @intFromEnum(tag);
+                    const constructor = comptime normal_form.constructors[
+                        constructor_id
+                    ];
+                    if (constructor.kind != .await_effect) {
+                        break :blk error.ProgramContractViolation;
+                    }
+                    const suspension = comptime program.blocks[
+                        constructor.source_block
+                    ].terminator.@"suspend";
+                    const target_constructor_id = comptime constructorForBlock(
+                        suspension.continuation.target,
+                    );
+                    const Environment = @FieldType(
+                        Frame,
+                        constructorName(target_constructor_id),
+                    );
+                    break :blk comptime portable_value.maximumEncodedSize(
+                        Environment,
+                    );
+                },
+            };
+        }
+
         pub fn @"resume"(
             frame: Frame,
             request: Request,
@@ -3318,19 +3433,90 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         environment,
                         valueName(predicate.value),
                     ) == predicate.expected,
+                    .boolean_copy => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == @field(
+                        environment,
+                        valueName(definition.source),
+                    ),
+                    .boolean_not => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == !@field(
+                        environment,
+                        valueName(definition.operand),
+                    ),
+                    .boolean_binary => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == (switch (definition.operation) {
+                        .@"and" => @field(
+                            environment,
+                            valueName(definition.left),
+                        ) and @field(
+                            environment,
+                            valueName(definition.right),
+                        ),
+                        .@"or" => @field(
+                            environment,
+                            valueName(definition.left),
+                        ) or @field(
+                            environment,
+                            valueName(definition.right),
+                        ),
+                    }),
+                    .boolean_select => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == if (@field(
+                        environment,
+                        valueName(definition.condition),
+                    ))
+                        @field(
+                            environment,
+                            valueName(definition.then_value),
+                        )
+                    else
+                        @field(
+                            environment,
+                            valueName(definition.else_value),
+                        ),
                     .integer_zero => |predicate| (@field(
                         environment,
                         valueName(predicate.value),
                     ) == 0) == predicate.equal,
+                    .integer_zero_result => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == (@field(
+                        environment,
+                        valueName(definition.value),
+                    ) == 0),
                     .integer_relation => |predicate| rnf.integerRelationHolds(
                         @field(environment, valueName(predicate.left)),
                         @field(environment, valueName(predicate.right)),
                         predicate.relation,
                     ) == predicate.expected,
+                    .integer_relation_result => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == rnf.integerRelationHolds(
+                        @field(environment, valueName(definition.left)),
+                        @field(environment, valueName(definition.right)),
+                        definition.relation,
+                    ),
                     .sum_case => |predicate| (algebraicCaseIndex(@field(
                         environment,
                         valueName(predicate.value),
                     )) == predicate.case_index) == predicate.equal,
+                    .sum_case_result => |definition| @field(
+                        environment,
+                        valueName(definition.result),
+                    ) == (algebraicCaseIndex(@field(
+                        environment,
+                        valueName(definition.value),
+                    )) == definition.case_index),
                 };
                 if (!accepted) return error.ProgramContractViolation;
             }

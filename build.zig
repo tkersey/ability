@@ -462,6 +462,27 @@ pub fn build(b: *std.Build) void {
         .os_tag = .freestanding,
         .abi = .none,
     });
+    const performance_wasm_core = addCoreModules(
+        b,
+        wasm_target,
+        .ReleaseSmall,
+    );
+    const performance_wasm_module = programTestModule(
+        b,
+        performance_wasm_core,
+        "test/machine_performance.zig",
+        wasm_target,
+        .ReleaseSmall,
+        false,
+        true,
+    );
+    const performance_wasm_executable = b.addExecutable(.{
+        .name = "boundary-machine-performance-one-effect",
+        .root_module = performance_wasm_module,
+    });
+    performance_wasm_executable.entry = .disabled;
+    performance_wasm_executable.rdynamic = true;
+
     const wasm_core = addCoreModules(b, wasm_target, .ReleaseSmall);
     const parity_wasm = programTestModule(
         b,
@@ -523,6 +544,15 @@ pub fn build(b: *std.Build) void {
         \\  src/program_api.zig \
         \\  src/internal/program_plan.zig \
         \\  src/internal_program_plan.zig \
+        \\  bench/abortive_effect_decompose_bench.zig \
+        \\  bench/algebraic_builder_decompose_bench.zig \
+        \\  bench/direct_first_suspend_bench.zig \
+        \\  bench/effect_family_matrix_bench.zig \
+        \\  bench/no_capture_bench.zig \
+        \\  bench/resource_effect_decompose_bench.zig \
+        \\  bench/state_effect_bench.zig \
+        \\  bench/writer_effect_decompose_bench.zig \
+        \\  bench/zprof_hotspots.zig \
         \\  test/program_api_test.zig \
         \\  test/static_machine_test.zig \
         \\  test/static_machine_wasm32_compile.zig \
@@ -531,6 +561,30 @@ pub fn build(b: *std.Build) void {
         \\  test ! -e "$path"
         \\done
         \\! rg -n 'pub const (Runtime|staticMachine|StaticMachineOptions)|Program\.Session|Loaded(Session|Module)|Certified Boundary Module' src/root.zig src
+        \\if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        \\  source_paths=$(
+        \\    {
+        \\      git ls-files '*.zig'
+        \\      git ls-files --others --exclude-standard '*.zig'
+        \\    } |
+        \\      while IFS= read -r source; do
+        \\        test -f "$source" && printf '%s\n' "$source"
+        \\      done |
+        \\      sort -u
+        \\  )
+        \\  test "$source_paths" = "$(cat repo_zig_paths.txt)"
+        \\else
+        \\  source_paths=$(cat repo_zig_paths.txt)
+        \\fi
+        \\legacy_source_matches=$(
+        \\  for source in $source_paths; do
+        \\    test "$source" = build.zig && continue
+        \\    rg --with-filename -n \
+        \\      '@import\("(loaded_execution|lowered_machine|interpreter|internal_program_plan)"\)|boundary\.(Runtime|Prompt|frontend|algebraic)|boundary\.effect\.(exception|optional|reader|resource|state|writer)|Program\.Session|Loaded(Session|Module)' \
+        \\      "$source" || test "$?" -eq 1
+        \\  done
+        \\)
+        \\test -z "$legacy_source_matches"
     });
     const deletion_step = b.step(
         "check-boundary-machine-deletion",
@@ -543,7 +597,10 @@ pub fn build(b: *std.Build) void {
         b.path("conformance/rnf-v1/check_performance.sh"),
     );
     performance_command.addFileArg(performance_tests.getEmittedBin());
-    performance_command.addFileArg(wasm_executable.getEmittedBin());
+    performance_command.addFileArg(
+        performance_wasm_executable.getEmittedBin(),
+    );
+    performance_command.addArg(b.graph.zig_exe);
     const performance_step = b.step(
         "check-boundary-machine-performance",
         "Compare RNF performance with the immutable Boundary v0.7.0 release.",
@@ -599,6 +656,10 @@ pub fn build(b: *std.Build) void {
             "Boundary Machine enums must be exhaustive",
         },
         .{
+            "test/compile_fail/portable_sentinel_array.zig",
+            "Boundary Machine portable arrays cannot have sentinels",
+        },
+        .{
             "test/compile_fail/effect_resume_type_mismatch.zig",
             "effect resume type does not match its site",
         },
@@ -617,6 +678,10 @@ pub fn build(b: *std.Build) void {
         .{
             "test/compile_fail/generated_reducer_limit.zig",
             "Boundary compiler blocked program: GeneratedReducerLimitExceeded",
+        },
+        .{
+            "test/compile_fail/dead_control_schema_reference.zig",
+            "Control IR value type schema index is out of bounds",
         },
         .{
             "test/compile_fail/missing_arithmetic_failure.zig",

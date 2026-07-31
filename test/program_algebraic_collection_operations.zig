@@ -19,6 +19,8 @@ const PopResult = struct {
 };
 const Text = portable_value.Text(64);
 const Bytes = portable_value.Bytes(16);
+const SmallText = portable_value.Text(16);
+const SmallBytes = portable_value.Bytes(8);
 const AlgebraicResult = struct {
     pair: Pair,
     choice: Choice,
@@ -37,14 +39,14 @@ const AlgebraicResult = struct {
     formatted: Text,
     copied_text: Text,
     text_comparison: i8,
-    joined: Text,
+    joined: SmallText,
     text_length: u32,
     bytes: Bytes,
     copied_bytes: Bytes,
     bytes_comparison: i8,
     bytes_length: u32,
-    joined_bytes: Bytes,
-    scalar_bytes: Bytes,
+    joined_bytes: SmallBytes,
+    scalar_bytes: SmallBytes,
 };
 
 const value_types = [_]cir.ValueType{
@@ -55,10 +57,10 @@ const value_types = [_]cir.ValueType{
     .{ .scalar = .u32 }, // v4  two
     .{ .scalar = .i32 }, // v5  negative seven
     .{ .scalar = .u32 }, // v6  scalar !
-    .{ .schema = 5 }, // v7  alpha
+    .{ .schema = 8 }, // v7  alpha
     .{ .schema = 5 }, // v8  separator
     .{ .schema = 5 }, // v9  beta
-    .{ .schema = 6 }, // v10 bytes prefix
+    .{ .schema = 9 }, // v10 bytes prefix
     .{ .schema = 6 }, // v11 bytes suffix
     .{ .scalar = .u32 }, // v12 forty two
     .{ .schema = 0 }, // v13 pair
@@ -89,7 +91,7 @@ const value_types = [_]cir.ValueType{
     .{ .schema = 5 }, // v38 signed text
     .{ .schema = 5 }, // v39 copied text
     .{ .scalar = .i8 }, // v40 text comparison
-    .{ .schema = 5 }, // v41 joined text
+    .{ .schema = 8 }, // v41 joined text
     .{ .schema = 6 }, // v42 bytes empty
     .{ .schema = 6 }, // v43 bytes prefix
     .{ .schema = 6 }, // v44 bytes joined
@@ -98,8 +100,8 @@ const value_types = [_]cir.ValueType{
     .{ .scalar = .u8 }, // v47 scalar byte
     .{ .scalar = .u32 }, // v48 text length
     .{ .scalar = .u32 }, // v49 bytes length
-    .{ .schema = 6 }, // v50 joined bytes
-    .{ .schema = 6 }, // v51 scalar-appended bytes
+    .{ .schema = 9 }, // v50 joined bytes
+    .{ .schema = 9 }, // v51 scalar-appended bytes
     .{ .schema = 7 }, // v52 result
 };
 
@@ -196,10 +198,10 @@ const Body = struct {
         @as(u32, 2),
         @as(i32, -7),
         @as(u32, '!'),
-        Text.fromSlice("alpha") catch unreachable,
+        SmallText.fromSlice("alpha") catch unreachable,
         Text.fromSlice("-") catch unreachable,
         Text.fromSlice("beta") catch unreachable,
-        Bytes.fromSlice(&.{ 1, 2 }) catch unreachable,
+        SmallBytes.fromSlice(&.{ 1, 2 }) catch unreachable,
         Bytes.fromSlice(&.{3}) catch unreachable,
         @as(u32, 42),
         @as(u8, 4),
@@ -214,6 +216,8 @@ const Body = struct {
         Text,
         Bytes,
         AlgebraicResult,
+        SmallText,
+        SmallBytes,
     };
     pub const control_ir: cir.Program = .{
         .label = "algebraic-collection-operations",
@@ -282,4 +286,33 @@ test "compiled products sums optionals vectors text and bytes are first order" {
         .none => {},
         .value => return error.TestUnexpectedResult,
     }
+}
+
+test "fixed-payload optionals and sums expose variable canonical size" {
+    const OptionalLarge = ?[1024]u8;
+    const FixedSum = union(enum) {
+        empty: void,
+        large: [1024]u8,
+    };
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        portable_value.minimumEncodedSize(OptionalLarge),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1025),
+        portable_value.maximumEncodedSize(OptionalLarge),
+    );
+    try std.testing.expect(
+        portable_value.hasVariableEncodedSize(OptionalLarge),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        portable_value.minimumEncodedSize(FixedSum),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1028),
+        portable_value.maximumEncodedSize(FixedSum),
+    );
+    try std.testing.expect(portable_value.hasVariableEncodedSize(FixedSum));
 }

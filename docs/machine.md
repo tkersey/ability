@@ -58,9 +58,11 @@ response value or external effect.
 State mutation is transactional. Invalid responses, allocation failure, frame
 overflow, and state-limit failure preserve authoritative state and caller fuel.
 Pending requests expose a derived `RequestIdentity` bound to the Machine
-contract, sequence, continuation constructor, residual site, and canonical
-payload. The identity is recomputed from authoritative state before resume;
-stale, duplicate, cross-Machine, and forged responses are rejected.
+contract, sequence, complete canonical continuation stack, continuation
+constructor, residual site, and canonical payload. The continuation digest
+includes every persisted frame environment and cumulative fuel counter. The
+identity is recomputed from authoritative state before resume; stale,
+duplicate, cross-continuation, cross-Machine, and forged responses are rejected.
 
 The Machine contract digest uses canonical reachable control ordinals and
 structural portable schemas. Source block, function, value, schema, and

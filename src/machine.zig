@@ -351,10 +351,11 @@ pub fn Machine(
                 return switch (self.*) {
                     .empty => true,
                     .one => options.maximum_frames >= 1,
-                    .many => |list| list.items.len >= 2 and
+                    .many => |list| list.items.len >= 1 and
                         list.items.len <= options.maximum_frames and
                         (@sizeOf(Frame) == 0 or
-                            list.capacity == list.items.len),
+                            (list.capacity >= list.items.len and
+                                list.capacity <= options.maximum_frames)),
                 };
             }
 
@@ -441,19 +442,47 @@ pub fn Machine(
                     .many => |*list| blk: {
                         const next_length = list.items.len - 1;
                         const result = list.items[next_length];
-                        if (next_length == 1) {
-                            const first = list.items[0];
+                        if (next_length == 0) {
                             list.deinit(allocator);
-                            self.* = .{ .one = first };
+                            self.* = .empty;
                         } else {
-                            list.shrinkAndFreePrecise(
-                                allocator,
-                                next_length,
-                            ) catch return error.OutOfMemory;
+                            list.items.len = next_length;
                         }
                         break :blk result;
                     },
                 };
+            }
+
+            fn commitFrom(
+                self: *Stack,
+                allocator: std.mem.Allocator,
+                candidate: *Stack,
+            ) void {
+                switch (self.*) {
+                    .many => |*destination| switch (candidate.*) {
+                        .one => |frame| {
+                            destination.items.len = 1;
+                            destination.items[0] = frame;
+                            candidate.* = .empty;
+                            return;
+                        },
+                        .many => |*source| {
+                            if (@sizeOf(Frame) == 0 or
+                                source.items.len <= destination.capacity)
+                            {
+                                destination.items.len = source.items.len;
+                                @memcpy(destination.items, source.items);
+                                source.deinit(allocator);
+                                candidate.* = .empty;
+                                return;
+                            }
+                        },
+                        .empty => {},
+                    },
+                    .empty, .one => {},
+                }
+                self.deinit(allocator);
+                self.* = candidate.take();
             }
         };
 
@@ -462,6 +491,10 @@ pub fn Machine(
             sequence: u64 = 0,
             cumulative_fuel: u64 = 0,
             frames: FrameStack,
+            // Derived from canonical state bytes when the top frame is parked.
+            // This cache is private live-state acceleration, never authority
+            // and never part of ABL_RNF2 encoding or Machine identity.
+            request_identity: ?RequestIdentity = null,
             terminal: bool = false,
         };
 
@@ -481,6 +514,7 @@ pub fn Machine(
             site_ordinal: u32,
             effect_site_digest: [32]u8,
             payload_digest: [32]u8,
+            continuation_digest: [32]u8,
             digest: [32]u8,
         };
 
@@ -492,6 +526,19 @@ pub fn Machine(
             value: Definition.Request,
             identity: RequestIdentity,
         };
+
+        const PreparedResumeValue = struct {
+            allocator: std.mem.Allocator,
+            state: State,
+            request: Request,
+            candidate: StoredState,
+            consumed: bool = false,
+        };
+
+        const PreparedResumeStorage = opaque {};
+        /// Opaque owner for a validated pending request and its preallocated
+        /// candidate state. Deinitialize it on every path.
+        pub const PreparedResume = *PreparedResumeStorage;
 
         /// Heap owner for one completed result.
         pub const OwnedResult = struct {
@@ -541,6 +588,10 @@ pub fn Machine(
             return @ptrCast(@alignCast(state));
         }
 
+        fn prepared(prepared_resume: PreparedResume) *PreparedResumeValue {
+            return @ptrCast(@alignCast(prepared_resume));
+        }
+
         fn own(allocator: std.mem.Allocator, value: *StoredState) Error!State {
             const result = allocator.create(StoredState) catch return error.OutOfMemory;
             result.* = value.*;
@@ -578,35 +629,27 @@ pub fn Machine(
         }
 
         fn canonicalPayloadDigest(
-            allocator: std.mem.Allocator,
             request_value: RequestValue,
         ) Error![32]u8 {
             if (RequestValue == void) return error.ProgramContractViolation;
-            const required = portable_value.unionPayloadEncodedSize(
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            portable_value.updateUnionPayloadCanonicalHash(
                 RequestValue,
                 request_value,
+                &hasher,
             ) catch return error.ProgramContractViolation;
-            const bytes = allocator.alloc(u8, required) catch
-                return error.OutOfMemory;
-            defer allocator.free(bytes);
-            const written = portable_value.encodeUnionPayload(
-                RequestValue,
-                request_value,
-                bytes,
-            ) catch return error.ProgramContractViolation;
-            if (written != required) return error.ProgramContractViolation;
             var result: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});
+            hasher.final(&result);
             return result;
         }
 
         fn requestIdentity(
-            allocator: std.mem.Allocator,
-            sequence: u64,
-            constructor_id: u32,
+            value: *const StoredState,
             request_value: RequestValue,
         ) Error!RequestIdentity {
             if (RequestValue == void) return error.ProgramContractViolation;
+            const sequence = value.sequence;
+            const constructor_id = try frameId(try top(value));
             const site_ordinal = portable_value.unionTag(
                 RequestValue,
                 request_value,
@@ -614,21 +657,20 @@ pub fn Machine(
             if (site_ordinal >= Definition.EffectRow.operation_site_count) {
                 return error.ProgramContractViolation;
             }
-            const payload_digest = try canonicalPayloadDigest(
-                allocator,
-                request_value,
-            );
+            const payload_digest = try canonicalPayloadDigest(request_value);
+            const continuation_digest = try canonicalContinuationDigest(value);
             const effect_site_digest = Definition.requestSiteDigest(
                 request_value,
             );
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-            hasher.update("boundary-request-identity-v1\x00");
+            hasher.update("boundary-request-identity-v2\x00");
             hasher.update(&digest);
             hashRequestInteger(&hasher, u64, sequence);
             hashRequestInteger(&hasher, u32, constructor_id);
             hashRequestInteger(&hasher, u32, site_ordinal);
             hasher.update(&effect_site_digest);
             hasher.update(&payload_digest);
+            hasher.update(&continuation_digest);
             var identity_digest: [32]u8 = undefined;
             hasher.final(&identity_digest);
             return .{
@@ -638,6 +680,7 @@ pub fn Machine(
                 .site_ordinal = site_ordinal,
                 .effect_site_digest = effect_site_digest,
                 .payload_digest = payload_digest,
+                .continuation_digest = continuation_digest,
                 .digest = identity_digest,
             };
         }
@@ -664,6 +707,11 @@ pub fn Machine(
                     &left.payload_digest,
                     &right.payload_digest,
                 ) and
+                std.mem.eql(
+                    u8,
+                    &left.continuation_digest,
+                    &right.continuation_digest,
+                ) and
                 std.mem.eql(u8, &left.digest, &right.digest);
         }
 
@@ -675,35 +723,73 @@ pub fn Machine(
             ) catch return error.ProgramContractViolation;
         }
 
-        fn makeRequest(
-            allocator: std.mem.Allocator,
-            sequence: u64,
-            constructor_id: u32,
+        fn refreshCurrentRequest(
+            value: *StoredState,
             request_value: RequestValue,
         ) Error!Request {
-            return .{
-                .sequence = sequence,
+            const constructor_id = try frameId(try top(value));
+            const identity = try requestIdentity(value, request_value);
+            value.request_identity = identity;
+            return Request{
+                .sequence = value.sequence,
                 .constructor_id = constructor_id,
                 .value = request_value,
-                .identity = try requestIdentity(
-                    allocator,
-                    sequence,
-                    constructor_id,
-                    request_value,
-                ),
+                .identity = identity,
             };
         }
 
         fn currentFrom(value: *const StoredState) Error!?Request {
             if (value.terminal) return error.ProgramContractViolation;
+            if (comptime RequestValue == void) return null;
             const frame = try top(value);
             const request_value = Definition.current(frame) orelse return null;
-            return try makeRequest(
-                value.allocator,
-                value.sequence,
-                try frameId(frame),
+            try validateRequestValue(request_value);
+            const constructor_id = try frameId(frame);
+            const site_ordinal = portable_value.unionTag(
+                RequestValue,
                 request_value,
-            );
+            ) catch return error.ProgramContractViolation;
+            if (site_ordinal >= Definition.EffectRow.operation_site_count) {
+                return error.ProgramContractViolation;
+            }
+            const identity = value.request_identity orelse
+                return error.ProgramContractViolation;
+            if (!std.mem.eql(
+                u8,
+                &identity.machine_contract_digest,
+                &digest,
+            ) or
+                identity.sequence != value.sequence or
+                identity.constructor_id != constructor_id or
+                identity.site_ordinal != site_ordinal or
+                !std.mem.eql(
+                    u8,
+                    &identity.effect_site_digest,
+                    &Definition.requestSiteDigest(request_value),
+                ))
+            {
+                return error.ProgramContractViolation;
+            }
+            return Request{
+                .sequence = value.sequence,
+                .constructor_id = constructor_id,
+                .value = request_value,
+                .identity = identity,
+            };
+        }
+
+        fn refreshRequestCache(value: *StoredState) Error!void {
+            if (value.terminal) return error.ProgramContractViolation;
+            if (comptime RequestValue == void) {
+                value.request_identity = null;
+                return;
+            }
+            const frame = try top(value);
+            const request_value = Definition.current(frame) orelse {
+                value.request_identity = null;
+                return;
+            };
+            _ = try refreshCurrentRequest(value, request_value);
         }
 
         fn stateSize(value: *const StoredState) Error!usize {
@@ -719,6 +805,108 @@ pub fn Machine(
                 ) catch return error.ProgramContractViolation;
             }
             return total;
+        }
+
+        fn maximumResumeStateSize(
+            value: *const StoredState,
+            request: Request,
+        ) Error!usize {
+            const frame = try top(value);
+            const current_payload_size =
+                try portable_value.unionPayloadEncodedSize(Frame, frame);
+            const maximum_next_payload_size =
+                if (comptime hasDeclSafe(
+                    Definition,
+                    "maximumResumeFramePayloadSize",
+                ))
+                    Definition.maximumResumeFramePayloadSize(
+                        frame,
+                        request.value,
+                    ) catch return error.ProgramContractViolation
+                else
+                    comptime portable_value.maximumUnionPayloadSize(Frame);
+            const without_current_payload = std.math.sub(
+                usize,
+                try stateSize(value),
+                current_payload_size,
+            ) catch return error.ProgramContractViolation;
+            return std.math.add(
+                usize,
+                without_current_payload,
+                maximum_next_payload_size,
+            ) catch return error.ProgramContractViolation;
+        }
+
+        fn writeCanonicalState(
+            value: *const StoredState,
+            output: []u8,
+        ) Error!void {
+            const required = try stateSize(value);
+            if (output.len != required) return error.ProgramContractViolation;
+            var writer: ByteWriter = .{ .bytes = output };
+            writer.write(state_magic);
+            writer.writeInt(u16, state_format_version);
+            writer.writeInt(u16, machine_abi_version);
+            writer.write(&digest);
+            writer.writeInt(u64, value.sequence);
+            writer.writeInt(u64, value.cumulative_fuel);
+            writer.writeInt(u32, @intCast(value.frames.len()));
+            writer.writeInt(u32, 0);
+            for (value.frames.slice()) |frame| {
+                const environment_length =
+                    try portable_value.unionPayloadEncodedSize(Frame, frame);
+                writer.writeInt(u32, try frameId(frame));
+                writer.writeInt(u32, @intCast(environment_length));
+                const written = portable_value.encodeUnionPayload(
+                    Frame,
+                    frame,
+                    output[writer.index..][0..environment_length],
+                ) catch return error.ProgramContractViolation;
+                if (written != environment_length) {
+                    return error.ProgramContractViolation;
+                }
+                writer.index += written;
+            }
+            if (writer.index != output.len) {
+                return error.ProgramContractViolation;
+            }
+        }
+
+        fn canonicalContinuationDigest(
+            value: *const StoredState,
+        ) Error![32]u8 {
+            _ = try stateSize(value);
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(state_magic);
+            hashRequestInteger(&hasher, u16, state_format_version);
+            hashRequestInteger(&hasher, u16, machine_abi_version);
+            hasher.update(&digest);
+            hashRequestInteger(&hasher, u64, value.sequence);
+            hashRequestInteger(&hasher, u64, value.cumulative_fuel);
+            hashRequestInteger(
+                &hasher,
+                u32,
+                @intCast(value.frames.len()),
+            );
+            hashRequestInteger(&hasher, u32, 0);
+            for (value.frames.slice()) |frame| {
+                const environment_length =
+                    try portable_value.unionPayloadEncodedSize(Frame, frame);
+                hashRequestInteger(&hasher, u32, try frameId(frame));
+                hashRequestInteger(
+                    &hasher,
+                    u32,
+                    @intCast(environment_length),
+                );
+                portable_value.updateUnionPayloadCanonicalHash(
+                    Frame,
+                    frame,
+                    &hasher,
+                ) catch return error.ProgramContractViolation;
+            }
+            var result: [32]u8 = undefined;
+            hasher.final(&result);
+            return result;
         }
 
         fn validate(value: *const StoredState) Error!void {
@@ -748,9 +936,15 @@ pub fn Machine(
 
         fn commit(state: State, candidate: *StoredState) void {
             const destination = stored(state);
-            destination.frames.deinit(destination.allocator);
-            destination.* = candidate.*;
-            destination.frames = candidate.frames.take();
+            destination.frames.commitFrom(
+                destination.allocator,
+                &candidate.frames,
+            );
+            destination.allocator = candidate.allocator;
+            destination.sequence = candidate.sequence;
+            destination.cumulative_fuel = candidate.cumulative_fuel;
+            destination.request_identity = candidate.request_identity;
+            destination.terminal = candidate.terminal;
         }
 
         /// Construct the initial nonempty continuation stack.
@@ -767,6 +961,7 @@ pub fn Machine(
             };
             errdefer value.frames.deinit(allocator);
             try validate(&value);
+            try refreshRequestCache(&value);
             return own(allocator, &value);
         }
 
@@ -798,6 +993,109 @@ pub fn Machine(
                 error.ProgramContractViolation;
         }
 
+        fn validatePendingRequest(
+            value: *const StoredState,
+            request: Request,
+        ) Error!void {
+            try validateRequestValue(request.value);
+            const expected = (try currentFrom(value)) orelse
+                return error.ProgramContractViolation;
+            if (expected.sequence != request.sequence or
+                expected.constructor_id != request.constructor_id or
+                !requestIdentityEql(expected.identity, request.identity) or
+                !Definition.requestEql(expected.value, request.value))
+            {
+                return error.ProgramContractViolation;
+            }
+        }
+
+        fn pendingRequestStillMatches(
+            value: *const StoredState,
+            request: Request,
+        ) Error!void {
+            try validate(value);
+            const frame = try top(value);
+            const request_value = Definition.current(frame) orelse
+                return error.ProgramContractViolation;
+            const current_request = (try currentFrom(value)) orelse
+                return error.ProgramContractViolation;
+            if (current_request.sequence != request.sequence or
+                current_request.constructor_id != request.constructor_id or
+                !requestIdentityEql(
+                    current_request.identity,
+                    request.identity,
+                ) or
+                !Definition.requestEql(request_value, request.value))
+            {
+                return error.ProgramContractViolation;
+            }
+        }
+
+        /// Validate one request and allocate its complete candidate state
+        /// before external handler authority is invoked.
+        pub fn prepareResume(
+            state: State,
+            request: Request,
+        ) Error!PreparedResume {
+            const original = storedConst(state);
+            try validate(original);
+            try validatePendingRequest(original, request);
+            if (try maximumResumeStateSize(original, request) >
+                options.maximum_state_bytes)
+            {
+                return error.ProgramContractViolation;
+            }
+
+            const value = original.allocator.create(PreparedResumeValue) catch
+                return error.OutOfMemory;
+            errdefer original.allocator.destroy(value);
+            value.* = .{
+                .allocator = original.allocator,
+                .state = state,
+                .request = request,
+                .candidate = original.*,
+            };
+            value.candidate.frames = .empty;
+            value.candidate.frames =
+                try original.frames.clone(original.allocator);
+            return @ptrCast(value);
+        }
+
+        /// Release a prepared resume that was committed or abandoned.
+        pub fn deinitPreparedResume(
+            prepared_resume: PreparedResume,
+        ) void {
+            const value = prepared(prepared_resume);
+            value.candidate.frames.deinit(value.allocator);
+            value.allocator.destroy(value);
+        }
+
+        /// Apply one typed response to an already allocated candidate and
+        /// commit it without further allocation.
+        pub fn commitPreparedResume(
+            prepared_resume: PreparedResume,
+            response: anytype,
+        ) Error!void {
+            const value = prepared(prepared_resume);
+            if (value.consumed) return error.ProgramContractViolation;
+            const original = storedConst(value.state);
+            try pendingRequestStillMatches(original, value.request);
+
+            const next_frame = Definition.@"resume"(
+                try top(&value.candidate),
+                value.request.value,
+                response,
+            ) catch return error.ProgramContractViolation;
+            value.candidate.request_identity = null;
+            try setTop(&value.candidate, next_frame);
+            try validate(&value.candidate);
+            if (Definition.current(try top(&value.candidate)) != null) {
+                return error.ProgramContractViolation;
+            }
+            commit(value.state, &value.candidate);
+            value.consumed = true;
+        }
+
         fn commitYield(
             state: State,
             candidate: *StoredState,
@@ -819,6 +1117,7 @@ pub fn Machine(
             var candidate = original.*;
             candidate.frames = try original.frames.clone(original.allocator);
             defer candidate.frames.deinit(candidate.allocator);
+            candidate.request_identity = null;
             var remaining_fuel = caller_fuel.*;
 
             while (true) {
@@ -916,10 +1215,8 @@ pub fn Machine(
                             1,
                         ) catch return error.ProgramContractViolation;
                         try validate(&candidate);
-                        const outcome_request = try makeRequest(
-                            candidate.allocator,
-                            candidate.sequence,
-                            try frameId(request.awaiting),
+                        const outcome_request = try refreshCurrentRequest(
+                            &candidate,
                             request.request,
                         );
                         const reconstructed = (try currentFrom(&candidate)) orelse
@@ -969,33 +1266,9 @@ pub fn Machine(
             request: Request,
             response: anytype,
         ) Error!void {
-            const original = storedConst(state);
-            try validate(original);
-            try validateRequestValue(request.value);
-            const expected = (try currentFrom(original)) orelse
-                return error.ProgramContractViolation;
-            if (expected.sequence != request.sequence or
-                expected.constructor_id != request.constructor_id or
-                !requestIdentityEql(expected.identity, request.identity) or
-                !Definition.requestEql(expected.value, request.value))
-            {
-                return error.ProgramContractViolation;
-            }
-
-            var candidate = original.*;
-            candidate.frames = try original.frames.clone(original.allocator);
-            defer candidate.frames.deinit(candidate.allocator);
-            const next_frame = Definition.@"resume"(
-                try top(&candidate),
-                request.value,
-                response,
-            ) catch return error.ProgramContractViolation;
-            try setTop(&candidate, next_frame);
-            try validate(&candidate);
-            if (try currentFrom(&candidate) != null) {
-                return error.ProgramContractViolation;
-            }
-            commit(state, &candidate);
+            const prepared_resume = try prepareResume(state, request);
+            defer deinitPreparedResume(prepared_resume);
+            try commitPreparedResume(prepared_resume, response);
         }
 
         /// Validate one live, nonterminal state without advancing.
@@ -1014,31 +1287,7 @@ pub fn Machine(
             const bytes = allocator.alloc(u8, required) catch
                 return error.OutOfMemory;
             errdefer allocator.free(bytes);
-            var writer: ByteWriter = .{ .bytes = bytes };
-            writer.write(state_magic);
-            writer.writeInt(u16, state_format_version);
-            writer.writeInt(u16, machine_abi_version);
-            writer.write(&digest);
-            writer.writeInt(u64, value.sequence);
-            writer.writeInt(u64, value.cumulative_fuel);
-            writer.writeInt(u32, value.frames.len());
-            writer.writeInt(u32, 0);
-            for (value.frames.slice()) |frame| {
-                const environment_length = try portable_value.unionPayloadEncodedSize(
-                    Frame,
-                    frame,
-                );
-                writer.writeInt(u32, try frameId(frame));
-                writer.writeInt(u32, @intCast(environment_length));
-                const written = try portable_value.encodeUnionPayload(
-                    Frame,
-                    frame,
-                    bytes[writer.index..][0..environment_length],
-                );
-                if (written != environment_length) return error.ProgramContractViolation;
-                writer.index += written;
-            }
-            if (writer.index != bytes.len) return error.ProgramContractViolation;
+            try writeCanonicalState(value, bytes);
             return bytes;
         }
 
@@ -1068,6 +1317,14 @@ pub fn Machine(
             {
                 return error.ProgramContractViolation;
             }
+            const minimum_frame_bytes = std.math.mul(
+                usize,
+                @intCast(frame_count),
+                8,
+            ) catch return error.ProgramContractViolation;
+            if (minimum_frame_bytes > bytes.len - reader.index) {
+                return error.ProgramContractViolation;
+            }
 
             var frames = try FrameStack.initUninitialized(
                 allocator,
@@ -1095,6 +1352,7 @@ pub fn Machine(
             frames = .empty;
             errdefer value.frames.deinit(allocator);
             try validate(&value);
+            try refreshRequestCache(&value);
             return own(allocator, &value);
         }
     };
@@ -1643,6 +1901,77 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     try std.testing.expectEqual(@as(u32, 5), done.value().*);
 }
 
+test "request identity binds the complete canonical continuation" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    const first_state = try TestMachine.initialState(std.testing.allocator, 3);
+    defer TestMachine.deinitState(first_state);
+    var fuel: u64 = 10;
+    const first_request = switch (try TestMachine.step(first_state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const first_bytes = try TestMachine.encodeState(
+        std.testing.allocator,
+        first_state,
+    );
+    defer std.testing.allocator.free(first_bytes);
+    var expected_continuation_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(
+        first_bytes,
+        &expected_continuation_digest,
+        .{},
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected_continuation_digest,
+        &first_request.identity.continuation_digest,
+    );
+    const second_bytes = try std.testing.allocator.dupe(u8, first_bytes);
+    defer std.testing.allocator.free(second_bytes);
+    std.mem.writeInt(
+        u32,
+        second_bytes[state_header_length + 8 + 4 ..][0..4],
+        1,
+        .little,
+    );
+    const second_state = try TestMachine.decodeState(
+        std.testing.allocator,
+        second_bytes,
+    );
+    defer TestMachine.deinitState(second_state);
+    const second_request = try TestMachine.current(second_state);
+
+    try std.testing.expect(TestDefinition.requestEql(
+        first_request.value,
+        second_request.value,
+    ));
+    try std.testing.expectEqual(first_request.sequence, second_request.sequence);
+    try std.testing.expectEqual(
+        first_request.constructor_id,
+        second_request.constructor_id,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &first_request.identity.continuation_digest,
+        &second_request.identity.continuation_digest,
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &first_request.identity.digest,
+        &second_request.identity.digest,
+    ));
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        TestMachine.@"resume"(second_state, first_request, @as(u32, 4)),
+    );
+    try TestMachine.@"resume"(second_state, second_request, @as(u32, 4));
+}
+
 test "live frame storage scales with logical frames, not maximum capacity" {
     const LargeFrameMachine = Machine(LargeFrameDefinition, .{
         .maximum_frames = 64,
@@ -1722,7 +2051,7 @@ test "Machine validates untrusted request payloads before equality" {
     ));
 }
 
-test "Machine candidate allocation failure preserves state and caller fuel" {
+test "Machine request identity hashing does not allocate" {
     const TestMachine = Machine(TestDefinition, .{
         .maximum_frames = 4,
         .maximum_state_bytes = 4096,
@@ -1739,21 +2068,62 @@ test "Machine candidate allocation failure preserves state and caller fuel" {
     var caller_fuel: u64 = 8;
 
     failing.fail_index = failing.allocations;
+    const request = switch (try TestMachine.step(state, &caller_fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u64, 7), caller_fuel);
+    const after = try TestMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expect(!std.mem.eql(u8, before, after));
+    const current = try TestMachine.current(state);
+    try std.testing.expect(TestDefinition.requestEql(
+        request.value,
+        current.value,
+    ));
+    try std.testing.expectEqualSlices(
+        u8,
+        &request.identity.digest,
+        &current.identity.digest,
+    );
+}
+
+test "Machine prepared resume allocation failure preserves pending state" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const state = try TestMachine.initialState(failing.allocator(), 3);
+    defer TestMachine.deinitState(state);
+    var caller_fuel: u64 = 8;
+    const request = switch (try TestMachine.step(state, &caller_fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const before = try TestMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+
+    failing.fail_index = failing.allocations;
     try std.testing.expectError(
         error.OutOfMemory,
-        TestMachine.step(state, &caller_fuel),
+        TestMachine.prepareResume(state, request),
     );
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expectEqual(@as(u64, 8), caller_fuel);
     const after = try TestMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
-
-    failing.fail_index = std.math.maxInt(usize);
-    switch (try TestMachine.step(state, &caller_fuel)) {
-        .request => {},
-        else => return error.TestUnexpectedResult,
-    }
+    const current = try TestMachine.current(state);
+    try std.testing.expectEqualSlices(
+        u8,
+        &request.identity.digest,
+        &current.identity.digest,
+    );
 }
 
 test "Machine terminal result allocation failure is retryable" {
@@ -2129,6 +2499,38 @@ test "ABL_RNF2 decode rejects wrong identity constructor truncation and trailing
     try std.testing.expectError(
         error.ProgramContractViolation,
         TestMachine.decodeState(std.testing.allocator, &forged),
+    );
+}
+
+test "ABL_RNF2 decode rejects impossible frame count before allocation" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    const state = try TestMachine.initialState(std.testing.allocator, 7);
+    defer TestMachine.deinitState(state);
+    const encoded = try TestMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    var forged: [4096]u8 = undefined;
+    @memcpy(forged[0..encoded.len], encoded);
+    const frame_count_offset = state_magic.len + 2 + 2 + 32 + 8 + 8;
+    std.mem.writeInt(
+        u32,
+        forged[frame_count_offset..][0..4],
+        TestMachine.Manifest.maximum_frames,
+        .little,
+    );
+
+    var no_storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_storage);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        TestMachine.decodeState(
+            fixed.allocator(),
+            forged[0..encoded.len],
+        ),
     );
 }
 

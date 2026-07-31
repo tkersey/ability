@@ -9,6 +9,14 @@ applies only the focused measurement patch in this directory, and builds both
 implementations with the invoking Zig toolchain. No Boundary v0 runtime source
 or executable path is retained in the Boundary 1.0 package.
 
+This historical comparison is a release-owner proof and must run from a tagged
+Boundary source checkout whose repository root contains local `.git` metadata
+and the reviewed `v0.7.0` tag. An extracted package or dependency-cache copy
+intentionally fails with an explicit checkout diagnostic; it cannot establish
+the immutable baseline identity. Package consumers can run the focused
+nonhistorical Machine, RNF, codec, malformed-state, and native/WASM parity
+gates without claiming this release comparison.
+
 The paired one-effect witness measures:
 
 - median native initial-state-to-request lifecycle time over five samples;
@@ -36,5 +44,5 @@ zig build check-boundary-machine-performance-falsifiers
 ```
 
 The falsifier step proves that exact limits pass and one-unit regressions fail.
-The comparison is a release proof, not a second reducer or compatibility
-runtime.
+The comparison is a mandatory release proof, not a second reducer or
+compatibility runtime and not a package-consumer compatibility requirement.

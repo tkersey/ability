@@ -61,6 +61,156 @@ const CompiledMachine = Program.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+const helper_call_arguments = [_]cir.EdgeArgument{.{ .value = 0 }};
+const helper_return_arguments = [_]cir.EdgeArgument{.@"resume"};
+const helper_effect_arguments = [_]cir.EdgeArgument{.@"resume"};
+const helper_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 1,
+                .arguments = &helper_call_arguments,
+            },
+            .continuation = .{
+                .target = 3,
+                .arguments = &helper_return_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 1,
+        .function_id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{1},
+            .continuation = .{
+                .target = 2,
+                .arguments = &helper_effect_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .function_id = 1,
+        .parameters = &.{2},
+        .terminator = .{ .return_to_caller = 2 },
+    },
+    .{
+        .id = 3,
+        .role = .terminal_handoff,
+        .parameters = &.{3},
+        .terminator = .{ .return_value = 3 },
+    },
+};
+
+const HelperEffectBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum {
+        rejected,
+    };
+    pub const constants = .{};
+    pub const effect_sites = .{Lookup};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "helper-effect-resume-transaction",
+        .value_types = &.{ u32_type, u32_type, u32_type, u32_type },
+        .blocks = &helper_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+        .functions = &.{
+            .{
+                .id = 0,
+                .entry = 0,
+                .result_type = u32_type,
+            },
+            .{
+                .id = 1,
+                .entry = 1,
+                .result_type = u32_type,
+            },
+        },
+    };
+};
+
+const HelperEffectMachine = program_v2.program(
+    "helper-effect-resume-transaction",
+    HelperEffectBody,
+).compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+const LargeResponse = ?[512]u8;
+
+const LargeLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity = "test.large-lookup.v1";
+    pub const Payload = u32;
+    pub const Resume = LargeResponse;
+};
+
+const large_response_arguments = [_]cir.EdgeArgument{.@"resume"};
+const large_response_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 1,
+                .arguments = &large_response_arguments,
+            },
+            .resume_type = .{ .schema = 0 },
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .return_value = 1 },
+    },
+};
+
+const LargeResponseBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = LargeResponse;
+    pub const Failure = enum {
+        rejected,
+    };
+    pub const effect_sites = .{LargeLookup};
+    pub const schema_types = .{LargeResponse};
+    pub const control_ir: cir.Program = .{
+        .label = "large-response-state-preflight",
+        .value_types = &.{
+            .{ .scalar = .u32 },
+            .{ .schema = 0 },
+        },
+        .blocks = &large_response_blocks,
+        .entry = 0,
+        .result_type = .{ .schema = 0 },
+    };
+};
+
+const LargeResponseMachine = program_v2.program(
+    "large-response-state-preflight",
+    LargeResponseBody,
+).compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 128,
+    .maximum_machine_fuel = 32,
+});
+
 fn identityBody(
     comptime constant_value: u32,
     comptime ignored_contract_bytes: []const u8,
@@ -371,4 +521,102 @@ test "Driver returns the exact pending request and retries handler errors" {
     defer done.deinit();
     try std.testing.expectEqual(@as(u8, 2), handler.attempts);
     try std.testing.expectEqual(@as(u32, 18), done.value().*);
+}
+
+test "Driver allocates a multi-frame resume before invoking its handler" {
+    const LocalDriver = driver.Driver(HelperEffectMachine);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    var local = try LocalDriver.init(failing.allocator(), 9);
+    defer local.deinit();
+
+    var fuel: u64 = 8;
+    const request = switch (try HelperEffectMachine.step(
+        local.state,
+        &fuel,
+    )) {
+        .request => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var handler = struct {
+        attempts: u8 = 0,
+
+        pub fn handle(
+            self: *@This(),
+            comptime tag: anytype,
+            payload: anytype,
+        ) !switch (tag) {
+            .s0 => u32,
+        } {
+            self.attempts += 1;
+            return payload * 2;
+        }
+    }{};
+
+    // prepareResume first allocates its owner, then clones the multi-frame
+    // stack. Fail that clone so no handler authority has been invoked.
+    failing.fail_index = failing.allocations + 1;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        local.run(&handler, &fuel),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u8, 0), handler.attempts);
+    failing.fail_index = std.math.maxInt(usize);
+    const parked = try HelperEffectMachine.current(local.state);
+    try std.testing.expectEqualSlices(
+        u8,
+        &request.identity.digest,
+        &parked.identity.digest,
+    );
+
+    const done = switch (try local.run(&handler, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u8, 1), handler.attempts);
+    try std.testing.expectEqual(@as(u32, 18), done.value().*);
+}
+
+test "Driver preflights the complete response state before handler authority" {
+    const LocalDriver = driver.Driver(LargeResponseMachine);
+    var local = try LocalDriver.init(std.testing.allocator, 9);
+    defer local.deinit();
+    var handler = struct {
+        attempts: u8 = 0,
+
+        pub fn handle(
+            self: *@This(),
+            comptime tag: anytype,
+            _: anytype,
+        ) !switch (tag) {
+            .s0 => LargeResponse,
+        } {
+            self.attempts += 1;
+            return null;
+        }
+    }{};
+
+    var fuel: u64 = 8;
+    const request = switch (try LargeResponseMachine.step(
+        local.state,
+        &fuel,
+    )) {
+        .request => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        local.run(&handler, &fuel),
+    );
+    try std.testing.expectEqual(@as(u8, 0), handler.attempts);
+    const parked = try LargeResponseMachine.current(local.state);
+    try std.testing.expectEqualSlices(
+        u8,
+        &request.identity.digest,
+        &parked.identity.digest,
+    );
 }

@@ -54,6 +54,14 @@ pub fn Driver(comptime Machine: type) type {
                     }
                     switch (request.value) {
                         inline else => |payload, tag| {
+                            const prepared_resume =
+                                try Machine.prepareResume(
+                                    self.state,
+                                    request,
+                                );
+                            defer Machine.deinitPreparedResume(
+                                prepared_resume,
+                            );
                             const response = handlers.handle(
                                 tag,
                                 payload,
@@ -61,9 +69,8 @@ pub fn Driver(comptime Machine: type) type {
                                 .request = request,
                                 .err = err,
                             } };
-                            try Machine.@"resume"(
-                                self.state,
-                                request,
+                            try Machine.commitPreparedResume(
+                                prepared_resume,
                                 response,
                             );
                         },

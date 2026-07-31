@@ -369,7 +369,12 @@ pub fn assertPortable(comptime T: type) void {
                 @compileError("Boundary Machine integers must be explicit i8/i16/i32/i64 or u8/u16/u32/u64");
             }
         },
-        .array => |info| assertPortable(info.child),
+        .array => |info| {
+            if (info.sentinel() != null) {
+                @compileError("Boundary Machine portable arrays cannot have sentinels");
+            }
+            assertPortable(info.child);
+        },
         .optional => |info| assertPortable(info.child),
         .@"enum" => |info| {
             if (!info.is_exhaustive) {
@@ -399,9 +404,11 @@ pub fn assertPortable(comptime T: type) void {
 /// Compare canonical value semantics without observing spare bounded storage.
 pub fn eqlValue(comptime T: type, left: T, right: T) bool {
     comptime assertPortable(T);
+    if (comptime maximumEncodedSize(T) == 0) return true;
     if (comptime isBytes(T) or isText(T)) return left.eql(&right);
     if (comptime isVector(T)) {
         if (left.logical_length != right.logical_length) return false;
+        if (comptime maximumEncodedSize(T.ElementType) == 0) return true;
         for (left.slice(), right.slice()) |left_item, right_item| {
             if (!eqlValue(T.ElementType, left_item, right_item)) return false;
         }
@@ -560,6 +567,7 @@ fn checkedAdd(left: usize, right: usize) Error!usize {
 /// Compute the exact canonical encoded size of one validated value.
 pub fn encodedSize(comptime T: type, value: T) Error!usize {
     comptime assertPortable(T);
+    if (comptime maximumEncodedSize(T) == 0) return 0;
     if (comptime isBytes(T)) {
         if (value.logical_length > T.maximum_length) return error.Malformed;
         return checkedAdd(4, @intCast(value.logical_length));
@@ -638,6 +646,43 @@ fn multiplyMaximum(comptime left: usize, comptime right: usize) usize {
     return left * right;
 }
 
+/// Compute the minimum canonical encoded size from portable value semantics.
+pub fn minimumEncodedSize(comptime T: type) usize {
+    @setEvalBranchQuota(1_000_000);
+    comptime assertPortable(T);
+    if (comptime isBytes(T) or isText(T) or isVector(T)) return 4;
+    return switch (@typeInfo(T)) {
+        .void => 0,
+        .bool => 1,
+        .int => |info| @divExact(info.bits, 8),
+        .array => |info| multiplyMaximum(
+            info.len,
+            minimumEncodedSize(info.child),
+        ),
+        .optional => 1,
+        .@"enum" => 4,
+        .@"struct" => |info| blk: {
+            comptime var total: usize = 0;
+            inline for (info.fields) |field| {
+                total = addMaximum(total, minimumEncodedSize(field.type));
+            }
+            break :blk total;
+        },
+        .@"union" => |info| blk: {
+            comptime var minimum: ?usize = null;
+            inline for (info.fields) |field| {
+                const field_minimum = comptime minimumEncodedSize(field.type);
+                minimum = if (minimum) |current|
+                    @min(current, field_minimum)
+                else
+                    field_minimum;
+            }
+            break :blk addMaximum(4, minimum orelse 0);
+        },
+        else => unreachable,
+    };
+}
+
 /// Compute the maximum canonical encoded size from contract-bearing bounds.
 pub fn maximumEncodedSize(comptime T: type) usize {
     @setEvalBranchQuota(1_000_000);
@@ -672,12 +717,19 @@ pub fn maximumEncodedSize(comptime T: type) usize {
         .@"union" => |info| blk: {
             comptime var maximum: usize = 0;
             inline for (info.fields) |field| {
-                maximum = @max(maximum, maximumEncodedSize(field.type));
+                const field_maximum =
+                    comptime maximumEncodedSize(field.type);
+                maximum = @max(maximum, field_maximum);
             }
             break :blk addMaximum(4, maximum);
         },
         else => unreachable,
     };
+}
+
+/// Report whether logical values of one type can have different encoded sizes.
+pub fn hasVariableEncodedSize(comptime T: type) bool {
+    return minimumEncodedSize(T) != maximumEncodedSize(T);
 }
 
 const Writer = struct {
@@ -696,11 +748,26 @@ const Writer = struct {
     }
 };
 
+const HashWriter = struct {
+    hasher: *std.crypto.hash.sha2.Sha256,
+
+    fn write(self: *HashWriter, value: []const u8) void {
+        self.hasher.update(value);
+    }
+
+    fn writeInt(self: *HashWriter, comptime T: type, value: T) void {
+        var bytes: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
+        std.mem.writeInt(T, &bytes, value, .little);
+        self.write(&bytes);
+    }
+};
+
 fn enumToU32(value: anytype) Error!u32 {
     return std.math.cast(u32, @intFromEnum(value)) orelse error.InvalidTag;
 }
 
-fn encodeInto(comptime T: type, value: T, writer: *Writer) Error!void {
+fn encodeInto(comptime T: type, value: T, writer: anytype) Error!void {
+    if (comptime maximumEncodedSize(T) == 0) return;
     if (comptime isBytes(T) or isText(T)) {
         writer.writeInt(u32, value.logical_length);
         writer.write(value.slice());
@@ -754,6 +821,17 @@ pub fn encode(comptime T: type, value: T, output: []u8) Error!usize {
     return writer.index;
 }
 
+/// Add one value's exact canonical encoding to a SHA-256 stream.
+pub fn updateCanonicalHash(
+    comptime T: type,
+    value: T,
+    hasher: *std.crypto.hash.sha2.Sha256,
+) Error!void {
+    _ = try encodedSize(T, value);
+    var writer: HashWriter = .{ .hasher = hasher };
+    try encodeInto(T, value, &writer);
+}
+
 const Reader = struct {
     bytes: []const u8,
     index: usize = 0,
@@ -782,6 +860,7 @@ fn enumFromU32(comptime T: type, value: u32) Error!T {
 }
 
 fn decodeFrom(comptime T: type, reader: *Reader) Error!T {
+    if (comptime maximumEncodedSize(T) == 0) return std.mem.zeroes(T);
     if (comptime isBytes(T)) {
         const length = try reader.readInt(u32);
         if (length > T.maximum_length) return error.CapacityExceeded;
@@ -869,6 +948,29 @@ pub fn unionPayloadEncodedSize(comptime T: type, value: T) Error!usize {
     inline for (info.@"union".fields) |field| {
         if (active == @field(Tag, field.name)) {
             return encodedSize(field.type, @field(value, field.name));
+        }
+    }
+    return error.InvalidTag;
+}
+
+/// Add only the active tagged-union payload's canonical bytes to a SHA-256
+/// stream. The caller owns the separately framed constructor or site tag.
+pub fn updateUnionPayloadCanonicalHash(
+    comptime T: type,
+    value: T,
+    hasher: *std.crypto.hash.sha2.Sha256,
+) Error!void {
+    _ = try unionPayloadEncodedSize(T, value);
+    const info = @typeInfo(T).@"union";
+    const Tag = info.tag_type.?;
+    const active = std.meta.activeTag(value);
+    inline for (info.fields) |field| {
+        if (active == @field(Tag, field.name)) {
+            return updateCanonicalHash(
+                field.type,
+                @field(value, field.name),
+                hasher,
+            );
         }
     }
     return error.InvalidTag;
@@ -1179,6 +1281,26 @@ test "zero-width vector codec and equality are constant in logical length" {
     );
     try std.testing.expectEqualSlices(u8, &bytes, &encoded);
     try std.testing.expect(decoded.eql(&decoded));
+    try std.testing.expect(eqlValue(Values, decoded, decoded));
+}
+
+test "nested zero-width portable values use one canonical constant-time quotient" {
+    const EmptyProduct = struct {
+        unit: void,
+    };
+    const Values = [1_000_000]EmptyProduct;
+    const value: Values = undefined;
+
+    try std.testing.expectEqual(@as(usize, 0), maximumEncodedSize(Values));
+    try std.testing.expectEqual(@as(usize, 0), try encodedSize(Values, value));
+
+    var bytes: [0]u8 = .{};
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try encode(Values, value, &bytes),
+    );
+    const decoded = try decodeExact(Values, &bytes);
+    try std.testing.expect(eqlValue(Values, value, decoded));
 }
 
 test "Research Digest bounds are representable without target-width values" {

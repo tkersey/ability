@@ -72,6 +72,60 @@ const PerformanceMachine = program_v2.program(
 const warmup_iterations = 2_000;
 const measured_iterations = 20_000;
 const sample_count = 5;
+var wasm_source_storage: [4096]u8 = undefined;
+var wasm_image_storage: [4096]u8 = undefined;
+var wasm_restored_storage: [4096]u8 = undefined;
+
+/// Import-free one-effect WASM witness for the same compiled Machine measured
+/// by the native performance test.
+pub export fn boundaryMachinePerformanceOneEffect() u32 {
+    var source = std.heap.FixedBufferAllocator.init(&wasm_source_storage);
+    const state =
+        PerformanceMachine.initialState(source.allocator(), {}) catch return 0;
+    defer PerformanceMachine.deinitState(state);
+    var fuel: u64 = 100;
+    const request = switch (PerformanceMachine.step(state, &fuel) catch
+        return 0) {
+        .request => |value| value,
+        else => return 0,
+    };
+    const payload_length = switch (request.value) {
+        .s0 => |value| value.len(),
+    };
+    if (payload_length != 7) return 0;
+
+    var image = std.heap.FixedBufferAllocator.init(&wasm_image_storage);
+    const encoded =
+        PerformanceMachine.encodeState(image.allocator(), state) catch return 0;
+    var restored =
+        std.heap.FixedBufferAllocator.init(&wasm_restored_storage);
+    const restored_state = PerformanceMachine.decodeState(
+        restored.allocator(),
+        encoded,
+    ) catch return 0;
+    defer PerformanceMachine.deinitState(restored_state);
+    const restored_request =
+        PerformanceMachine.current(restored_state) catch return 0;
+    const restored_payload_length = switch (restored_request.value) {
+        .s0 => |value| value.len(),
+    };
+    if (restored_payload_length != payload_length) return 0;
+    PerformanceMachine.@"resume"(
+        restored_state,
+        restored_request,
+        @as(i32, @intCast(payload_length)),
+    ) catch return 0;
+
+    const done = switch (PerformanceMachine.step(
+        restored_state,
+        &fuel,
+    ) catch return 0) {
+        .done => |result| result,
+        else => return 0,
+    };
+    defer done.deinit();
+    return if (done.value().* == @as(i32, @intCast(payload_length))) 1 else 0;
+}
 
 fn oneEffectLifecycle() !u64 {
     const state = try PerformanceMachine.initialState(std.testing.allocator, {});
