@@ -2016,7 +2016,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         pub const generated_reducer_operation_count =
             generated_operation_count;
         pub const reachable_value_catalog_bytes = @sizeOf(ValueCatalog);
-        pub const maximum_segment_scratch_bytes =
+        pub const maximum_segment_value_bytes =
             maximumSegmentStoreSize(
                 Body,
                 program,

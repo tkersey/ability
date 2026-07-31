@@ -430,6 +430,76 @@ test "fixed-buffer decoded terminal state fully releases in ownership order" {
     try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
 
+test "decode allocation follows logical frames instead of configured ceiling" {
+    const TightMachine = Program.compile(.{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const WideMachine = Program.compile(.{
+        .maximum_frames = 16,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+
+    const tight_source = try TightMachine.initialState(
+        std.testing.allocator,
+        3,
+    );
+    defer TightMachine.deinitState(tight_source);
+    var tight_fuel: u64 = 3;
+    try std.testing.expectEqual(
+        TightMachine.Outcome.yielded,
+        try TightMachine.step(tight_source, &tight_fuel),
+    );
+    const tight_encoded = try TightMachine.encodeState(
+        std.testing.allocator,
+        tight_source,
+    );
+    defer std.testing.allocator.free(tight_encoded);
+
+    const wide_source = try WideMachine.initialState(
+        std.testing.allocator,
+        3,
+    );
+    defer WideMachine.deinitState(wide_source);
+    var wide_fuel: u64 = 3;
+    try std.testing.expectEqual(
+        WideMachine.Outcome.yielded,
+        try WideMachine.step(wide_source, &wide_fuel),
+    );
+    const wide_encoded = try WideMachine.encodeState(
+        std.testing.allocator,
+        wide_source,
+    );
+    defer std.testing.allocator.free(wide_encoded);
+    try std.testing.expectEqual(tight_encoded.len, wide_encoded.len);
+
+    const tight_backing = try std.testing.allocator.alloc(u8, 512 << 10);
+    defer std.testing.allocator.free(tight_backing);
+    var tight_fixed = std.heap.FixedBufferAllocator.init(tight_backing);
+    const tight_restored = try TightMachine.decodeState(
+        tight_fixed.allocator(),
+        tight_encoded,
+    );
+    const tight_peak = tight_fixed.end_index;
+    TightMachine.deinitState(tight_restored);
+    try std.testing.expectEqual(@as(usize, 0), tight_fixed.end_index);
+
+    const wide_backing = try std.testing.allocator.alloc(u8, 512 << 10);
+    defer std.testing.allocator.free(wide_backing);
+    var wide_fixed = std.heap.FixedBufferAllocator.init(wide_backing);
+    const wide_restored = try WideMachine.decodeState(
+        wide_fixed.allocator(),
+        wide_encoded,
+    );
+    const wide_peak = wide_fixed.end_index;
+    WideMachine.deinitState(wide_restored);
+    try std.testing.expectEqual(@as(usize, 0), wide_fixed.end_index);
+
+    try std.testing.expectEqual(tight_peak, wide_peak);
+}
+
 test "call continuation may return to its own source block" {
     var block_entry_count: usize = 0;
     var suspension_count: usize = 0;

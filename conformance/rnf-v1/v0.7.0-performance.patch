@@ -100,6 +100,92 @@ index 61b014e..843eb3e 100644
      .minimum_zig_version = "0.16.0",
      .paths = .{
          "LICENSE",
+diff --git a/test/static_machine_wasm32_compile.zig b/test/static_machine_wasm32_compile.zig
+index 7f5ffb1..f9b356f 100644
+--- a/test/static_machine_wasm32_compile.zig
++++ b/test/static_machine_wasm32_compile.zig
+@@ -7,14 +7,14 @@ fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+     const payload = boundary.ir.builder.local(root, 0);
+     const resumed = boundary.ir.builder.local(root, 1);
+     const instructions = [_]boundary.ir.plan.Instruction{
+-        .{ .kind = .const_usize, .dst = payload.index, .string_literal = "4294967295" },
++        .{ .kind = .const_string, .dst = payload.index, .string_literal = "payload" },
+         boundary.ir.builder.callOp(root, resumed, boundary.ir.builder.op(root, 0), payload) catch unreachable,
+         boundary.ir.builder.returnValue(root, resumed) catch unreachable,
+     };
+     const functions = [_]boundary.ir.plan.Function{.{
+         .symbol_name = "run",
+-        .value_codec = .usize,
+-        .result_codec = .usize,
++        .value_codec = .i32,
++        .result_codec = .i32,
+         .parameter_count = 0,
+         .first_requirement = 0,
+         .requirement_count = 1,
+@@ -37,8 +37,8 @@ fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+         .requirement_index = 0,
+         .op_name = "round_trip",
+         .mode = .transform,
+-        .payload_codec = .usize,
+-        .resume_codec = .usize,
++        .payload_codec = .string,
++        .resume_codec = .i32,
+     }};
+     const blocks = [_]boundary.ir.plan.Block{.{
+         .first_instruction = 0,
+@@ -55,7 +55,7 @@ fn oneEffectPlan(comptime label: []const u8) boundary.ir.ProgramPlan {
+         .requirements = &requirements,
+         .ops = &ops,
+         .outputs = &.{},
+-        .locals = &.{ .{ .codec = .usize }, .{ .codec = .usize } },
++        .locals = &.{ .{ .codec = .string }, .{ .codec = .i32 } },
+         .blocks = &blocks,
+         .terminators = &terminators,
+         .instructions = &instructions,
+@@ -153,31 +153,36 @@ var restored_storage: [64 * 1024]u8 = undefined;
+ export fn boundaryStaticMachineWasm32Smoke() u32 {
+-    const expected = @as(usize, std.math.maxInt(u32));
++    const expected = "payload";
+     var source = std.heap.FixedBufferAllocator.init(&source_storage);
+     const state = Machine.initialState(source.allocator(), .{}) catch return 0;
+     defer Machine.deinitState(state);
+     var fuel: u64 = 100;
+     const request = switch (Machine.reduce(state, &fuel) catch return 0) {
+         .request => |request| request,
+         else => return 0,
+     };
+-    if ((request.payload(usize) catch return 0) != expected) return 0;
++    if (!std.mem.eql(u8, request.payload([]const u8) catch return 0, expected))
++        return 0;
+-
++
+     var image = std.heap.FixedBufferAllocator.init(&image_storage);
+     const encoded = Machine.encodeState(image.allocator(), state) catch return 0;
+     var restored = std.heap.FixedBufferAllocator.init(&restored_storage);
+     const restored_state = Machine.decodeState(restored.allocator(), encoded) catch return 0;
+     defer Machine.deinitState(restored_state);
+     const restored_request = switch (Machine.current(restored_state) catch return 0) {
+         .request => |current| current,
+         else => return 0,
+     };
+-    if ((restored_request.payload(usize) catch return 0) != expected) return 0;
+-    Machine.@"resume"(restored_state, restored_request, expected) catch return 0;
++    if (!std.mem.eql(
++        u8,
++        restored_request.payload([]const u8) catch return 0,
++        expected,
++    )) return 0;
++    Machine.@"resume"(restored_state, restored_request, @as(i32, 7)) catch return 0;
+-
++
+     var result = switch (Machine.reduce(restored_state, &fuel) catch return 0) {
+         .done => |done| done,
+         else => return 0,
+     };
+     defer result.deinit();
+-    return if (result.value() == expected) 1 else 0;
++    return if (result.value() == 7) 1 else 0;
+ }
 diff --git a/test/static_machine_test.zig b/test/static_machine_test.zig
 index 22f4ca4..4217f67 100644
 --- a/test/static_machine_test.zig

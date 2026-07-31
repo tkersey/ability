@@ -305,7 +305,7 @@ pub fn Machine(
                 if (logical_length == 1) return .{ .one = undefined };
                 var list = std.ArrayList(Frame).initCapacity(
                     allocator,
-                    options.maximum_frames,
+                    logical_length,
                 ) catch return error.OutOfMemory;
                 list.items.len = @intCast(logical_length);
                 return .{ .many = list };
@@ -318,23 +318,46 @@ pub fn Machine(
                 return .{ .one = frame };
             }
 
-            fn clone(
+            fn cloneWithCapacity(
                 self: *const Stack,
                 allocator: std.mem.Allocator,
+                many_capacity: usize,
             ) Error!Stack {
                 if (!self.consistent()) return error.ProgramContractViolation;
                 return switch (self.*) {
                     .empty => .empty,
                     .one => |frame| .{ .one = frame },
                     .many => |list| blk: {
+                        if (many_capacity < list.items.len or
+                            many_capacity > options.maximum_frames)
+                        {
+                            return error.ProgramContractViolation;
+                        }
                         var copy = std.ArrayList(Frame).initCapacity(
                             allocator,
-                            list.capacity,
+                            many_capacity,
                         ) catch return error.OutOfMemory;
                         copy.appendSliceAssumeCapacity(list.items);
                         break :blk .{ .many = copy };
                     },
                 };
+            }
+
+            fn cloneExact(
+                self: *const Stack,
+                allocator: std.mem.Allocator,
+            ) Error!Stack {
+                return self.cloneWithCapacity(allocator, self.len());
+            }
+
+            fn cloneForStep(
+                self: *const Stack,
+                allocator: std.mem.Allocator,
+            ) Error!Stack {
+                return self.cloneWithCapacity(
+                    allocator,
+                    options.maximum_frames,
+                );
             }
 
             fn deinit(self: *Stack, allocator: std.mem.Allocator) void {
@@ -457,7 +480,8 @@ pub fn Machine(
                 self: *Stack,
                 allocator: std.mem.Allocator,
                 candidate: *Stack,
-            ) void {
+                retired: *RetiredFrameStacks,
+            ) Error!void {
                 switch (self.*) {
                     .many => |*destination| switch (candidate.*) {
                         .one => |frame| {
@@ -481,8 +505,77 @@ pub fn Machine(
                     },
                     .empty, .one => {},
                 }
+                switch (self.*) {
+                    .many => switch (candidate.*) {
+                        .many => {
+                            try retired.append(self);
+                            self.* = candidate.take();
+                            return;
+                        },
+                        .empty, .one => {},
+                    },
+                    .empty, .one => {},
+                }
                 self.deinit(allocator);
                 self.* = candidate.take();
+            }
+        };
+
+        const RetiredFrameStacks = struct {
+            older: FrameStack = .empty,
+            newer: FrameStack = .empty,
+
+            fn count(self: *const @This()) u8 {
+                return @intFromBool(self.older.len() != 0) +
+                    @intFromBool(self.newer.len() != 0);
+            }
+
+            fn consistent(self: *const @This()) bool {
+                if (!self.older.consistent() or !self.newer.consistent()) {
+                    return false;
+                }
+                switch (self.older) {
+                    .empty => return self.newer.len() == 0,
+                    .one => return false,
+                    .many => {},
+                }
+                return switch (self.newer) {
+                    .empty, .many => true,
+                    .one => false,
+                };
+            }
+
+            fn append(
+                self: *@This(),
+                frames: *FrameStack,
+            ) Error!void {
+                if (!self.consistent() or frames.* != .many) {
+                    return error.ProgramContractViolation;
+                }
+                if (self.older.len() == 0) {
+                    self.older = frames.take();
+                    return;
+                }
+                if (self.newer.len() == 0) {
+                    self.newer = frames.take();
+                    return;
+                }
+                return error.ProgramContractViolation;
+            }
+
+            fn deinit(
+                self: *@This(),
+                allocator: std.mem.Allocator,
+            ) void {
+                self.newer.deinit(allocator);
+                self.older.deinit(allocator);
+                self.* = .{};
+            }
+
+            fn take(self: *@This()) @This() {
+                const result = self.*;
+                self.* = .{};
+                return result;
             }
         };
 
@@ -496,7 +589,7 @@ pub fn Machine(
             // terminal result is allocated last, so releasing result, active
             // frames, retired frames, and finally the state remains LIFO for
             // fixed-buffer allocators.
-            retired_frames: FrameStack = .empty,
+            retired_frames: RetiredFrameStacks = .{},
             // Derived from canonical state bytes when the top frame is parked.
             // This cache is private live-state acceleration, never authority
             // and never part of ABL_RNF2 encoding or Machine identity.
@@ -920,7 +1013,7 @@ pub fn Machine(
             if (value.terminal) return error.ProgramContractViolation;
             if (!value.frames.consistent() or
                 !value.retired_frames.consistent() or
-                value.retired_frames.len() != 0 or
+                value.retired_frames.count() > 1 or
                 value.frames.len() == 0 or
                 value.frames.len() > options.maximum_frames or
                 value.cumulative_fuel > options.maximum_machine_fuel or
@@ -943,11 +1036,12 @@ pub fn Machine(
             }
         }
 
-        fn commit(state: State, candidate: *StoredState) void {
+        fn commit(state: State, candidate: *StoredState) Error!void {
             const destination = stored(state);
-            destination.frames.commitFrom(
+            try destination.frames.commitFrom(
                 destination.allocator,
                 &candidate.frames,
+                &destination.retired_frames,
             );
             destination.allocator = candidate.allocator;
             destination.sequence = candidate.sequence;
@@ -956,23 +1050,29 @@ pub fn Machine(
             destination.terminal = candidate.terminal;
         }
 
-        fn commitTerminal(state: State, candidate: *StoredState) void {
+        fn commitTerminal(
+            state: State,
+            candidate: *StoredState,
+        ) Error!void {
             const destination = stored(state);
             switch (destination.frames) {
                 .many => switch (candidate.frames) {
                     .many => {
-                        destination.retired_frames =
-                            destination.frames.take();
+                        try destination.retired_frames.append(
+                            &destination.frames,
+                        );
                         destination.frames = candidate.frames.take();
                     },
-                    .empty, .one => destination.frames.commitFrom(
+                    .empty, .one => try destination.frames.commitFrom(
                         destination.allocator,
                         &candidate.frames,
+                        &destination.retired_frames,
                     ),
                 },
-                .empty, .one => destination.frames.commitFrom(
+                .empty, .one => try destination.frames.commitFrom(
                     destination.allocator,
                     &candidate.frames,
+                    &destination.retired_frames,
                 ),
             }
             destination.allocator = candidate.allocator;
@@ -1013,8 +1113,8 @@ pub fn Machine(
             copy.* = original.*;
             copy.allocator = allocator;
             copy.frames = .empty;
-            copy.retired_frames = .empty;
-            copy.frames = try original.frames.clone(allocator);
+            copy.retired_frames = .{};
+            copy.frames = try original.frames.cloneExact(allocator);
             return @ptrCast(copy);
         }
 
@@ -1097,9 +1197,9 @@ pub fn Machine(
                 .candidate = original.*,
             };
             value.candidate.frames = .empty;
-            value.candidate.retired_frames = .empty;
+            value.candidate.retired_frames = .{};
             value.candidate.frames =
-                try original.frames.clone(original.allocator);
+                try original.frames.cloneExact(original.allocator);
             return @ptrCast(value);
         }
 
@@ -1135,7 +1235,7 @@ pub fn Machine(
             if (Definition.current(try top(&value.candidate)) != null) {
                 return error.ProgramContractViolation;
             }
-            commit(value.state, &value.candidate);
+            try commit(value.state, &value.candidate);
             value.consumed = true;
         }
 
@@ -1146,7 +1246,7 @@ pub fn Machine(
             remaining_fuel: u64,
         ) Error!Outcome {
             try validate(candidate);
-            commit(state, candidate);
+            try commit(state, candidate);
             caller_fuel.* = remaining_fuel;
             return .yielded;
         }
@@ -1158,9 +1258,11 @@ pub fn Machine(
             if (try currentFrom(original) != null) return error.ProgramContractViolation;
 
             var candidate = original.*;
-            candidate.frames = try original.frames.clone(original.allocator);
+            candidate.frames = try original.frames.cloneForStep(
+                original.allocator,
+            );
             defer candidate.frames.deinit(candidate.allocator);
-            candidate.retired_frames = .empty;
+            candidate.retired_frames = .{};
             defer candidate.retired_frames.deinit(candidate.allocator);
             candidate.request_identity = null;
             var remaining_fuel = caller_fuel.*;
@@ -1183,13 +1285,13 @@ pub fn Machine(
                     cost,
                 ) catch {
                     candidate.terminal = true;
-                    commit(state, &candidate);
+                    try commit(state, &candidate);
                     caller_fuel.* = remaining_fuel;
                     return .{ .failed = .execution_budget_exceeded };
                 };
                 if (next_total > options.maximum_machine_fuel) {
                     candidate.terminal = true;
-                    commit(state, &candidate);
+                    try commit(state, &candidate);
                     caller_fuel.* = remaining_fuel;
                     return .{ .failed = .execution_budget_exceeded };
                 }
@@ -1279,7 +1381,7 @@ pub fn Machine(
                         {
                             return error.ProgramContractViolation;
                         }
-                        commit(state, &candidate);
+                        try commit(state, &candidate);
                         caller_fuel.* = remaining_fuel;
                         return .{ .request = outcome_request };
                     },
@@ -1290,14 +1392,15 @@ pub fn Machine(
                             .allocator = original.allocator,
                             .result = result,
                         };
+                        errdefer owned.deinit();
                         candidate.terminal = true;
-                        commitTerminal(state, &candidate);
+                        try commitTerminal(state, &candidate);
                         caller_fuel.* = remaining_fuel;
                         return .{ .done = owned };
                     },
                     .failed => |failure| {
                         candidate.terminal = true;
-                        commit(state, &candidate);
+                        try commit(state, &candidate);
                         caller_fuel.* = remaining_fuel;
                         return .{ .failed = .{ .authored = failure } };
                     },

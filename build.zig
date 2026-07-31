@@ -370,6 +370,7 @@ pub fn build(b: *std.Build) void {
     addTestArtifact(b, control_step, program_dead_control);
     addTestArtifact(b, control_step, program_effect_handler);
     addTestArtifact(b, control_step, program_effect_morphism);
+    addTestArtifact(b, control_step, research_digest);
 
     const values_step = b.step(
         "check-boundary-rnf-values",

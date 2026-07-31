@@ -16,9 +16,12 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
         /// Static size proxy for the generated direct reducer.
         pub const generated_reducer_operation_count =
             Definition.generated_reducer_operation_count;
-        /// Maximum stack scratch used by any one generated direct segment.
-        pub const maximum_segment_scratch_bytes =
-            Definition.maximum_segment_scratch_bytes;
+        /// Largest typed value carrier used by one generated direct segment.
+        ///
+        /// This excludes compiler- and optimizer-dependent native stack
+        /// placement of temporary copies.
+        pub const maximum_segment_value_bytes =
+            Definition.maximum_segment_value_bytes;
         /// Compile-time-only whole-program value catalog size for proof.
         pub const reachable_value_catalog_bytes =
             Definition.reachable_value_catalog_bytes;

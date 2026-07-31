@@ -45,6 +45,23 @@ current_runtime_semantic_module_count() {
         tr -d ' '
 }
 
+require_current_wasm_schema() {
+    current_source=$1/test/machine_performance.zig
+    rg -Fq 'const RequestPayload = portable_value.Text(16);' "$current_source"
+    rg -Fq 'pub const Resume = i32;' "$current_source"
+    rg -Fq 'pub const Result = i32;' "$current_source"
+    rg -Fq 'RequestPayload.fromSlice("payload")' "$current_source"
+}
+
+require_baseline_wasm_schema() {
+    baseline_wasm_source=$1/test/static_machine_wasm32_compile.zig
+    rg -Fq '.kind = .const_string' "$baseline_wasm_source"
+    rg -Fq '.string_literal = "payload"' "$baseline_wasm_source"
+    rg -Fq '.payload_codec = .string' "$baseline_wasm_source"
+    rg -Fq '.resume_codec = .i32' "$baseline_wasm_source"
+    rg -Fq '.result_codec = .i32' "$baseline_wasm_source"
+}
+
 within_ratio() {
     candidate=$1
     baseline=$2
@@ -98,6 +115,15 @@ self_test() {
     fi
     test "$(current_runtime_semantic_module_count \
         "$script_directory/../..")" -eq 1
+    require_current_wasm_schema "$script_directory/../.."
+    rg -Fq '+        .{ .kind = .const_string' \
+        "$script_directory/v0.7.0-performance.patch"
+    rg -Fq '+        .payload_codec = .string' \
+        "$script_directory/v0.7.0-performance.patch"
+    rg -Fq '+        .resume_codec = .i32' \
+        "$script_directory/v0.7.0-performance.patch"
+    rg -Fq '+        .result_codec = .i32' \
+        "$script_directory/v0.7.0-performance.patch"
     node "$script_directory/measure_wasm.mjs" --self-test |
         grep -qx 'wasm_measurement_falsifier=pass'
     if missing_checkout_output=$(
@@ -168,6 +194,8 @@ git -C "$repository_root" archive "$baseline_commit" |
     tar -xf - -C "$baseline_source"
 patch -s -d "$baseline_source" -p1 \
     <"$script_directory/v0.7.0-performance.patch"
+require_current_wasm_schema "$repository_root"
+require_baseline_wasm_schema "$baseline_source"
 
 if ! baseline_output=$(
     cd "$baseline_source"
@@ -321,6 +349,9 @@ echo "boundary_performance_status=pass baseline_release=$baseline_tag" \
     "current_wasm_bytes=$current_wasm_bytes" \
     "wasm_ratio_limit=1.50" \
     "wasm_optimization=$wasm_optimization" \
+    "wasm_payload_schema=string" \
+    "wasm_resume_schema=i32" \
+    "wasm_result_schema=i32" \
     "current_wasm_witness=machine-performance-one-effect" \
     "baseline_runtime_semantic_modules=$baseline_runtime_semantic_modules" \
     "current_runtime_semantic_modules=$current_runtime_semantic_modules"
