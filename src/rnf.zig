@@ -882,6 +882,7 @@ pub fn NormalForm(
     const GeneratedFacts = struct {
         terms: AnalysisFactSet = .{},
         direct_len: usize = 0,
+        direct_complete: bool = false,
     };
 
     return struct {
@@ -892,6 +893,37 @@ pub fn NormalForm(
 
         constructors: [maximum_constructors]ConstructorType = undefined,
         constructor_count: usize = 0,
+
+        fn needsDefinitionWitness(
+            generated: GeneratedFacts,
+            target_live: Set,
+        ) bool {
+            if (generated.direct_complete or
+                generated.terms.len <= generated.direct_len + 1)
+            {
+                return false;
+            }
+            var direct_required = Set.empty();
+            for (generated.terms.terms[0..generated.direct_len]) |term| {
+                term.addRequired(&direct_required);
+            }
+            for (
+                generated.terms.terms[generated.direct_len + 1 .. generated.terms.len],
+            ) |term| {
+                var required = Set.empty();
+                term.addRequired(&required);
+                for (0..maximum_values) |value_index| {
+                    const value: control_ir.ValueId = @intCast(value_index);
+                    if (required.contains(value) and
+                        target_live.contains(value) and
+                        !direct_required.contains(value))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
 
         /// Borrow all synthesized constructors in canonical id order.
         pub fn constructorSlice(self: *const Self) []const ConstructorType {
@@ -949,6 +981,19 @@ pub fn NormalForm(
                 .resume_target = resume_target,
             };
             var required = environment_set;
+            const source_function_id =
+                program.blocks[@intCast(source_block)].function_id;
+            if (source_function_id != 0) {
+                const source_function = try program.function(
+                    source_function_id,
+                );
+                const entry = program.blocks[
+                    @intCast(source_function.entry)
+                ];
+                for (entry.parameters) |parameter| {
+                    _ = required.insert(parameter);
+                }
+            }
             var ordered_invariants = invariants;
             ordered_invariants.canonicalize(canonical_values);
             if (comptime maximum_invariant_terms == 0) {
@@ -1489,8 +1534,8 @@ pub fn NormalForm(
             expected: bool,
             facts: *AnalysisFactSet,
             visited: *Set,
-        ) Error!void {
-            if (!visited.insert(value)) return;
+        ) Error!bool {
+            if (!visited.insert(value)) return true;
             if (directFactForValue(
                 program,
                 value,
@@ -1501,8 +1546,8 @@ pub fn NormalForm(
             }
 
             const instruction = definingInstruction(program, value) orelse
-                return;
-            switch (instruction.operation) {
+                return false;
+            return switch (instruction.operation) {
                 .copy => try collectDirectBranchFacts(
                     program,
                     instruction.operands[0],
@@ -1517,42 +1562,51 @@ pub fn NormalForm(
                     facts,
                     visited,
                 ),
-                .boolean_and => {
-                    if (!expected) return;
-                    try collectDirectBranchFacts(
+                .boolean_and => if (!expected)
+                    false
+                else blk: {
+                    const left_complete = try collectDirectBranchFacts(
                         program,
                         instruction.operands[0],
                         true,
                         facts,
                         visited,
                     );
-                    try collectDirectBranchFacts(
+                    const right_complete = try collectDirectBranchFacts(
                         program,
                         instruction.operands[1],
                         true,
                         facts,
                         visited,
                     );
+                    break :blk left_complete and right_complete;
                 },
-                .boolean_or => {
-                    if (expected) return;
-                    try collectDirectBranchFacts(
+                .boolean_or => if (expected)
+                    false
+                else blk: {
+                    const left_complete = try collectDirectBranchFacts(
                         program,
                         instruction.operands[0],
                         false,
                         facts,
                         visited,
                     );
-                    try collectDirectBranchFacts(
+                    const right_complete = try collectDirectBranchFacts(
                         program,
                         instruction.operands[1],
                         false,
                         facts,
                         visited,
                     );
+                    break :blk left_complete and right_complete;
                 },
-                else => {},
-            }
+                else => directFactForValue(
+                    program,
+                    value,
+                    expected,
+                    program.value_types.len + 1,
+                ) != null,
+            };
         }
 
         fn branchFacts(
@@ -1562,7 +1616,7 @@ pub fn NormalForm(
         ) Error!GeneratedFacts {
             var result: GeneratedFacts = .{};
             var direct_visited = Set.empty();
-            try collectDirectBranchFacts(
+            result.direct_complete = try collectDirectBranchFacts(
                 program,
                 branch.condition,
                 expected,
@@ -1593,6 +1647,10 @@ pub fn NormalForm(
             generated: GeneratedFacts,
         ) Error!FactSet {
             var result: FactSet = .{};
+            const retain_definitions = needsDefinitionWitness(
+                generated,
+                target_live,
+            );
             for (source_facts.terms[0..source_facts.len]) |term| {
                 try projectTermInto(
                     program,
@@ -1611,7 +1669,9 @@ pub fn NormalForm(
                 const retain_for_invariant =
                     index < generated.direct_len or
                     (index == generated.direct_len and
-                        generated.direct_len == 0);
+                        !generated.direct_complete) or
+                    (index > generated.direct_len and
+                        retain_definitions);
                 try projectTermInto(
                     program,
                     source_block,
@@ -1870,6 +1930,16 @@ pub fn NormalForm(
                             );
                         for (suspension.request_values) |value| {
                             _ = environment.insert(value);
+                        }
+                        if (suspension.kind == .call) {
+                            for (suspension.callee.?.arguments) |argument| {
+                                switch (argument) {
+                                    .value => |value| {
+                                        _ = environment.insert(value);
+                                    },
+                                    .@"resume" => unreachable,
+                                }
+                            }
                         }
                         try result.appendConstructor(
                             program,
@@ -2431,6 +2501,111 @@ test "RNF normalizes Boolean composition into local definition equations" {
         try std.testing.expectError(
             error.InvariantViolation,
             constructor.validateInvariant(&forged_right),
+        );
+        return;
+    }
+    return error.TestExpectedEqual;
+}
+
+test "RNF retains partial Boolean definitions beside direct path facts" {
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const bool_type: control_ir.ValueType = .{ .scalar = .boolean };
+    const instructions = [_]control_ir.Instruction{
+        .{
+            .kind = .compare_eq_zero,
+            .result = 3,
+            .operands = &.{0},
+        },
+        .{
+            .kind = .compare_eq_zero,
+            .result = 4,
+            .operands = &.{1},
+        },
+        .{
+            .kind = .compare_eq_zero,
+            .result = 5,
+            .operands = &.{2},
+        },
+        .{
+            .kind = .pure,
+            .result = 6,
+            .operands = &.{ 4, 5 },
+            .operation = .boolean_or,
+        },
+        .{
+            .kind = .pure,
+            .result = 7,
+            .operands = &.{ 3, 6 },
+            .operation = .boolean_and,
+        },
+    };
+    const target_instructions = [_]control_ir.Instruction{.{
+        .kind = .pure,
+        .result = 8,
+        .operands = &.{ 1, 2 },
+    }};
+    const blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 0, 1, 2 },
+            .instructions = &instructions,
+            .terminator = .{ .branch = .{
+                .condition = 7,
+                .then_edge = .{ .target = 1 },
+                .else_edge = .{ .target = 2 },
+            } },
+        },
+        .{
+            .id = 1,
+            .instructions = &target_instructions,
+            .terminator = .{ .return_value = 8 },
+        },
+        .{
+            .id = 2,
+            .terminator = .{ .return_value = 1 },
+        },
+    };
+    const program: control_ir.Program = .{
+        .label = "partial-boolean-direct-facts",
+        .value_types = &.{
+            u32_type,
+            u32_type,
+            u32_type,
+            bool_type,
+            bool_type,
+            bool_type,
+            bool_type,
+            bool_type,
+            u32_type,
+        },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+
+    const normal_form = try NormalForm(9, 4, 8, 8, 8).synthesize(program);
+    for (normal_form.constructorSlice()) |constructor| {
+        if (constructor.source_block != 1) continue;
+        try std.testing.expectEqual(@as(usize, 7), constructor.invariant_len);
+        const valid = [_]InvariantBinding{
+            .{ .value = 0, .contents = .{ .unsigned = 0 } },
+            .{ .value = 1, .contents = .{ .unsigned = 0 } },
+            .{ .value = 2, .contents = .{ .unsigned = 9 } },
+            .{ .value = 3, .contents = .{ .boolean = true } },
+            .{ .value = 4, .contents = .{ .boolean = true } },
+            .{ .value = 5, .contents = .{ .boolean = false } },
+            .{ .value = 6, .contents = .{ .boolean = true } },
+            .{ .value = 7, .contents = .{ .boolean = true } },
+        };
+        try constructor.validateInvariant(&valid);
+
+        var forged = valid;
+        forged[1].contents = .{ .unsigned = 9 };
+        forged[4].contents = .{ .boolean = false };
+        forged[6].contents = .{ .boolean = false };
+        try std.testing.expectError(
+            error.InvariantViolation,
+            constructor.validateInvariant(&forged),
         );
         return;
     }

@@ -462,17 +462,19 @@ pub fn build(b: *std.Build) void {
         .os_tag = .freestanding,
         .abi = .none,
     });
+    const performance_wasm_optimize: std.builtin.OptimizeMode =
+        .ReleaseSmall;
     const performance_wasm_core = addCoreModules(
         b,
         wasm_target,
-        .ReleaseSmall,
+        performance_wasm_optimize,
     );
     const performance_wasm_module = programTestModule(
         b,
         performance_wasm_core,
         "test/machine_performance.zig",
         wasm_target,
-        .ReleaseSmall,
+        performance_wasm_optimize,
         false,
         true,
     );
@@ -601,6 +603,7 @@ pub fn build(b: *std.Build) void {
         performance_wasm_executable.getEmittedBin(),
     );
     performance_command.addArg(b.graph.zig_exe);
+    performance_command.addArg(@tagName(performance_wasm_optimize));
     const performance_step = b.step(
         "check-boundary-machine-performance",
         "Compare RNF performance with the immutable Boundary v0.7.0 release.",
@@ -649,6 +652,10 @@ pub fn build(b: *std.Build) void {
     inline for (.{
         .{
             "test/compile_fail/portable_usize.zig",
+            "Boundary Machine integers must be explicit i8/i16/i32/i64 or u8/u16/u32/u64",
+        },
+        .{
+            "test/compile_fail/portable_c_integer.zig",
             "Boundary Machine integers must be explicit i8/i16/i32/i64 or u8/u16/u32/u64",
         },
         .{
@@ -724,7 +731,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(parity_step);
 
     const format_command = b.addSystemCommand(&.{
-        "zig",
+        b.graph.zig_exe,
         "fmt",
         "--check",
         "build.zig",

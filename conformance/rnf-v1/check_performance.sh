@@ -23,6 +23,28 @@ require_release_checkout() {
     fi
 }
 
+require_optimization_mode() {
+    case "$1" in
+        ReleaseFast|ReleaseSmall) ;;
+        *)
+            echo "unsupported performance optimization mode: $1" >&2
+            return 1
+            ;;
+    esac
+}
+
+current_runtime_semantic_module_count() {
+    source_root=$1
+    machine_modules=$(
+        rg -l '^pub fn Machine\(' "$source_root/src" --glob '*.zig'
+    )
+    test "$machine_modules" = "$source_root/src/machine.zig"
+    printf '%s\n' "$machine_modules" |
+        sed '/^$/d' |
+        wc -l |
+        tr -d ' '
+}
+
 within_ratio() {
     candidate=$1
     baseline=$2
@@ -69,6 +91,13 @@ self_test() {
         echo "semantic-module non-reduction was accepted" >&2
         exit 1
     fi
+    require_optimization_mode ReleaseSmall
+    if require_optimization_mode Debug 2>/dev/null; then
+        echo "unsupported optimization mode was accepted" >&2
+        exit 1
+    fi
+    test "$(current_runtime_semantic_module_count \
+        "$script_directory/../..")" -eq 1
     node "$script_directory/measure_wasm.mjs" --self-test |
         grep -qx 'wasm_measurement_falsifier=pass'
     if missing_checkout_output=$(
@@ -88,19 +117,21 @@ if test "${1:-}" = "--self-test"; then
     exit 0
 fi
 
-if test "$#" -ne 3; then
-    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM ZIG_EXE" >&2
+if test "$#" -ne 4; then
+    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM ZIG_EXE WASM_OPTIMIZATION" >&2
     exit 2
 fi
 
 current_test=$1
 current_wasm=$2
 zig_exe=$3
+wasm_optimization=$4
 repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 
 test -x "$current_test"
 test -f "$current_wasm"
 test -x "$zig_exe"
+require_optimization_mode "$wasm_optimization"
 
 require_release_checkout "$repository_root"
 if ! actual_baseline_commit=$(
@@ -228,7 +259,7 @@ within_ratio "$current_decode_median" "$baseline_decode_median" 125 100
 
 if ! install_output=$(
     cd "$baseline_source"
-    "$zig_exe" build install -Doptimize=ReleaseFast
+    "$zig_exe" build install -Doptimize="$wasm_optimization"
   2>&1
 ); then
     printf '%s\n' "$install_output" >&2
@@ -266,8 +297,9 @@ do
     test -f "$baseline_source/$path"
     baseline_runtime_semantic_modules=$((baseline_runtime_semantic_modules + 1))
 done
-current_runtime_semantic_modules=1
-test -f "$repository_root/src/machine.zig"
+current_runtime_semantic_modules=$(
+    current_runtime_semantic_module_count "$repository_root"
+)
 test "$current_runtime_semantic_modules" \
     -lt "$baseline_runtime_semantic_modules"
 
@@ -288,6 +320,7 @@ echo "boundary_performance_status=pass baseline_release=$baseline_tag" \
     "baseline_wasm_bytes=$baseline_wasm_bytes" \
     "current_wasm_bytes=$current_wasm_bytes" \
     "wasm_ratio_limit=1.50" \
+    "wasm_optimization=$wasm_optimization" \
     "current_wasm_witness=machine-performance-one-effect" \
     "baseline_runtime_semantic_modules=$baseline_runtime_semantic_modules" \
     "current_runtime_semantic_modules=$current_runtime_semantic_modules"

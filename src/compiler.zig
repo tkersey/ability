@@ -153,7 +153,7 @@ fn structForValues(
     return @Struct(.auto, null, &names, &types, &attributes);
 }
 
-fn storeType(
+fn valueCatalogType(
     comptime Body: type,
     comptime program: control_ir.Program,
     comptime canonical: anytype,
@@ -167,6 +167,106 @@ fn storeType(
         };
     }
     return structForValues(Body, program, &fields);
+}
+
+fn addSegmentEdgeValues(
+    comptime program: control_ir.Program,
+    comptime edge: control_ir.Edge,
+    included: anytype,
+) void {
+    const target = program.blocks[@intCast(edge.target)];
+    inline for (target.parameters) |parameter| {
+        included[@intCast(parameter)] = true;
+    }
+    inline for (edge.arguments) |argument| switch (argument) {
+        .value => |value| included[@intCast(value)] = true,
+        .@"resume" => {},
+    };
+}
+
+fn segmentStoreType(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime constructor: anytype,
+    comptime canonical: anytype,
+) type {
+    var included = [_]bool{false} ** program.value_types.len;
+    inline for (constructor.environmentFields()) |field| {
+        included[@intCast(field.value)] = true;
+    }
+    const block = program.blocks[@intCast(constructor.source_block)];
+    inline for (block.instructions) |instruction| {
+        included[@intCast(instruction.result)] = true;
+        inline for (instruction.operands) |operand| {
+            included[@intCast(operand)] = true;
+        }
+    }
+    switch (block.terminator) {
+        .jump => |edge| addSegmentEdgeValues(program, edge, &included),
+        .branch => |branch| {
+            included[@intCast(branch.condition)] = true;
+            addSegmentEdgeValues(program, branch.then_edge, &included);
+            addSegmentEdgeValues(program, branch.else_edge, &included);
+        },
+        .@"suspend" => |suspension| {
+            inline for (suspension.request_values) |value| {
+                included[@intCast(value)] = true;
+            }
+            addSegmentEdgeValues(
+                program,
+                suspension.continuation,
+                &included,
+            );
+            if (suspension.callee) |callee| {
+                addSegmentEdgeValues(program, callee, &included);
+            }
+        },
+        .return_value => |maybe_value| if (maybe_value) |value| {
+            included[@intCast(value)] = true;
+        },
+        .return_to_caller => |value| {
+            included[@intCast(value)] = true;
+        },
+        .fail => {},
+    }
+
+    var fields: [canonical.value_count]rnf.EnvironmentField = undefined;
+    var field_count: usize = 0;
+    inline for (0..canonical.value_count) |dense_index| {
+        const source_value = canonical.value_dense_to_source[dense_index];
+        if (!included[@intCast(source_value)]) continue;
+        fields[field_count] = .{
+            .value = source_value,
+            .value_type = program.value_types[@intCast(source_value)],
+        };
+        field_count += 1;
+    }
+    return structForValues(
+        Body,
+        program,
+        fields[0..field_count],
+    );
+}
+
+fn maximumSegmentStoreSize(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime normal_form: anytype,
+    comptime canonical: anytype,
+) usize {
+    var maximum: usize = 0;
+    inline for (normal_form.constructorSlice()) |constructor| {
+        maximum = @max(
+            maximum,
+            @sizeOf(segmentStoreType(
+                Body,
+                program,
+                constructor,
+                canonical,
+            )),
+        );
+    }
+    return maximum;
 }
 
 fn frameType(
@@ -1795,17 +1895,17 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         semantic_canonicalization,
     );
     const FrameType = frameType(Body, program, normal_form);
-    const Store = storeType(
+    const ValueCatalog = valueCatalogType(
         Body,
         program,
         semantic_canonicalization,
     );
     comptime {
-        if (@typeInfo(Store).@"struct".fields.len !=
+        if (@typeInfo(ValueCatalog).@"struct".fields.len !=
             semantic_canonicalization.value_count)
         {
             @compileError(
-                "generated Store must contain exactly the reachable values",
+                "compiler value catalog must contain exactly the reachable values",
             );
         }
     }
@@ -1915,6 +2015,23 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         pub const compiler_limits = limits;
         pub const generated_reducer_operation_count =
             generated_operation_count;
+        pub const reachable_value_catalog_bytes = @sizeOf(ValueCatalog);
+        pub const maximum_segment_scratch_bytes =
+            maximumSegmentStoreSize(
+                Body,
+                program,
+                normal_form,
+                semantic_canonicalization,
+            );
+
+        fn SegmentStore(comptime constructor_id: usize) type {
+            return segmentStoreType(
+                Body,
+                program,
+                normal_form.constructors[constructor_id],
+                semantic_canonicalization,
+            );
+        }
 
         fn constructorForBlock(comptime block_id: control_ir.BlockId) usize {
             inline for (0..normal_form.constructor_count) |index| {
@@ -1934,7 +2051,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         fn loadEnvironment(
             comptime constructor_id: usize,
             environment: anytype,
-            store: *Store,
+            store: anytype,
         ) void {
             const constructor = comptime normal_form.constructors[constructor_id];
             inline for (0..constructor.environment_len) |field_index| {
@@ -1946,7 +2063,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
         fn frameForBlock(
             comptime block_id: control_ir.BlockId,
-            store: *const Store,
+            store: anytype,
         ) Frame {
             const constructor_id = comptime constructorForBlock(block_id);
             const constructor = comptime normal_form.constructors[constructor_id];
@@ -1969,7 +2086,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
         fn applyOrdinaryEdge(
             comptime edge: control_ir.Edge,
-            store: *Store,
+            store: anytype,
         ) void {
             const source = store.*;
             const target = program.blocks[edge.target];
@@ -1988,7 +2105,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
         fn applyResumeEdge(
             comptime edge: control_ir.Edge,
-            store: *Store,
+            store: anytype,
             response: anytype,
         ) void {
             const source = store.*;
@@ -2015,7 +2132,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
         fn awaitingFrame(
             comptime constructor_id: usize,
-            store: *const Store,
+            store: anytype,
         ) Frame {
             const constructor = comptime normal_form.constructors[constructor_id];
             const Environment = @FieldType(
@@ -2037,7 +2154,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
         fn checkpointFrame(
             comptime suspension: control_ir.Suspension,
-            store: *const Store,
+            store: anytype,
         ) Frame {
             var continuation_store = store.*;
             applyOrdinaryEdge(
@@ -2150,7 +2267,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             sizes: *const [limits.maximum_values]u64,
         ) ?u64 {
             const product_name = comptime valueName(product_value);
-            const Product = @FieldType(Store, product_name);
+            const Product = @FieldType(ValueCatalog, product_name);
             const field = std.meta.fields(Product)[field_index];
             const Environment = @TypeOf(environment);
             if (comptime @hasField(Environment, product_name)) {
@@ -2217,7 +2334,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             sizes: *const [limits.maximum_values]u64,
         ) u64 {
             const result_name = comptime valueName(instruction.result);
-            const ResultType = @FieldType(Store, result_name);
+            const ResultType = @FieldType(ValueCatalog, result_name);
             const maximum = maximumEncodedBytes(ResultType);
             return switch (instruction.operation) {
                 .metadata => unreachable,
@@ -2339,7 +2456,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
         fn executeInstructions(
             comptime block: control_ir.Block,
-            store: *Store,
+            store: anytype,
         ) ?Failure {
             inline for (block.instructions) |instruction| {
                 const result_name = comptime valueName(instruction.result);
@@ -2361,7 +2478,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         ) == 0;
                     },
                     .integer_add => {
-                        const ResultType = @FieldType(Store, result_name);
+                        const ResultType = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = std.math.add(
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
@@ -2369,7 +2486,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         ) catch return failureNamed(Body, "arithmetic_overflow");
                     },
                     .integer_subtract => {
-                        const ResultType = @FieldType(Store, result_name);
+                        const ResultType = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = std.math.sub(
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
@@ -2377,7 +2494,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         ) catch return failureNamed(Body, "arithmetic_overflow");
                     },
                     .integer_multiply => {
-                        const ResultType = @FieldType(Store, result_name);
+                        const ResultType = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = std.math.mul(
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
@@ -2385,7 +2502,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         ) catch return failureNamed(Body, "arithmetic_overflow");
                     },
                     .integer_divide => {
-                        const ResultType = @FieldType(Store, result_name);
+                        const ResultType = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = std.math.divTrunc(
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
@@ -2402,7 +2519,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         };
                     },
                     .integer_remainder => {
-                        const ResultType = @FieldType(Store, result_name);
+                        const ResultType = @FieldType(ValueCatalog, result_name);
                         const left = @field(
                             store,
                             valueName(instruction.operands[0]),
@@ -2524,7 +2641,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         );
                     },
                     .integer_convert => {
-                        const ResultType = @FieldType(Store, result_name);
+                        const ResultType = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = std.math.cast(
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
@@ -2573,7 +2690,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             );
                     },
                     .product_construct => {
-                        const Product = @FieldType(Store, result_name);
+                        const Product = @FieldType(ValueCatalog, result_name);
                         var product: Product = undefined;
                         inline for (
                             std.meta.fields(Product),
@@ -2588,7 +2705,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     },
                     .product_extract => |field_index| {
                         const Product = @FieldType(
-                            Store,
+                            ValueCatalog,
                             valueName(instruction.operands[0]),
                         );
                         const field = std.meta.fields(Product)[field_index];
@@ -2614,7 +2731,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         @field(store, result_name) = product;
                     },
                     .sum_construct => |variant_index| {
-                        const Sum = @FieldType(Store, result_name);
+                        const Sum = @FieldType(ValueCatalog, result_name);
                         const field = std.meta.fields(Sum)[variant_index];
                         @field(store, result_name) = @unionInit(
                             Sum,
@@ -2627,7 +2744,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     },
                     .sum_tag_is => |variant_index| {
                         const Sum = @FieldType(
-                            Store,
+                            ValueCatalog,
                             valueName(instruction.operands[0]),
                         );
                         const Tag = @typeInfo(Sum).@"union".tag_type.?;
@@ -2666,7 +2783,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         ) != null;
                     },
                     .vector_empty => {
-                        const Vector = @FieldType(Store, result_name);
+                        const Vector = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = Vector.empty();
                     },
                     .vector_length => {
@@ -2718,7 +2835,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             valueName(instruction.operands[0]),
                         );
                         const popped = vector.pop();
-                        const Product = @FieldType(Store, result_name);
+                        const Product = @FieldType(ValueCatalog, result_name);
                         const fields = std.meta.fields(Product);
                         var product: Product = undefined;
                         @field(product, fields[0].name) = vector;
@@ -2745,7 +2862,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         @field(store, result_name) = vector;
                     },
                     .text_empty => {
-                        const Text = @FieldType(Store, result_name);
+                        const Text = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = Text.empty();
                     },
                     .text_length => {
@@ -2816,11 +2933,14 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     },
                     .text_copy => {
                         const Source = @FieldType(
-                            Store,
+                            ValueCatalog,
                             valueName(instruction.operands[0]),
                         );
                         _ = Source;
-                        const ResultText = @FieldType(Store, result_name);
+                        const ResultText = @FieldType(
+                            ValueCatalog,
+                            result_name,
+                        );
                         const source = @field(
                             store,
                             valueName(instruction.operands[0]),
@@ -2886,7 +3006,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         @field(store, result_name) = text;
                     },
                     .bytes_empty => {
-                        const Bytes = @FieldType(Store, result_name);
+                        const Bytes = @FieldType(ValueCatalog, result_name);
                         @field(store, result_name) = Bytes.empty();
                     },
                     .bytes_length => {
@@ -2922,7 +3042,10 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         @field(store, result_name) = bytes;
                     },
                     .bytes_copy => {
-                        const ResultBytes = @FieldType(Store, result_name);
+                        const ResultBytes = @FieldType(
+                            ValueCatalog,
+                            result_name,
+                        );
                         const source = @field(
                             store,
                             valueName(instruction.operands[0]),
@@ -3055,7 +3178,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             inline for (0..constructor.environment_len) |field_index| {
                 const field = comptime constructor.environment[field_index];
                 const name = comptime valueName(field.value);
-                const Value = @FieldType(Store, name);
+                const Value = @FieldType(ValueCatalog, name);
                 const size = encodedBytes(Value, @field(environment, name));
                 sizes[@intCast(field.value)] = size;
                 addFuelCost(
@@ -3067,7 +3190,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             inline for (block.instructions) |instruction| {
                 inline for (instruction.operands) |operand| {
                     const name = comptime valueName(operand);
-                    const Operand = @FieldType(Store, name);
+                    const Operand = @FieldType(ValueCatalog, name);
                     addFuelCost(
                         &fuel_cost,
                         dynamicBytesCost(
@@ -3077,7 +3200,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     );
                 }
                 const result_name = comptime valueName(instruction.result);
-                const ResultType = @FieldType(Store, result_name);
+                const ResultType = @FieldType(ValueCatalog, result_name);
                 const result_size = resultEncodedBytes(
                     block,
                     instruction,
@@ -3103,7 +3226,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             {
                 unreachable;
             }
-            var store: Store = undefined;
+            var store: SegmentStore(constructor_id) = undefined;
             loadEnvironment(constructor_id, environment, &store);
             const block = comptime program.blocks[constructor.source_block];
             const fuel_cost = preflightCostConstructor(
@@ -3213,7 +3336,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         }
 
         pub fn initial(args: InitialArgs) Frame {
-            var store: Store = undefined;
+            const constructor_id = comptime constructorForBlock(program.entry);
+            var store: SegmentStore(constructor_id) = undefined;
             const entry = program.blocks[program.entry];
             if (entry.parameters.len == 1) {
                 @field(store, valueName(entry.parameters[0])) = args;
@@ -3348,7 +3472,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     )) {
                         break :blk error.ProgramContractViolation;
                     }
-                    var store: Store = undefined;
+                    var store: SegmentStore(constructor_id) = undefined;
                     loadEnvironment(constructor_id, environment, &store);
                     applyResumeEdge(
                         suspension.continuation,
@@ -3395,7 +3519,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                                 {
                                     break :return_blk error.ProgramContractViolation;
                                 }
-                                var store: Store = undefined;
+                                var store: SegmentStore(
+                                    constructor_id,
+                                ) = undefined;
                                 loadEnvironment(
                                     constructor_id,
                                     environment,
@@ -3554,12 +3680,87 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
+        fn validateCallArguments(
+            parent_environment: anytype,
+            comptime suspension: control_ir.Suspension,
+            child: Frame,
+        ) error{ProgramContractViolation}!void {
+            return switch (child) {
+                inline else => |child_environment, child_tag| blk: {
+                    const child_constructor_id: usize =
+                        comptime @intFromEnum(child_tag);
+                    const child_constructor = comptime normal_form.constructors[
+                        child_constructor_id
+                    ];
+                    if (program.blocks[
+                        child_constructor.source_block
+                    ].function_id != suspension.callee_function.?) {
+                        break :blk error.ProgramContractViolation;
+                    }
+                    const callee = comptime suspension.callee.?;
+                    const callee_entry = comptime program.blocks[callee.target];
+                    inline for (
+                        callee.arguments,
+                        callee_entry.parameters,
+                    ) |argument, parameter| {
+                        switch (argument) {
+                            .value => |caller_value| {
+                                const parent_name =
+                                    comptime valueName(caller_value);
+                                const child_name =
+                                    comptime valueName(parameter);
+                                const ParentEnvironment =
+                                    @TypeOf(parent_environment);
+                                const ChildEnvironment =
+                                    @TypeOf(child_environment);
+                                if (comptime !@hasField(
+                                    ParentEnvironment,
+                                    parent_name,
+                                ) or
+                                    !@hasField(
+                                        ChildEnvironment,
+                                        child_name,
+                                    ))
+                                {
+                                    @compileError(
+                                        "persisted call frame is missing its exact argument witness",
+                                    );
+                                }
+                                const Value = typeForValue(
+                                    Body,
+                                    program.value_types[
+                                        @intCast(caller_value)
+                                    ],
+                                );
+                                if (!portable_value.eqlValue(
+                                    Value,
+                                    @field(
+                                        parent_environment,
+                                        parent_name,
+                                    ),
+                                    @field(
+                                        child_environment,
+                                        child_name,
+                                    ),
+                                )) {
+                                    break :blk error.ProgramContractViolation;
+                                }
+                            },
+                            .@"resume" => @compileError(
+                                "callee edge cannot carry a resume value",
+                            ),
+                        }
+                    }
+                },
+            };
+        }
+
         fn validateStackPair(
             parent: Frame,
             child: Frame,
         ) error{ProgramContractViolation}!void {
             return switch (parent) {
-                inline else => |_, tag| blk: {
+                inline else => |parent_environment, tag| blk: {
                     const constructor_id: usize =
                         comptime @intFromEnum(tag);
                     if (!comptime isAwaitCallConstructor(constructor_id)) {
@@ -3571,9 +3772,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const suspension = comptime program.blocks[
                         constructor.source_block
                     ].terminator.@"suspend";
-                    if (frameFunctionId(child) != suspension.callee_function.?) {
-                        break :blk error.ProgramContractViolation;
-                    }
+                    try validateCallArguments(
+                        parent_environment,
+                        suspension,
+                        child,
+                    );
                 },
             };
         }

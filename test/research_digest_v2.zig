@@ -299,6 +299,12 @@ const DigestMachine = Program.compile(.{
 });
 
 test "Research Digest v2 formats capability data inside the Machine" {
+    try std.testing.expect(Program.maximum_segment_scratch_bytes > 0);
+    try std.testing.expect(
+        Program.maximum_segment_scratch_bytes <
+            Program.reachable_value_catalog_bytes,
+    );
+
     var saw_loop_body = false;
     for (Program.rnf.constructorSlice()) |constructor| {
         if (constructor.source_block != 3 or

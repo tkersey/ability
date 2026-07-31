@@ -23,7 +23,8 @@ The paired one-effect witness measures:
 - median native canonical-state decode/current time over five samples;
 - median import-free WASM lifecycle time over five samples;
 - canonical parked-state bytes;
-- the ReleaseSmall one-effect WASM artifact size; and
+- the one-effect WASM lifecycle and artifact size with both current and
+  baseline artifacts compiled in the build-selected ReleaseSmall mode; and
 - production runtime semantic modules.
 
 The baseline compile observation and the outer Zig build summary report compile
@@ -32,9 +33,10 @@ from an empty package/cache so those observations are not cache-hit timings.
 
 The gate rejects native or WASM runtime above 1.25 times the v0.7.0 median, a
 WASM artifact above 1.5 times the v0.7.0 artifact, any parked-state growth, or
-failure to reduce the four predecessor runtime-semantic modules to the one
-generated Machine owner. State and WASM sizes are deterministic. Runtime is a
-same-host paired measurement rather than a portable absolute threshold.
+failure to reduce the four predecessor runtime-semantic modules to the
+source-derived generated Machine owner count. State and WASM sizes are
+deterministic. Runtime is a same-host paired measurement rather than a portable
+absolute threshold.
 
 Run:
 

@@ -352,6 +352,11 @@ fn isVector(comptime T: type) bool {
     return isGeneratedKind(T, .vector, vector_authenticity);
 }
 
+fn isCanonicalInteger(comptime T: type) bool {
+    return T == i8 or T == i16 or T == i32 or T == i64 or
+        T == u8 or T == u16 or T == u32 or T == u64;
+}
+
 /// Reject values without explicit first-order portable semantics.
 pub fn assertPortable(comptime T: type) void {
     if (isBytes(T) or isText(T)) return;
@@ -361,11 +366,8 @@ pub fn assertPortable(comptime T: type) void {
     }
     switch (@typeInfo(T)) {
         .void, .bool => {},
-        .int => |info| {
-            if (T == usize or T == isize or
-                (info.bits != 8 and info.bits != 16 and
-                    info.bits != 32 and info.bits != 64))
-            {
+        .int => {
+            if (!isCanonicalInteger(T)) {
                 @compileError("Boundary Machine integers must be explicit i8/i16/i32/i64 or u8/u16/u32/u64");
             }
         },

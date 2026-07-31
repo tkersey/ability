@@ -305,7 +305,7 @@ pub fn Machine(
                 if (logical_length == 1) return .{ .one = undefined };
                 var list = std.ArrayList(Frame).initCapacity(
                     allocator,
-                    @intCast(logical_length),
+                    options.maximum_frames,
                 ) catch return error.OutOfMemory;
                 list.items.len = @intCast(logical_length);
                 return .{ .many = list };
@@ -326,9 +326,13 @@ pub fn Machine(
                 return switch (self.*) {
                     .empty => .empty,
                     .one => |frame| .{ .one = frame },
-                    .many => |list| .{
-                        .many = list.clone(allocator) catch
-                            return error.OutOfMemory,
+                    .many => |list| blk: {
+                        var copy = std.ArrayList(Frame).initCapacity(
+                            allocator,
+                            list.capacity,
+                        ) catch return error.OutOfMemory;
+                        copy.appendSliceAssumeCapacity(list.items);
+                        break :blk .{ .many = copy };
                     },
                 };
             }
@@ -410,17 +414,13 @@ pub fn Machine(
                     .one => |first| {
                         var list = std.ArrayList(Frame).initCapacity(
                             allocator,
-                            2,
+                            options.maximum_frames,
                         ) catch return error.OutOfMemory;
                         list.appendAssumeCapacity(first);
                         list.appendAssumeCapacity(frame);
                         self.* = .{ .many = list };
                     },
                     .many => |*list| {
-                        list.ensureTotalCapacityPrecise(
-                            allocator,
-                            list.items.len + 1,
-                        ) catch return error.OutOfMemory;
                         list.appendAssumeCapacity(frame);
                     },
                 }
@@ -491,6 +491,12 @@ pub fn Machine(
             sequence: u64 = 0,
             cumulative_fuel: u64 = 0,
             frames: FrameStack,
+            // A terminal transition may need to preserve the prior reusable
+            // frame allocation beneath the candidate frame allocation. The
+            // terminal result is allocated last, so releasing result, active
+            // frames, retired frames, and finally the state remains LIFO for
+            // fixed-buffer allocators.
+            retired_frames: FrameStack = .empty,
             // Derived from canonical state bytes when the top frame is parked.
             // This cache is private live-state acceleration, never authority
             // and never part of ABL_RNF2 encoding or Machine identity.
@@ -596,6 +602,7 @@ pub fn Machine(
             const result = allocator.create(StoredState) catch return error.OutOfMemory;
             result.* = value.*;
             result.frames = value.frames.take();
+            result.retired_frames = value.retired_frames.take();
             return @ptrCast(result);
         }
 
@@ -912,6 +919,8 @@ pub fn Machine(
         fn validate(value: *const StoredState) Error!void {
             if (value.terminal) return error.ProgramContractViolation;
             if (!value.frames.consistent() or
+                !value.retired_frames.consistent() or
+                value.retired_frames.len() != 0 or
                 value.frames.len() == 0 or
                 value.frames.len() > options.maximum_frames or
                 value.cumulative_fuel > options.maximum_machine_fuel or
@@ -947,6 +956,32 @@ pub fn Machine(
             destination.terminal = candidate.terminal;
         }
 
+        fn commitTerminal(state: State, candidate: *StoredState) void {
+            const destination = stored(state);
+            switch (destination.frames) {
+                .many => switch (candidate.frames) {
+                    .many => {
+                        destination.retired_frames =
+                            destination.frames.take();
+                        destination.frames = candidate.frames.take();
+                    },
+                    .empty, .one => destination.frames.commitFrom(
+                        destination.allocator,
+                        &candidate.frames,
+                    ),
+                },
+                .empty, .one => destination.frames.commitFrom(
+                    destination.allocator,
+                    &candidate.frames,
+                ),
+            }
+            destination.allocator = candidate.allocator;
+            destination.sequence = candidate.sequence;
+            destination.cumulative_fuel = candidate.cumulative_fuel;
+            destination.request_identity = candidate.request_identity;
+            destination.terminal = candidate.terminal;
+        }
+
         /// Construct the initial nonempty continuation stack.
         pub fn initialState(
             allocator: std.mem.Allocator,
@@ -970,12 +1005,17 @@ pub fn Machine(
             allocator: std.mem.Allocator,
             state: State,
         ) Error!State {
-            try validate(storedConst(state));
-            var copy = storedConst(state).*;
+            const original = storedConst(state);
+            try validate(original);
+            const copy = allocator.create(StoredState) catch
+                return error.OutOfMemory;
+            errdefer allocator.destroy(copy);
+            copy.* = original.*;
             copy.allocator = allocator;
-            copy.frames = try storedConst(state).frames.clone(allocator);
-            errdefer copy.frames.deinit(allocator);
-            return own(allocator, &copy);
+            copy.frames = .empty;
+            copy.retired_frames = .empty;
+            copy.frames = try original.frames.clone(allocator);
+            return @ptrCast(copy);
         }
 
         /// Release one live Machine state.
@@ -983,6 +1023,7 @@ pub fn Machine(
             const value = stored(state);
             const allocator = value.allocator;
             value.frames.deinit(allocator);
+            value.retired_frames.deinit(allocator);
             allocator.destroy(value);
         }
 
@@ -1056,6 +1097,7 @@ pub fn Machine(
                 .candidate = original.*,
             };
             value.candidate.frames = .empty;
+            value.candidate.retired_frames = .empty;
             value.candidate.frames =
                 try original.frames.clone(original.allocator);
             return @ptrCast(value);
@@ -1067,6 +1109,7 @@ pub fn Machine(
         ) void {
             const value = prepared(prepared_resume);
             value.candidate.frames.deinit(value.allocator);
+            value.candidate.retired_frames.deinit(value.allocator);
             value.allocator.destroy(value);
         }
 
@@ -1117,6 +1160,8 @@ pub fn Machine(
             var candidate = original.*;
             candidate.frames = try original.frames.clone(original.allocator);
             defer candidate.frames.deinit(candidate.allocator);
+            candidate.retired_frames = .empty;
+            defer candidate.retired_frames.deinit(candidate.allocator);
             candidate.request_identity = null;
             var remaining_fuel = caller_fuel.*;
 
@@ -1246,7 +1291,7 @@ pub fn Machine(
                             .result = result,
                         };
                         candidate.terminal = true;
-                        commit(state, &candidate);
+                        commitTerminal(state, &candidate);
                         caller_fuel.* = remaining_fuel;
                         return .{ .done = owned };
                     },
@@ -1326,11 +1371,20 @@ pub fn Machine(
                 return error.ProgramContractViolation;
             }
 
-            var frames = try FrameStack.initUninitialized(
+            const value = allocator.create(StoredState) catch
+                return error.OutOfMemory;
+            errdefer allocator.destroy(value);
+            value.* = .{
+                .allocator = allocator,
+                .sequence = sequence,
+                .cumulative_fuel = cumulative_fuel,
+                .frames = .empty,
+            };
+            value.frames = try FrameStack.initUninitialized(
                 allocator,
                 frame_count,
             );
-            errdefer frames.deinit(allocator);
+            errdefer value.frames.deinit(allocator);
             for (0..frame_count) |frame_index| {
                 const constructor_id = try reader.readInt(u32);
                 const environment_length = try reader.readInt(u32);
@@ -1340,20 +1394,12 @@ pub fn Machine(
                     constructor_id,
                     environment,
                 ) catch return error.ProgramContractViolation;
-                try frames.set(@intCast(frame_index), frame);
+                try value.frames.set(@intCast(frame_index), frame);
             }
             if (reader.index != bytes.len) return error.ProgramContractViolation;
-            var value: StoredState = .{
-                .allocator = allocator,
-                .sequence = sequence,
-                .cumulative_fuel = cumulative_fuel,
-                .frames = frames,
-            };
-            frames = .empty;
-            errdefer value.frames.deinit(allocator);
-            try validate(&value);
-            try refreshRequestCache(&value);
-            return own(allocator, &value);
+            try validate(value);
+            try refreshRequestCache(value);
+            return @ptrCast(value);
         }
     };
 }

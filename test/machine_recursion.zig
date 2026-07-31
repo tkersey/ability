@@ -302,6 +302,60 @@ test "compiled bounded recursive frames survive canonical round trip" {
     try std.testing.expectEqual(@as(u64, 7), completion_fuel);
 }
 
+test "decode rejects a callee frame forged for different call arguments" {
+    const RecursiveMachine = Program.compile(.{
+        .maximum_frames = 8,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const state = try RecursiveMachine.initialState(std.testing.allocator, 3);
+    defer RecursiveMachine.deinitState(state);
+
+    var caller_fuel: u64 = 3;
+    try std.testing.expectEqual(
+        RecursiveMachine.Outcome.yielded,
+        try RecursiveMachine.step(state, &caller_fuel),
+    );
+    const encoded = try RecursiveMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+
+    const state_header_length = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
+    var frame_offset: usize = state_header_length;
+    const parent_environment_length = std.mem.readInt(
+        u32,
+        forged[frame_offset + 4 ..][0..4],
+        .little,
+    );
+    frame_offset += 8 + parent_environment_length;
+    const child_constructor_id = std.mem.readInt(
+        u32,
+        forged[frame_offset..][0..4],
+        .little,
+    );
+    const child_constructor =
+        Program.rnf.constructors[child_constructor_id];
+    try std.testing.expectEqual(
+        @as(cir.ValueId, 3),
+        child_constructor.environmentFields()[0].value,
+    );
+
+    std.mem.writeInt(
+        u32,
+        forged[frame_offset + 8 ..][0..4],
+        4,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        RecursiveMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
 test "multi-frame commits reuse fixed-buffer transaction storage" {
     const RecursiveMachine = Program.compile(.{
         .maximum_frames = 8,
@@ -332,6 +386,48 @@ test "multi-frame commits reuse fixed-buffer transaction storage" {
             fixed.end_index,
         );
     }
+}
+
+test "fixed-buffer decoded terminal state fully releases in ownership order" {
+    const RecursiveMachine = Program.compile(.{
+        .maximum_frames = 8,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const source = try RecursiveMachine.initialState(std.testing.allocator, 3);
+    defer RecursiveMachine.deinitState(source);
+
+    var split_fuel: u64 = 3;
+    try std.testing.expectEqual(
+        RecursiveMachine.Outcome.yielded,
+        try RecursiveMachine.step(source, &split_fuel),
+    );
+    const encoded = try RecursiveMachine.encodeState(
+        std.testing.allocator,
+        source,
+    );
+    defer std.testing.allocator.free(encoded);
+
+    const backing = try std.testing.allocator.alloc(u8, 512 << 10);
+    defer std.testing.allocator.free(backing);
+    var fixed = std.heap.FixedBufferAllocator.init(backing);
+    const restored = try RecursiveMachine.decodeState(
+        fixed.allocator(),
+        encoded,
+    );
+
+    var completion_fuel: u64 = 32;
+    const done = switch (try RecursiveMachine.step(
+        restored,
+        &completion_fuel,
+    )) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u32, 6), done.value().*);
+    done.deinit();
+    RecursiveMachine.deinitState(restored);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
 
 test "call continuation may return to its own source block" {
