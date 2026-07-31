@@ -137,6 +137,10 @@ pub const InstructionOperation = union(enum) {
     bytes_append,
     bytes_copy,
     bytes_compare,
+    text_length,
+    bytes_length,
+    bytes_append_scalar,
+    bytes_join,
 };
 
 /// One explicit typed Control IR value definition.
@@ -696,6 +700,7 @@ pub fn validate(
                 .text_append_signed,
                 .text_compare,
                 .bytes_append,
+                .bytes_append_scalar,
                 .bytes_compare,
                 => if (instruction.kind != .pure or instruction.operands.len != 2) {
                     return error.InvalidInstruction;
@@ -713,6 +718,8 @@ pub fn validate(
                 .optional_some,
                 .optional_is_some,
                 .vector_length,
+                .text_length,
+                .bytes_length,
                 .vector_pop,
                 .vector_clear,
                 => if (instruction.kind != .pure or
@@ -725,6 +732,7 @@ pub fn validate(
                 .text_copy,
                 .text_join,
                 .bytes_copy,
+                .bytes_join,
                 => if (instruction.kind != .pure or
                     instruction.operands.len != 3)
                 {

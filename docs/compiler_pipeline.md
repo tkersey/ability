@@ -70,7 +70,9 @@ survives normalization.
 
 The release performance proof exports the immutable Boundary v0.7.0 tag into a
 temporary tree and builds its focused StaticMachine witness with the same Zig
-toolchain as the RNF witness. It compares paired native medians, canonical
-parked-state size, and one-effect WASM size against the specified 1.25x, no-state
-growth, and 1.5x limits. This bounded reference is conformance-only: no legacy
-runtime source or reducer is imported into the production module graph.
+toolchain as the RNF witness. It records compile time and peak compiler memory,
+then compares paired native lifecycle and decode medians, import-free WASM
+lifecycle medians, canonical parked-state size, one-effect WASM size, and
+runtime-semantic module count against the specified hard gates. This bounded
+reference is conformance-only: no legacy runtime source or reducer is imported
+into the production module graph.

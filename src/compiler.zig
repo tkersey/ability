@@ -850,6 +850,13 @@ fn validateInstruction(
             requireOperandCount(instruction, 0);
             if (!isText(Result)) @compileError("text_empty result must be Text");
         },
+        .text_length => {
+            requireOperandCount(instruction, 1);
+            const Text = operandType(Body, program, instruction, 0);
+            if (!isText(Text) or Result != u32) {
+                @compileError("text_length requires Text -> u32");
+            }
+        },
         .text_append => {
             requireOperandCount(instruction, 2);
             const Destination = operandType(Body, program, instruction, 0);
@@ -932,6 +939,13 @@ fn validateInstruction(
             requireOperandCount(instruction, 0);
             if (!isBytes(Result)) @compileError("bytes_empty result must be Bytes");
         },
+        .bytes_length => {
+            requireOperandCount(instruction, 1);
+            const Bytes = operandType(Body, program, instruction, 0);
+            if (!isBytes(Bytes) or Result != u32) {
+                @compileError("bytes_length requires Bytes -> u32");
+            }
+        },
         .bytes_append => {
             requireOperandCount(instruction, 2);
             const Destination = operandType(Body, program, instruction, 0);
@@ -940,6 +954,16 @@ fn validateInstruction(
                 Result != Destination)
             {
                 @compileError("bytes_append requires Bytes operands");
+            }
+            _ = failureNamed(Body, "capacity_exceeded");
+        },
+        .bytes_append_scalar => {
+            requireOperandCount(instruction, 2);
+            const Destination = operandType(Body, program, instruction, 0);
+            if (!isBytes(Destination) or Result != Destination or
+                operandType(Body, program, instruction, 1) != u8)
+            {
+                @compileError("bytes_append_scalar requires Bytes and u8");
             }
             _ = failureNamed(Body, "capacity_exceeded");
         },
@@ -961,6 +985,18 @@ fn validateInstruction(
             if (!isBytes(Left) or !isBytes(Right) or Result != i8) {
                 @compileError("bytes_compare requires Bytes, Bytes -> i8");
             }
+        },
+        .bytes_join => {
+            requireOperandCount(instruction, 3);
+            const Left = operandType(Body, program, instruction, 0);
+            const Separator = operandType(Body, program, instruction, 1);
+            const Right = operandType(Body, program, instruction, 2);
+            if (!isBytes(Left) or !isBytes(Separator) or !isBytes(Right) or
+                Result != Left)
+            {
+                @compileError("bytes_join requires three Bytes operands");
+            }
+            _ = failureNamed(Body, "capacity_exceeded");
         },
     }
 }
@@ -2174,6 +2210,10 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     sizes[@intCast(instruction.operands[0])],
                     &.{sizes[@intCast(instruction.operands[1])]},
                 ),
+                .bytes_append_scalar => boundedBytes(
+                    ResultType,
+                    sizes[@intCast(instruction.operands[0])] +| 1,
+                ),
                 .text_append_scalar => boundedBytes(
                     ResultType,
                     sizes[@intCast(instruction.operands[0])] +| 4,
@@ -2186,7 +2226,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     maximum,
                     sizes[@intCast(instruction.operands[0])],
                 ),
-                .text_join => combinedSequenceBytes(
+                .text_join, .bytes_join => combinedSequenceBytes(
                     ResultType,
                     sizes[@intCast(instruction.operands[0])],
                     &.{
@@ -2218,6 +2258,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 .sum_tag_is,
                 .optional_is_some,
                 .vector_length,
+                .text_length,
+                .bytes_length,
                 .text_compare,
                 .bytes_compare,
                 => maximum,
@@ -2635,6 +2677,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         const Text = @FieldType(Store, result_name);
                         @field(store, result_name) = Text.empty();
                     },
+                    .text_length => {
+                        @field(store, result_name) = @field(
+                            store,
+                            valueName(instruction.operands[0]),
+                        ).len();
+                    },
                     .text_append => {
                         var text = @field(
                             store,
@@ -2766,6 +2814,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         const Bytes = @FieldType(Store, result_name);
                         @field(store, result_name) = Bytes.empty();
                     },
+                    .bytes_length => {
+                        @field(store, result_name) = @field(
+                            store,
+                            valueName(instruction.operands[0]),
+                        ).len();
+                    },
                     .bytes_append => {
                         var bytes = @field(
                             store,
@@ -2776,6 +2830,19 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             valueName(instruction.operands[1]),
                         );
                         bytes.append(suffix.slice()) catch
+                            return failureNamed(Body, "capacity_exceeded");
+                        @field(store, result_name) = bytes;
+                    },
+                    .bytes_append_scalar => {
+                        var bytes = @field(
+                            store,
+                            valueName(instruction.operands[0]),
+                        );
+                        const scalar = @field(
+                            store,
+                            valueName(instruction.operands[1]),
+                        );
+                        bytes.append(&.{scalar}) catch
                             return failureNamed(Body, "capacity_exceeded");
                         @field(store, result_name) = bytes;
                     },
@@ -2814,6 +2881,25 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             .eq => 0,
                             .gt => 1,
                         };
+                    },
+                    .bytes_join => {
+                        var bytes = @field(
+                            store,
+                            valueName(instruction.operands[0]),
+                        );
+                        const separator = @field(
+                            store,
+                            valueName(instruction.operands[1]),
+                        );
+                        const right = @field(
+                            store,
+                            valueName(instruction.operands[2]),
+                        );
+                        bytes.append(separator.slice()) catch
+                            return failureNamed(Body, "capacity_exceeded");
+                        bytes.append(right.slice()) catch
+                            return failureNamed(Body, "capacity_exceeded");
+                        @field(store, result_name) = bytes;
                     },
                 }
             }

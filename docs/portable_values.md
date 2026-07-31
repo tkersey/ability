@@ -27,7 +27,10 @@ observable. Capacity overflow and invalid UTF-8 fail before mutation.
 
 The source algebra includes deterministic fixed-width integer computation,
 branching, product construction/extraction, vector construction and access, and
-bounded text construction. Operations charge deterministic fuel.
+bounded text/byte construction. Text and Bytes expose canonical logical length,
+copy, comparison, join, and append operations; Bytes also admits one-byte
+scalar append, while Text admits Unicode-scalar and integer formatting.
+Operations charge deterministic fuel.
 
 Unsupported values include `usize`, `isize`, raw pointers, arbitrary slices,
 floats, function values, opaque host handles, non-exhaustive enums, comptime

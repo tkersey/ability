@@ -38,9 +38,13 @@ const AlgebraicResult = struct {
     copied_text: Text,
     text_comparison: i8,
     joined: Text,
+    text_length: u32,
     bytes: Bytes,
     copied_bytes: Bytes,
     bytes_comparison: i8,
+    bytes_length: u32,
+    joined_bytes: Bytes,
+    scalar_bytes: Bytes,
 };
 
 const value_types = [_]cir.ValueType{
@@ -91,7 +95,12 @@ const value_types = [_]cir.ValueType{
     .{ .schema = 6 }, // v44 bytes joined
     .{ .schema = 6 }, // v45 copied bytes
     .{ .scalar = .i8 }, // v46 bytes comparison
-    .{ .schema = 7 }, // v47 result
+    .{ .scalar = .u8 }, // v47 scalar byte
+    .{ .scalar = .u32 }, // v48 text length
+    .{ .scalar = .u32 }, // v49 bytes length
+    .{ .schema = 6 }, // v50 joined bytes
+    .{ .schema = 6 }, // v51 scalar-appended bytes
+    .{ .schema = 7 }, // v52 result
 };
 
 const instructions = [_]cir.Instruction{
@@ -142,13 +151,19 @@ const instructions = [_]cir.Instruction{
     .{ .kind = .pure, .result = 44, .operands = &.{ 43, 11 }, .operation = .bytes_append },
     .{ .kind = .pure, .result = 45, .operands = &.{ 44, 2, 4 }, .operation = .bytes_copy },
     .{ .kind = .pure, .result = 46, .operands = &.{ 45, 10 }, .operation = .bytes_compare },
+    .{ .kind = .constant, .result = 47, .operation = .{ .constant = 13 } },
+    .{ .kind = .pure, .result = 48, .operands = &.{41}, .operation = .text_length },
+    .{ .kind = .pure, .result = 49, .operands = &.{44}, .operation = .bytes_length },
+    .{ .kind = .pure, .result = 50, .operands = &.{ 10, 11, 10 }, .operation = .bytes_join },
+    .{ .kind = .pure, .result = 51, .operands = &.{ 50, 47 }, .operation = .bytes_append_scalar },
     .{
         .kind = .pure,
-        .result = 47,
+        .result = 52,
         .operands = &.{
             14, 16, 19, 18, 17, 20, 21,
             22, 26, 27, 28, 29, 32, 33,
-            38, 39, 40, 41, 44, 45, 46,
+            38, 39, 40, 41, 48, 44, 45,
+            46, 49, 50, 51,
         },
         .operation = .product_construct,
     },
@@ -158,7 +173,7 @@ const blocks = [_]cir.Block{
     .{
         .id = 0,
         .instructions = &instructions,
-        .terminator = .{ .return_value = 47 },
+        .terminator = .{ .return_value = 52 },
     },
 };
 
@@ -187,6 +202,7 @@ const Body = struct {
         Bytes.fromSlice(&.{ 1, 2 }) catch unreachable,
         Bytes.fromSlice(&.{3}) catch unreachable,
         @as(u32, 42),
+        @as(u8, 4),
     };
     pub const effect_sites = .{};
     pub const schema_types = .{
@@ -243,9 +259,21 @@ test "compiled products sums optionals vectors text and bytes are first order" {
     try std.testing.expectEqualStrings("al", result.copied_text.slice());
     try std.testing.expectEqual(@as(i8, -1), result.text_comparison);
     try std.testing.expectEqualStrings("alpha-beta", result.joined.slice());
+    try std.testing.expectEqual(@as(u32, 10), result.text_length);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, result.bytes.slice());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, result.copied_bytes.slice());
     try std.testing.expectEqual(@as(i8, 0), result.bytes_comparison);
+    try std.testing.expectEqual(@as(u32, 3), result.bytes_length);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 1, 2, 3, 1, 2 },
+        result.joined_bytes.slice(),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 1, 2, 3, 1, 2, 4 },
+        result.scalar_bytes.slice(),
+    );
     switch (result.choice) {
         .value => |value| try std.testing.expectEqual(@as(u32, 7), value),
         .none => return error.TestUnexpectedResult,
