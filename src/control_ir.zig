@@ -1,9 +1,9 @@
 const std = @import("std");
 
-/// Dense value identity scoped to one Control IR function.
+/// Dense value identity scoped to one Control IR program.
 pub const ValueId = u16;
 
-/// Dense block identity scoped to one Control IR function.
+/// Dense block identity scoped to one Control IR program.
 pub const BlockId = u16;
 
 /// Dense function identity scoped to one Control IR program.

@@ -180,8 +180,11 @@ pub fn Text(comptime maximum_bytes: usize) type {
 
         /// Append valid UTF-8 atomically.
         pub fn append(self: *Self, suffix: []const u8) Error!void {
-            if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
             if (self.logical_length > maximum_bytes) return error.Malformed;
+            if (!std.unicode.utf8ValidateSlice(self.slice())) {
+                return error.InvalidUtf8;
+            }
+            if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
             const start: usize = @intCast(self.logical_length);
             const end = std.math.add(usize, start, suffix.len) catch
                 return error.CapacityExceeded;
@@ -232,6 +235,8 @@ pub fn Text(comptime maximum_bytes: usize) type {
         pub fn eql(self: *const Self, other: *const Self) bool {
             if (self.logical_length > maximum_bytes or
                 other.logical_length > maximum_bytes) return false;
+            if (!std.unicode.utf8ValidateSlice(self.slice()) or
+                !std.unicode.utf8ValidateSlice(other.slice())) return false;
             return std.mem.eql(u8, self.slice(), other.slice());
         }
 
@@ -250,6 +255,12 @@ pub fn Text(comptime maximum_bytes: usize) type {
 /// Inline owned bounded vector whose spare capacity has no semantic identity.
 pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
     comptime assertCanonicalCapacity(maximum_items);
+    comptime assertPortable(Element);
+    comptime if (!hasCanonicalDefaultValue(Element)) {
+        @compileError(
+            "Boundary Vector element type must have a canonical default value",
+        );
+    };
     return struct {
         const Self = @This();
 
@@ -416,6 +427,29 @@ fn isCanonicalInteger(comptime T: type) bool {
         T == u8 or T == u16 or T == u32 or T == u64;
 }
 
+fn hasCanonicalDefaultValue(comptime T: type) bool {
+    if (isBytes(T) or isText(T) or isVector(T)) return true;
+    return switch (@typeInfo(T)) {
+        .void, .bool, .int => true,
+        .array => |info| info.len == 0 or hasCanonicalDefaultValue(info.child),
+        .optional => true,
+        .@"enum" => |info| info.fields.len != 0,
+        .@"struct" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (!hasCanonicalDefaultValue(field.type)) break :blk false;
+            }
+            break :blk true;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (hasCanonicalDefaultValue(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 /// Reject values without explicit first-order portable semantics.
 pub fn assertPortable(comptime T: type) void {
     if (isBytes(T) or isText(T)) return;
@@ -485,11 +519,18 @@ fn canonicalDefaultValue(comptime T: type) T {
             }
             break :blk result;
         },
-        .@"union" => |info| @unionInit(
-            T,
-            info.fields[0].name,
-            canonicalDefaultValue(info.fields[0].type),
-        ),
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (hasCanonicalDefaultValue(field.type)) {
+                    break :blk @unionInit(
+                        T,
+                        field.name,
+                        canonicalDefaultValue(field.type),
+                    );
+                }
+            }
+            unreachable;
+        },
         else => unreachable,
     };
 }
@@ -499,14 +540,7 @@ pub fn eqlValue(comptime T: type, left: T, right: T) bool {
     comptime assertPortable(T);
     if (comptime maximumEncodedSize(T) == 0) return true;
     if (comptime isBytes(T) or isText(T)) return left.eql(&right);
-    if (comptime isVector(T)) {
-        if (left.logical_length != right.logical_length) return false;
-        if (comptime maximumEncodedSize(T.ElementType) == 0) return true;
-        for (left.slice(), right.slice()) |left_item, right_item| {
-            if (!eqlValue(T.ElementType, left_item, right_item)) return false;
-        }
-        return true;
-    }
+    if (comptime isVector(T)) return left.eql(&right);
     return switch (@typeInfo(T)) {
         .void => true,
         .bool, .int, .@"enum" => left == right,
@@ -1217,6 +1251,31 @@ test "bounded defaults initialize all storage and malformed lengths stay total" 
         error.Malformed,
         malformed_items.push(.{ .title = text, .count = 1 }),
     );
+}
+
+test "Text append rejects an invalid current prefix before mutation" {
+    const Value = Text(4);
+    var value = Value.empty();
+    value.storage[0] = 0xff;
+    value.logical_length = 1;
+    const before = value;
+
+    try std.testing.expectError(error.InvalidUtf8, value.append("a"));
+    try std.testing.expectEqualDeep(before, value);
+    try std.testing.expect(!eqlValue(Value, value, value));
+}
+
+test "generic vector equality rejects malformed logical lengths" {
+    const Values = Vector(u8, 1);
+    var left = Values.empty();
+    var right = Values.empty();
+    left.logical_length = 2;
+    right.logical_length = 2;
+    left.storage[0] = 1;
+    right.storage[0] = 2;
+
+    try std.testing.expect(!left.eql(&right));
+    try std.testing.expect(!eqlValue(Values, left, right));
 }
 
 test "vector validates nested bounded values before mutation" {

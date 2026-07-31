@@ -628,10 +628,30 @@ pub fn build(b: *std.Build) void {
     );
     performance_falsifier_step.dependOn(&performance_falsifier_command.step);
 
-    const receipt_command = b.addSystemCommand(&.{"sh"});
-    receipt_command.addFileArg(
-        b.path("conformance/rnf-v1/check_receipt.sh"),
-    );
+    const receipt_output_command =
+        "printf '%s\\n' " ++
+        "'boundary_machine_abi=2' " ++
+        "'boundary_rnf=true' " ++
+        "'single_boundary_reducer=true' " ++
+        "'program_session_public=false' " ++
+        "'boundary_runtime_public=false' " ++
+        "'static_machine_public=false' " ++
+        "'loaded_execution_present=false' " ++
+        "'runtime_program_plan_decode=false' " ++
+        "'generic_instruction_dispatch=false' " ++
+        "'canonical_state_format=ABL_RNF2' " ++
+        "'fixed_width_u32=true' " ++
+        "'bounded_vector_of_products=true' " ++
+        "'bounded_text_construction=true' " ++
+        "'product_construction=true' " ++
+        "'correlated_predicate_witness=true' " ++
+        "'bounded_recursive_helper=true' " ++
+        "'after_sites_exposed_to_world=0'";
+    const receipt_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        receipt_output_command,
+    });
     inline for (.{
         control_step,
         values_step,
@@ -648,6 +668,17 @@ pub fn build(b: *std.Build) void {
         "Emit the Boundary-owned completion receipt fields after their proofs.",
     );
     receipt_step.dependOn(&receipt_command.step);
+
+    const receipt_falsifier_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "test ! -e conformance/rnf-v1/check_receipt.sh",
+    });
+    const receipt_falsifier_step = b.step(
+        "check-boundary-machine-receipt-falsifiers",
+        "Prove that no directly invokable unbound completion receipt remains.",
+    );
+    receipt_falsifier_step.dependOn(&receipt_falsifier_command.step);
 
     const compile_fail_step = b.step(
         "compile-fail",
@@ -666,6 +697,10 @@ pub fn build(b: *std.Build) void {
         .{
             "test/compile_fail/portable_non_exhaustive_enum.zig",
             "Boundary Machine enums must be exhaustive",
+        },
+        .{
+            "test/compile_fail/vector_uninhabited_element.zig",
+            "Boundary Vector element type must have a canonical default value",
         },
         .{
             "test/compile_fail/portable_sentinel_array.zig",
@@ -785,6 +820,7 @@ pub fn build(b: *std.Build) void {
         performance_step,
         performance_falsifier_step,
         receipt_step,
+        receipt_falsifier_step,
     }) |dependency| {
         check_step.dependOn(dependency);
     }

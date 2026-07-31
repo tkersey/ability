@@ -103,6 +103,7 @@ fn invariantConstantValue(comptime T: type, value: T) ?rnf.InvariantValue {
             .{ .signed = @intCast(value) }
         else
             .{ .unsigned = @intCast(value) },
+        .optional, .@"union" => .{ .sum_case = algebraicCaseIndex(value) },
         else => null,
     };
 }
@@ -1707,6 +1708,45 @@ fn semanticHashInvariant(
             semanticHashU16(hasher, canonical.valueId(definition.result));
             semanticHashInvariantValue(hasher, definition.contents);
         },
+        .value_select => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.condition));
+            semanticHashU16(hasher, canonical.valueId(definition.then_value));
+            semanticHashU16(hasher, canonical.valueId(definition.else_value));
+        },
+        .integer_unary_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.operand));
+            semanticHashU8(
+                hasher,
+                @intCast(@intFromEnum(definition.operation)),
+            );
+            semanticHashU8(
+                hasher,
+                @intCast(@intFromEnum(definition.scalar_type)),
+            );
+        },
+        .integer_binary_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.left));
+            semanticHashU16(hasher, canonical.valueId(definition.right));
+            semanticHashU8(
+                hasher,
+                @intCast(@intFromEnum(definition.operation)),
+            );
+            semanticHashU8(
+                hasher,
+                @intCast(@intFromEnum(definition.scalar_type)),
+            );
+        },
+        .integer_convert_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.operand));
+            semanticHashU8(
+                hasher,
+                @intCast(@intFromEnum(definition.scalar_type)),
+            );
+        },
         .integer_zero => |predicate| {
             semanticHashU16(
                 hasher,
@@ -1784,6 +1824,10 @@ fn invariantValueMatches(value: anytype, expected: rnf.InvariantValue) bool {
             }
         else switch (expected) {
             .unsigned => |contents| @as(u64, value) == contents,
+            else => false,
+        },
+        .optional, .@"union" => switch (expected) {
+            .sum_case => |contents| algebraicCaseIndex(value) == contents,
             else => false,
         },
         else => false,
@@ -3756,6 +3800,41 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     .value_constant => |definition| invariantValueMatches(
                         @field(environment, valueName(definition.result)),
                         definition.contents,
+                    ),
+                    .value_select => |definition| portable_value.eqlValue(
+                        @TypeOf(@field(
+                            environment,
+                            valueName(definition.result),
+                        )),
+                        @field(environment, valueName(definition.result)),
+                        if (@field(
+                            environment,
+                            valueName(definition.condition),
+                        ))
+                            @field(
+                                environment,
+                                valueName(definition.then_value),
+                            )
+                        else
+                            @field(
+                                environment,
+                                valueName(definition.else_value),
+                            ),
+                    ),
+                    .integer_unary_result => |definition| rnf.integerUnaryDefinitionHolds(
+                        @field(environment, valueName(definition.result)),
+                        @field(environment, valueName(definition.operand)),
+                        definition.operation,
+                    ),
+                    .integer_binary_result => |definition| rnf.integerBinaryDefinitionHolds(
+                        @field(environment, valueName(definition.result)),
+                        @field(environment, valueName(definition.left)),
+                        @field(environment, valueName(definition.right)),
+                        definition.operation,
+                    ),
+                    .integer_convert_result => |definition| rnf.integerConvertDefinitionHolds(
+                        @field(environment, valueName(definition.result)),
+                        @field(environment, valueName(definition.operand)),
                     ),
                     .integer_zero => |predicate| (@field(
                         environment,
