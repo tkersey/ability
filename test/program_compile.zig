@@ -581,7 +581,7 @@ test "Driver allocates a multi-frame resume before invoking its handler" {
     try std.testing.expectEqual(@as(u32, 18), done.value().*);
 }
 
-test "Driver preflights the complete response state before handler authority" {
+test "Machine preflights the complete response state before request authority" {
     const LocalDriver = driver.Driver(LargeResponseMachine);
     var local = try LocalDriver.init(std.testing.allocator, 9);
     defer local.deinit();
@@ -600,23 +600,30 @@ test "Driver preflights the complete response state before handler authority" {
         }
     }{};
 
-    var fuel: u64 = 8;
-    const request = switch (try LargeResponseMachine.step(
+    const before = try LargeResponseMachine.encodeState(
+        std.testing.allocator,
         local.state,
-        &fuel,
-    )) {
-        .request => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
+    );
+    defer std.testing.allocator.free(before);
+    var fuel: u64 = 8;
     try std.testing.expectError(
         error.ProgramContractViolation,
         local.run(&handler, &fuel),
     );
     try std.testing.expectEqual(@as(u8, 0), handler.attempts);
-    const parked = try LargeResponseMachine.current(local.state);
+    try std.testing.expectEqual(@as(u64, 8), fuel);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        LargeResponseMachine.current(local.state),
+    );
+    const after = try LargeResponseMachine.encodeState(
+        std.testing.allocator,
+        local.state,
+    );
+    defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(
         u8,
-        &request.identity.digest,
-        &parked.identity.digest,
+        before,
+        after,
     );
 }

@@ -23,6 +23,7 @@ test/compile_fail/portable_c_integer.zig
 test/compile_fail/portable_non_exhaustive_enum.zig
 test/compile_fail/portable_sentinel_array.zig
 test/compile_fail/portable_usize.zig
+test/compile_fail/undersized_machine_state.zig
 test/machine_after.zig
 test/machine_native_wasm.zig
 test/machine_performance.zig

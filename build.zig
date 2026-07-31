@@ -287,6 +287,7 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    program_dead_control.addImport("compiler", host_core.compiler);
     program_dead_control.addImport("machine", host_core.machine);
     const constructor_invariants = programTestModule(
         b,
@@ -697,7 +698,11 @@ pub fn build(b: *std.Build) void {
         },
         .{
             "test/compile_fail/oversized_machine_state.zig",
-            "Boundary Machine maximum_state_bytes must fit canonical u32 and its header",
+            "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
+        },
+        .{
+            "test/compile_fail/undersized_machine_state.zig",
+            "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
         },
     }) |case| {
         addExpectedCompileFailure(

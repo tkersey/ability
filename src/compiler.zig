@@ -448,19 +448,26 @@ fn requestType(comptime Body: type, comptime residual_effects: anytype) type {
 fn returnValueType(
     comptime Body: type,
     comptime program: control_ir.Program,
+    comptime semantic_canonicalization: anytype,
 ) type {
-    if (program.functions.len <= 1) return void;
-    const count = program.functions.len - 1;
+    if (semantic_canonicalization.function_count <= 1) return void;
+    const count = semantic_canonicalization.function_count - 1;
     var names: [count][:0]const u8 = undefined;
     var values: [count]u32 = undefined;
     var types: [count]type = undefined;
     var attributes = [_]std.builtin.Type.UnionField.Attributes{.{}} ** count;
-    inline for (program.functions[1..], 0..) |function, index| {
+    var index: usize = 0;
+    inline for (
+        semantic_canonicalization.function_dense_to_source[0..semantic_canonicalization.function_count],
+    ) |source_function_id| {
+        if (source_function_id == 0) continue;
+        const function = program.functions[@intCast(source_function_id)];
         const ResultType = typeForValue(Body, function.result_type);
         names[index] = functionReturnName(function.id);
         values[index] = @intCast(index);
         types[index] = ResultType;
         attributes[index] = .{ .@"align" = @alignOf(ResultType) };
+        index += 1;
     }
     const Tag = @Enum(u32, .exhaustive, &names, &values);
     return @Union(.auto, Tag, &names, &types, &attributes);
@@ -1910,7 +1917,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         }
     }
     const RequestType = requestType(Body, residual_effects);
-    const ReturnValueType = returnValueType(Body, program);
+    const ReturnValueType = returnValueType(
+        Body,
+        program,
+        semantic_canonicalization,
+    );
 
     return struct {
         const Self = @This();
@@ -3680,13 +3691,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
-        fn validateCallArguments(
-            parent_environment: anytype,
+        fn validateCallCallee(
             comptime suspension: control_ir.Suspension,
             child: Frame,
         ) error{ProgramContractViolation}!void {
             return switch (child) {
-                inline else => |child_environment, child_tag| blk: {
+                inline else => |_, child_tag| blk: {
                     const child_constructor_id: usize =
                         comptime @intFromEnum(child_tag);
                     const child_constructor = comptime normal_form.constructors[
@@ -3697,60 +3707,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     ].function_id != suspension.callee_function.?) {
                         break :blk error.ProgramContractViolation;
                     }
-                    const callee = comptime suspension.callee.?;
-                    const callee_entry = comptime program.blocks[callee.target];
-                    inline for (
-                        callee.arguments,
-                        callee_entry.parameters,
-                    ) |argument, parameter| {
-                        switch (argument) {
-                            .value => |caller_value| {
-                                const parent_name =
-                                    comptime valueName(caller_value);
-                                const child_name =
-                                    comptime valueName(parameter);
-                                const ParentEnvironment =
-                                    @TypeOf(parent_environment);
-                                const ChildEnvironment =
-                                    @TypeOf(child_environment);
-                                if (comptime !@hasField(
-                                    ParentEnvironment,
-                                    parent_name,
-                                ) or
-                                    !@hasField(
-                                        ChildEnvironment,
-                                        child_name,
-                                    ))
-                                {
-                                    @compileError(
-                                        "persisted call frame is missing its exact argument witness",
-                                    );
-                                }
-                                const Value = typeForValue(
-                                    Body,
-                                    program.value_types[
-                                        @intCast(caller_value)
-                                    ],
-                                );
-                                if (!portable_value.eqlValue(
-                                    Value,
-                                    @field(
-                                        parent_environment,
-                                        parent_name,
-                                    ),
-                                    @field(
-                                        child_environment,
-                                        child_name,
-                                    ),
-                                )) {
-                                    break :blk error.ProgramContractViolation;
-                                }
-                            },
-                            .@"resume" => @compileError(
-                                "callee edge cannot carry a resume value",
-                            ),
-                        }
-                    }
                 },
             };
         }
@@ -3760,7 +3716,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             child: Frame,
         ) error{ProgramContractViolation}!void {
             return switch (parent) {
-                inline else => |parent_environment, tag| blk: {
+                inline else => |_, tag| blk: {
                     const constructor_id: usize =
                         comptime @intFromEnum(tag);
                     if (!comptime isAwaitCallConstructor(constructor_id)) {
@@ -3772,8 +3728,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const suspension = comptime program.blocks[
                         constructor.source_block
                     ].terminator.@"suspend";
-                    try validateCallArguments(
-                        parent_environment,
+                    try validateCallCallee(
                         suspension,
                         child,
                     );

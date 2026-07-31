@@ -169,6 +169,7 @@ const state_magic = "ABL_RNF2";
 const state_format_version: u16 = 1;
 const machine_abi_version: u16 = 2;
 const state_header_length: usize = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
+const frame_header_length: usize = 4 + 4;
 
 const ByteWriter = struct {
     bytes: []u8,
@@ -238,10 +239,13 @@ pub fn Machine(
         if (options.maximum_frames > std.math.maxInt(u32)) {
             @compileError("Boundary Machine maximum_frames must fit canonical u32");
         }
-        if (options.maximum_state_bytes < state_header_length or
+        if (options.maximum_state_bytes <
+            state_header_length + frame_header_length or
             options.maximum_state_bytes > std.math.maxInt(u32))
         {
-            @compileError("Boundary Machine maximum_state_bytes must fit canonical u32 and its header");
+            @compileError(
+                "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
+            );
         }
     }
 
@@ -354,10 +358,7 @@ pub fn Machine(
                 self: *const Stack,
                 allocator: std.mem.Allocator,
             ) Error!Stack {
-                return self.cloneWithCapacity(
-                    allocator,
-                    options.maximum_frames,
-                );
+                return self.cloneExact(allocator);
             }
 
             fn deinit(self: *Stack, allocator: std.mem.Allocator) void {
@@ -437,13 +438,21 @@ pub fn Machine(
                     .one => |first| {
                         var list = std.ArrayList(Frame).initCapacity(
                             allocator,
-                            options.maximum_frames,
+                            2,
                         ) catch return error.OutOfMemory;
                         list.appendAssumeCapacity(first);
                         list.appendAssumeCapacity(frame);
                         self.* = .{ .many = list };
                     },
                     .many => |*list| {
+                        if (@sizeOf(Frame) != 0 and
+                            list.capacity < list.items.len + 1)
+                        {
+                            list.ensureTotalCapacityPrecise(
+                                allocator,
+                                list.items.len + 1,
+                            ) catch return error.OutOfMemory;
+                        }
                         list.appendAssumeCapacity(frame);
                     },
                 }
@@ -901,7 +910,8 @@ pub fn Machine(
                 total = std.math.add(
                     usize,
                     total,
-                    8 + try portable_value.unionPayloadEncodedSize(Frame, frame),
+                    frame_header_length +
+                        try portable_value.unionPayloadEncodedSize(Frame, frame),
                 ) catch return error.ProgramContractViolation;
             }
             return total;
@@ -1366,6 +1376,12 @@ pub fn Machine(
                             &candidate,
                             request.request,
                         );
+                        if (try maximumResumeStateSize(
+                            &candidate,
+                            outcome_request,
+                        ) > options.maximum_state_bytes) {
+                            return error.ProgramContractViolation;
+                        }
                         const reconstructed = (try currentFrom(&candidate)) orelse
                             return error.ProgramContractViolation;
                         if (reconstructed.sequence != outcome_request.sequence or
@@ -1880,6 +1896,84 @@ const MalformedRequestDefinition = struct {
     }
 };
 
+const UnresumableRequestDefinition = struct {
+    const Frame = union(enum) {
+        entry: struct {},
+        awaiting: struct {},
+        resumed: [16]u8,
+    };
+    const InitialArgs = void;
+    const Result = void;
+    const Failure = enum { rejected };
+    const Request = union(enum) {
+        lookup: void,
+    };
+    const EffectRow = struct {
+        pub const operation_site_count: usize = 1;
+        pub const after_site_count: usize = 0;
+    };
+    const Transition = Reduction(Frame, Request, Result, Failure);
+    const contract_bytes = "test-direct-rnf\x00unresumable-request";
+
+    fn initial(_: InitialArgs) Frame {
+        return .{ .entry = .{} };
+    }
+
+    fn minimumCost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn cost(_: Frame) u64 {
+        return 1;
+    }
+
+    fn plan(frame: Frame) struct {
+        cost: u64,
+        transition: Transition,
+    } {
+        return .{ .cost = 1, .transition = switch (frame) {
+            .entry => .{ .request = .{
+                .awaiting = .{ .awaiting = .{} },
+                .request = .{ .lookup = {} },
+            } },
+            .awaiting, .resumed => unreachable,
+        } };
+    }
+
+    fn current(frame: Frame) ?Request {
+        return switch (frame) {
+            .awaiting => .{ .lookup = {} },
+            .entry, .resumed => null,
+        };
+    }
+
+    fn @"resume"(
+        frame: Frame,
+        _: Request,
+        response: anytype,
+    ) error{ProgramContractViolation}!Frame {
+        if (@TypeOf(response) != void) return error.ProgramContractViolation;
+        return switch (frame) {
+            .awaiting => .{ .resumed = [_]u8{0} ** 16 },
+            .entry, .resumed => error.ProgramContractViolation,
+        };
+    }
+
+    fn requestEql(left: Request, right: Request) bool {
+        return portable_value.eqlValue(Request, left, right);
+    }
+
+    fn requestSiteDigest(_: Request) [32]u8 {
+        return [_]u8{0x75} ** 32;
+    }
+
+    fn validateFrame(_: Frame) error{ProgramContractViolation}!void {}
+
+    fn validateStack(frames: []const Frame) error{ProgramContractViolation}!void {
+        if (frames.len != 1) return error.ProgramContractViolation;
+    }
+};
+
 const CostPreflightDefinition = struct {
     const Frame = union(enum) {
         entry: struct {},
@@ -2048,6 +2142,51 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 5), done.value().*);
+}
+
+test "minimum state ceiling admits exactly one empty canonical frame" {
+    const MinimumMachine = Machine(UnresumableRequestDefinition, .{
+        .maximum_frames = 1,
+        .maximum_state_bytes = state_header_length + frame_header_length,
+        .maximum_machine_fuel = 8,
+    });
+    const state = try MinimumMachine.initialState(std.testing.allocator, {});
+    defer MinimumMachine.deinitState(state);
+    const encoded = try MinimumMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqual(
+        state_header_length + frame_header_length,
+        encoded.len,
+    );
+}
+
+test "Machine rejects an unresumable request before exposing authority" {
+    const RequestMachine = Machine(UnresumableRequestDefinition, .{
+        .maximum_frames = 1,
+        .maximum_state_bytes = state_header_length + frame_header_length,
+        .maximum_machine_fuel = 8,
+    });
+    const state = try RequestMachine.initialState(std.testing.allocator, {});
+    defer RequestMachine.deinitState(state);
+    const before = try RequestMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    var caller_fuel: u64 = 1;
+
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        RequestMachine.step(state, &caller_fuel),
+    );
+    try std.testing.expectEqual(@as(u64, 1), caller_fuel);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        RequestMachine.current(state),
+    );
+    const after = try RequestMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 test "request identity binds the complete canonical continuation" {

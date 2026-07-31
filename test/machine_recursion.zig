@@ -258,6 +258,158 @@ const SelfTargetProgram = program_v2.program(
     SelfTargetBody,
 );
 
+const backedge_root_call_arguments = [_]cir.EdgeArgument{
+    .{ .value = 1 },
+    .{ .value = 0 },
+};
+const backedge_root_return_arguments = [_]cir.EdgeArgument{.@"resume"};
+const backedge_body_arguments = [_]cir.EdgeArgument{
+    .{ .value = 2 },
+    .{ .value = 3 },
+};
+const backedge_done_arguments = [_]cir.EdgeArgument{.{ .value = 2 }};
+const backedge_repeat_arguments = [_]cir.EdgeArgument{
+    .{ .value = 8 },
+    .{ .value = 6 },
+};
+const backedge_root_instructions = [_]cir.Instruction{.{
+    .kind = .constant,
+    .result = 1,
+    .operation = .{ .constant = 0 },
+}};
+const backedge_header_instructions = [_]cir.Instruction{.{
+    .kind = .pure,
+    .result = 4,
+    .operands = &.{ 2, 3 },
+    .operation = .integer_less_than,
+}};
+const backedge_increment_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 7,
+        .operation = .{ .constant = 1 },
+    },
+    .{
+        .kind = .pure,
+        .result = 8,
+        .operands = &.{ 5, 7 },
+        .operation = .integer_add,
+    },
+};
+const helper_backedge_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &backedge_root_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 1,
+                .arguments = &backedge_root_call_arguments,
+            },
+            .continuation = .{
+                .target = 4,
+                .arguments = &backedge_root_return_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 1,
+        .function_id = 1,
+        .role = .loop_header,
+        .parameters = &.{ 2, 3 },
+        .instructions = &backedge_header_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 4,
+            .then_edge = .{
+                .target = 2,
+                .arguments = &backedge_body_arguments,
+            },
+            .else_edge = .{
+                .target = 3,
+                .arguments = &backedge_done_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 2,
+        .function_id = 1,
+        .parameters = &.{ 5, 6 },
+        .instructions = &backedge_increment_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .explicit_yield,
+            .continuation = .{
+                .target = 1,
+                .arguments = &backedge_repeat_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 3,
+        .function_id = 1,
+        .parameters = &.{9},
+        .terminator = .{ .return_to_caller = 9 },
+    },
+    .{
+        .id = 4,
+        .role = .terminal_handoff,
+        .parameters = &.{10},
+        .terminator = .{ .return_value = 10 },
+    },
+};
+
+const HelperBackedgeBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum {
+        arithmetic_overflow,
+    };
+    pub const constants = .{
+        @as(u32, 0),
+        @as(u32, 1),
+    };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "helper-entry-backedge",
+        .value_types = &.{
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .boolean },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+        },
+        .blocks = &helper_backedge_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+        .functions = &.{
+            .{
+                .id = 0,
+                .entry = 0,
+                .result_type = .{ .scalar = .u32 },
+            },
+            .{
+                .id = 1,
+                .entry = 1,
+                .result_type = .{ .scalar = .u32 },
+            },
+        },
+    };
+};
+
+const HelperBackedgeProgram = program_v2.program(
+    "helper-entry-backedge",
+    HelperBackedgeBody,
+);
+
 test "compiled bounded recursive frames survive canonical round trip" {
     var call_return_count: usize = 0;
     for (Program.rnf.constructorSlice()) |constructor| {
@@ -302,58 +454,67 @@ test "compiled bounded recursive frames survive canonical round trip" {
     try std.testing.expectEqual(@as(u64, 7), completion_fuel);
 }
 
-test "decode rejects a callee frame forged for different call arguments" {
-    const RecursiveMachine = Program.compile(.{
-        .maximum_frames = 8,
+test "helper entry backedges persist only future-local callee state" {
+    const BackedgeMachine = HelperBackedgeProgram.compile(.{
+        .maximum_frames = 2,
         .maximum_state_bytes = 4096,
         .maximum_machine_fuel = 64,
     });
-    const state = try RecursiveMachine.initialState(std.testing.allocator, 3);
-    defer RecursiveMachine.deinitState(state);
+    const state = try BackedgeMachine.initialState(std.testing.allocator, 2);
+    defer BackedgeMachine.deinitState(state);
 
-    var caller_fuel: u64 = 3;
+    var caller_fuel: u64 = 16;
     try std.testing.expectEqual(
-        RecursiveMachine.Outcome.yielded,
-        try RecursiveMachine.step(state, &caller_fuel),
+        BackedgeMachine.Outcome.yielded,
+        try BackedgeMachine.step(state, &caller_fuel),
     );
-    const encoded = try RecursiveMachine.encodeState(
+    const encoded = try BackedgeMachine.encodeState(
         std.testing.allocator,
         state,
     );
     defer std.testing.allocator.free(encoded);
-    const forged = try std.testing.allocator.dupe(u8, encoded);
-    defer std.testing.allocator.free(forged);
+    const restored = try BackedgeMachine.decodeState(
+        std.testing.allocator,
+        encoded,
+    );
+    defer BackedgeMachine.deinitState(restored);
 
-    const state_header_length = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
-    var frame_offset: usize = state_header_length;
-    const parent_environment_length = std.mem.readInt(
-        u32,
-        forged[frame_offset + 4 ..][0..4],
-        .little,
-    );
-    frame_offset += 8 + parent_environment_length;
-    const child_constructor_id = std.mem.readInt(
-        u32,
-        forged[frame_offset..][0..4],
-        .little,
-    );
-    const child_constructor =
-        Program.rnf.constructors[child_constructor_id];
     try std.testing.expectEqual(
-        @as(cir.ValueId, 3),
-        child_constructor.environmentFields()[0].value,
+        BackedgeMachine.Outcome.yielded,
+        try BackedgeMachine.step(restored, &caller_fuel),
     );
+    const done = switch (try BackedgeMachine.step(restored, &caller_fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 2), done.value().*);
+}
 
-    std.mem.writeInt(
-        u32,
-        forged[frame_offset + 8 ..][0..4],
-        4,
-        .little,
+test "shallow recursive stepping allocates from logical depth" {
+    const WideMachine = HelperBackedgeProgram.compile(.{
+        .maximum_frames = 1 << 20,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const backing = try std.testing.allocator.alloc(u8, 64 << 10);
+    defer std.testing.allocator.free(backing);
+    var fixed = std.heap.FixedBufferAllocator.init(backing);
+    const state = try WideMachine.initialState(fixed.allocator(), 2);
+    defer WideMachine.deinitState(state);
+
+    var caller_fuel: u64 = 16;
+    try std.testing.expectEqual(
+        WideMachine.Outcome.yielded,
+        try WideMachine.step(state, &caller_fuel),
     );
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        RecursiveMachine.decodeState(std.testing.allocator, forged),
+    const retained_high_water = fixed.end_index;
+    var no_fuel: u64 = 0;
+    try std.testing.expectEqual(
+        WideMachine.Outcome.yielded,
+        try WideMachine.step(state, &no_fuel),
     );
+    try std.testing.expectEqual(retained_high_water, fixed.end_index);
 }
 
 test "multi-frame commits reuse fixed-buffer transaction storage" {

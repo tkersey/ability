@@ -98,6 +98,63 @@ pub const InvariantTerm = union(enum) {
         case_index: u16,
     },
 
+    fn definitionResult(self: InvariantTerm) ?control_ir.ValueId {
+        return switch (self) {
+            .boolean_copy => |term| term.result,
+            .boolean_not => |term| term.result,
+            .boolean_binary => |term| term.result,
+            .boolean_select => |term| term.result,
+            .integer_zero_result => |term| term.result,
+            .integer_relation_result => |term| term.result,
+            .sum_case_result => |term| term.result,
+            .boolean,
+            .integer_zero,
+            .integer_relation,
+            .sum_case,
+            => null,
+        };
+    }
+
+    fn addDefinitionInputs(
+        self: InvariantTerm,
+        required: anytype,
+    ) bool {
+        var changed = false;
+        switch (self) {
+            .boolean_copy => |term| {
+                changed = required.insert(term.source) or changed;
+            },
+            .boolean_not => |term| {
+                changed = required.insert(term.operand) or changed;
+            },
+            .boolean_binary => |term| {
+                changed = required.insert(term.left) or changed;
+                changed = required.insert(term.right) or changed;
+            },
+            .boolean_select => |term| {
+                changed = required.insert(term.condition) or changed;
+                changed = required.insert(term.then_value) or changed;
+                changed = required.insert(term.else_value) or changed;
+            },
+            .integer_zero_result => |term| {
+                changed = required.insert(term.value) or changed;
+            },
+            .integer_relation_result => |term| {
+                changed = required.insert(term.left) or changed;
+                changed = required.insert(term.right) or changed;
+            },
+            .sum_case_result => |term| {
+                changed = required.insert(term.value) or changed;
+            },
+            .boolean,
+            .integer_zero,
+            .integer_relation,
+            .sum_case,
+            => {},
+        }
+        return changed;
+    }
+
     fn addRequired(self: InvariantTerm, required: anytype) void {
         switch (self) {
             .boolean => |term| _ = required.insert(term.value),
@@ -894,35 +951,85 @@ pub fn NormalForm(
         constructors: [maximum_constructors]ConstructorType = undefined,
         constructor_count: usize = 0,
 
-        fn needsDefinitionWitness(
+        fn definitionWitnesses(
+            program: control_ir.Program,
+            source_block: control_ir.Block,
+            edge: control_ir.Edge,
             generated: GeneratedFacts,
             target_live: Set,
-        ) bool {
-            if (generated.direct_complete or
-                generated.terms.len <= generated.direct_len + 1)
-            {
-                return false;
+        ) Set {
+            var required = Set.empty();
+            if (generated.terms.len <= generated.direct_len + 1) {
+                return required;
             }
-            var direct_required = Set.empty();
-            for (generated.terms.terms[0..generated.direct_len]) |term| {
-                term.addRequired(&direct_required);
-            }
-            for (
-                generated.terms.terms[generated.direct_len + 1 .. generated.terms.len],
-            ) |term| {
-                var required = Set.empty();
-                term.addRequired(&required);
-                for (0..maximum_values) |value_index| {
+            const definitions = generated.terms.terms[generated.direct_len + 1 .. generated.terms.len];
+            var future_dependent = Set.empty();
+            for (definitions) |term| {
+                var inputs = Set.empty();
+                _ = term.addDefinitionInputs(&inputs);
+                for (inputs.bits, 0..) |present, value_index| {
+                    if (!present) continue;
                     const value: control_ir.ValueId = @intCast(value_index);
-                    if (required.contains(value) and
-                        target_live.contains(value) and
-                        !direct_required.contains(value))
-                    {
-                        return true;
+                    if (projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        false,
+                        value,
+                    ).len != 0) {
+                        _ = future_dependent.insert(value);
                     }
                 }
             }
-            return false;
+            for (0..maximum_values) |_| {
+                var changed = false;
+                for (definitions) |term| {
+                    const result = term.definitionResult() orelse continue;
+                    var inputs = Set.empty();
+                    _ = term.addDefinitionInputs(&inputs);
+                    for (inputs.bits, 0..) |present, value_index| {
+                        if (!present or
+                            !future_dependent.bits[value_index]) continue;
+                        changed = future_dependent.insert(result) or changed;
+                        break;
+                    }
+                }
+                if (!changed) break;
+            }
+            if (!generated.direct_complete) {
+                switch (generated.terms.terms[generated.direct_len]) {
+                    .boolean => |path_fact| {
+                        if (future_dependent.contains(path_fact.value)) {
+                            _ = required.insert(path_fact.value);
+                        }
+                    },
+                    else => unreachable,
+                }
+            }
+            for (definitions) |term| {
+                const result = term.definitionResult() orelse continue;
+                if (projectValues(
+                    program,
+                    source_block,
+                    edge,
+                    target_live,
+                    false,
+                    result,
+                ).len != 0) {
+                    _ = required.insert(result);
+                }
+            }
+            for (0..maximum_values) |_| {
+                var changed = false;
+                for (definitions) |term| {
+                    const result = term.definitionResult() orelse continue;
+                    if (!required.contains(result)) continue;
+                    changed = term.addDefinitionInputs(&required) or changed;
+                }
+                if (!changed) break;
+            }
+            return required;
         }
 
         /// Borrow all synthesized constructors in canonical id order.
@@ -1647,7 +1754,10 @@ pub fn NormalForm(
             generated: GeneratedFacts,
         ) Error!FactSet {
             var result: FactSet = .{};
-            const retain_definitions = needsDefinitionWitness(
+            const definition_witnesses = definitionWitnesses(
+                program,
+                source_block,
+                edge,
                 generated,
                 target_live,
             );
@@ -1666,12 +1776,17 @@ pub fn NormalForm(
                 generated.terms.terms[0..generated.terms.len],
                 0..,
             ) |term, index| {
+                const retain_definition =
+                    if (term.definitionResult()) |definition_result|
+                        definition_witnesses.contains(definition_result)
+                    else
+                        false;
                 const retain_for_invariant =
                     index < generated.direct_len or
                     (index == generated.direct_len and
                         !generated.direct_complete) or
                     (index > generated.direct_len and
-                        retain_definitions);
+                        retain_definition);
                 try projectTermInto(
                     program,
                     source_block,

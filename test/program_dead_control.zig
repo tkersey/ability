@@ -1,4 +1,5 @@
 const cir = @import("control_ir");
+const compiler = @import("compiler");
 const machine = @import("machine");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -205,6 +206,70 @@ fn ReindexedBody() type {
     };
 }
 
+fn BodyWithDeadHelper() type {
+    return struct {
+        const HugeDeadResult = [8192]u8;
+        const blocks = [_]cir.Block{
+            .{
+                .id = 0,
+                .parameters = &.{0},
+                .terminator = .{ .@"suspend" = .{
+                    .kind = .effect,
+                    .site_id = 0,
+                    .request_values = &.{0},
+                    .continuation = .{
+                        .target = 1,
+                        .arguments = &live_resume_arguments,
+                    },
+                    .resume_type = u32_type,
+                } },
+            },
+            .{
+                .id = 1,
+                .parameters = &.{1},
+                .terminator = .{ .return_value = 1 },
+            },
+            .{
+                .id = 2,
+                .function_id = 1,
+                .parameters = &.{2},
+                .terminator = .{ .return_to_caller = 2 },
+            },
+        };
+
+        pub const InitialArgs = u32;
+        pub const Result = u32;
+        pub const Failure = enum {
+            rejected,
+        };
+        pub const effect_sites = .{Live};
+        pub const schema_types = .{HugeDeadResult};
+        pub const control_ir: cir.Program = .{
+            .label = "dead-helper-control",
+            .value_types = &.{
+                u32_type,
+                u32_type,
+                .{ .schema = 0 },
+            },
+            .blocks = &blocks,
+            .entry = 0,
+            .result_type = u32_type,
+            .functions = &.{
+                .{
+                    .id = 0,
+                    .entry = 0,
+                    .result_type = u32_type,
+                },
+                .{
+                    .id = 1,
+                    .entry = 2,
+                    .result_type = .{ .schema = 0 },
+                },
+            },
+        };
+    };
+}
+
 const options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
@@ -225,6 +290,14 @@ const ReindexedProgram = program_v2.program(
 const Canonical = CanonicalProgram.compile(options);
 const WithDead = WithDeadProgram.compile(options);
 const Reindexed = ReindexedProgram.compile(options);
+const CanonicalDefinition = compiler.DefinitionFor(
+    "canonical-control",
+    CanonicalBody(),
+);
+const DeadHelperDefinition = compiler.DefinitionFor(
+    "dead-helper-control",
+    BodyWithDeadHelper(),
+);
 
 test "unreachable control creates no constructor, authority, or identity delta" {
     try std.testing.expectEqual(
@@ -274,4 +347,20 @@ test "unreachable control creates no constructor, authority, or identity delta" 
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 11), done.value().*);
+}
+
+test "unreachable helper results do not enter the generated return carrier" {
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        CanonicalDefinition.reachable_function_count,
+    );
+    try std.testing.expectEqual(
+        CanonicalDefinition.reachable_function_count,
+        DeadHelperDefinition.reachable_function_count,
+    );
+    try std.testing.expect(DeadHelperDefinition.ReturnValue == void);
+    try std.testing.expectEqual(
+        @sizeOf(CanonicalDefinition.Plan),
+        @sizeOf(DeadHelperDefinition.Plan),
+    );
 }

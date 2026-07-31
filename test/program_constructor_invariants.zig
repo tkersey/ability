@@ -215,6 +215,100 @@ const OptionalMachine = OptionalProgram.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+const DerivedLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.derived-lookup.v1";
+    pub const Payload = bool;
+    pub const Resume = u32;
+};
+
+const derived_entry_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 0,
+        .operation = .{ .constant = 0 },
+    },
+    .{
+        .kind = .compare_eq_zero,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .compare_eq_zero,
+    },
+};
+const derived_then_arguments = [_]cir.EdgeArgument{.{ .value = 1 }};
+const derived_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const derived_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &derived_entry_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 1,
+            .then_edge = .{
+                .target = 1,
+                .arguments = &derived_then_arguments,
+            },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{2},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{2},
+            .continuation = .{
+                .target = 3,
+                .arguments = &derived_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .return_value = 0 },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{3},
+        .terminator = .{ .return_value = 3 },
+    },
+};
+
+const DerivedBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum {
+        rejected,
+    };
+    pub const constants = .{@as(u32, 0)};
+    pub const effect_sites = .{DerivedLookup};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "derived-predicate-constructor-invariant",
+        .value_types = &.{
+            u32_type,
+            bool_type,
+            bool_type,
+            u32_type,
+        },
+        .blocks = &derived_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const DerivedProgram = program_v2.program(
+    "derived-predicate-constructor-invariant",
+    DerivedBody,
+);
+const DerivedMachine = DerivedProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
 test "sum branches persist the source case and reject a forged local path" {
     const awaiting_left = &SumProgram.rnf.constructors[2];
     try std.testing.expectEqual(@as(usize, 1), awaiting_left.environment_len);
@@ -296,5 +390,64 @@ test "optional branches use the same canonical sum-case invariant" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         OptionalMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "derived live predicates retain their local defining equation" {
+    const awaiting = blk: {
+        for (DerivedProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 1 and
+                constructor.kind == .await_effect)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expectEqual(@as(usize, 2), awaiting.environment_len);
+    try std.testing.expectEqual(
+        @as(cir.ValueId, 0),
+        awaiting.environmentFields()[0].value,
+    );
+    try std.testing.expectEqual(
+        @as(cir.ValueId, 2),
+        awaiting.environmentFields()[1].value,
+    );
+    var saw_operand_fact = false;
+    var saw_definition = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .integer_zero => |fact| {
+            saw_operand_fact = fact.value == 0 and fact.equal;
+        },
+        .integer_zero_result => |definition| {
+            saw_definition =
+                definition.result == 2 and definition.value == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_operand_fact);
+    try std.testing.expect(saw_definition);
+
+    const state = try DerivedMachine.initialState(std.testing.allocator, {});
+    defer DerivedMachine.deinitState(state);
+    var fuel: u64 = 8;
+    const request = switch (try DerivedMachine.step(state, &fuel)) {
+        .request => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    switch (request.value) {
+        .s0 => |predicate| try std.testing.expect(predicate),
+    }
+    const encoded = try DerivedMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    forged[first_environment_offset + @sizeOf(u32)] = 0;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        DerivedMachine.decodeState(std.testing.allocator, forged),
     );
 }
