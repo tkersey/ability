@@ -643,6 +643,97 @@ fn minimumBlockCost(comptime block: control_ir.Block) u64 {
     return @intCast(block.instructions.len + 1);
 }
 
+fn minimumSourceBlockCost(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime block_id: control_ir.BlockId,
+) u64 {
+    if (comptime hasDeclSafe(Body, "block_costs")) {
+        return Body.block_costs[block_id];
+    }
+    return minimumBlockCost(program.blocks[block_id]);
+}
+
+fn lowerMinimumArrival(
+    comptime maximum_blocks: usize,
+    arrivals: *[maximum_blocks]u64,
+    target: control_ir.BlockId,
+    candidate: u64,
+    changed: *bool,
+) void {
+    if (candidate >= arrivals[target]) return;
+    arrivals[target] = candidate;
+    changed.* = true;
+}
+
+fn minimumBlockArrivalFuel(
+    comptime Body: type,
+    comptime maximum_blocks: usize,
+    comptime program: control_ir.Program,
+) [maximum_blocks]u64 {
+    const unreachable_fuel = std.math.maxInt(u64);
+    var arrivals = [_]u64{unreachable_fuel} ** maximum_blocks;
+    arrivals[program.entry] = 0;
+    for (0..program.blocks.len) |_| {
+        var changed = false;
+        for (program.blocks) |block| {
+            const arrival = arrivals[block.id];
+            if (arrival == unreachable_fuel) continue;
+            const after = arrival +| minimumSourceBlockCost(
+                Body,
+                program,
+                block.id,
+            );
+            switch (block.terminator) {
+                .jump => |edge| lowerMinimumArrival(
+                    maximum_blocks,
+                    &arrivals,
+                    edge.target,
+                    after,
+                    &changed,
+                ),
+                .branch => |branch| {
+                    lowerMinimumArrival(
+                        maximum_blocks,
+                        &arrivals,
+                        branch.then_edge.target,
+                        after,
+                        &changed,
+                    );
+                    lowerMinimumArrival(
+                        maximum_blocks,
+                        &arrivals,
+                        branch.else_edge.target,
+                        after,
+                        &changed,
+                    );
+                },
+                .@"suspend" => |suspension| {
+                    if (suspension.callee) |callee| {
+                        lowerMinimumArrival(
+                            maximum_blocks,
+                            &arrivals,
+                            callee.target,
+                            after,
+                            &changed,
+                        );
+                    }
+                    lowerMinimumArrival(
+                        maximum_blocks,
+                        &arrivals,
+                        suspension.continuation.target,
+                        after,
+                        &changed,
+                    );
+                },
+                .return_value, .return_to_caller, .fail => {},
+            }
+        }
+        if (!changed) break;
+    }
+    return arrivals;
+}
+
 fn requireOperandCount(
     comptime instruction: control_ir.Instruction,
     comptime expected: usize,
@@ -1714,6 +1805,10 @@ fn semanticHashInvariant(
             semanticHashU16(hasher, canonical.valueId(definition.then_value));
             semanticHashU16(hasher, canonical.valueId(definition.else_value));
         },
+        .instruction_result => |definition| semanticHashU16(
+            hasher,
+            canonical.valueId(definition.result),
+        ),
         .product_extract_result => |definition| {
             semanticHashU16(hasher, canonical.valueId(definition.result));
             semanticHashU16(hasher, canonical.valueId(definition.product));
@@ -2055,6 +2150,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         ) catch |err|
             @compileError("Boundary RNF synthesis failed: " ++ @errorName(err));
     };
+    const minimum_block_arrival_fuel = comptime minimumBlockArrivalFuel(
+        Body,
+        limits.maximum_blocks,
+        program,
+    );
     const generated_operation_count = comptime generatedReducerOperationCount(
         program,
         normal_form,
@@ -2429,6 +2529,17 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         ) ?control_ir.Instruction {
             inline for (block.instructions) |instruction| {
                 if (instruction.result == value) return instruction;
+            }
+            return null;
+        }
+
+        fn definingInstructionForValue(
+            comptime value: control_ir.ValueId,
+        ) ?control_ir.Instruction {
+            inline for (program.blocks) |block| {
+                if (definingInstructionInBlock(block, value)) |instruction| {
+                    return instruction;
+                }
             }
             return null;
         }
@@ -3357,11 +3468,60 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         fn baseCostForConstructor(comptime constructor_id: usize) u64 {
             const constructor = comptime normal_form.constructors[constructor_id];
             if (constructor.kind == .await_effect) return 1;
-            if (comptime hasDeclSafe(Body, "block_costs")) {
-                return Body.block_costs[constructor.source_block];
+            return minimumSourceBlockCost(
+                Body,
+                program,
+                constructor.source_block,
+            );
+        }
+
+        fn minimumArrivalForConstructor(comptime constructor_id: usize) u64 {
+            const unreachable_fuel = std.math.maxInt(u64);
+            const constructor = comptime normal_form.constructors[constructor_id];
+            if (constructor.origin == .block_entry) {
+                const arrival = minimum_block_arrival_fuel[
+                    constructor.source_block
+                ];
+                if (arrival == unreachable_fuel) unreachable;
+                return arrival;
             }
-            return minimumBlockCost(
-                program.blocks[constructor.source_block],
+            if (constructor.kind == .caller_fuel_yield) {
+                var arrival: u64 = unreachable_fuel;
+                inline for (program.blocks) |block| {
+                    switch (block.terminator) {
+                        .@"suspend" => |suspension| {
+                            if ((suspension.kind == .explicit_yield or
+                                suspension.kind == .caller_fuel) and
+                                suspension.continuation.target ==
+                                    constructor.source_block)
+                            {
+                                const source_arrival =
+                                    minimum_block_arrival_fuel[block.id];
+                                if (source_arrival == unreachable_fuel) continue;
+                                arrival = @min(
+                                    arrival,
+                                    source_arrival +| minimumSourceBlockCost(
+                                        Body,
+                                        program,
+                                        block.id,
+                                    ),
+                                );
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                if (arrival == unreachable_fuel) unreachable;
+                return arrival;
+            }
+            const source_arrival = minimum_block_arrival_fuel[
+                constructor.source_block
+            ];
+            if (source_arrival == unreachable_fuel) unreachable;
+            return source_arrival +| minimumSourceBlockCost(
+                Body,
+                program,
+                constructor.source_block,
             );
         }
 
@@ -3553,6 +3713,14 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const constructor_id: usize = comptime @intFromEnum(tag);
                     return baseCostForConstructor(constructor_id);
                 },
+            };
+        }
+
+        pub fn minimumCumulativeFuel(frame: Frame) u64 {
+            return switch (frame) {
+                inline else => |_, tag| minimumArrivalForConstructor(
+                    comptime @intFromEnum(tag),
+                ),
             };
         }
 
@@ -3753,6 +3921,42 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             }
         }
 
+        fn instructionResultHolds(
+            comptime constructor_id: usize,
+            environment: anytype,
+            comptime result: control_ir.ValueId,
+        ) bool {
+            const instruction = comptime definingInstructionForValue(
+                result,
+            ) orelse @compileError(
+                "generated instruction-result invariant has no definition",
+            );
+            const instructions = [_]control_ir.Instruction{instruction};
+            const constructor = comptime normal_form.constructors[
+                constructor_id
+            ];
+            const validation_block: control_ir.Block = .{
+                .id = constructor.source_block,
+                .function_id = program.blocks[
+                    constructor.source_block
+                ].function_id,
+                .instructions = &instructions,
+                .terminator = .{ .fail = 0 },
+            };
+            var store: SegmentStore(constructor_id) = undefined;
+            loadEnvironment(constructor_id, environment, &store);
+            const name = comptime valueName(result);
+            const actual = @field(environment, name);
+            if (executeInstructions(validation_block, &store) != null) {
+                return false;
+            }
+            return portable_value.eqlValue(
+                @TypeOf(actual),
+                actual,
+                @field(store, name),
+            );
+        }
+
         pub fn requestEql(left: Request, right: Request) bool {
             return portable_value.eqlValue(Request, left, right);
         }
@@ -3849,6 +4053,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                                 environment,
                                 valueName(definition.else_value),
                             ),
+                    ),
+                    .instruction_result => |definition| instructionResultHolds(
+                        constructor_id,
+                        environment,
+                        definition.result,
                     ),
                     .product_extract_result => |definition| blk: {
                         const product = @field(

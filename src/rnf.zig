@@ -99,6 +99,9 @@ pub const InvariantTerm = union(enum) {
         then_value: control_ir.ValueId,
         else_value: control_ir.ValueId,
     },
+    instruction_result: struct {
+        result: control_ir.ValueId,
+    },
     product_extract_result: struct {
         result: control_ir.ValueId,
         product: control_ir.ValueId,
@@ -171,6 +174,7 @@ pub const InvariantTerm = union(enum) {
             .value_copy => |term| term.result,
             .value_constant => |term| term.result,
             .value_select => |term| term.result,
+            .instruction_result => |term| term.result,
             .product_extract_result => |term| term.result,
             .sum_extract_result => |term| term.result,
             .bounded_length_result => |term| term.result,
@@ -212,7 +216,7 @@ pub const InvariantTerm = union(enum) {
             .value_copy => |term| {
                 changed = required.insert(term.source) or changed;
             },
-            .value_constant => {},
+            .value_constant, .instruction_result => {},
             .value_select => |term| {
                 changed = required.insert(term.condition) or changed;
                 changed = required.insert(term.then_value) or changed;
@@ -278,6 +282,7 @@ pub const InvariantTerm = union(enum) {
                 _ = required.insert(term.then_value);
                 _ = required.insert(term.else_value);
             },
+            .instruction_result => |term| _ = required.insert(term.result),
             .value_copy => |term| {
                 _ = required.insert(term.result);
                 _ = required.insert(term.source);
@@ -382,6 +387,11 @@ pub const InvariantTerm = union(enum) {
                     term.condition == other_term.condition and
                     term.then_value == other_term.then_value and
                     term.else_value == other_term.else_value,
+                else => false,
+            },
+            .instruction_result => |term| switch (other) {
+                .instruction_result => |other_term| term.result ==
+                    other_term.result,
                 else => false,
             },
             .product_extract_result => |term| switch (other) {
@@ -789,6 +799,7 @@ fn evaluate(term: InvariantTerm, bindings: []const InvariantBinding) Error!void 
         .product_extract_result,
         .sum_extract_result,
         .bounded_length_result,
+        .instruction_result,
         => return error.InvalidInvariantValue,
         .integer_unary_result => |definition| integerUnaryInvariantHolds(
             bindingFor(bindings, definition.result) orelse
@@ -1296,6 +1307,11 @@ pub fn NormalForm(
                         }
                     }
                     break :blk false;
+                },
+                .instruction_result => |left_term| {
+                    const right_term = right.instruction_result;
+                    return canonical_values.ordinal(left_term.result) <
+                        canonical_values.ordinal(right_term.result);
                 },
                 .product_extract_result => |left_term| blk: {
                     const right_term = right.product_extract_result;
@@ -2018,6 +2034,22 @@ pub fn NormalForm(
                                 }
                             }
                         }
+                    }
+                },
+                .instruction_result => |definition| {
+                    const results = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.result,
+                    );
+                    for (results.slice()) |result_value| {
+                        if (result_value != definition.result) continue;
+                        try result.insert(.{ .instruction_result = .{
+                            .result = result_value,
+                        } });
                     }
                 },
                 .product_extract_result => |definition| {
@@ -2752,6 +2784,91 @@ pub fn NormalForm(
             };
         }
 
+        fn addInstructionDefinition(
+            program: control_ir.Program,
+            value: control_ir.ValueId,
+            environment: *Set,
+            facts: *FactSet,
+            visited: *Set,
+        ) Error!void {
+            if (!visited.insert(value)) return;
+            const instruction = definingInstruction(program, value) orelse
+                return;
+            if (instruction.operation == .metadata) {
+                return error.UnsupportedInvariantDefinition;
+            }
+            for (instruction.operands) |operand| {
+                _ = environment.insert(operand);
+                try addInstructionDefinition(
+                    program,
+                    operand,
+                    environment,
+                    facts,
+                    visited,
+                );
+            }
+            try facts.insert(.{ .instruction_result = .{ .result = value } });
+        }
+
+        fn addEnvironmentDefinitions(
+            program: control_ir.Program,
+            constant_values: []const ?InvariantValue,
+            environment: *Set,
+            facts: *FactSet,
+        ) Error!void {
+            const original = environment.*;
+            var visited = Set.empty();
+            for (original.bits, 0..) |present, value_index| {
+                if (!present) continue;
+                try addInstructionDefinition(
+                    program,
+                    @intCast(value_index),
+                    environment,
+                    facts,
+                    &visited,
+                );
+            }
+            var representable: AnalysisFactSet = .{};
+            for (original.bits, 0..) |present, value_index| {
+                if (!present) continue;
+                const value: control_ir.ValueId = @intCast(value_index);
+                switch (try program.valueType(value)) {
+                    .scalar => |scalar| if (scalar == .boolean) {
+                        var boolean_visited = Set.empty();
+                        collectBooleanDefinitions(
+                            program,
+                            constant_values,
+                            value,
+                            &representable,
+                            &boolean_visited,
+                        ) catch continue;
+                    } else {
+                        var value_visited = Set.empty();
+                        _ = collectValueDefinition(
+                            program,
+                            constant_values,
+                            value,
+                            &representable,
+                            &value_visited,
+                        ) catch continue;
+                    },
+                    .schema => {
+                        var value_visited = Set.empty();
+                        _ = collectValueDefinition(
+                            program,
+                            constant_values,
+                            value,
+                            &representable,
+                            &value_visited,
+                        ) catch continue;
+                    },
+                }
+            }
+            for (representable.terms[0..representable.len]) |term| {
+                try facts.insert(term);
+            }
+        }
+
         fn collectDirectBranchFacts(
             program: control_ir.Program,
             value: control_ir.ValueId,
@@ -3204,6 +3321,18 @@ pub fn NormalForm(
                         for (suspension.request_values) |value| {
                             _ = environment.insert(value);
                         }
+                        var suspension_facts = path_facts[
+                            @intCast(if (persists_continuation)
+                                suspension.continuation.target
+                            else
+                                block.id)
+                        ];
+                        try addEnvironmentDefinitions(
+                            program,
+                            constant_values,
+                            &environment,
+                            &suspension_facts,
+                        );
                         try result.appendConstructor(
                             program,
                             constructorKindForSuspension(suspension.kind),
@@ -3214,12 +3343,7 @@ pub fn NormalForm(
                                 block.id,
                             suspension.continuation.target,
                             environment,
-                            path_facts[
-                                @intCast(if (persists_continuation)
-                                    suspension.continuation.target
-                                else
-                                    block.id)
-                            ],
+                            suspension_facts,
                             canonical_values,
                         );
                     },

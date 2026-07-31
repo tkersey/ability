@@ -1001,6 +1001,77 @@ const BooleanConstantMachine = BooleanConstantProgram.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+const LocalText = portable_value.Text(8);
+
+const LocalTextLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.local-text.v1";
+    pub const Payload = LocalText;
+    pub const Resume = u32;
+};
+
+const local_text_instructions = [_]cir.Instruction{
+    .{
+        .kind = .copy,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .copy,
+    },
+};
+const local_text_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const local_text_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &local_text_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{1},
+            .continuation = .{
+                .target = 1,
+                .arguments = &local_text_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{2},
+        .terminator = .{ .return_value = 2 },
+    },
+};
+
+const LocalTextBody = struct {
+    pub const InitialArgs = LocalText;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{LocalTextLookup};
+    pub const schema_types = .{LocalText};
+    pub const control_ir: cir.Program = .{
+        .label = "local-text-constructor-invariant",
+        .value_types = &.{
+            cir.ValueType{ .schema = 0 },
+            cir.ValueType{ .schema = 0 },
+            u32_type,
+        },
+        .blocks = &local_text_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const LocalTextProgram = program_v2.program(
+    "local-text-constructor-invariant",
+    LocalTextBody,
+);
+const LocalTextMachine = LocalTextProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
 fn ClassificationOnlyProgram(comptime role: cir.BlockRole) type {
     return struct {
         const entry_instructions = [_]cir.Instruction{
@@ -1536,6 +1607,52 @@ test "Boolean constants retain canonical definition witnesses" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         BooleanConstantMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "suspension environments retain local definition closure" {
+    const awaiting = blk: {
+        for (LocalTextProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 0 and
+                constructor.kind == .await_effect)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_copy = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .value_copy => |definition| {
+            saw_copy = definition.result == 1 and definition.source == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_copy);
+
+    const initial = try LocalText.fromSlice("a");
+    const state = try LocalTextMachine.initialState(
+        std.testing.allocator,
+        initial,
+    );
+    defer LocalTextMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try LocalTextMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try LocalTextMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    const source_size = try portable_value.encodedSize(LocalText, initial);
+    forged[first_environment_offset + source_size + 4] = 'b';
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        LocalTextMachine.decodeState(std.testing.allocator, forged),
     );
 }
 

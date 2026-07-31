@@ -75,6 +75,7 @@ fn requireDefinition(comptime Definition: type) void {
         "Transition",
         "contract_bytes",
         "initial",
+        "minimumCumulativeFuel",
         "minimumCost",
         "cost",
         "plan",
@@ -1117,6 +1118,11 @@ pub fn Machine(
             for (value.frames.slice()) |frame| {
                 Definition.validateFrame(frame) catch
                     return error.ProgramContractViolation;
+                if (value.cumulative_fuel <
+                    Definition.minimumCumulativeFuel(frame))
+                {
+                    return error.ProgramContractViolation;
+                }
             }
             Definition.validateStack(value.frames.slice()) catch
                 return error.ProgramContractViolation;
@@ -1631,6 +1637,13 @@ const TestDefinition = struct {
         return .{ .entry = .{ .seed = seed } };
     }
 
+    fn minimumCumulativeFuel(frame: Frame) u64 {
+        return switch (frame) {
+            .entry => 0,
+            .loop_header, .await_increment => 1,
+        };
+    }
+
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
@@ -1738,6 +1751,7 @@ const AlternateTestDefinition = struct {
     const Transition = TestDefinition.Transition;
     const contract_bytes = "test-direct-rnf\x00semantic-alternative";
     const initial = TestDefinition.initial;
+    const minimumCumulativeFuel = TestDefinition.minimumCumulativeFuel;
     const minimumCost = TestDefinition.minimumCost;
     const cost = TestDefinition.cost;
     const plan = TestDefinition.plan;
@@ -1767,6 +1781,13 @@ const BudgetTestDefinition = struct {
 
     fn initial(_: InitialArgs) Frame {
         return .{ .entry = .{} };
+    }
+
+    fn minimumCumulativeFuel(frame: Frame) u64 {
+        return switch (frame) {
+            .entry => 0,
+            .finish => 1,
+        };
     }
 
     fn minimumCost(_: Frame) u64 {
@@ -1840,6 +1861,10 @@ const LargeFrameDefinition = struct {
         return .{ .entry = .{ .payload = LargeFrameText.empty() } };
     }
 
+    fn minimumCumulativeFuel(_: Frame) u64 {
+        return 0;
+    }
+
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
@@ -1905,6 +1930,13 @@ const MalformedRequestDefinition = struct {
 
     fn initial(_: InitialArgs) Frame {
         return .{ .entry = .{} };
+    }
+
+    fn minimumCumulativeFuel(frame: Frame) u64 {
+        return switch (frame) {
+            .entry => 0,
+            .awaiting_lookup => 1,
+        };
     }
 
     fn minimumCost(_: Frame) u64 {
@@ -1985,6 +2017,13 @@ const UnresumableRequestDefinition = struct {
         return .{ .entry = .{} };
     }
 
+    fn minimumCumulativeFuel(frame: Frame) u64 {
+        return switch (frame) {
+            .entry => 0,
+            .awaiting, .resumed => 1,
+        };
+    }
+
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
@@ -2061,6 +2100,10 @@ const CostPreflightDefinition = struct {
         return .{ .entry = .{} };
     }
 
+    fn minimumCumulativeFuel(_: Frame) u64 {
+        return 0;
+    }
+
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
@@ -2133,6 +2176,13 @@ const ZeroFuelStackDefinition = struct {
 
     fn initial(_: InitialArgs) Frame {
         return .{ .entry = .{} };
+    }
+
+    fn minimumCumulativeFuel(frame: Frame) u64 {
+        return switch (frame) {
+            .entry => 0,
+            .parent, .child => 1,
+        };
     }
 
     fn minimumCost(_: Frame) u64 {
@@ -2652,6 +2702,43 @@ test "terminal budget failure retains prior segment charges" {
         try BudgetMachine.step(state, &caller_fuel),
     );
     try std.testing.expectEqual(@as(u64, 4), caller_fuel);
+}
+
+test "decode rejects cumulative fuel below the constructor arrival floor" {
+    const BudgetMachine = Machine(BudgetTestDefinition, .{
+        .maximum_frames = 1,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 1,
+    });
+    const state = try BudgetMachine.initialState(std.testing.allocator, {});
+    defer BudgetMachine.deinitState(state);
+    var caller_fuel: u64 = 1;
+    try std.testing.expectEqual(
+        BudgetMachine.Outcome.yielded,
+        try BudgetMachine.step(state, &caller_fuel),
+    );
+
+    const encoded = try BudgetMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    var forged: [4096]u8 = undefined;
+    @memcpy(forged[0..encoded.len], encoded);
+    const cumulative_fuel_offset = state_magic.len + 2 + 2 + 32 + 8;
+    std.mem.writeInt(
+        u64,
+        forged[cumulative_fuel_offset..][0..8],
+        0,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        BudgetMachine.decodeState(
+            std.testing.allocator,
+            forged[0..encoded.len],
+        ),
+    );
 }
 
 test "caller fuel preflight does not execute the segment plan" {
