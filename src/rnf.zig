@@ -67,6 +67,14 @@ pub const InvariantTerm = union(enum) {
         then_value: control_ir.ValueId,
         else_value: control_ir.ValueId,
     },
+    value_copy: struct {
+        result: control_ir.ValueId,
+        source: control_ir.ValueId,
+    },
+    value_constant: struct {
+        result: control_ir.ValueId,
+        contents: InvariantValue,
+    },
     integer_zero: struct {
         value: control_ir.ValueId,
         equal: bool,
@@ -104,6 +112,8 @@ pub const InvariantTerm = union(enum) {
             .boolean_not => |term| term.result,
             .boolean_binary => |term| term.result,
             .boolean_select => |term| term.result,
+            .value_copy => |term| term.result,
+            .value_constant => |term| term.result,
             .integer_zero_result => |term| term.result,
             .integer_relation_result => |term| term.result,
             .sum_case_result => |term| term.result,
@@ -136,6 +146,10 @@ pub const InvariantTerm = union(enum) {
                 changed = required.insert(term.then_value) or changed;
                 changed = required.insert(term.else_value) or changed;
             },
+            .value_copy => |term| {
+                changed = required.insert(term.source) or changed;
+            },
+            .value_constant => {},
             .integer_zero_result => |term| {
                 changed = required.insert(term.value) or changed;
             },
@@ -177,6 +191,11 @@ pub const InvariantTerm = union(enum) {
                 _ = required.insert(term.then_value);
                 _ = required.insert(term.else_value);
             },
+            .value_copy => |term| {
+                _ = required.insert(term.result);
+                _ = required.insert(term.source);
+            },
+            .value_constant => |term| _ = required.insert(term.result),
             .integer_zero => |term| _ = required.insert(term.value),
             .integer_zero_result => |term| {
                 _ = required.insert(term.result);
@@ -230,6 +249,16 @@ pub const InvariantTerm = union(enum) {
                     term.else_value == other_term.else_value,
                 else => false,
             },
+            .value_copy => |term| switch (other) {
+                .value_copy => |other_term| term.result == other_term.result and
+                    term.source == other_term.source,
+                else => false,
+            },
+            .value_constant => |term| switch (other) {
+                .value_constant => |other_term| term.result == other_term.result and
+                    invariantValueEql(term.contents, other_term.contents),
+                else => false,
+            },
             .integer_zero => |term| switch (other) {
                 .integer_zero => |other_term| term.value == other_term.value and
                     term.equal == other_term.equal,
@@ -278,6 +307,39 @@ pub const InvariantValue = union(enum) {
     sum_case: u16,
 };
 
+fn invariantValueEql(left: InvariantValue, right: InvariantValue) bool {
+    return switch (left) {
+        .boolean => |value| switch (right) {
+            .boolean => |other| value == other,
+            else => false,
+        },
+        .signed => |value| switch (right) {
+            .signed => |other| value == other,
+            else => false,
+        },
+        .unsigned => |value| switch (right) {
+            .unsigned => |other| value == other,
+            else => false,
+        },
+        .sum_case => |value| switch (right) {
+            .sum_case => |other| value == other,
+            else => false,
+        },
+    };
+}
+
+fn invariantValueLessThan(left: InvariantValue, right: InvariantValue) bool {
+    const left_tag = @intFromEnum(std.meta.activeTag(left));
+    const right_tag = @intFromEnum(std.meta.activeTag(right));
+    if (left_tag != right_tag) return left_tag < right_tag;
+    return switch (left) {
+        .boolean => |value| @intFromBool(value) < @intFromBool(right.boolean),
+        .signed => |value| value < right.signed,
+        .unsigned => |value| value < right.unsigned,
+        .sum_case => |value| value < right.sum_case,
+    };
+}
+
 /// One value binding supplied to constructor-local invariant evaluation.
 pub const InvariantBinding = struct {
     value: control_ir.ValueId,
@@ -293,6 +355,7 @@ pub const Error = control_ir.ValidationError || error{
     InvalidInvariantValue,
     InvariantViolation,
     PathFactsDidNotConverge,
+    UnsupportedInvariantDefinition,
 };
 
 fn bindingFor(
@@ -370,6 +433,17 @@ fn evaluate(term: InvariantTerm, bindings: []const InvariantBinding) Error!void 
             break :blk try booleanBinding(bindings, definition.result) ==
                 selected;
         },
+        .value_copy => |definition| invariantValueEql(
+            bindingFor(bindings, definition.result) orelse
+                return error.MissingInvariantValue,
+            bindingFor(bindings, definition.source) orelse
+                return error.MissingInvariantValue,
+        ),
+        .value_constant => |definition| invariantValueEql(
+            bindingFor(bindings, definition.result) orelse
+                return error.MissingInvariantValue,
+            definition.contents,
+        ),
         .integer_zero => |predicate| switch (bindingFor(
             bindings,
             predicate.value,
@@ -806,6 +880,28 @@ pub fn NormalForm(
                     }
                     break :blk false;
                 },
+                .value_copy => |left_term| blk: {
+                    const right_term = right.value_copy;
+                    const left_result = canonical_values.ordinal(left_term.result);
+                    const right_result = canonical_values.ordinal(right_term.result);
+                    if (left_result != right_result) {
+                        break :blk left_result < right_result;
+                    }
+                    break :blk canonical_values.ordinal(left_term.source) <
+                        canonical_values.ordinal(right_term.source);
+                },
+                .value_constant => |left_term| blk: {
+                    const right_term = right.value_constant;
+                    const left_result = canonical_values.ordinal(left_term.result);
+                    const right_result = canonical_values.ordinal(right_term.result);
+                    if (left_result != right_result) {
+                        break :blk left_result < right_result;
+                    }
+                    break :blk invariantValueLessThan(
+                        left_term.contents,
+                        right_term.contents,
+                    );
+                },
                 .integer_zero => |left_term| blk: {
                     const right_term = right.integer_zero;
                     const left_value = canonical_values.ordinal(left_term.value);
@@ -917,7 +1013,7 @@ pub fn NormalForm(
         }
     };
     const AnalysisFactSet = struct {
-        terms: [maximum_values * 2 + 1]InvariantTerm = undefined,
+        terms: [maximum_values * 3 + 1]InvariantTerm = undefined,
         len: usize = 0,
 
         fn contains(self: @This(), term: InvariantTerm) bool {
@@ -959,9 +1055,10 @@ pub fn NormalForm(
             target_live: Set,
         ) Set {
             var required = Set.empty();
-            if (generated.terms.len <= generated.direct_len + 1) {
-                return required;
+            for (generated.terms.terms[0..generated.direct_len]) |term| {
+                term.addRequired(&required);
             }
+            if (generated.terms.len <= generated.direct_len + 1) return required;
             const definitions = generated.terms.terms[generated.direct_len + 1 .. generated.terms.len];
             var future_dependent = Set.empty();
             for (definitions) |term| {
@@ -1345,6 +1442,48 @@ pub fn NormalForm(
                         }
                     }
                 },
+                .value_copy => |definition| {
+                    const results = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.result,
+                    );
+                    const sources = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.source,
+                    );
+                    for (results.slice()) |result_value| {
+                        for (sources.slice()) |source| try result.insert(.{
+                            .value_copy = .{
+                                .result = result_value,
+                                .source = source,
+                            },
+                        });
+                    }
+                },
+                .value_constant => |definition| {
+                    const results = projectValues(
+                        program,
+                        source_block,
+                        edge,
+                        target_live,
+                        retain_for_invariant,
+                        definition.result,
+                    );
+                    for (results.slice()) |result_value| try result.insert(.{
+                        .value_constant = .{
+                            .result = result_value,
+                            .contents = definition.contents,
+                        },
+                    });
+                },
                 .integer_zero => |predicate| {
                     const values = projectValues(
                         program,
@@ -1622,6 +1761,47 @@ pub fn NormalForm(
             }
         }
 
+        fn collectValueDefinition(
+            program: control_ir.Program,
+            constant_values: []const ?InvariantValue,
+            value: control_ir.ValueId,
+            facts: *AnalysisFactSet,
+            visited: *Set,
+        ) Error!bool {
+            if (!visited.insert(value)) return false;
+            const instruction = definingInstruction(program, value) orelse
+                return false;
+            return switch (instruction.operation) {
+                .copy => {
+                    const rooted = try collectValueDefinition(
+                        program,
+                        constant_values,
+                        instruction.operands[0],
+                        facts,
+                        visited,
+                    );
+                    if (rooted) try facts.insert(.{ .value_copy = .{
+                        .result = value,
+                        .source = instruction.operands[0],
+                    } });
+                    return rooted;
+                },
+                .constant => {
+                    if (value >= constant_values.len) {
+                        return error.UnsupportedInvariantDefinition;
+                    }
+                    const contents = constant_values[@intCast(value)] orelse
+                        return error.UnsupportedInvariantDefinition;
+                    try facts.insert(.{ .value_constant = .{
+                        .result = value,
+                        .contents = contents,
+                    } });
+                    return true;
+                },
+                else => false,
+            };
+        }
+
         fn collectDirectBranchFacts(
             program: control_ir.Program,
             value: control_ir.ValueId,
@@ -1705,6 +1885,7 @@ pub fn NormalForm(
 
         fn branchFacts(
             program: control_ir.Program,
+            constant_values: []const ?InvariantValue,
             branch: control_ir.Branch,
             expected: bool,
         ) Error!GeneratedFacts {
@@ -1729,6 +1910,21 @@ pub fn NormalForm(
                 &result.terms,
                 &visited,
             );
+            var direct_values = Set.empty();
+            for (result.terms.terms[0..result.direct_len]) |term| {
+                term.addRequired(&direct_values);
+            }
+            for (direct_values.bits, 0..) |present, value_index| {
+                if (!present) continue;
+                var definition_visited = Set.empty();
+                _ = try collectValueDefinition(
+                    program,
+                    constant_values,
+                    @intCast(value_index),
+                    &result.terms,
+                    &definition_visited,
+                );
+            }
             return result;
         }
 
@@ -1825,6 +2021,7 @@ pub fn NormalForm(
 
         fn incomingFacts(
             program: control_ir.Program,
+            constant_values: []const ?InvariantValue,
             reachability: ReachabilityType,
             liveness: Liveness,
             current: [maximum_blocks]FactSet,
@@ -1855,11 +2052,13 @@ pub fn NormalForm(
                     .branch => |branch| {
                         const then_facts = try branchFacts(
                             program,
+                            constant_values,
                             branch,
                             true,
                         );
                         const else_facts = try branchFacts(
                             program,
+                            constant_values,
                             branch,
                             false,
                         );
@@ -1920,6 +2119,7 @@ pub fn NormalForm(
 
         fn analyzePathFacts(
             program: control_ir.Program,
+            constant_values: []const ?InvariantValue,
             reachability: ReachabilityType,
             liveness: Liveness,
         ) Error![maximum_blocks]FactSet {
@@ -1941,6 +2141,7 @@ pub fn NormalForm(
                     }
                     const facts = try incomingFacts(
                         program,
+                        constant_values,
                         reachability,
                         liveness,
                         result,
@@ -1977,9 +2178,28 @@ pub fn NormalForm(
             program: control_ir.Program,
             reachability: ReachabilityType,
         ) Error!Self {
+            const no_constants = [_]?InvariantValue{null} ** maximum_values;
+            return synthesizeReachableWithConstants(
+                program,
+                reachability,
+                &no_constants,
+            );
+        }
+
+        /// Synthesize with compiler-owned scalar constant witnesses used only
+        /// to authenticate direct constructor-local path facts.
+        pub fn synthesizeReachableWithConstants(
+            program: control_ir.Program,
+            reachability: ReachabilityType,
+            constant_values: []const ?InvariantValue,
+        ) Error!Self {
+            if (constant_values.len < program.value_types.len) {
+                return error.UnsupportedInvariantDefinition;
+            }
             const liveness = try Liveness.analyze(program);
             const path_facts = try analyzePathFacts(
                 program,
+                constant_values,
                 reachability,
                 liveness,
             );

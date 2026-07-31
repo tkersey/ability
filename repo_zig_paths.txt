@@ -11,11 +11,14 @@ src/program_v2.zig
 src/rnf.zig
 src/root.zig
 test/agent_loop.zig
+test/compile_fail/dead_control_malformed_constant.zig
 test/compile_fail/dead_control_schema_reference.zig
 test/compile_fail/effect_handler_type_mismatch.zig
 test/compile_fail/effect_morphism_type_mismatch.zig
 test/compile_fail/effect_resume_type_mismatch.zig
 test/compile_fail/effect_site_ordinal_mismatch.zig
+test/compile_fail/forged_portable_container_marker.zig
+test/compile_fail/generated_container_product_access.zig
 test/compile_fail/generated_reducer_limit.zig
 test/compile_fail/missing_arithmetic_failure.zig
 test/compile_fail/oversized_machine_state.zig

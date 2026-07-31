@@ -36,7 +36,7 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
         pub const portable_value_authenticity = bytes_authenticity;
         pub const maximum_length = maximum_bytes;
 
-        storage: [maximum_bytes]u8 = undefined,
+        storage: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes,
         logical_length: u32 = 0,
 
         /// Construct an empty value.
@@ -60,11 +60,13 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
 
         /// Borrow only initialized logical bytes.
         pub fn slice(self: *const Self) []const u8 {
+            if (self.logical_length > maximum_bytes) return &.{};
             return self.storage[0..@intCast(self.logical_length)];
         }
 
         /// Append atomically, failing before mutation on overflow.
         pub fn append(self: *Self, suffix: []const u8) Error!void {
+            if (self.logical_length > maximum_bytes) return error.Malformed;
             const start: usize = @intCast(self.logical_length);
             const end = std.math.add(usize, start, suffix.len) catch
                 return error.CapacityExceeded;
@@ -80,7 +82,9 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
             start: u32,
             end: u32,
         ) Error!Bytes(result_capacity) {
-            if (start > end or end > self.logical_length) {
+            if (self.logical_length > maximum_bytes or
+                start > end or end > self.logical_length)
+            {
                 return error.CapacityExceeded;
             }
             return Bytes(result_capacity).fromSlice(
@@ -90,18 +94,24 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
 
         /// Replace one logical byte.
         pub fn set(self: *Self, index: u32, value: u8) Error!void {
+            if (self.logical_length > maximum_bytes) return error.Malformed;
             if (index >= self.logical_length) return error.CapacityExceeded;
             self.storage[@intCast(index)] = value;
         }
 
         /// Return one logical byte.
         pub fn get(self: *const Self, index: u32) ?u8 {
-            if (index >= self.logical_length) return null;
+            if (self.logical_length > maximum_bytes or
+                index >= self.logical_length) return null;
             return self.storage[@intCast(index)];
         }
 
         /// Shorten the logical value.
         pub fn truncate(self: *Self, new_length: u32) void {
+            if (self.logical_length > maximum_bytes) {
+                self.logical_length = 0;
+                return;
+            }
             if (new_length < self.logical_length) self.logical_length = new_length;
         }
 
@@ -112,11 +122,18 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
 
         /// Compare canonical logical contents.
         pub fn eql(self: *const Self, other: *const Self) bool {
+            if (self.logical_length > maximum_bytes or
+                other.logical_length > maximum_bytes) return false;
             return std.mem.eql(u8, self.slice(), other.slice());
         }
 
         /// Lexicographically compare logical bytes.
         pub fn order(self: *const Self, other: *const Self) std.math.Order {
+            if (self.logical_length > maximum_bytes or
+                other.logical_length > maximum_bytes)
+            {
+                return .eq;
+            }
             return std.mem.order(u8, self.slice(), other.slice());
         }
     };
@@ -132,7 +149,7 @@ pub fn Text(comptime maximum_bytes: usize) type {
         pub const portable_value_authenticity = text_authenticity;
         pub const maximum_length = maximum_bytes;
 
-        storage: [maximum_bytes]u8 = undefined,
+        storage: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes,
         logical_length: u32 = 0,
 
         /// Construct empty text.
@@ -157,12 +174,14 @@ pub fn Text(comptime maximum_bytes: usize) type {
 
         /// Borrow only initialized logical UTF-8 bytes.
         pub fn slice(self: *const Self) []const u8 {
+            if (self.logical_length > maximum_bytes) return &.{};
             return self.storage[0..@intCast(self.logical_length)];
         }
 
         /// Append valid UTF-8 atomically.
         pub fn append(self: *Self, suffix: []const u8) Error!void {
             if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
+            if (self.logical_length > maximum_bytes) return error.Malformed;
             const start: usize = @intCast(self.logical_length);
             const end = std.math.add(usize, start, suffix.len) catch
                 return error.CapacityExceeded;
@@ -202,6 +221,7 @@ pub fn Text(comptime maximum_bytes: usize) type {
             start: u32,
             end: u32,
         ) Error!Text(result_capacity) {
+            if (self.logical_length > maximum_bytes) return error.Malformed;
             if (start > end or end > self.logical_length) return error.CapacityExceeded;
             return Text(result_capacity).fromSlice(
                 self.storage[@intCast(start)..@intCast(end)],
@@ -210,11 +230,18 @@ pub fn Text(comptime maximum_bytes: usize) type {
 
         /// Compare canonical logical contents.
         pub fn eql(self: *const Self, other: *const Self) bool {
+            if (self.logical_length > maximum_bytes or
+                other.logical_length > maximum_bytes) return false;
             return std.mem.eql(u8, self.slice(), other.slice());
         }
 
         /// Lexicographically compare UTF-8 bytes without locale semantics.
         pub fn order(self: *const Self, other: *const Self) std.math.Order {
+            if (self.logical_length > maximum_bytes or
+                other.logical_length > maximum_bytes)
+            {
+                return .eq;
+            }
             return std.mem.order(u8, self.slice(), other.slice());
         }
     };
@@ -231,7 +258,8 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         pub const ElementType = Element;
         pub const maximum_length = maximum_items;
 
-        storage: [maximum_items]Element = undefined,
+        storage: [maximum_items]Element =
+            [_]Element{canonicalDefaultValue(Element)} ** maximum_items,
         logical_length: u32 = 0,
 
         /// Construct an empty vector.
@@ -243,7 +271,10 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         pub fn fromSlice(items: []const Element) Error!Self {
             if (items.len > maximum_items) return error.CapacityExceeded;
             var result = Self.empty();
-            for (items, 0..) |item, index| result.storage[index] = item;
+            for (items, 0..) |item, index| {
+                _ = try encodedSize(Element, item);
+                result.storage[index] = item;
+            }
             result.logical_length = @intCast(items.len);
             return result;
         }
@@ -255,31 +286,38 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
 
         /// Borrow only initialized logical elements.
         pub fn slice(self: *const Self) []const Element {
+            if (self.logical_length > maximum_items) return &.{};
             return self.storage[0..@intCast(self.logical_length)];
         }
 
         /// Return one element by value, never by portable pointer identity.
         pub fn get(self: *const Self, index: u32) ?Element {
-            if (index >= self.logical_length) return null;
+            if (self.logical_length > maximum_items or
+                index >= self.logical_length) return null;
             return self.storage[@intCast(index)];
         }
 
         /// Replace one logical element.
         pub fn set(self: *Self, index: u32, item: Element) Error!void {
+            if (self.logical_length > maximum_items) return error.Malformed;
             if (index >= self.logical_length) return error.CapacityExceeded;
+            _ = try encodedSize(Element, item);
             self.storage[@intCast(index)] = item;
         }
 
         /// Append one element atomically.
         pub fn push(self: *Self, item: Element) Error!void {
+            if (self.logical_length > maximum_items) return error.Malformed;
             const index: usize = @intCast(self.logical_length);
             if (index == maximum_items) return error.CapacityExceeded;
+            _ = try encodedSize(Element, item);
             self.storage[index] = item;
             self.logical_length += 1;
         }
 
         /// Remove and return the final logical element.
         pub fn pop(self: *Self) ?Element {
+            if (self.logical_length > maximum_items) return null;
             if (self.logical_length == 0) return null;
             self.logical_length -= 1;
             return self.storage[@intCast(self.logical_length)];
@@ -287,6 +325,10 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
 
         /// Shorten the vector without observing spare storage.
         pub fn truncate(self: *Self, new_length: u32) void {
+            if (self.logical_length > maximum_items) {
+                self.logical_length = 0;
+                return;
+            }
             if (new_length < self.logical_length) self.logical_length = new_length;
         }
 
@@ -297,6 +339,8 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
 
         /// Compare logical elements structurally.
         pub fn eql(self: *const Self, other: *const Self) bool {
+            if (self.logical_length > maximum_items or
+                other.logical_length > maximum_items) return false;
             if (self.logical_length != other.logical_length) return false;
             if (comptime maximumEncodedSize(Element) == 0) return true;
             for (self.slice(), other.slice()) |left, right| {
@@ -329,27 +373,42 @@ fn hasDeclSafe(comptime T: type, comptime name: []const u8) bool {
     };
 }
 
-fn isGeneratedKind(
-    comptime T: type,
-    comptime kind: PortableKind,
-    comptime authenticity: type,
-) bool {
-    return hasDeclSafe(T, "portable_value_kind") and
-        hasDeclSafe(T, "portable_value_authenticity") and
-        T.portable_value_kind == kind and
-        T.portable_value_authenticity == authenticity;
-}
-
 fn isBytes(comptime T: type) bool {
-    return isGeneratedKind(T, .bytes, bytes_authenticity);
+    if (!hasDeclSafe(T, "portable_value_kind") or
+        !hasDeclSafe(T, "portable_value_authenticity") or
+        !hasDeclSafe(T, "maximum_length")) return false;
+    if (@TypeOf(T.portable_value_kind) != PortableKind or
+        @TypeOf(T.portable_value_authenticity) != type or
+        @TypeOf(T.maximum_length) != usize) return false;
+    return T.portable_value_kind == .bytes and
+        T.portable_value_authenticity == bytes_authenticity and
+        T == Bytes(T.maximum_length);
 }
 
 fn isText(comptime T: type) bool {
-    return isGeneratedKind(T, .text, text_authenticity);
+    if (!hasDeclSafe(T, "portable_value_kind") or
+        !hasDeclSafe(T, "portable_value_authenticity") or
+        !hasDeclSafe(T, "maximum_length")) return false;
+    if (@TypeOf(T.portable_value_kind) != PortableKind or
+        @TypeOf(T.portable_value_authenticity) != type or
+        @TypeOf(T.maximum_length) != usize) return false;
+    return T.portable_value_kind == .text and
+        T.portable_value_authenticity == text_authenticity and
+        T == Text(T.maximum_length);
 }
 
 fn isVector(comptime T: type) bool {
-    return isGeneratedKind(T, .vector, vector_authenticity);
+    if (!hasDeclSafe(T, "portable_value_kind") or
+        !hasDeclSafe(T, "portable_value_authenticity") or
+        !hasDeclSafe(T, "ElementType") or
+        !hasDeclSafe(T, "maximum_length")) return false;
+    if (@TypeOf(T.portable_value_kind) != PortableKind or
+        @TypeOf(T.portable_value_authenticity) != type or
+        @TypeOf(T.ElementType) != type or
+        @TypeOf(T.maximum_length) != usize) return false;
+    return T.portable_value_kind == .vector and
+        T.portable_value_authenticity == vector_authenticity and
+        T == Vector(T.ElementType, T.maximum_length);
 }
 
 fn isCanonicalInteger(comptime T: type) bool {
@@ -401,6 +460,38 @@ pub fn assertPortable(comptime T: type) void {
         },
         else => @compileError("unsupported Boundary Machine portable value: " ++ @typeName(T)),
     }
+}
+
+fn canonicalDefaultValue(comptime T: type) T {
+    comptime assertPortable(T);
+    if (comptime isBytes(T) or isText(T) or isVector(T)) return T.empty();
+    return switch (@typeInfo(T)) {
+        .void => {},
+        .bool => false,
+        .int => 0,
+        .array => |info| blk: {
+            var result: T = undefined;
+            inline for (0..info.len) |index| {
+                result[index] = canonicalDefaultValue(info.child);
+            }
+            break :blk result;
+        },
+        .optional => null,
+        .@"enum" => |info| @field(T, info.fields[0].name),
+        .@"struct" => |info| blk: {
+            var result: T = undefined;
+            inline for (info.fields) |field| {
+                @field(result, field.name) = canonicalDefaultValue(field.type);
+            }
+            break :blk result;
+        },
+        .@"union" => |info| @unionInit(
+            T,
+            info.fields[0].name,
+            canonicalDefaultValue(info.fields[0].type),
+        ),
+        else => unreachable,
+    };
 }
 
 /// Compare canonical value semantics without observing spare bounded storage.
@@ -1095,6 +1186,48 @@ test "canonical equality ignores spare storage recursively" {
     };
 
     try std.testing.expect(eqlValue(Items, left, right));
+}
+
+test "bounded defaults initialize all storage and malformed lengths stay total" {
+    const Item = struct {
+        title: Text(4),
+        count: u32,
+    };
+    const Items = Vector(Item, 2);
+    const bytes = Bytes(4).empty();
+    const text = Text(4).empty();
+    const items = Items.empty();
+
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &bytes.storage);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &text.storage);
+    try std.testing.expectEqual(@as(u32, 0), items.storage[0].count);
+    try std.testing.expectEqual(@as(u32, 0), items.storage[1].count);
+    try std.testing.expectEqual(@as(u32, 0), items.storage[0].title.len());
+
+    var malformed_text = text;
+    malformed_text.logical_length = 5;
+    try std.testing.expectEqual(@as(usize, 0), malformed_text.slice().len);
+    try std.testing.expectError(error.Malformed, malformed_text.append("x"));
+
+    var malformed_items = items;
+    malformed_items.logical_length = 3;
+    try std.testing.expectEqual(@as(usize, 0), malformed_items.slice().len);
+    try std.testing.expectEqual(@as(?Item, null), malformed_items.get(0));
+    try std.testing.expectError(
+        error.Malformed,
+        malformed_items.push(.{ .title = text, .count = 1 }),
+    );
+}
+
+test "vector validates nested bounded values before mutation" {
+    const SmallText = Text(1);
+    const Values = Vector(SmallText, 1);
+    var malformed = SmallText.empty();
+    malformed.logical_length = 2;
+    var values = Values.empty();
+
+    try std.testing.expectError(error.Malformed, values.push(malformed));
+    try std.testing.expectEqual(@as(u32, 0), values.len());
 }
 
 test "portable schema identity is structural and capacity-bearing" {

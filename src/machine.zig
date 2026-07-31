@@ -1148,6 +1148,8 @@ pub fn Machine(
             allocator: std.mem.Allocator,
             args: InitialArgs,
         ) Error!State {
+            _ = portable_value.encodedSize(InitialArgs, args) catch
+                return error.ProgramContractViolation;
             var value: StoredState = .{
                 .allocator = allocator,
                 .frames = try FrameStack.initOne(

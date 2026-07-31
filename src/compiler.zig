@@ -96,6 +96,38 @@ fn typeForValue(comptime Body: type, comptime value_type: control_ir.ValueType) 
     };
 }
 
+fn invariantConstantValue(comptime T: type, value: T) ?rnf.InvariantValue {
+    return switch (@typeInfo(T)) {
+        .bool => .{ .boolean = value },
+        .int => |info| if (info.signedness == .signed)
+            .{ .signed = @intCast(value) }
+        else
+            .{ .unsigned = @intCast(value) },
+        else => null,
+    };
+}
+
+fn invariantConstantValues(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime maximum_values: usize,
+) [maximum_values]?rnf.InvariantValue {
+    var result = [_]?rnf.InvariantValue{null} ** maximum_values;
+    inline for (program.blocks) |block| {
+        inline for (block.instructions) |instruction| {
+            switch (instruction.operation) {
+                .constant => |constant_index| {
+                    const value = Body.constants[constant_index];
+                    result[@intCast(instruction.result)] =
+                        invariantConstantValue(@TypeOf(value), value);
+                },
+                else => {},
+            }
+        }
+    }
+    return result;
+}
+
 fn validateValueTypeReference(
     comptime Body: type,
     comptime value_type: control_ir.ValueType,
@@ -689,6 +721,10 @@ fn validateInstruction(
             if (@TypeOf(Body.constants[constant_index]) != Result) {
                 @compileError("constant instruction type does not match its result");
             }
+            _ = portable_value.encodedSize(
+                Result,
+                Body.constants[constant_index],
+            ) catch @compileError("constant instruction value is not canonical");
         },
         .copy => {
             requireOperandCount(instruction, 1);
@@ -786,6 +822,14 @@ fn validateInstruction(
             }
         },
         .product_construct => {
+            if (portable_value.isBytesType(Result) or
+                portable_value.isTextType(Result) or
+                portable_value.isVectorType(Result))
+            {
+                @compileError(
+                    "generated bounded values are semantic atoms, not generic products",
+                );
+            }
             const fields = switch (@typeInfo(Result)) {
                 .@"struct" => |info| info.fields,
                 else => @compileError("product_construct result must be a struct"),
@@ -808,6 +852,14 @@ fn validateInstruction(
                 Body,
                 program.value_types[instruction.operands[0]],
             );
+            if (portable_value.isBytesType(Product) or
+                portable_value.isTextType(Product) or
+                portable_value.isVectorType(Product))
+            {
+                @compileError(
+                    "generated bounded values are semantic atoms, not generic products",
+                );
+            }
             const fields = switch (@typeInfo(Product)) {
                 .@"struct" => |info| info.fields,
                 else => @compileError("product_extract operand must be a struct"),
@@ -820,6 +872,14 @@ fn validateInstruction(
             requireOperandCount(instruction, 2);
             const Product = operandType(Body, program, instruction, 0);
             const Replacement = operandType(Body, program, instruction, 1);
+            if (portable_value.isBytesType(Product) or
+                portable_value.isTextType(Product) or
+                portable_value.isVectorType(Product))
+            {
+                @compileError(
+                    "generated bounded values are semantic atoms, not generic products",
+                );
+            }
             const fields = switch (@typeInfo(Product)) {
                 .@"struct" => |info| info.fields,
                 else => @compileError("product_replace operand must be a struct"),
@@ -1580,6 +1640,25 @@ fn semanticHashTerminator(
     }
 }
 
+fn semanticHashInvariantValue(
+    hasher: *SemanticHasher,
+    value: rnf.InvariantValue,
+) void {
+    semanticHashU8(
+        hasher,
+        @intCast(@intFromEnum(std.meta.activeTag(value))),
+    );
+    switch (value) {
+        .boolean => |contents| semanticHashBool(hasher, contents),
+        .signed => |contents| semanticHashU64(
+            hasher,
+            @bitCast(contents),
+        ),
+        .unsigned => |contents| semanticHashU64(hasher, contents),
+        .sum_case => |contents| semanticHashU16(hasher, contents),
+    }
+}
+
 fn semanticHashInvariant(
     hasher: *SemanticHasher,
     invariant: rnf.InvariantTerm,
@@ -1619,6 +1698,14 @@ fn semanticHashInvariant(
             semanticHashU16(hasher, canonical.valueId(definition.condition));
             semanticHashU16(hasher, canonical.valueId(definition.then_value));
             semanticHashU16(hasher, canonical.valueId(definition.else_value));
+        },
+        .value_copy => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.source));
+        },
+        .value_constant => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashInvariantValue(hasher, definition.contents);
         },
         .integer_zero => |predicate| {
             semanticHashU16(
@@ -1680,6 +1767,26 @@ fn algebraicCaseIndex(value: anytype) u16 {
         else => @compileError(
             "sum-case invariant requires a tagged union or optional",
         ),
+    };
+}
+
+fn invariantValueMatches(value: anytype, expected: rnf.InvariantValue) bool {
+    const T = @TypeOf(value);
+    return switch (@typeInfo(T)) {
+        .bool => switch (expected) {
+            .boolean => |contents| value == contents,
+            else => false,
+        },
+        .int => |info| if (info.signedness == .signed)
+            switch (expected) {
+                .signed => |contents| @as(i64, value) == contents,
+                else => false,
+            }
+        else switch (expected) {
+            .unsigned => |contents| @as(u64, value) == contents,
+            else => false,
+        },
+        else => false,
     };
 }
 
@@ -1876,6 +1983,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         program,
         reachability,
     );
+    const invariant_constants = comptime invariantConstantValues(
+        Body,
+        program,
+        limits.maximum_values,
+    );
     const normal_form = comptime blk: {
         break :blk rnf.NormalForm(
             limits.maximum_values,
@@ -1883,7 +1995,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             limits.maximum_constructors,
             limits.maximum_environment_fields,
             limits.maximum_invariant_terms,
-        ).synthesizeReachable(program, reachability) catch |err|
+        ).synthesizeReachableWithConstants(
+            program,
+            reachability,
+            &invariant_constants,
+        ) catch |err|
             @compileError("Boundary RNF synthesis failed: " ++ @errorName(err));
     };
     const generated_operation_count = comptime generatedReducerOperationCount(
@@ -3351,7 +3467,10 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             var store: SegmentStore(constructor_id) = undefined;
             const entry = program.blocks[program.entry];
             if (entry.parameters.len == 1) {
-                @field(store, valueName(entry.parameters[0])) = args;
+                const argument_name = comptime valueName(entry.parameters[0]);
+                if (comptime @hasField(@TypeOf(store), argument_name)) {
+                    @field(store, argument_name) = args;
+                }
             }
             return frameForBlock(program.entry, &store);
         }
@@ -3470,6 +3589,10 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     if (@TypeOf(response) != Site.Resume) {
                         break :blk error.ProgramContractViolation;
                     }
+                    _ = portable_value.encodedSize(
+                        Site.Resume,
+                        response,
+                    ) catch break :blk error.ProgramContractViolation;
                     if (std.meta.activeTag(request) !=
                         @field(std.meta.Tag(Request), request_field))
                     {
@@ -3622,6 +3745,18 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             environment,
                             valueName(definition.else_value),
                         ),
+                    .value_copy => |definition| portable_value.eqlValue(
+                        @TypeOf(@field(
+                            environment,
+                            valueName(definition.result),
+                        )),
+                        @field(environment, valueName(definition.result)),
+                        @field(environment, valueName(definition.source)),
+                    ),
+                    .value_constant => |definition| invariantValueMatches(
+                        @field(environment, valueName(definition.result)),
+                        definition.contents,
+                    ),
                     .integer_zero => |predicate| (@field(
                         environment,
                         valueName(predicate.value),

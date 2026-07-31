@@ -230,34 +230,44 @@ const derived_entry_instructions = [_]cir.Instruction{
         .operation = .{ .constant = 0 },
     },
     .{
-        .kind = .compare_eq_zero,
+        .kind = .copy,
         .result = 1,
         .operands = &.{0},
+        .operation = .copy,
+    },
+    .{
+        .kind = .compare_eq_zero,
+        .result = 2,
+        .operands = &.{1},
         .operation = .compare_eq_zero,
     },
 };
-const derived_then_arguments = [_]cir.EdgeArgument{.{ .value = 1 }};
+const derived_else_arguments = [_]cir.EdgeArgument{.{ .value = 2 }};
 const derived_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
 const derived_blocks = [_]cir.Block{
     .{
         .id = 0,
         .instructions = &derived_entry_instructions,
         .terminator = .{ .branch = .{
-            .condition = 1,
-            .then_edge = .{
-                .target = 1,
-                .arguments = &derived_then_arguments,
+            .condition = 2,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{
+                .target = 2,
+                .arguments = &derived_else_arguments,
             },
-            .else_edge = .{ .target = 2 },
         } },
     },
     .{
         .id = 1,
-        .parameters = &.{2},
+        .terminator = .{ .return_value = 0 },
+    },
+    .{
+        .id = 2,
+        .parameters = &.{3},
         .terminator = .{ .@"suspend" = .{
             .kind = .effect,
             .site_id = 0,
-            .request_values = &.{2},
+            .request_values = &.{3},
             .continuation = .{
                 .target = 3,
                 .arguments = &derived_resume_arguments,
@@ -266,13 +276,9 @@ const derived_blocks = [_]cir.Block{
         } },
     },
     .{
-        .id = 2,
-        .terminator = .{ .return_value = 0 },
-    },
-    .{
         .id = 3,
-        .parameters = &.{3},
-        .terminator = .{ .return_value = 3 },
+        .parameters = &.{4},
+        .terminator = .{ .return_value = 4 },
     },
 };
 
@@ -282,12 +288,13 @@ const DerivedBody = struct {
     pub const Failure = enum {
         rejected,
     };
-    pub const constants = .{@as(u32, 0)};
+    pub const constants = .{@as(u32, 1)};
     pub const effect_sites = .{DerivedLookup};
     pub const schema_types = .{};
     pub const control_ir: cir.Program = .{
         .label = "derived-predicate-constructor-invariant",
         .value_types = &.{
+            u32_type,
             u32_type,
             bool_type,
             bool_type,
@@ -396,7 +403,7 @@ test "optional branches use the same canonical sum-case invariant" {
 test "derived live predicates retain their local defining equation" {
     const awaiting = blk: {
         for (DerivedProgram.rnf.constructorSlice()) |*constructor| {
-            if (constructor.source_block == 1 and
+            if (constructor.source_block == 2 and
                 constructor.kind == .await_effect)
             {
                 break :blk constructor;
@@ -404,29 +411,47 @@ test "derived live predicates retain their local defining equation" {
         }
         return error.TestExpectedEqual;
     };
-    try std.testing.expectEqual(@as(usize, 2), awaiting.environment_len);
+    try std.testing.expectEqual(@as(usize, 3), awaiting.environment_len);
     try std.testing.expectEqual(
         @as(cir.ValueId, 0),
         awaiting.environmentFields()[0].value,
     );
     try std.testing.expectEqual(
-        @as(cir.ValueId, 2),
+        @as(cir.ValueId, 1),
         awaiting.environmentFields()[1].value,
+    );
+    try std.testing.expectEqual(
+        @as(cir.ValueId, 3),
+        awaiting.environmentFields()[2].value,
     );
     var saw_operand_fact = false;
     var saw_definition = false;
+    var saw_copy = false;
+    var saw_constant = false;
     for (awaiting.invariantTerms()) |term| switch (term) {
         .integer_zero => |fact| {
-            saw_operand_fact = fact.value == 0 and fact.equal;
+            saw_operand_fact = fact.value == 1 and !fact.equal;
         },
         .integer_zero_result => |definition| {
             saw_definition =
-                definition.result == 2 and definition.value == 0;
+                definition.result == 3 and definition.value == 1;
+        },
+        .value_copy => |definition| {
+            saw_copy = definition.result == 1 and definition.source == 0;
+        },
+        .value_constant => |definition| {
+            saw_constant = definition.result == 0 and
+                switch (definition.contents) {
+                    .unsigned => |value| value == 1,
+                    else => false,
+                };
         },
         else => {},
     };
     try std.testing.expect(saw_operand_fact);
     try std.testing.expect(saw_definition);
+    try std.testing.expect(saw_copy);
+    try std.testing.expect(saw_constant);
 
     const state = try DerivedMachine.initialState(std.testing.allocator, {});
     defer DerivedMachine.deinitState(state);
@@ -436,18 +461,42 @@ test "derived live predicates retain their local defining equation" {
         else => return error.TestUnexpectedResult,
     };
     switch (request.value) {
-        .s0 => |predicate| try std.testing.expect(predicate),
+        .s0 => |predicate| try std.testing.expect(!predicate),
     }
     const encoded = try DerivedMachine.encodeState(
         std.testing.allocator,
         state,
     );
     defer std.testing.allocator.free(encoded);
-    const forged = try std.testing.allocator.dupe(u8, encoded);
-    defer std.testing.allocator.free(forged);
-    forged[first_environment_offset + @sizeOf(u32)] = 0;
+    const forged_copy = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged_copy);
+    std.mem.writeInt(
+        u32,
+        forged_copy[first_environment_offset + @sizeOf(u32) ..][0..4],
+        2,
+        .little,
+    );
     try std.testing.expectError(
         error.ProgramContractViolation,
-        DerivedMachine.decodeState(std.testing.allocator, forged),
+        DerivedMachine.decodeState(std.testing.allocator, forged_copy),
+    );
+
+    const forged_constant = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged_constant);
+    std.mem.writeInt(
+        u32,
+        forged_constant[first_environment_offset..][0..4],
+        2,
+        .little,
+    );
+    std.mem.writeInt(
+        u32,
+        forged_constant[first_environment_offset + @sizeOf(u32) ..][0..4],
+        2,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        DerivedMachine.decodeState(std.testing.allocator, forged_constant),
     );
 }

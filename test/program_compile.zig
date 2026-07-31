@@ -1,7 +1,10 @@
 const cir = @import("control_ir");
 const driver = @import("driver");
+const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
+
+const Text4 = portable_value.Text(4);
 
 const Lookup = struct {
     pub const id: u32 = 0;
@@ -626,4 +629,133 @@ test "Machine preflights the complete response state before request authority" {
         before,
         after,
     );
+}
+
+const ignored_argument_blocks = [_]cir.Block{.{
+    .id = 0,
+    .parameters = &.{0},
+    .terminator = .{ .return_value = null },
+}};
+const IgnoredArgumentBody = struct {
+    pub const InitialArgs = Text4;
+    pub const Result = void;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{};
+    pub const schema_types = .{Text4};
+    pub const control_ir: cir.Program = .{
+        .label = "ignored-entry-argument",
+        .value_types = &.{.{ .schema = 0 }},
+        .blocks = &ignored_argument_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .unit },
+    };
+};
+const IgnoredArgumentMachine = program_v2.program(
+    "ignored-entry-argument",
+    IgnoredArgumentBody,
+).compile(.{});
+
+const IgnoredResponseLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity = "test.ignored-response-lookup.v1";
+    pub const Payload = u32;
+    pub const Resume = Text4;
+};
+const ignored_response_arguments = [_]cir.EdgeArgument{.@"resume"};
+const ignored_response_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 1,
+                .arguments = &ignored_response_arguments,
+            },
+            .resume_type = .{ .schema = 0 },
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .return_value = null },
+    },
+};
+const IgnoredResponseBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = void;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{IgnoredResponseLookup};
+    pub const schema_types = .{Text4};
+    pub const control_ir: cir.Program = .{
+        .label = "ignored-effect-response",
+        .value_types = &.{ u32_type, .{ .schema = 0 } },
+        .blocks = &ignored_response_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .unit },
+    };
+};
+const IgnoredResponseMachine = program_v2.program(
+    "ignored-effect-response",
+    IgnoredResponseBody,
+).compile(.{});
+
+test "entry initialization stores only live arguments but validates every input" {
+    const valid = try Text4.fromSlice("ok");
+    const state = try IgnoredArgumentMachine.initialState(
+        std.testing.allocator,
+        valid,
+    );
+    defer IgnoredArgumentMachine.deinitState(state);
+    var fuel: u64 = 4;
+    const done = switch (try IgnoredArgumentMachine.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+
+    var malformed = Text4.empty();
+    malformed.logical_length = 5;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        IgnoredArgumentMachine.initialState(std.testing.allocator, malformed),
+    );
+}
+
+test "resume validates a future-dead response before consuming the request" {
+    const state = try IgnoredResponseMachine.initialState(
+        std.testing.allocator,
+        7,
+    );
+    defer IgnoredResponseMachine.deinitState(state);
+    var fuel: u64 = 8;
+    const request = switch (try IgnoredResponseMachine.step(state, &fuel)) {
+        .request => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var malformed = Text4.empty();
+    malformed.logical_length = 5;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        IgnoredResponseMachine.@"resume"(state, request, malformed),
+    );
+    const unchanged = try IgnoredResponseMachine.current(state);
+    try std.testing.expectEqualSlices(
+        u8,
+        &request.identity.digest,
+        &unchanged.identity.digest,
+    );
+
+    try IgnoredResponseMachine.@"resume"(
+        state,
+        request,
+        try Text4.fromSlice("ok"),
+    );
+    const done = switch (try IgnoredResponseMachine.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
 }

@@ -235,7 +235,7 @@ pub fn build(b: *std.Build) void {
         b.graph.host,
         optimize,
         true,
-        false,
+        true,
     );
     const program_dynamic_fuel = programTestModule(
         b,
@@ -565,7 +565,9 @@ pub fn build(b: *std.Build) void {
         \\  test ! -e "$path"
         \\done
         \\! rg -n 'pub const (Runtime|staticMachine|StaticMachineOptions)|Program\.Session|Loaded(Session|Module)|Certified Boundary Module' src/root.zig src
-        \\if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        \\package_root=$(pwd -P)
+        \\git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+        \\if test -n "$git_root" && test "$(cd "$git_root" && pwd -P)" = "$package_root"; then
         \\  source_paths=$(
         \\    {
         \\      git ls-files '*.zig'
@@ -590,6 +592,7 @@ pub fn build(b: *std.Build) void {
         \\)
         \\test -z "$legacy_source_matches"
     });
+    deletion_command.setCwd(b.path("."));
     const deletion_step = b.step(
         "check-boundary-machine-deletion",
         "Prove removed Boundary v0 execution surfaces cannot reappear.",
@@ -667,6 +670,18 @@ pub fn build(b: *std.Build) void {
         .{
             "test/compile_fail/portable_sentinel_array.zig",
             "Boundary Machine portable arrays cannot have sentinels",
+        },
+        .{
+            "test/compile_fail/forged_portable_container_marker.zig",
+            "unsupported Boundary Machine portable value: *u8",
+        },
+        .{
+            "test/compile_fail/generated_container_product_access.zig",
+            "generated bounded values are semantic atoms, not generic products",
+        },
+        .{
+            "test/compile_fail/dead_control_malformed_constant.zig",
+            "constant instruction value is not canonical",
         },
         .{
             "test/compile_fail/effect_resume_type_mismatch.zig",
