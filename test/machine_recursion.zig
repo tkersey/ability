@@ -606,7 +606,7 @@ test "compiled bounded recursive frames survive canonical round trip" {
     try std.testing.expectEqual(@as(u64, 7), completion_fuel);
 }
 
-test "helper entry backedges persist only future-local callee state" {
+test "helper entry backedges rebind future state without overwriting activation context" {
     const call_entry_id = blk: {
         for (HelperBackedgeProgram.rnf.entryTransitionSlice()) |transition| {
             if (transition.source_block == 0 and
@@ -675,6 +675,96 @@ test "helper entry backedges persist only future-local callee state" {
     try std.testing.expectEqual(@as(u32, 2), done.value().*);
 }
 
+test "progressed helper rejects an authentic child from another invocation" {
+    const BackedgeMachine = HelperBackedgeProgram.compile(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const recipient_state = try BackedgeMachine.initialState(
+        std.testing.allocator,
+        2,
+    );
+    defer BackedgeMachine.deinitState(recipient_state);
+    const donor_state = try BackedgeMachine.initialState(
+        std.testing.allocator,
+        3,
+    );
+    defer BackedgeMachine.deinitState(donor_state);
+
+    var recipient_fuel: u64 = 16;
+    try std.testing.expectEqual(
+        BackedgeMachine.Outcome.yielded,
+        try BackedgeMachine.step(recipient_state, &recipient_fuel),
+    );
+    var donor_fuel: u64 = 16;
+    try std.testing.expectEqual(
+        BackedgeMachine.Outcome.yielded,
+        try BackedgeMachine.step(donor_state, &donor_fuel),
+    );
+
+    const recipient = try BackedgeMachine.encodeState(
+        std.testing.allocator,
+        recipient_state,
+    );
+    defer std.testing.allocator.free(recipient);
+    const donor = try BackedgeMachine.encodeState(
+        std.testing.allocator,
+        donor_state,
+    );
+    defer std.testing.allocator.free(donor);
+    const frame_count_offset = state_header_length - 8;
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        std.mem.readInt(u32, recipient[frame_count_offset..][0..4], .little),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        std.mem.readInt(u32, donor[frame_count_offset..][0..4], .little),
+    );
+    const recipient_parent_length = std.mem.readInt(
+        u32,
+        recipient[state_header_length + 4 ..][0..4],
+        .little,
+    );
+    const donor_parent_length = std.mem.readInt(
+        u32,
+        donor[state_header_length + 4 ..][0..4],
+        .little,
+    );
+    try std.testing.expectEqual(recipient_parent_length, donor_parent_length);
+    const child_offset = state_header_length +
+        frame_header_length + recipient_parent_length;
+    const recipient_child_length = std.mem.readInt(
+        u32,
+        recipient[child_offset + 4 ..][0..4],
+        .little,
+    );
+    const donor_child_length = std.mem.readInt(
+        u32,
+        donor[child_offset + 4 ..][0..4],
+        .little,
+    );
+    try std.testing.expectEqual(recipient_child_length, donor_child_length);
+    try std.testing.expectEqualSlices(
+        u8,
+        recipient[child_offset..][0..4],
+        donor[child_offset..][0..4],
+    );
+
+    const forged = try std.testing.allocator.dupe(u8, recipient);
+    defer std.testing.allocator.free(forged);
+    const child_total_length = frame_header_length + recipient_child_length;
+    @memcpy(
+        forged[child_offset..][0..child_total_length],
+        donor[child_offset..][0..child_total_length],
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        BackedgeMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
 test "call-created entry binds parent and child arguments" {
     const RecursiveMachine = Program.compile(.{
         .maximum_frames = 8,
@@ -718,7 +808,7 @@ test "call-created entry binds parent and child arguments" {
     defer std.testing.allocator.free(forged);
     std.mem.writeInt(
         u32,
-        forged[child_environment_offset..][0..4],
+        forged[child_environment_offset + 4 ..][0..4],
         4,
         .little,
     );

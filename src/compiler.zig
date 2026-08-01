@@ -63,6 +63,13 @@ fn valueName(comptime value: control_ir.ValueId) [:0]const u8 {
     return std.fmt.comptimePrint("v{d}", .{value});
 }
 
+const activation_entry_name: [:0]const u8 = "activation_entry";
+
+fn activationValueName(comptime value: control_ir.ValueId) [:0]const u8 {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
+    return std.fmt.comptimePrint("a{d}", .{value});
+}
+
 fn constructorName(comptime id: usize) [:0]const u8 {
     @setEvalBranchQuota(compiler_evaluation_branch_quota);
     return std.fmt.comptimePrint("c{d}", .{id});
@@ -186,6 +193,45 @@ fn structForValues(
     return @Struct(.auto, null, &names, &types, &attributes);
 }
 
+fn structForContinuationValues(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime constructor: anytype,
+    comptime values: []const rnf.EnvironmentField,
+) type {
+    const activation_count = if (constructor.has_activation_context)
+        constructor.activation_len + 1
+    else
+        0;
+    const field_count = activation_count + values.len;
+    var names: [field_count][:0]const u8 = undefined;
+    var types: [field_count]type = undefined;
+    var attributes = [_]std.builtin.Type.StructField.Attributes{.{}} ** field_count;
+    var index: usize = 0;
+    if (constructor.has_activation_context) {
+        names[index] = activation_entry_name;
+        types[index] = u32;
+        attributes[index] = .{ .@"align" = @alignOf(u32) };
+        index += 1;
+        inline for (constructor.activationFields()) |field| {
+            const FieldType = typeForValue(Body, field.value_type);
+            names[index] = activationValueName(field.value);
+            types[index] = FieldType;
+            attributes[index] = .{ .@"align" = @alignOf(FieldType) };
+            index += 1;
+        }
+    }
+    inline for (values) |field| {
+        const FieldType = typeForValue(Body, field.value_type);
+        names[index] = valueName(field.value);
+        types[index] = FieldType;
+        attributes[index] = .{ .@"align" = @alignOf(FieldType) };
+        index += 1;
+    }
+    _ = program;
+    return @Struct(.auto, null, &names, &types, &attributes);
+}
+
 fn valueCatalogType(
     comptime Body: type,
     comptime program: control_ir.Program,
@@ -274,9 +320,10 @@ fn segmentStoreType(
         };
         field_count += 1;
     }
-    return structForValues(
+    return structForContinuationValues(
         Body,
         program,
+        constructor,
         fields[0..field_count],
     );
 }
@@ -313,9 +360,10 @@ fn frameType(
     var types: [count]type = undefined;
     var attributes = [_]std.builtin.Type.UnionField.Attributes{.{}} ** count;
     inline for (normal_form.constructorSlice(), 0..) |constructor, index| {
-        const Environment = structForValues(
+        const Environment = structForContinuationValues(
             Body,
             program,
+            constructor,
             constructor.environmentFields(),
         );
         names[index] = constructorName(index);
@@ -1872,7 +1920,7 @@ fn compilerSemanticDigest(
     canonical: anytype,
 ) [32]u8 {
     var hasher = SemanticHasher.init(.{});
-    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v2");
+    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v3");
     semanticHashBytes(
         &hasher,
         "segment-fuel=preflight-resource-shape-v3",
@@ -1978,6 +2026,15 @@ fn compilerSemanticDigest(
         semanticHashBool(&hasher, constructor.resume_target != null);
         if (constructor.resume_target) |target| {
             semanticHashU16(&hasher, canonical.blockId(target));
+        }
+        semanticHashBool(&hasher, constructor.has_activation_context);
+        semanticHashU32(
+            &hasher,
+            @intCast(constructor.activation_len),
+        );
+        for (constructor.activationFields()) |field| {
+            semanticHashU16(&hasher, canonical.valueId(field.value));
+            semanticHashValueType(Body, &hasher, field.value_type);
         }
         semanticHashU32(
             &hasher,
@@ -2327,6 +2384,15 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             store: anytype,
         ) void {
             const constructor = comptime normal_form.constructors[constructor_id];
+            if (comptime constructor.has_activation_context) {
+                @field(store, activation_entry_name) =
+                    @field(environment, activation_entry_name);
+                inline for (0..constructor.activation_len) |field_index| {
+                    const field = comptime constructor.activation[field_index];
+                    @field(store, activationValueName(field.value)) =
+                        @field(environment, activationValueName(field.value));
+                }
+            }
             inline for (0..constructor.environment_len) |field_index| {
                 const field = comptime constructor.environment[field_index];
                 @field(store, valueName(field.value)) =
@@ -2345,6 +2411,15 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 constructorName(constructor_id),
             );
             var environment: Environment = undefined;
+            if (comptime constructor.has_activation_context) {
+                @field(environment, activation_entry_name) =
+                    @field(store, activation_entry_name);
+                inline for (0..constructor.activation_len) |field_index| {
+                    const field = comptime constructor.activation[field_index];
+                    @field(environment, activationValueName(field.value)) =
+                        @field(store, activationValueName(field.value));
+                }
+            }
             inline for (0..constructor.environment_len) |field_index| {
                 const field = comptime constructor.environment[field_index];
                 @field(environment, valueName(field.value)) =
@@ -2368,7 +2443,36 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 edge_kind,
                 target_block,
             );
-            return awaitingFrame(constructor_id, store);
+            if (comptime edge_kind != .call) {
+                return awaitingFrame(constructor_id, store);
+            }
+            const constructor = comptime normal_form.constructors[constructor_id];
+            if (comptime !constructor.has_activation_context or
+                constructor.origin != .call_entry)
+            {
+                @compileError("call transition must create activation context");
+            }
+            const Environment = @FieldType(
+                Frame,
+                constructorName(constructor_id),
+            );
+            var environment: Environment = undefined;
+            @field(environment, activation_entry_name) = constructor.id;
+            inline for (0..constructor.activation_len) |field_index| {
+                const field = comptime constructor.activation[field_index];
+                @field(environment, activationValueName(field.value)) =
+                    @field(store, valueName(field.value));
+            }
+            inline for (0..constructor.environment_len) |field_index| {
+                const field = comptime constructor.environment[field_index];
+                @field(environment, valueName(field.value)) =
+                    @field(store, valueName(field.value));
+            }
+            return @unionInit(
+                Frame,
+                constructorName(constructor_id),
+                environment,
+            );
         }
 
         fn applyOrdinaryEdge(
@@ -2427,6 +2531,15 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 constructorName(constructor_id),
             );
             var environment: Environment = undefined;
+            if (comptime constructor.has_activation_context) {
+                @field(environment, activation_entry_name) =
+                    @field(store, activation_entry_name);
+                inline for (0..constructor.activation_len) |field_index| {
+                    const field = comptime constructor.activation[field_index];
+                    @field(environment, activationValueName(field.value)) =
+                        @field(store, activationValueName(field.value));
+                }
+            }
             inline for (0..constructor.environment_len) |field_index| {
                 const field = comptime constructor.environment[field_index];
                 @field(environment, valueName(field.value)) =
@@ -3461,6 +3574,16 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         ) u64 {
             const constructor = comptime normal_form.constructors[constructor_id];
             var fuel_cost = baseCostForConstructor(constructor_id);
+            inline for (0..constructor.activation_len) |field_index| {
+                const field = comptime constructor.activation[field_index];
+                const name = comptime activationValueName(field.value);
+                const Value = @FieldType(@TypeOf(environment), name);
+                const size = encodedBytes(Value, @field(environment, name));
+                addFuelCost(
+                    &fuel_cost,
+                    dynamicBytesCost(Value, size),
+                );
+            }
             if (constructor.kind == .await_effect or
                 isAwaitCallConstructor(constructor_id))
             {
@@ -4165,6 +4288,19 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             return false;
         }
 
+        fn constructorRetainsActivationValue(
+            comptime constructor_id: usize,
+            comptime value: control_ir.ValueId,
+        ) bool {
+            const constructor = comptime normal_form.constructors[constructor_id];
+            inline for (0..constructor.activation_len) |field_index| {
+                if (constructor.activation[field_index].value == value) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         fn validateCallEntryArguments(
             comptime parent_constructor_id: usize,
             parent_environment: anytype,
@@ -4188,59 +4324,57 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const child_constructor = comptime normal_form.constructors[
                         child_constructor_id
                     ];
-                    if (comptime child_constructor.origin == .call_entry and
-                        child_constructor_id != call_entry_constructor_id)
-                    {
-                        break :blk error.ProgramContractViolation;
-                    }
-                    if (comptime child_constructor_id != call_entry_constructor_id) {
-                        break :blk;
-                    }
-                    if (comptime child_constructor.origin != .call_entry) {
-                        @compileError("call transition must select a call-entry constructor");
-                    }
-                    const target = comptime program.blocks[@intCast(callee.target)];
-                    inline for (
-                        target.parameters,
-                        callee.arguments,
-                    ) |parameter, argument| {
-                        if (!comptime constructorRetainsValue(
-                            child_constructor_id,
-                            parameter,
-                        )) continue;
-                        switch (argument) {
-                            .value => |source| {
-                                if (!comptime constructorRetainsValue(
-                                    parent_constructor_id,
-                                    source,
-                                )) {
-                                    @compileError(
-                                        "call return frame must retain every live call argument",
-                                    );
-                                }
-                                const Value = typeForValue(
-                                    Body,
-                                    program.value_types[@intCast(parameter)],
-                                );
-                                const equal = portable_value.eqlValue(
-                                    Value,
-                                    @field(
-                                        parent_environment,
-                                        valueName(source),
-                                    ),
-                                    @field(
-                                        child_environment,
-                                        valueName(parameter),
-                                    ),
-                                );
-                                if (!equal) {
-                                    break :blk error.ProgramContractViolation;
-                                }
-                            },
-                            .@"resume" => @compileError(
-                                "call edge cannot carry a resume value",
-                            ),
+                    if (comptime child_constructor.has_activation_context) {
+                        if (@field(child_environment, activation_entry_name) !=
+                            @as(u32, @intCast(call_entry_constructor_id)))
+                        {
+                            break :blk error.ProgramContractViolation;
                         }
+                        const target = comptime program.blocks[@intCast(callee.target)];
+                        inline for (
+                            target.parameters,
+                            callee.arguments,
+                        ) |parameter, argument| {
+                            if (!comptime constructorRetainsActivationValue(
+                                child_constructor_id,
+                                parameter,
+                            )) continue;
+                            switch (argument) {
+                                .value => |source| {
+                                    if (!comptime constructorRetainsValue(
+                                        parent_constructor_id,
+                                        source,
+                                    )) {
+                                        @compileError(
+                                            "call return frame must retain every live call argument",
+                                        );
+                                    }
+                                    const Value = typeForValue(
+                                        Body,
+                                        program.value_types[@intCast(parameter)],
+                                    );
+                                    const equal = portable_value.eqlValue(
+                                        Value,
+                                        @field(
+                                            parent_environment,
+                                            valueName(source),
+                                        ),
+                                        @field(
+                                            child_environment,
+                                            activationValueName(parameter),
+                                        ),
+                                    );
+                                    if (!equal) {
+                                        break :blk error.ProgramContractViolation;
+                                    }
+                                },
+                                .@"resume" => @compileError(
+                                    "call edge cannot carry a resume value",
+                                ),
+                            }
+                        }
+                    } else {
+                        break :blk error.ProgramContractViolation;
                     }
                 },
             };

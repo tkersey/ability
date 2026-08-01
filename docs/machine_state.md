@@ -21,6 +21,12 @@ environment_length     u32 little-endian
 environment_bytes      exact constructor schema
 ```
 
+For a non-root constructor, that schema begins with compiler-generated
+activation context: the call-entry constructor id and the typed invocation
+arguments that were live at the callee entry. Future-live values follow as a
+separate product. Both products are Machine-identity-bearing, bounded by the
+constructor field ceiling, and encoded without source or interpreter cursors.
+
 An await-effect constructor owns pending effect state; there is no independent
 generic pending-instruction record.
 
@@ -38,7 +44,8 @@ length, frame bounds, dense constructor schemas, portable-value bounds,
 constructor-local invariants, stack compatibility, pending-request state, fuel
 arithmetic, and trailing bytes. Sequence cannot exceed cumulative fuel, and a
 parked request must have a nonzero sequence. Decode executes no effects or user
-callbacks.
+callbacks. Stack compatibility compares every waiting parent with the child's
+preserved activation context; it does not replay the child's historical path.
 
 The bytes are transferable bearer authority. Decode validates the current
 cumulative counter against fixed bounds and local arithmetic relations; it does

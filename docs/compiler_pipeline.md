@@ -23,12 +23,15 @@ source -> portable types -> Control IR -> algebraic lowering
 5. Suspension splitting creates persisted boundaries only where a continuation
    must survive an effect, call, recursive return, explicit yield, or fuel
    checkpoint.
-6. Backward liveness computes each continuation's exact ordered environment.
+6. Backward liveness computes each continuation's exact ordered future
+   environment and, for non-root continuations, the distinct function-entry
+   parameters live at invocation. The latter form immutable activation context
+   and are not aliases of mutable loop-carried values.
 7. Path facts become bounded constructor-local invariants.
 8. RNF canonicalization hash-conses exact equivalent futures, then assigns
    dense constructor ids and static reducer entries. Equivalence requires the
-   same reducer class, source/target, ordered environment schema, and local
-   invariant.
+   same reducer class, source/target, ordered future environment, activation
+   schema, and local invariant.
 9. Machine generation emits direct constructor dispatch, canonical codecs,
    typed effect metadata, and the SHA-256 contract digest.
 
@@ -52,8 +55,9 @@ fields, invariant terms, and the generated-reducer operation proxy. They may
 lower but cannot exceed Boundary's implementation ceilings. Exceeding a limit
 produces a named compiler blocker such as `TooManyEnvironmentFields` or
 `GeneratedReducerLimitExceeded`; the compiler never falls back to an
-interpreter. Limits are compiler-resource policy and do not alter Machine
-identity when they generate the same RNF.
+interpreter. Activation entry identity, activation values, and future values
+share the environment-field ceiling. Limits are compiler-resource policy and
+do not alter Machine identity when they generate the same RNF.
 
 An authored `effect_morphisms` tuple is resolved entirely at comptime. Each
 morphism replaces one source site's residual contract with a target typed site;

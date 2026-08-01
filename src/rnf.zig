@@ -954,6 +954,9 @@ pub fn Constructor(
         origin: ConstructorOrigin,
         source_block: control_ir.BlockId,
         resume_target: ?control_ir.BlockId = null,
+        has_activation_context: bool = false,
+        activation: [maximum_environment_fields]EnvironmentField = undefined,
+        activation_len: usize = 0,
         environment: [maximum_environment_fields]EnvironmentField = undefined,
         environment_len: usize = 0,
         invariants: [maximum_invariant_terms]InvariantTerm = undefined,
@@ -962,6 +965,11 @@ pub fn Constructor(
         /// Borrow the exact ordered environment schema.
         pub fn environmentFields(self: *const Self) []const EnvironmentField {
             return self.environment[0..self.environment_len];
+        }
+
+        /// Borrow the immutable invocation values retained for a non-root frame.
+        pub fn activationFields(self: *const Self) []const EnvironmentField {
+            return self.activation[0..self.activation_len];
         }
 
         /// Borrow the constructor-local invariant conjunction.
@@ -1672,10 +1680,22 @@ pub fn NormalForm(
                 left.origin != right.origin or
                 left.source_block != right.source_block or
                 left.resume_target != right.resume_target or
+                left.has_activation_context != right.has_activation_context or
+                left.activation_len != right.activation_len or
                 left.environment_len != right.environment_len or
                 left.invariant_len != right.invariant_len)
             {
                 return false;
+            }
+            for (
+                left.activationFields(),
+                right.activationFields(),
+            ) |left_field, right_field| {
+                if (left_field.value != right_field.value or
+                    !left_field.value_type.eql(right_field.value_type))
+                {
+                    return false;
+                }
             }
             for (
                 left.environmentFields(),
@@ -1706,6 +1726,7 @@ pub fn NormalForm(
             environment_set: Set,
             invariants: FactSet,
             canonical_values: CanonicalValues,
+            liveness: Liveness,
         ) Error!u32 {
             var constructor: ConstructorType = .{
                 .id = @intCast(self.constructor_count),
@@ -1742,6 +1763,50 @@ pub fn NormalForm(
                     .value_type = program.value_types[@intCast(value)],
                 };
                 constructor.environment_len += 1;
+            }
+            const source_function = program.blocks[
+                @intCast(source_block)
+            ].function_id;
+            if (source_function != 0) {
+                constructor.has_activation_context = true;
+                var function_entry: control_ir.BlockId = undefined;
+                for (program.functions) |function| {
+                    if (function.id == source_function) {
+                        function_entry = function.entry;
+                        break;
+                    }
+                } else return error.InvalidFunction;
+                const entry = program.blocks[@intCast(function_entry)];
+                for (canonical_values.values[0..canonical_values.len]) |value| {
+                    if (!liveness.entry_live[@intCast(function_entry)].contains(value)) {
+                        continue;
+                    }
+                    var is_entry_parameter = false;
+                    for (entry.parameters) |parameter| {
+                        if (parameter == value) {
+                            is_entry_parameter = true;
+                            break;
+                        }
+                    }
+                    if (!is_entry_parameter) continue;
+                    if (constructor.environment_len +
+                        constructor.activation_len + 1 >=
+                        maximum_environment_fields)
+                    {
+                        return error.TooManyEnvironmentFields;
+                    }
+                    constructor.activation[constructor.activation_len] = .{
+                        .value = value,
+                        .value_type = program.value_types[@intCast(value)],
+                    };
+                    constructor.activation_len += 1;
+                }
+                if (constructor.environment_len +
+                    constructor.activation_len + 1 >
+                    maximum_environment_fields)
+                {
+                    return error.TooManyEnvironmentFields;
+                }
             }
             for (self.constructorSlice()) |*existing| {
                 if (equivalent(existing, &constructor)) return existing.id;
@@ -3452,6 +3517,7 @@ pub fn NormalForm(
                 environment,
                 facts,
                 canonical_values,
+                liveness,
             );
             try result.appendEntryTransition(
                 source_block.id,
@@ -3507,6 +3573,7 @@ pub fn NormalForm(
                 liveness.entry_live[entry_index],
                 .{},
                 canonical_values,
+                liveness,
             );
 
             for (0..reachability.count) |dense_block_index| {
@@ -3527,6 +3594,7 @@ pub fn NormalForm(
                         liveness.entry_live[block_index],
                         path_facts[block_index],
                         canonical_values,
+                        liveness,
                     );
                 }
                 switch (block.terminator) {
@@ -3677,6 +3745,7 @@ pub fn NormalForm(
                             environment,
                             suspension_facts,
                             canonical_values,
+                            liveness,
                         );
                         if (persists_continuation) {
                             try result.appendEntryTransition(
@@ -4744,6 +4813,12 @@ test "RNF projects caller facts while call stacks own argument binding" {
         return error.TestExpectedEqual;
     };
     try std.testing.expectEqual(.call_entry, call_entry.origin);
+    try std.testing.expect(call_entry.has_activation_context);
+    try std.testing.expectEqual(@as(usize, 1), call_entry.activation_len);
+    try std.testing.expectEqual(
+        @as(control_ir.ValueId, 2),
+        call_entry.activationFields()[0].value,
+    );
     try std.testing.expectEqual(@as(usize, 1), call_entry.environment_len);
     try std.testing.expectEqual(
         @as(control_ir.ValueId, 2),
