@@ -4,6 +4,10 @@ set -eu
 baseline_tag=v0.7.0
 baseline_commit=7f2472100454aa2cd5c62e07db0c1e23eaf46a77
 release_checkout_error='Boundary release performance proof requires a tagged Boundary source checkout with local .git metadata'
+runtime_maximum_numerator=125
+runtime_maximum_denominator=100
+wasm_size_maximum_numerator=150
+wasm_size_maximum_denominator=100
 
 require_release_checkout() {
     checkout_root=$1
@@ -36,28 +40,19 @@ require_optimization_mode() {
 current_runtime_semantic_module_count() {
     source_root=$1
     topology_receipt=$2
+    reducer_receipt=$3
     test -f "$topology_receipt" || return 1
+    test -f "$reducer_receipt" || return 1
 
     core_module_count=$(
         sed -n 's/^core_module_count=//p' "$topology_receipt"
     )
-    reducer_count=$(
-        sed -n 's/^reducer_count=//p' "$topology_receipt"
-    )
-    reducer_owner=$(
-        sed -n 's/^reducer_owner=//p' "$topology_receipt"
-    )
     case "$core_module_count" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    case "$reducer_count" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    test "$reducer_count" -eq 1 || return 1
-    test "$reducer_owner" = machine || return 1
 
     expected_sources=$(
-        sed -n 's/^source_module [^ ]* \([^ ]*\) [^ ]*$/\1/p' \
+        sed -n 's/^source_module [^ ]* \([^ ]*\)$/\1/p' \
             "$topology_receipt" |
             sort
     )
@@ -71,12 +66,17 @@ current_runtime_semantic_module_count() {
     test "$source_module_count" -eq "$((core_module_count + 1))" ||
         return 1
 
-    reducer_sources=$(
-        sed -n 's/^source_module [^ ]* \([^ ]*\) reducer$/\1/p' \
-            "$topology_receipt"
-    )
-    test "$reducer_sources" = src/machine.zig || return 1
-    printf '%s\n' "$reducer_count"
+    test "$(grep -Fxc 'single_boundary_reducer=true' \
+        "$reducer_receipt")" -eq 1 || return 1
+    test "$(grep -Fxc 'runtime_semantic_module_count=1' \
+        "$reducer_receipt")" -eq 1 || return 1
+    test "$(grep -Fxc \
+        'reducer_public_entry=Program.compile(...).step' \
+        "$reducer_receipt")" -eq 1 || return 1
+    test "$(grep -Fxc 'program_compile_surface_count=1' \
+        "$reducer_receipt")" -eq 1 || return 1
+    test "$(wc -l <"$reducer_receipt" | tr -d ' ')" -eq 4 || return 1
+    printf '%s\n' 1
 }
 
 require_current_wasm_schema() {
@@ -111,27 +111,63 @@ within_ratio() {
 }
 
 self_test() {
-    within_ratio 125 100 125 100 ||
+    within_ratio \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator" \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator" ||
         { echo "performance ratio exact limit was rejected" >&2; exit 1; }
-    if within_ratio 126 100 125 100; then
+    if within_ratio \
+        "$((runtime_maximum_numerator + 1))" \
+        "$runtime_maximum_denominator" \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator"
+    then
         echo "performance runtime regression was accepted" >&2
         exit 1
     fi
-    within_ratio 125 100 125 100 ||
+    within_ratio \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator" \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator" ||
         { echo "decode runtime exact limit was rejected" >&2; exit 1; }
-    if within_ratio 126 100 125 100; then
+    if within_ratio \
+        "$((runtime_maximum_numerator + 1))" \
+        "$runtime_maximum_denominator" \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator"
+    then
         echo "decode runtime regression was accepted" >&2
         exit 1
     fi
-    within_ratio 125 100 125 100 ||
+    within_ratio \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator" \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator" ||
         { echo "WASM runtime exact limit was rejected" >&2; exit 1; }
-    if within_ratio 126 100 125 100; then
+    if within_ratio \
+        "$((runtime_maximum_numerator + 1))" \
+        "$runtime_maximum_denominator" \
+        "$runtime_maximum_numerator" \
+        "$runtime_maximum_denominator"
+    then
         echo "WASM runtime regression was accepted" >&2
         exit 1
     fi
-    within_ratio 150 100 150 100 ||
+    within_ratio \
+        "$wasm_size_maximum_numerator" \
+        "$wasm_size_maximum_denominator" \
+        "$wasm_size_maximum_numerator" \
+        "$wasm_size_maximum_denominator" ||
         { echo "WASM ratio exact limit was rejected" >&2; exit 1; }
-    if within_ratio 151 100 150 100; then
+    if within_ratio \
+        "$((wasm_size_maximum_numerator + 1))" \
+        "$wasm_size_maximum_denominator" \
+        "$wasm_size_maximum_numerator" \
+        "$wasm_size_maximum_denominator"
+    then
         echo "WASM size regression was accepted" >&2
         exit 1
     fi
@@ -172,18 +208,37 @@ self_test() {
     touch "$topology_test_root/src/root.zig"
     touch "$topology_test_root/src/machine.zig"
     topology_test_receipt="$topology_test_root/topology.txt"
+    reducer_test_receipt="$topology_test_root/reducer.txt"
     printf '%s\n' \
         'core_module_count=1' \
-        'reducer_count=1' \
-        'reducer_owner=machine' \
-        'source_module root src/root.zig public_root' \
-        'source_module machine src/machine.zig reducer' \
+        'source_module root src/root.zig' \
+        'source_module machine src/machine.zig' \
         >"$topology_test_receipt"
+    printf '%s\n' \
+        'single_boundary_reducer=true' \
+        'runtime_semantic_module_count=1' \
+        'reducer_public_entry=Program.compile(...).step' \
+        'program_compile_surface_count=1' \
+        >"$reducer_test_receipt"
     test "$(current_runtime_semantic_module_count \
-        "$topology_test_root" "$topology_test_receipt")" -eq 1
+        "$topology_test_root" \
+        "$topology_test_receipt" \
+        "$reducer_test_receipt")" -eq 1
+    sed 's/runtime_semantic_module_count=1/runtime_semantic_module_count=2/' \
+        "$reducer_test_receipt" >"$reducer_test_receipt.invalid"
+    if current_runtime_semantic_module_count \
+        "$topology_test_root" \
+        "$topology_test_receipt" \
+        "$reducer_test_receipt.invalid" >/dev/null 2>&1
+    then
+        echo "self-declared alternate reducer count was accepted" >&2
+        exit 1
+    fi
     touch "$topology_test_root/src/alternate_reducer.zig"
     if current_runtime_semantic_module_count \
-        "$topology_test_root" "$topology_test_receipt" >/dev/null 2>&1
+        "$topology_test_root" \
+        "$topology_test_receipt" \
+        "$reducer_test_receipt" >/dev/null 2>&1
     then
         echo "unclassified production reducer was accepted" >&2
         exit 1
@@ -218,8 +273,8 @@ if test "${1:-}" = "--self-test"; then
     exit 0
 fi
 
-if test "$#" -ne 5; then
-    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM ZIG_EXE WASM_OPTIMIZATION TOPOLOGY_RECEIPT" >&2
+if test "$#" -ne 6; then
+    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM ZIG_EXE WASM_OPTIMIZATION TOPOLOGY_RECEIPT REDUCER_RECEIPT" >&2
     exit 2
 fi
 
@@ -228,6 +283,7 @@ current_wasm=$2
 zig_exe=$3
 wasm_optimization=$4
 topology_receipt=$5
+reducer_receipt=$6
 repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 
 test -x "$current_test"
@@ -358,8 +414,16 @@ test "$current_checksum" -eq "$baseline_checksum"
 test "$baseline_decode_checksum" -eq "$baseline_checksum"
 test "$current_decode_checksum" -eq "$baseline_decode_checksum"
 test "$current_state" -le "$baseline_state"
-within_ratio "$current_median" "$baseline_median" 125 100
-within_ratio "$current_decode_median" "$baseline_decode_median" 125 100
+within_ratio \
+    "$current_median" \
+    "$baseline_median" \
+    "$runtime_maximum_numerator" \
+    "$runtime_maximum_denominator"
+within_ratio \
+    "$current_decode_median" \
+    "$baseline_decode_median" \
+    "$runtime_maximum_numerator" \
+    "$runtime_maximum_denominator"
 
 if ! install_output=$(
     cd "$baseline_source"
@@ -374,7 +438,11 @@ baseline_wasm_bytes=$(wc -c <"$baseline_wasm" | tr -d ' ')
 current_wasm_bytes=$(wc -c <"$current_wasm" | tr -d ' ')
 require_uint baseline_wasm_bytes "$baseline_wasm_bytes"
 require_uint current_wasm_bytes "$current_wasm_bytes"
-within_ratio "$current_wasm_bytes" "$baseline_wasm_bytes" 150 100
+within_ratio \
+    "$current_wasm_bytes" \
+    "$baseline_wasm_bytes" \
+    "$wasm_size_maximum_numerator" \
+    "$wasm_size_maximum_denominator"
 
 baseline_wasm_step_ns=$(
     node "$script_directory/measure_wasm.mjs" \
@@ -388,7 +456,11 @@ current_wasm_step_ns=$(
 )
 require_uint baseline_wasm_step_ns "$baseline_wasm_step_ns"
 require_uint current_wasm_step_ns "$current_wasm_step_ns"
-within_ratio "$current_wasm_step_ns" "$baseline_wasm_step_ns" 125 100
+within_ratio \
+    "$current_wasm_step_ns" \
+    "$baseline_wasm_step_ns" \
+    "$runtime_maximum_numerator" \
+    "$runtime_maximum_denominator"
 
 baseline_runtime_semantic_modules=0
 for path in \
@@ -401,7 +473,10 @@ do
     baseline_runtime_semantic_modules=$((baseline_runtime_semantic_modules + 1))
 done
 current_runtime_semantic_modules=$(
-    current_runtime_semantic_module_count "$repository_root" "$topology_receipt"
+    current_runtime_semantic_module_count \
+        "$repository_root" \
+        "$topology_receipt" \
+        "$reducer_receipt"
 )
 test "$current_runtime_semantic_modules" \
     -lt "$baseline_runtime_semantic_modules"

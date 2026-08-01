@@ -651,7 +651,12 @@ pub fn eqlValue(comptime T: type, left: T, right: T) bool {
     if (comptime isVector(T)) return left.eql(&right);
     return switch (@typeInfo(T)) {
         .void => true,
-        .bool, .int, .@"enum" => left == right,
+        .bool, .int => left == right,
+        .@"enum" => blk: {
+            validateEnumTag(T, left) catch break :blk false;
+            validateEnumTag(T, right) catch break :blk false;
+            break :blk left == right;
+        },
         .array => |info| blk: {
             for (left, right) |left_item, right_item| {
                 if (!eqlValue(info.child, left_item, right_item)) {
@@ -690,7 +695,7 @@ pub fn eqlValue(comptime T: type, left: T, right: T) bool {
                     );
                 }
             }
-            unreachable;
+            break :blk false;
         },
         else => unreachable,
     };
@@ -862,17 +867,15 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
         .@"union" => |info| blk: {
             const Tag = info.tag_type.?;
             const active = std.meta.activeTag(value);
-            var total: usize = 4;
             inline for (info.fields) |field| {
                 if (active == @field(Tag, field.name)) {
-                    total = try checkedAdd(
-                        total,
+                    break :blk try checkedAdd(
+                        4,
                         try encodedSize(field.type, @field(value, field.name)),
                     );
-                    break;
                 }
             }
-            break :blk total;
+            break :blk error.InvalidTag;
         },
         else => unreachable,
     };
@@ -1749,6 +1752,12 @@ test "invalid exhaustive enum tags fail before canonical write or hash" {
     };
     const invalid = InvalidFactory.make(2);
 
+    try std.testing.expect(!eqlValue(Exhaustive, invalid, invalid));
+    try std.testing.expect(!eqlValue(
+        [1]Exhaustive,
+        .{invalid},
+        .{invalid},
+    ));
     try std.testing.expectError(error.InvalidTag, encodedSize(Exhaustive, invalid));
     var output = [_]u8{0xa5} ** 4;
     try std.testing.expectError(
@@ -1771,6 +1780,45 @@ test "invalid exhaustive enum tags fail before canonical write or hash" {
         error.InvalidTag,
         encodedSize(Nested, .{ .value = invalid }),
     );
+}
+
+test "invalid tagged union tags fail canonical sizing before mutation" {
+    const Tag = enum(u8) {
+        empty,
+        other,
+    };
+    const Sum = union(Tag) {
+        empty: void,
+        other: void,
+    };
+    const InvalidFactory = struct {
+        fn make(raw: u8) Sum {
+            var value: Sum = .empty;
+            @setRuntimeSafety(false);
+            const tag: Tag = @enumFromInt(raw);
+            const tag_pointer: *Tag = @ptrCast(&value);
+            tag_pointer.* = tag;
+            return value;
+        }
+    };
+    const invalid = InvalidFactory.make(2);
+
+    try std.testing.expect(!eqlValue(Sum, invalid, invalid));
+    try std.testing.expectError(error.InvalidTag, encodedSize(Sum, invalid));
+    var output = [_]u8{0xa5} ** maximumEncodedSize(Sum);
+    try std.testing.expectError(error.InvalidTag, encode(Sum, invalid, &output));
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xa5} ** maximumEncodedSize(Sum)),
+        &output,
+    );
+
+    var values = Vector(Sum, 1).empty();
+    try std.testing.expectError(error.InvalidTag, values.push(invalid));
+    try std.testing.expectEqual(@as(u32, 0), values.len());
+    values.storage[0] = invalid;
+    values.logical_length = 1;
+    try std.testing.expect(!values.eql(&values));
 }
 
 test "zero-width vector codec and equality are constant in logical length" {

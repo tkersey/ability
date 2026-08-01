@@ -26,32 +26,6 @@ const CoreModuleId = enum {
     rnf,
 };
 
-const CoreModuleRole = enum {
-    agent_profile,
-    compiler,
-    control_ir,
-    driver,
-    effect_schema,
-    reducer,
-    portable_value,
-    program_frontend,
-    resumption_normal_form,
-};
-
-fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
-    return switch (module) {
-        .agent_profile => .agent_profile,
-        .compiler => .compiler,
-        .control_ir => .control_ir,
-        .driver => .driver,
-        .effect_v2 => .effect_schema,
-        .machine => .reducer,
-        .portable_value => .portable_value,
-        .program_v2 => .program_frontend,
-        .rnf => .resumption_normal_form,
-    };
-}
-
 fn coreModulePath(module: CoreModuleId) []const u8 {
     return switch (module) {
         .agent_profile => "src/agent_profile.zig",
@@ -66,26 +40,6 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
     };
 }
 
-const core_module_reducer_count: usize = count: {
-    var result: usize = 0;
-    for (std.meta.fields(CoreModuleId)) |field| {
-        const module: CoreModuleId = @enumFromInt(field.value);
-        if (coreModuleRole(module) == .reducer) result += 1;
-    }
-    break :count result;
-};
-
-const core_module_reducer_owner: CoreModuleId = owner: {
-    var result: ?CoreModuleId = null;
-    for (std.meta.fields(CoreModuleId)) |field| {
-        const module: CoreModuleId = @enumFromInt(field.value);
-        if (coreModuleRole(module) == .reducer) result = module;
-    }
-    break :owner result orelse @compileError(
-        "Boundary core-module topology has no reducer owner",
-    );
-};
-
 comptime {
     @setEvalBranchQuota(10_000);
     const module_fields = std.meta.fields(CoreModules);
@@ -96,7 +50,7 @@ comptime {
     for (module_fields) |field| {
         if (std.meta.stringToEnum(CoreModuleId, field.name) == null) {
             @compileError(
-                "Boundary core module lacks a semantic role: " ++ field.name,
+                "Boundary core module lacks a source identity: " ++ field.name,
             );
         }
     }
@@ -112,13 +66,6 @@ comptime {
                 @compileError("Boundary core-module topology has duplicate source paths");
             }
         }
-    }
-    if (core_module_reducer_count != 1 or
-        core_module_reducer_owner != .machine)
-    {
-        @compileError(
-            "Boundary core-module topology must assign exactly one reducer to machine",
-        );
     }
 }
 
@@ -473,6 +420,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     wirePublicImports(boundary, core);
+    const host_boundary = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    wirePublicImports(host_boundary, host_core);
 
     const library = b.addLibrary(.{
         .linkage = .static,
@@ -918,48 +871,50 @@ pub fn build(b: *std.Build) void {
     );
     deletion_step.dependOn(&deletion_command.step);
 
-    const single_reducer_proof = b.addWriteFiles();
-    const topology_receipt = single_reducer_proof.add(
+    const source_topology_proof = b.addWriteFiles();
+    const topology_receipt = source_topology_proof.add(
         "boundary-core-module-topology.txt",
         b.fmt(
             "core_module_count={d}\n" ++
-                "reducer_count={d}\n" ++
-                "reducer_owner={s}\n" ++
-                "source_module root src/root.zig public_root\n" ++
-                "source_module agent_profile {s} {s}\n" ++
-                "source_module compiler {s} {s}\n" ++
-                "source_module control_ir {s} {s}\n" ++
-                "source_module driver {s} {s}\n" ++
-                "source_module effect_v2 {s} {s}\n" ++
-                "source_module machine {s} {s}\n" ++
-                "source_module portable_value {s} {s}\n" ++
-                "source_module program_v2 {s} {s}\n" ++
-                "source_module rnf {s} {s}\n",
+                "source_module root src/root.zig\n" ++
+                "source_module agent_profile {s}\n" ++
+                "source_module compiler {s}\n" ++
+                "source_module control_ir {s}\n" ++
+                "source_module driver {s}\n" ++
+                "source_module effect_v2 {s}\n" ++
+                "source_module machine {s}\n" ++
+                "source_module portable_value {s}\n" ++
+                "source_module program_v2 {s}\n" ++
+                "source_module rnf {s}\n",
             .{
                 std.meta.fields(CoreModules).len,
-                core_module_reducer_count,
-                @tagName(core_module_reducer_owner),
                 coreModulePath(.agent_profile),
-                @tagName(coreModuleRole(.agent_profile)),
                 coreModulePath(.compiler),
-                @tagName(coreModuleRole(.compiler)),
                 coreModulePath(.control_ir),
-                @tagName(coreModuleRole(.control_ir)),
                 coreModulePath(.driver),
-                @tagName(coreModuleRole(.driver)),
                 coreModulePath(.effect_v2),
-                @tagName(coreModuleRole(.effect_v2)),
                 coreModulePath(.machine),
-                @tagName(coreModuleRole(.machine)),
                 coreModulePath(.portable_value),
-                @tagName(coreModuleRole(.portable_value)),
                 coreModulePath(.program_v2),
-                @tagName(coreModuleRole(.program_v2)),
                 coreModulePath(.rnf),
-                @tagName(coreModuleRole(.rnf)),
             },
         ),
     );
+
+    const single_reducer_module = b.createModule(.{
+        .root_source_file = b.path("test/single_reducer.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    single_reducer_module.addImport("boundary", host_boundary);
+    const single_reducer_executable = b.addExecutable(.{
+        .name = "boundary-machine-single-reducer-proof",
+        .root_module = single_reducer_module,
+    });
+    const single_reducer_run = b.addRunArtifact(single_reducer_executable);
+    const single_reducer_receipt = single_reducer_run.captureStdOut(.{
+        .basename = "boundary-machine-single-reducer.txt",
+    });
 
     const performance_command = b.addSystemCommand(&.{"sh"});
     performance_command.addFileArg(
@@ -972,6 +927,7 @@ pub fn build(b: *std.Build) void {
     performance_command.addArg(b.graph.zig_exe);
     performance_command.addArg(@tagName(performance_wasm_optimize));
     performance_command.addFileArg(topology_receipt);
+    performance_command.addFileArg(single_reducer_receipt);
     const performance_step = b.step(
         "check-boundary-machine-performance",
         "Compare RNF performance with the immutable Boundary v0.7.0 release.",
@@ -993,62 +949,10 @@ pub fn build(b: *std.Build) void {
 
     const single_reducer_step = b.step(
         "check-boundary-machine-single-reducer",
-        "Prove the total Boundary core-module graph has exactly one reducer owner.",
+        "Prove a compiled Program exposes exactly one normative reducer.",
     );
-    single_reducer_step.dependOn(&single_reducer_proof.step);
-
-    const receipt_output_command =
-        "printf '%s\\n' " ++
-        "'boundary_machine_abi=2' " ++
-        "'boundary_rnf=true' " ++
-        "'single_boundary_reducer=true' " ++
-        "'program_session_public=false' " ++
-        "'boundary_runtime_public=false' " ++
-        "'static_machine_public=false' " ++
-        "'loaded_execution_present=false' " ++
-        "'runtime_program_plan_decode=false' " ++
-        "'generic_instruction_dispatch=false' " ++
-        "'canonical_state_format=ABL_RNF2' " ++
-        "'fixed_width_u32=true' " ++
-        "'bounded_vector_of_products=true' " ++
-        "'bounded_text_construction=true' " ++
-        "'product_construction=true' " ++
-        "'correlated_predicate_witness=true' " ++
-        "'bounded_recursive_helper=true' " ++
-        "'after_sites_exposed_to_world=0'";
-    const receipt_command = b.addSystemCommand(&.{
-        "sh",
-        "-c",
-        receipt_output_command,
-    });
-    inline for (.{
-        control_step,
-        values_step,
-        state_step,
-        recursion_step,
-        after_step,
-        single_reducer_step,
-        no_interpreter_step,
-        deletion_step,
-    }) |dependency| {
-        receipt_command.step.dependOn(dependency);
-    }
-    const receipt_step = b.step(
-        "check-boundary-machine-receipt",
-        "Emit the Boundary-owned completion receipt fields after their proofs.",
-    );
-    receipt_step.dependOn(&receipt_command.step);
-
-    const receipt_falsifier_command = b.addSystemCommand(&.{
-        "sh",
-        "-c",
-        "test ! -e conformance/rnf-v1/check_receipt.sh",
-    });
-    const receipt_falsifier_step = b.step(
-        "check-boundary-machine-receipt-falsifiers",
-        "Prove that no directly invokable unbound completion receipt remains.",
-    );
-    receipt_falsifier_step.dependOn(&receipt_falsifier_command.step);
+    single_reducer_step.dependOn(&source_topology_proof.step);
+    single_reducer_step.dependOn(&single_reducer_run.step);
 
     const compile_fail_step = b.step(
         "compile-fail",
@@ -1218,7 +1122,26 @@ pub fn build(b: *std.Build) void {
     defer b.graph.global_cache_root.path = saved_global_cache_path;
     lint_step.dependOn(lint_builder.build());
 
-    const check_step = b.step("check", "Run the full Boundary Machine proof.");
+    const receipt_falsifier_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\test ! -e conformance/rnf-v1/check_receipt.sh
+        \\test "$(rg -Fxc '    const release_proof_step = b.step(' build.zig)" -eq 1
+        \\rg -Fq '    receipt_command.step.dependOn(release_proof_step);' build.zig
+        \\rg -Fq '    check_step.dependOn(release_proof_step);' build.zig
+        \\rg -Fq '    check_step.dependOn(receipt_step);' build.zig
+    });
+    const receipt_falsifier_step = b.step(
+        "check-boundary-machine-receipt-falsifiers",
+        "Prove that no directly invokable unbound completion receipt remains.",
+    );
+    receipt_falsifier_step.dependOn(&receipt_falsifier_command.step);
+
+    const release_proof_step = b.step(
+        "check-boundary-machine-release-proof",
+        "Run the complete Boundary Machine release-proof DAG.",
+    );
     inline for (.{
         test_step,
         rnf_step,
@@ -1239,9 +1162,44 @@ pub fn build(b: *std.Build) void {
         lint_step,
         performance_step,
         performance_falsifier_step,
-        receipt_step,
+        single_reducer_step,
         receipt_falsifier_step,
     }) |dependency| {
-        check_step.dependOn(dependency);
+        release_proof_step.dependOn(dependency);
     }
+
+    const receipt_output_command =
+        "printf '%s\\n' " ++
+        "'boundary_machine_abi=2' " ++
+        "'boundary_rnf=true' " ++
+        "'single_boundary_reducer=true' " ++
+        "'program_session_public=false' " ++
+        "'boundary_runtime_public=false' " ++
+        "'static_machine_public=false' " ++
+        "'loaded_execution_present=false' " ++
+        "'runtime_program_plan_decode=false' " ++
+        "'generic_instruction_dispatch=false' " ++
+        "'canonical_state_format=ABL_RNF2' " ++
+        "'fixed_width_u32=true' " ++
+        "'bounded_vector_of_products=true' " ++
+        "'bounded_text_construction=true' " ++
+        "'product_construction=true' " ++
+        "'correlated_predicate_witness=true' " ++
+        "'bounded_recursive_helper=true' " ++
+        "'after_sites_exposed_to_world=0'";
+    const receipt_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        receipt_output_command,
+    });
+    receipt_command.step.dependOn(release_proof_step);
+    const receipt_step = b.step(
+        "check-boundary-machine-receipt",
+        "Emit the Boundary-owned completion receipt after the release proof.",
+    );
+    receipt_step.dependOn(&receipt_command.step);
+
+    const check_step = b.step("check", "Run the full Boundary Machine proof.");
+    check_step.dependOn(release_proof_step);
+    check_step.dependOn(receipt_step);
 }
