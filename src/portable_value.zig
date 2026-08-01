@@ -799,6 +799,14 @@ fn checkedAdd(left: usize, right: usize) Error!usize {
     return std.math.add(usize, left, right) catch error.SizeOverflow;
 }
 
+fn validateEnumTag(comptime T: type, value: T) Error!void {
+    const raw = @intFromEnum(value);
+    inline for (std.meta.fields(T)) |field| {
+        if (raw == field.value) return;
+    }
+    return error.InvalidTag;
+}
+
 /// Compute the exact canonical encoded size of one validated value.
 pub fn encodedSize(comptime T: type, value: T) Error!usize {
     comptime assertPortable(T);
@@ -837,7 +845,10 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
             checkedAdd(1, try encodedSize(info.child, payload))
         else
             1,
-        .@"enum" => 4,
+        .@"enum" => blk: {
+            try validateEnumTag(T, value);
+            break :blk 4;
+        },
         .@"struct" => |info| blk: {
             var total: usize = 0;
             inline for (info.fields) |field| {
@@ -998,6 +1009,7 @@ const HashWriter = struct {
 };
 
 fn enumToU32(value: anytype) Error!u32 {
+    try validateEnumTag(@TypeOf(value), value);
     return std.math.cast(u32, @intFromEnum(value)) orelse error.InvalidTag;
 }
 
@@ -1721,6 +1733,43 @@ test "malformed bounded lengths tags UTF-8 and trailing bytes fail closed" {
     try std.testing.expectError(
         error.InvalidTag,
         decodeExact(Sum, &.{ 2, 0, 0, 0 }),
+    );
+}
+
+test "invalid exhaustive enum tags fail before canonical write or hash" {
+    const Exhaustive = enum(u8) {
+        first,
+        second,
+    };
+    const InvalidFactory = struct {
+        fn make(raw: u8) Exhaustive {
+            @setRuntimeSafety(false);
+            return @enumFromInt(raw);
+        }
+    };
+    const invalid = InvalidFactory.make(2);
+
+    try std.testing.expectError(error.InvalidTag, encodedSize(Exhaustive, invalid));
+    var output = [_]u8{0xa5} ** 4;
+    try std.testing.expectError(
+        error.InvalidTag,
+        encode(Exhaustive, invalid, &output),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xa5} ** 4),
+        &output,
+    );
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    try std.testing.expectError(
+        error.InvalidTag,
+        updateCanonicalHash(Exhaustive, invalid, &hasher),
+    );
+
+    const Nested = struct { value: Exhaustive };
+    try std.testing.expectError(
+        error.InvalidTag,
+        encodedSize(Nested, .{ .value = invalid }),
     );
 }
 

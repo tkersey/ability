@@ -128,7 +128,16 @@ pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {
         else => return 0,
     };
     defer done.deinit();
-    return done.value().*;
+    const payload_observation = std.math.add(
+        i32,
+        @intCast(payload_length),
+        @intCast(restored_payload_length),
+    ) catch return 0;
+    return std.math.add(
+        i32,
+        done.value().*,
+        payload_observation,
+    ) catch return 0;
 }
 
 fn oneEffectLifecycle() !u64 {

@@ -52,6 +52,20 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     };
 }
 
+fn coreModulePath(module: CoreModuleId) []const u8 {
+    return switch (module) {
+        .agent_profile => "src/agent_profile.zig",
+        .compiler => "src/compiler.zig",
+        .control_ir => "src/control_ir.zig",
+        .driver => "src/driver.zig",
+        .effect_v2 => "src/effect_v2.zig",
+        .machine => "src/machine.zig",
+        .portable_value => "src/portable_value.zig",
+        .program_v2 => "src/program_v2.zig",
+        .rnf => "src/rnf.zig",
+    };
+}
+
 const core_module_reducer_count: usize = count: {
     var result: usize = 0;
     for (std.meta.fields(CoreModuleId)) |field| {
@@ -84,6 +98,19 @@ comptime {
             @compileError(
                 "Boundary core module lacks a semantic role: " ++ field.name,
             );
+        }
+    }
+    for (module_ids, 0..) |field, index| {
+        const module: CoreModuleId = @enumFromInt(field.value);
+        for (module_ids[index + 1 ..]) |other_field| {
+            const other: CoreModuleId = @enumFromInt(other_field.value);
+            if (std.mem.eql(
+                u8,
+                coreModulePath(module),
+                coreModulePath(other),
+            )) {
+                @compileError("Boundary core-module topology has duplicate source paths");
+            }
         }
     }
     if (core_module_reducer_count != 1 or
@@ -333,29 +360,29 @@ fn addCoreModules(
     optimize: std.builtin.OptimizeMode,
 ) CoreModules {
     const control_ir = b.createModule(.{
-        .root_source_file = b.path("src/control_ir.zig"),
+        .root_source_file = b.path(coreModulePath(.control_ir)),
         .target = target,
         .optimize = optimize,
     });
     const portable_value = b.createModule(.{
-        .root_source_file = b.path("src/portable_value.zig"),
+        .root_source_file = b.path(coreModulePath(.portable_value)),
         .target = target,
         .optimize = optimize,
     });
     const machine = b.createModule(.{
-        .root_source_file = b.path("src/machine.zig"),
+        .root_source_file = b.path(coreModulePath(.machine)),
         .target = target,
         .optimize = optimize,
     });
     machine.addImport("portable_value", portable_value);
     const rnf = b.createModule(.{
-        .root_source_file = b.path("src/rnf.zig"),
+        .root_source_file = b.path(coreModulePath(.rnf)),
         .target = target,
         .optimize = optimize,
     });
     rnf.addImport("control_ir", control_ir);
     const compiler = b.createModule(.{
-        .root_source_file = b.path("src/compiler.zig"),
+        .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
         .optimize = optimize,
     });
@@ -364,24 +391,24 @@ fn addCoreModules(
     compiler.addImport("portable_value", portable_value);
     compiler.addImport("rnf", rnf);
     const program_v2 = b.createModule(.{
-        .root_source_file = b.path("src/program_v2.zig"),
+        .root_source_file = b.path(coreModulePath(.program_v2)),
         .target = target,
         .optimize = optimize,
     });
     program_v2.addImport("compiler", compiler);
     program_v2.addImport("machine", machine);
     const driver = b.createModule(.{
-        .root_source_file = b.path("src/driver.zig"),
+        .root_source_file = b.path(coreModulePath(.driver)),
         .target = target,
         .optimize = optimize,
     });
     const effect_v2 = b.createModule(.{
-        .root_source_file = b.path("src/effect_v2.zig"),
+        .root_source_file = b.path(coreModulePath(.effect_v2)),
         .target = target,
         .optimize = optimize,
     });
     const agent_profile = b.createModule(.{
-        .root_source_file = b.path("src/agent_profile.zig"),
+        .root_source_file = b.path(coreModulePath(.agent_profile)),
         .target = target,
         .optimize = optimize,
     });
@@ -891,6 +918,49 @@ pub fn build(b: *std.Build) void {
     );
     deletion_step.dependOn(&deletion_command.step);
 
+    const single_reducer_proof = b.addWriteFiles();
+    const topology_receipt = single_reducer_proof.add(
+        "boundary-core-module-topology.txt",
+        b.fmt(
+            "core_module_count={d}\n" ++
+                "reducer_count={d}\n" ++
+                "reducer_owner={s}\n" ++
+                "source_module root src/root.zig public_root\n" ++
+                "source_module agent_profile {s} {s}\n" ++
+                "source_module compiler {s} {s}\n" ++
+                "source_module control_ir {s} {s}\n" ++
+                "source_module driver {s} {s}\n" ++
+                "source_module effect_v2 {s} {s}\n" ++
+                "source_module machine {s} {s}\n" ++
+                "source_module portable_value {s} {s}\n" ++
+                "source_module program_v2 {s} {s}\n" ++
+                "source_module rnf {s} {s}\n",
+            .{
+                std.meta.fields(CoreModules).len,
+                core_module_reducer_count,
+                @tagName(core_module_reducer_owner),
+                coreModulePath(.agent_profile),
+                @tagName(coreModuleRole(.agent_profile)),
+                coreModulePath(.compiler),
+                @tagName(coreModuleRole(.compiler)),
+                coreModulePath(.control_ir),
+                @tagName(coreModuleRole(.control_ir)),
+                coreModulePath(.driver),
+                @tagName(coreModuleRole(.driver)),
+                coreModulePath(.effect_v2),
+                @tagName(coreModuleRole(.effect_v2)),
+                coreModulePath(.machine),
+                @tagName(coreModuleRole(.machine)),
+                coreModulePath(.portable_value),
+                @tagName(coreModuleRole(.portable_value)),
+                coreModulePath(.program_v2),
+                @tagName(coreModuleRole(.program_v2)),
+                coreModulePath(.rnf),
+                @tagName(coreModuleRole(.rnf)),
+            },
+        ),
+    );
+
     const performance_command = b.addSystemCommand(&.{"sh"});
     performance_command.addFileArg(
         b.path("conformance/rnf-v1/check_performance.sh"),
@@ -901,6 +971,7 @@ pub fn build(b: *std.Build) void {
     );
     performance_command.addArg(b.graph.zig_exe);
     performance_command.addArg(@tagName(performance_wasm_optimize));
+    performance_command.addFileArg(topology_receipt);
     const performance_step = b.step(
         "check-boundary-machine-performance",
         "Compare RNF performance with the immutable Boundary v0.7.0 release.",
@@ -920,18 +991,6 @@ pub fn build(b: *std.Build) void {
     );
     performance_falsifier_step.dependOn(&performance_falsifier_command.step);
 
-    const single_reducer_proof = b.addWriteFiles();
-    _ = single_reducer_proof.add(
-        "boundary-core-module-topology.txt",
-        b.fmt(
-            "core_module_count={d}\nreducer_count={d}\nreducer_owner={s}\n",
-            .{
-                std.meta.fields(CoreModules).len,
-                core_module_reducer_count,
-                @tagName(core_module_reducer_owner),
-            },
-        ),
-    );
     const single_reducer_step = b.step(
         "check-boundary-machine-single-reducer",
         "Prove the total Boundary core-module graph has exactly one reducer owner.",

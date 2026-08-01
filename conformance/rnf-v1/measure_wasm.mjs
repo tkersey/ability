@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 const warmupIterations = 2_000;
 const measuredIterations = 20_000;
 const sampleCount = 5;
+const machineLifecycleObservation = 14;
 
 function measure(
   run,
@@ -35,7 +36,7 @@ function bindMachineWorkload(run) {
   let response = 16;
   return () => {
     response += 1;
-    return run(response) === response ? 1 : 0;
+    return run(response) === response + machineLifecycleObservation ? 1 : 0;
   };
 }
 
@@ -76,6 +77,20 @@ if (wasmPath === "--self-test") {
   }
   if (!constantExportRejected) {
     throw new Error("WASM performance constant export was accepted");
+  }
+
+  let identityExportRejected = false;
+  try {
+    measure(bindMachineWorkload((response) => response), 1, 1, 1);
+  } catch (error) {
+    if (error.message === "WASM performance warmup invocation failed") {
+      identityExportRejected = true;
+    } else {
+      throw error;
+    }
+  }
+  if (!identityExportRejected) {
+    throw new Error("WASM performance identity export was accepted");
   }
 
   process.stdout.write("wasm_measurement_falsifier=pass\n");

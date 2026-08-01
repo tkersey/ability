@@ -35,14 +35,48 @@ require_optimization_mode() {
 
 current_runtime_semantic_module_count() {
     source_root=$1
-    machine_modules=$(
-        rg -l '^pub fn Machine\(' "$source_root/src" --glob '*.zig'
+    topology_receipt=$2
+    test -f "$topology_receipt" || return 1
+
+    core_module_count=$(
+        sed -n 's/^core_module_count=//p' "$topology_receipt"
     )
-    test "$machine_modules" = "$source_root/src/machine.zig"
-    printf '%s\n' "$machine_modules" |
-        sed '/^$/d' |
-        wc -l |
-        tr -d ' '
+    reducer_count=$(
+        sed -n 's/^reducer_count=//p' "$topology_receipt"
+    )
+    reducer_owner=$(
+        sed -n 's/^reducer_owner=//p' "$topology_receipt"
+    )
+    case "$core_module_count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    case "$reducer_count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    test "$reducer_count" -eq 1 || return 1
+    test "$reducer_owner" = machine || return 1
+
+    expected_sources=$(
+        sed -n 's/^source_module [^ ]* \([^ ]*\) [^ ]*$/\1/p' \
+            "$topology_receipt" |
+            sort
+    )
+    actual_sources=$(
+        find "$source_root/src" -maxdepth 1 -type f -name '*.zig' |
+            sed "s#^$source_root/##" |
+            sort
+    )
+    test "$actual_sources" = "$expected_sources" || return 1
+    source_module_count=$(printf '%s\n' "$expected_sources" | sed '/^$/d' | wc -l | tr -d ' ')
+    test "$source_module_count" -eq "$((core_module_count + 1))" ||
+        return 1
+
+    reducer_sources=$(
+        sed -n 's/^source_module [^ ]* \([^ ]*\) reducer$/\1/p' \
+            "$topology_receipt"
+    )
+    test "$reducer_sources" = src/machine.zig || return 1
+    printf '%s\n' "$reducer_count"
 }
 
 require_current_wasm_schema() {
@@ -54,6 +88,8 @@ require_current_wasm_schema() {
     rg -Fq \
         'pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {' \
         "$current_source"
+    rg -Fq 'const payload_observation = std.math.add(' "$current_source"
+    rg -Fq 'done.value().*,' "$current_source"
 }
 
 require_baseline_wasm_schema() {
@@ -116,8 +152,44 @@ self_test() {
         echo "unsupported optimization mode was accepted" >&2
         exit 1
     fi
+    topology_test_root=$(
+        mktemp -d "${TMPDIR:-/tmp}/boundary-rnf-topology.XXXXXX"
+    )
+    case "$(basename -- "$topology_test_root")" in
+        boundary-rnf-topology.*) ;;
+        *)
+            echo "refusing unsafe topology test path: $topology_test_root" >&2
+            exit 1
+            ;;
+    esac
+    cleanup_topology_test() {
+        if test -d "$topology_test_root"; then
+            rm -rf -- "$topology_test_root"
+        fi
+    }
+    trap cleanup_topology_test EXIT HUP INT TERM
+    mkdir "$topology_test_root/src"
+    touch "$topology_test_root/src/root.zig"
+    touch "$topology_test_root/src/machine.zig"
+    topology_test_receipt="$topology_test_root/topology.txt"
+    printf '%s\n' \
+        'core_module_count=1' \
+        'reducer_count=1' \
+        'reducer_owner=machine' \
+        'source_module root src/root.zig public_root' \
+        'source_module machine src/machine.zig reducer' \
+        >"$topology_test_receipt"
     test "$(current_runtime_semantic_module_count \
-        "$script_directory/../..")" -eq 1
+        "$topology_test_root" "$topology_test_receipt")" -eq 1
+    touch "$topology_test_root/src/alternate_reducer.zig"
+    if current_runtime_semantic_module_count \
+        "$topology_test_root" "$topology_test_receipt" >/dev/null 2>&1
+    then
+        echo "unclassified production reducer was accepted" >&2
+        exit 1
+    fi
+    cleanup_topology_test
+    trap - EXIT HUP INT TERM
     require_current_wasm_schema "$script_directory/../.."
     rg -Fq '+        .{ .kind = .const_string' \
         "$script_directory/v0.7.0-performance.patch"
@@ -146,8 +218,8 @@ if test "${1:-}" = "--self-test"; then
     exit 0
 fi
 
-if test "$#" -ne 4; then
-    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM ZIG_EXE WASM_OPTIMIZATION" >&2
+if test "$#" -ne 5; then
+    echo "usage: check_performance.sh CURRENT_TEST CURRENT_WASM ZIG_EXE WASM_OPTIMIZATION TOPOLOGY_RECEIPT" >&2
     exit 2
 fi
 
@@ -155,6 +227,7 @@ current_test=$1
 current_wasm=$2
 zig_exe=$3
 wasm_optimization=$4
+topology_receipt=$5
 repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
 
 test -x "$current_test"
@@ -328,7 +401,7 @@ do
     baseline_runtime_semantic_modules=$((baseline_runtime_semantic_modules + 1))
 done
 current_runtime_semantic_modules=$(
-    current_runtime_semantic_module_count "$repository_root"
+    current_runtime_semantic_module_count "$repository_root" "$topology_receipt"
 )
 test "$current_runtime_semantic_modules" \
     -lt "$baseline_runtime_semantic_modules"
