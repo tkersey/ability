@@ -1039,7 +1039,11 @@ pub fn build(b: *std.Build) void {
         },
         .{
             "test/compile_fail/driver_semantic_site_mismatch.zig",
-            "Boundary Driver handler does not admit effect site semantic identity",
+            "Boundary Driver handler does not admit effect site semantic contract",
+        },
+        .{
+            "test/compile_fail/driver_semantic_contract_mismatch.zig",
+            "Boundary Driver handler does not admit effect site semantic contract",
         },
         .{
             "test/compile_fail/effect_handler_type_mismatch.zig",

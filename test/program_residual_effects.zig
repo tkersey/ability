@@ -140,6 +140,11 @@ test "compiler eliminates unreferenced effects and canonicalizes residual ordina
     );
     try std.testing.expectEqualSlices(
         u8,
+        &Canonical.EffectRow.site(0).semantic_contract_digest,
+        &Site.semantic_contract_digest,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
         &Canonical.Manifest.machine_contract_digest,
         &WithUnused.Manifest.machine_contract_digest,
     );

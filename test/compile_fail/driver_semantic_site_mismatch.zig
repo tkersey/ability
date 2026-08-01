@@ -61,8 +61,8 @@ test "Driver rejects an unadmitted same-shaped semantic site" {
     var local = try LocalDriver.init(std.testing.allocator, 7);
     defer local.deinit();
     var handler = struct {
-        pub const semantic_site_identities = .{
-            "compile-fail.driver-semantic-site.expected.v1",
+        pub const semantic_site_contract_digests = .{
+            [_]u8{0} ** 32,
         };
 
         pub fn handle(

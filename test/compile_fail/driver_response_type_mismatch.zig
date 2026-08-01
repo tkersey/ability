@@ -61,7 +61,9 @@ test "Driver rejects a handler response mismatch before execution" {
     var local = try LocalDriver.init(std.testing.allocator, 7);
     defer local.deinit();
     var handler = struct {
-        pub const semantic_site_identities = .{Lookup.semantic_identity};
+        pub const semantic_site_contract_digests = .{
+            Machine.EffectRow.site(0).semantic_contract_digest,
+        };
 
         pub fn handle(
             _: *@This(),

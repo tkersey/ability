@@ -14,6 +14,7 @@ test/agent_loop.zig
 test/compile_fail/dead_control_malformed_constant.zig
 test/compile_fail/dead_control_schema_reference.zig
 test/compile_fail/driver_response_type_mismatch.zig
+test/compile_fail/driver_semantic_contract_mismatch.zig
 test/compile_fail/driver_semantic_site_mismatch.zig
 test/compile_fail/effect_handler_type_mismatch.zig
 test/compile_fail/effect_morphism_type_mismatch.zig

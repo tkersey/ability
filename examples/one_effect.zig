@@ -64,7 +64,9 @@ pub fn main() !void {
     defer driver.deinit();
 
     var handlers = struct {
-        pub const semantic_site_identities = .{Lookup.semantic_identity};
+        pub const semantic_site_contract_digests = .{
+            Machine.EffectRow.site(0).semantic_contract_digest,
+        };
 
         pub fn handle(
             _: *@This(),

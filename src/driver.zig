@@ -9,20 +9,22 @@ pub fn Driver(comptime Machine: type) type {
             comptime Handler: type,
             comptime Site: type,
         ) void {
-            if (!@hasDecl(Handler, "semantic_site_identities")) {
+            if (!@hasDecl(Handler, "semantic_site_contract_digests")) {
                 @compileError(
-                    "Boundary Driver handlers must declare semantic_site_identities",
+                    "Boundary Driver handlers must declare semantic_site_contract_digests",
                 );
             }
-            inline for (Handler.semantic_site_identities) |identity| {
+            inline for (
+                Handler.semantic_site_contract_digests,
+            ) |contract_digest| {
                 if (std.mem.eql(
                     u8,
-                    identity,
-                    Site.semantic_identity,
+                    &contract_digest,
+                    &Site.semantic_contract_digest,
                 )) return;
             }
             @compileError(
-                "Boundary Driver handler does not admit effect site semantic identity",
+                "Boundary Driver handler does not admit effect site semantic contract",
             );
         }
 

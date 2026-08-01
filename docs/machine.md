@@ -47,11 +47,15 @@ closed instruction sequence. It uses exact subvalue sizes when they are
 available and contract-bounded upper estimates otherwise; it does not construct
 the result or invoke the segment plan. Cost addition is checked; a mathematical
 cost beyond `u64` fails with `execution_budget_exceeded` before the overflowing
-segment executes. Insufficient caller fuel therefore
-yields at the same constructor before reducer execution, while an exhausted
-Machine budget terminates with `execution_budget_exceeded`. If earlier segments
-completed in the same call, their exact scheduled charges remain reflected in
-both cumulative Machine fuel and the remaining caller quantum.
+segment executes. Before any constructor, stack, environment, or canonical-size
+validation, `step` reads the opaque live-state header and top constructor and
+compares caller fuel with that constructor's compiler-known minimum cost.
+Fuel below that minimum yields unchanged without deep state traversal. Once the
+minimum is funded, full validation and exact dynamic-cost preflight run before
+reducer execution. An exhausted Machine budget terminates with
+`execution_budget_exceeded`. If earlier segments completed in the same call,
+their exact scheduled charges remain reflected in both cumulative Machine fuel
+and the remaining caller quantum.
 
 An authored explicit yield commits the already-lowered continuation constructor
 and returns `yielded` immediately. A compiler-inserted caller-fuel checkpoint
@@ -91,8 +95,10 @@ constant-table numbering cannot grant identity merely by rearranging dead
 source declarations.
 
 `boundary.Driver(Machine)` is the local convenience layer. A handler declares
-`semantic_site_identities` as its compile-time capability set. The Driver
-rejects an unadmitted site before authority, then supplies
+`semantic_site_contract_digests` as its compile-time capability set. Each
+digest binds semantic identity, payload schema, resume schema, and response
+mode while remaining stable across residual-ordinal normalization. The Driver
+rejects an unadmitted contract before authority, then supplies
 `(comptime Site, payload, request_identity)` after the complete resume
 candidate has been prepared. `Site` carries the semantic identity and exact
 payload/resume contract; dense request tags remain internal union coordinates.

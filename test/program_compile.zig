@@ -351,6 +351,11 @@ test "Program.compile generates direct exact-live RNF Machine" {
         &Site.contract_digest,
         &([_]u8{0} ** 32),
     ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &Site.semantic_contract_digest,
+        &([_]u8{0} ** 32),
+    ));
 
     const state = try CompiledMachine.initialState(std.testing.allocator, 21);
     defer CompiledMachine.deinitState(state);
@@ -546,7 +551,9 @@ test "Driver handles effects without owning another reducer" {
     var local = try LocalDriver.init(std.testing.allocator, 9);
     defer local.deinit();
     var handler = struct {
-        pub const semantic_site_identities = .{Lookup.semantic_identity};
+        pub const semantic_site_contract_digests = .{
+            CompiledMachine.EffectRow.site(0).semantic_contract_digest,
+        };
 
         pub fn handle(
             _: *@This(),
@@ -574,7 +581,9 @@ test "Driver returns the exact pending request and retries handler errors" {
         attempts: u8 = 0,
         identities: [2][32]u8 = undefined,
 
-        pub const semantic_site_identities = .{Lookup.semantic_identity};
+        pub const semantic_site_contract_digests = .{
+            CompiledMachine.EffectRow.site(0).semantic_contract_digest,
+        };
 
         pub fn handle(
             self: *@This(),
@@ -648,7 +657,9 @@ test "Driver allocates a multi-frame resume before invoking its handler" {
     var handler = struct {
         attempts: u8 = 0,
 
-        pub const semantic_site_identities = .{Lookup.semantic_identity};
+        pub const semantic_site_contract_digests = .{
+            HelperEffectMachine.EffectRow.site(0).semantic_contract_digest,
+        };
 
         pub fn handle(
             self: *@This(),
@@ -694,7 +705,9 @@ test "Machine preflights the complete response state before request authority" {
     var handler = struct {
         attempts: u8 = 0,
 
-        pub const semantic_site_identities = .{LargeLookup.semantic_identity};
+        pub const semantic_site_contract_digests = .{
+            LargeResponseMachine.EffectRow.site(0).semantic_contract_digest,
+        };
 
         pub fn handle(
             self: *@This(),

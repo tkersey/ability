@@ -1255,7 +1255,7 @@ pub fn Machine(
             return result;
         }
 
-        fn validate(value: *const StoredState) Error!void {
+        fn validateLiveStateHeader(value: *const StoredState) Error!void {
             if (value.terminal) return error.ProgramContractViolation;
             if (!value.frames.consistent() or
                 value.frames.len() == 0 or
@@ -1266,6 +1266,10 @@ pub fn Machine(
             {
                 return error.ProgramContractViolation;
             }
+        }
+
+        fn validate(value: *const StoredState) Error!void {
+            try validateLiveStateHeader(value);
             for (value.frames.slice()) |frame| {
                 Definition.validateFrame(frame) catch
                     return error.ProgramContractViolation;
@@ -1508,14 +1512,20 @@ pub fn Machine(
         /// Run direct generated segments to one request, yield, result, or failure.
         pub fn step(state: State, caller_fuel: *u64) Error!Outcome {
             const original = storedConst(state);
-            try validate(original);
-            if (try currentFrom(original) != null) return error.ProgramContractViolation;
+            try validateLiveStateHeader(original);
             const original_frame = try top(original);
+            if (Definition.current(original_frame) != null) {
+                return error.ProgramContractViolation;
+            }
             const original_minimum_cost = Definition.minimumCost(original_frame);
             if (original_minimum_cost == 0) {
                 return error.ProgramContractViolation;
             }
             if (caller_fuel.* < original_minimum_cost) return .yielded;
+            try validate(original);
+            if (try currentFrom(original) != null) {
+                return error.ProgramContractViolation;
+            }
             if (definitionCostOverflows(original_frame)) {
                 stored(state).terminal = true;
                 return .{ .failed = .execution_budget_exceeded };
@@ -2322,6 +2332,8 @@ const ZeroFuelStackDefinition = struct {
         void,
     );
     const contract_bytes = "test-direct-rnf\x00zero-fuel-stack";
+    var frame_validation_calls: usize = 0;
+    var stack_validation_calls: usize = 0;
 
     fn initial(_: InitialArgs) Frame {
         return .{ .entry = .{} };
@@ -2375,9 +2387,12 @@ const ZeroFuelStackDefinition = struct {
         return [_]u8{0} ** 32;
     }
 
-    fn validateFrame(_: Frame) error{ProgramContractViolation}!void {}
+    fn validateFrame(_: Frame) error{ProgramContractViolation}!void {
+        frame_validation_calls += 1;
+    }
 
     fn validateStack(frames: []const Frame) error{ProgramContractViolation}!void {
+        stack_validation_calls += 1;
         if (frames.len == 1) return;
         if (frames.len == 2 and
             std.meta.activeTag(frames[0]) == .parent and
@@ -2967,6 +2982,8 @@ test "zero caller fuel yields a multi-frame state without allocation" {
     defer std.testing.allocator.free(before);
 
     failing.fail_index = failing.allocations;
+    ZeroFuelStackDefinition.frame_validation_calls = 0;
+    ZeroFuelStackDefinition.stack_validation_calls = 0;
     var no_fuel: u64 = 0;
     try std.testing.expectEqual(
         ZeroFuelMachine.Outcome.yielded,
@@ -2974,9 +2991,36 @@ test "zero caller fuel yields a multi-frame state without allocation" {
     );
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), no_fuel);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        ZeroFuelStackDefinition.frame_validation_calls,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        ZeroFuelStackDefinition.stack_validation_calls,
+    );
     const after = try ZeroFuelMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
+
+    const funded_state = try ZeroFuelMachine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer ZeroFuelMachine.deinitState(funded_state);
+    ZeroFuelStackDefinition.frame_validation_calls = 0;
+    ZeroFuelStackDefinition.stack_validation_calls = 0;
+    var funded: u64 = 1;
+    try std.testing.expectEqual(
+        ZeroFuelMachine.Outcome.yielded,
+        try ZeroFuelMachine.step(funded_state, &funded),
+    );
+    try std.testing.expect(
+        ZeroFuelStackDefinition.frame_validation_calls != 0,
+    );
+    try std.testing.expect(
+        ZeroFuelStackDefinition.stack_validation_calls != 0,
+    );
 }
 
 test "insufficient first dynamic cost yields a multi-frame state without allocation" {

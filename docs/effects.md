@@ -56,9 +56,12 @@ request union, Machine identity, or World.
 World inspects the compiler-owned contract through
 `Machine.EffectRow.site(ordinal)`. Each descriptor exposes the site ordinal,
 `Payload`, `Resume`, result type, single-resume mode, and semantic identity.
-It also exposes a SHA-256 `contract_digest` over the ordinal, declared semantic
-identity, canonical payload/resume schemas, and response mode. The source
-`Body` and its accidental declarations remain private.
+It exposes two domain-separated SHA-256 digests. `semantic_contract_digest`
+binds the declared semantic identity, canonical payload/resume schemas, and
+response mode without the residual ordinal; local Driver handlers use it as
+their compile-time capability. `contract_digest` additionally binds the dense
+residual ordinal for Machine and request identity. The source `Body` and its
+accidental declarations remain private.
 
 `Machine.step` can park at one effect constructor and return one typed request.
 The canonical state retains the exact continuation environment. After the

@@ -1575,6 +1575,19 @@ fn effectSiteContractDigest(
     return digest;
 }
 
+fn effectSiteSemanticContractDigest(comptime Site: type) [32]u8 {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
+    var hasher = SemanticHasher.init(.{});
+    semanticHashBytes(&hasher, "boundary-effect-site-semantic-contract-v1");
+    semanticHashBytes(&hasher, Site.semantic_identity);
+    semanticHashSchema(Site.Payload, &hasher);
+    semanticHashSchema(Site.Resume, &hasher);
+    semanticHashBytes(&hasher, "single-resume");
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
 fn semanticHashValueType(
     comptime Body: type,
     hasher: *SemanticHasher,
@@ -2267,6 +2280,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         .single_resume;
                     pub const semantic_identity: []const u8 =
                         ResidualSite.semantic_identity;
+                    /// Ordinal-independent capability used by local handlers.
+                    pub const semantic_contract_digest: [32]u8 =
+                        effectSiteSemanticContractDigest(ResidualSite);
                     pub const contract_digest: [32]u8 =
                         effectSiteContractDigest(ResidualSite, ordinal);
                 };
