@@ -821,6 +821,52 @@ const LiveThroughMachine = LiveThroughProgram.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+const yield_live_through_instructions = [_]cir.Instruction{.{
+    .kind = .constant,
+    .result = 0,
+    .operation = .{ .constant = 0 },
+}};
+const yield_live_through_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &yield_live_through_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .explicit_yield,
+            .continuation = .{ .target = 1 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .return_value = 0 },
+    },
+};
+
+const YieldLiveThroughBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const constants = .{@as(u32, 7)};
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "yield-live-through-constructor-invariant",
+        .value_types = &.{u32_type},
+        .blocks = &yield_live_through_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const YieldLiveThroughProgram = program_v2.program(
+    "yield-live-through-constructor-invariant",
+    YieldLiveThroughBody,
+);
+const YieldLiveThroughMachine = YieldLiveThroughProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
 const RetainedProduct = struct {
     selected: u32,
     retained: u32,
@@ -2036,6 +2082,59 @@ test "predecessor-defined live-through values retain local definitions" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         LiveThroughMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "explicit yields finalize live-through definitions locally" {
+    const yielded = blk: {
+        for (YieldLiveThroughProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.kind == .caller_fuel_yield and
+                constructor.origin == .suspension)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_definition = false;
+    for (yielded.invariantTerms()) |term| switch (term) {
+        .value_constant => |definition| {
+            saw_definition = definition.result == 0 and
+                switch (definition.contents) {
+                    .unsigned => |value| value == 7,
+                    else => false,
+                };
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_definition);
+
+    const state = try YieldLiveThroughMachine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer YieldLiveThroughMachine.deinitState(state);
+    var fuel: u64 = 8;
+    try std.testing.expectEqual(
+        .yielded,
+        std.meta.activeTag(try YieldLiveThroughMachine.step(state, &fuel)),
+    );
+    const encoded = try YieldLiveThroughMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset..][0..4],
+        8,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        YieldLiveThroughMachine.decodeState(std.testing.allocator, forged),
     );
 }
 

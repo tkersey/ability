@@ -1041,6 +1041,12 @@ test "compiled bounded recursive frames survive canonical round trip" {
 }
 
 test "helper entry backedges rebind future state without overwriting activation context" {
+    for (HelperBackedgeProgram.rnf.constructorSlice()) |constructor| {
+        try std.testing.expect(
+            constructor.source_block != 1 or
+                constructor.origin != .block_entry,
+        );
+    }
     const call_entry_id = blk: {
         for (HelperBackedgeProgram.rnf.entryTransitionSlice()) |transition| {
             if (transition.source_block == 0 and

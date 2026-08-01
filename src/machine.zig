@@ -809,6 +809,11 @@ pub fn Machine(
             // This cache is private live-state acceleration, never authority
             // and never part of ABL_RNF2 encoding or Machine identity.
             request_identity: ?RequestIdentity = null,
+            // PreparedResume retains a raw pointer to this allocation until it
+            // is consumed or abandoned. These private lease fields never
+            // enter canonical state bytes or Machine identity.
+            prepared_resume_leases: usize = 0,
+            release_requested: bool = false,
             terminal_result: ?*OwnedResult = null,
             terminal: bool = false,
         };
@@ -895,9 +900,29 @@ pub fn Machine(
 
         fn destroyStateStorage(state: State) void {
             const value = stored(state);
+            std.debug.assert(value.prepared_resume_leases == 0);
+            std.debug.assert(value.terminal_result == null);
             const allocator = value.allocator;
             value.frames.deinit(allocator);
             allocator.destroy(value);
+        }
+
+        fn releaseStateStorageIfReady(state: State) void {
+            const value = stored(state);
+            if (!value.release_requested or
+                value.prepared_resume_leases != 0 or
+                value.terminal_result != null)
+            {
+                return;
+            }
+            destroyStateStorage(state);
+        }
+
+        fn releasePreparedResumeLease(state: State) void {
+            const value = stored(state);
+            std.debug.assert(value.prepared_resume_leases != 0);
+            value.prepared_resume_leases -= 1;
+            releaseStateStorageIfReady(state);
         }
 
         fn releaseOwnedResult(owner: *OwnedResult) void {
@@ -908,7 +933,10 @@ pub fn Machine(
             const state_released = owner.state_released;
             value.terminal_result = null;
             allocator.destroy(owner);
-            if (state_released) destroyStateStorage(state);
+            if (state_released) {
+                value.release_requested = true;
+                releaseStateStorageIfReady(state);
+            }
         }
 
         fn topIndex(value: *const StoredState) Error!u32 {
@@ -1317,6 +1345,8 @@ pub fn Machine(
             copy.* = original.*;
             copy.allocator = allocator;
             copy.frames = .empty;
+            copy.prepared_resume_leases = 0;
+            copy.release_requested = false;
             copy.terminal_result = null;
             copy.frames = try original.frames.cloneExact(allocator);
             return @ptrCast(copy);
@@ -1325,11 +1355,12 @@ pub fn Machine(
         /// Release one live Machine state.
         pub fn deinitState(state: State) void {
             const value = stored(state);
+            value.release_requested = true;
             if (value.terminal_result) |result| {
                 result.state_released = true;
                 return;
             }
-            destroyStateStorage(state);
+            releaseStateStorageIfReady(state);
         }
 
         /// Borrow the current parked request without advancing.
@@ -1391,6 +1422,9 @@ pub fn Machine(
             {
                 return error.ProgramContractViolation;
             }
+            if (original.prepared_resume_leases == std.math.maxInt(usize)) {
+                return error.ProgramContractViolation;
+            }
 
             const value = original.allocator.create(PreparedResumeValue) catch
                 return error.OutOfMemory;
@@ -1402,9 +1436,12 @@ pub fn Machine(
                 .candidate = original.*,
             };
             value.candidate.frames = .empty;
+            value.candidate.prepared_resume_leases = 0;
+            value.candidate.release_requested = false;
             value.candidate.terminal_result = null;
             value.candidate.frames =
                 try original.frames.cloneExact(original.allocator);
+            stored(state).prepared_resume_leases += 1;
             return @ptrCast(value);
         }
 
@@ -1413,8 +1450,11 @@ pub fn Machine(
             prepared_resume: PreparedResume,
         ) void {
             const value = prepared(prepared_resume);
+            const state = value.state;
+            const allocator = value.allocator;
             value.candidate.frames.deinit(value.allocator);
-            value.allocator.destroy(value);
+            allocator.destroy(value);
+            releasePreparedResumeLease(state);
         }
 
         /// Apply one typed response to an already allocated candidate and
@@ -2457,6 +2497,27 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 5), done.value().*);
+}
+
+test "PreparedResume leases source state until every candidate is released" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    const state = try TestMachine.initialState(std.testing.allocator, 3);
+    var fuel: u64 = 10;
+    const request = switch (try TestMachine.step(state, &fuel)) {
+        .request => |pending| pending,
+        else => return error.TestUnexpectedResult,
+    };
+    const abandoned = try TestMachine.prepareResume(state, request);
+    const committed = try TestMachine.prepareResume(state, request);
+
+    TestMachine.deinitState(state);
+    TestMachine.deinitPreparedResume(abandoned);
+    try TestMachine.@"resume"(committed, @as(u32, 4));
+    TestMachine.deinitPreparedResume(committed);
 }
 
 test "minimum state ceiling admits exactly one empty canonical frame" {

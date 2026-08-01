@@ -531,7 +531,6 @@ test "unreachable helper results do not enter the generated return carrier" {
 
 test "helper continuations omit future-dead call arguments" {
     var saw_await_call = false;
-    var saw_helper_entry = false;
     for (DeadCallArgumentProgram.rnf.constructorSlice()) |constructor| {
         if (constructor.origin == .suspension and
             constructor.source_block == 0)
@@ -541,17 +540,34 @@ test "helper continuations omit future-dead call arguments" {
                 try std.testing.expect(field.value != 0);
             }
         }
-        if (constructor.origin == .block_entry and
-            constructor.source_block == 1)
-        {
-            saw_helper_entry = true;
-            for (constructor.environmentFields()) |field| {
-                try std.testing.expect(field.value != 1);
-            }
-        }
+        try std.testing.expect(
+            constructor.source_block != 1 or
+                constructor.origin != .block_entry,
+        );
     }
     try std.testing.expect(saw_await_call);
-    try std.testing.expect(saw_helper_entry);
+
+    const helper_entry_id = blk: {
+        for (DeadCallArgumentProgram.rnf.entryTransitionSlice()) |transition| {
+            if (transition.source_block == 0 and
+                transition.edge_kind == .call and
+                transition.target_block == 1)
+            {
+                break :blk transition.constructor_id;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    const helper_entry = DeadCallArgumentProgram.rnf.constructors[
+        helper_entry_id
+    ];
+    try std.testing.expectEqual(.call_entry, helper_entry.origin);
+    for (helper_entry.activationFields()) |field| {
+        try std.testing.expect(field.value != 1);
+    }
+    for (helper_entry.environmentFields()) |field| {
+        try std.testing.expect(field.value != 0 and field.value != 1);
+    }
 }
 
 test "dense return tags map through reachable source functions" {

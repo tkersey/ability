@@ -45,6 +45,12 @@ unwind/regrow histories from extending the predecessor allocation chain under
 allocators that cannot resize in place. `maximum_frames` remains the admission
 bound, and canonical state bytes still encode only logical frames.
 
+Opaque prepared resumes may retain a private lease on the live state allocation
+whose pending request they validated. `deinitState` marks that allocation for
+release, but physical destruction waits for both terminal-result rendezvous and
+all prepared-resume leases. Lease count and release state are private ownership
+metadata: cloning resets them, and encoding never observes them.
+
 Decode is fail-closed. It checks the exact Machine digest, versions, total
 length, frame bounds, dense constructor schemas, portable-value bounds,
 constructor-local invariants, stack compatibility, pending-request state, fuel

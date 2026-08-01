@@ -1771,6 +1771,7 @@ pub fn NormalForm(
         fn appendConstructor(
             self: *Self,
             program: control_ir.Program,
+            constant_values: []const ?InvariantValue,
             kind: ConstructorKind,
             origin: ConstructorOrigin,
             source_block: control_ir.BlockId,
@@ -1789,6 +1790,12 @@ pub fn NormalForm(
             };
             var required = environment_set;
             var ordered_invariants = invariants;
+            try addEnvironmentDefinitions(
+                program,
+                constant_values,
+                &required,
+                &ordered_invariants,
+            );
             ordered_invariants.canonicalize(canonical_values);
             if (comptime maximum_invariant_terms == 0) {
                 if (ordered_invariants.len != 0) {
@@ -3704,17 +3711,6 @@ pub fn NormalForm(
             return error.PathFactsDidNotConverge;
         }
 
-        fn isFunctionEntry(
-            program: control_ir.Program,
-            block_id: control_ir.BlockId,
-        ) bool {
-            if (program.functions.len == 0) return block_id == program.entry;
-            for (program.functions) |function| {
-                if (function.entry == block_id) return true;
-            }
-            return false;
-        }
-
         fn appendIncomingConstructor(
             result: *Self,
             program: control_ir.Program,
@@ -3728,7 +3724,7 @@ pub fn NormalForm(
             generated: GeneratedFacts,
         ) Error!void {
             const target_index: usize = @intCast(edge.target);
-            var environment = liveness.entry_live[target_index];
+            const environment = liveness.entry_live[target_index];
             var facts = try transferFacts(
                 program,
                 source_block,
@@ -3747,15 +3743,10 @@ pub fn NormalForm(
                     &facts,
                 );
             }
-            try addEnvironmentDefinitions(
-                program,
-                constant_values,
-                &environment,
-                &facts,
-            );
             const target = program.blocks[target_index];
             const constructor_id = try result.appendConstructor(
                 program,
+                constant_values,
                 constructorKindForRole(target.role),
                 if (incoming_edge_kind == .call)
                     .call_entry
@@ -3815,6 +3806,7 @@ pub fn NormalForm(
             const entry_index: usize = @intCast(program.entry);
             _ = try result.appendConstructor(
                 program,
+                constant_values,
                 .entry,
                 .block_entry,
                 program.entry,
@@ -3831,21 +3823,6 @@ pub fn NormalForm(
                 ) orelse unreachable;
                 const block = program.blocks[@intCast(source_block)];
                 const block_index: usize = @intCast(block.id);
-                if (block.id != program.entry and
-                    isFunctionEntry(program, block.id))
-                {
-                    _ = try result.appendConstructor(
-                        program,
-                        constructorKindForRole(block.role),
-                        .block_entry,
-                        block.id,
-                        block.id,
-                        liveness.entry_live[block_index],
-                        path_facts[block_index],
-                        canonical_values,
-                        liveness,
-                    );
-                }
                 switch (block.terminator) {
                     .jump => |edge| try appendIncomingConstructor(
                         &result,
@@ -3974,16 +3951,10 @@ pub fn NormalForm(
                                 environment,
                                 &suspension_facts,
                             );
-                        } else {
-                            try addEnvironmentDefinitions(
-                                program,
-                                constant_values,
-                                &environment,
-                                &suspension_facts,
-                            );
                         }
                         const constructor_id = try result.appendConstructor(
                             program,
+                            constant_values,
                             constructorKindForSuspension(suspension.kind),
                             .suspension,
                             if (persists_continuation)

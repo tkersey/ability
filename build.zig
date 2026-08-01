@@ -12,6 +12,87 @@ const CoreModules = struct {
     rnf: *std.Build.Module,
 };
 
+const CoreModuleId = enum {
+    agent_profile,
+    compiler,
+    control_ir,
+    driver,
+    effect_v2,
+    machine,
+    portable_value,
+    program_v2,
+    rnf,
+};
+
+const CoreModuleRole = enum {
+    agent_profile,
+    compiler,
+    control_ir,
+    driver,
+    effect_schema,
+    reducer,
+    portable_value,
+    program_frontend,
+    resumption_normal_form,
+};
+
+fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
+    return switch (module) {
+        .agent_profile => .agent_profile,
+        .compiler => .compiler,
+        .control_ir => .control_ir,
+        .driver => .driver,
+        .effect_v2 => .effect_schema,
+        .machine => .reducer,
+        .portable_value => .portable_value,
+        .program_v2 => .program_frontend,
+        .rnf => .resumption_normal_form,
+    };
+}
+
+const core_module_reducer_count: usize = count: {
+    var result: usize = 0;
+    for (std.meta.fields(CoreModuleId)) |field| {
+        const module: CoreModuleId = @enumFromInt(field.value);
+        if (coreModuleRole(module) == .reducer) result += 1;
+    }
+    break :count result;
+};
+
+const core_module_reducer_owner: CoreModuleId = owner: {
+    var result: ?CoreModuleId = null;
+    for (std.meta.fields(CoreModuleId)) |field| {
+        const module: CoreModuleId = @enumFromInt(field.value);
+        if (coreModuleRole(module) == .reducer) result = module;
+    }
+    break :owner result orelse @compileError(
+        "Boundary core-module topology has no reducer owner",
+    );
+};
+
+comptime {
+    @setEvalBranchQuota(10_000);
+    const module_fields = std.meta.fields(CoreModules);
+    const module_ids = std.meta.fields(CoreModuleId);
+    if (module_fields.len != module_ids.len) {
+        @compileError("Boundary core-module topology is not total");
+    }
+    for (module_fields) |field| {
+        if (std.meta.stringToEnum(CoreModuleId, field.name) == null) {
+            @compileError(
+                "Boundary core module lacks a semantic role: " ++ field.name,
+            );
+        }
+    }
+    if (core_module_reducer_count != 1 or
+        core_module_reducer_owner != .machine)
+    {
+        @compileError(
+            "Boundary core-module topology must assign exactly one reducer to machine",
+        );
+    }
+}
+
 const TestArgs = struct {
     filters: []const []const u8,
     passthrough: []const []const u8,
@@ -823,6 +904,24 @@ pub fn build(b: *std.Build) void {
     );
     performance_falsifier_step.dependOn(&performance_falsifier_command.step);
 
+    const single_reducer_proof = b.addWriteFiles();
+    _ = single_reducer_proof.add(
+        "boundary-core-module-topology.txt",
+        b.fmt(
+            "core_module_count={d}\nreducer_count={d}\nreducer_owner={s}\n",
+            .{
+                std.meta.fields(CoreModules).len,
+                core_module_reducer_count,
+                @tagName(core_module_reducer_owner),
+            },
+        ),
+    );
+    const single_reducer_step = b.step(
+        "check-boundary-machine-single-reducer",
+        "Prove the total Boundary core-module graph has exactly one reducer owner.",
+    );
+    single_reducer_step.dependOn(&single_reducer_proof.step);
+
     const receipt_output_command =
         "printf '%s\\n' " ++
         "'boundary_machine_abi=2' " ++
@@ -853,6 +952,7 @@ pub fn build(b: *std.Build) void {
         state_step,
         recursion_step,
         after_step,
+        single_reducer_step,
         no_interpreter_step,
         deletion_step,
     }) |dependency| {
