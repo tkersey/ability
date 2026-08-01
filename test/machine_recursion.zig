@@ -195,6 +195,155 @@ const Body = struct {
 
 const Program = program_v2.program("bounded-recursive-helper", Body);
 
+const alternate_entry_then_arguments = [_]cir.EdgeArgument{
+    .{ .value = 0 },
+    .{ .value = 1 },
+};
+const alternate_entry_else_arguments = [_]cir.EdgeArgument{
+    .{ .value = 0 },
+    .{ .value = 1 },
+};
+const alternate_entry_then_call_arguments = [_]cir.EdgeArgument{
+    .{ .value = 3 },
+    .{ .value = 4 },
+};
+const alternate_entry_else_call_arguments = [_]cir.EdgeArgument{
+    .{ .value = 5 },
+    .{ .value = 6 },
+};
+const alternate_entry_return_arguments = [_]cir.EdgeArgument{.@"resume"};
+const alternate_entry_root_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 1,
+        .operation = .{ .constant = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{ 0, 1 },
+        .operation = .integer_equal,
+    },
+};
+const alternate_entry_helper_instructions = [_]cir.Instruction{.{
+    .kind = .pure,
+    .result = 9,
+    .operands = &.{ 7, 8 },
+    .operation = .integer_add,
+}};
+const alternate_entry_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &alternate_entry_root_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 2,
+            .then_edge = .{
+                .target = 1,
+                .arguments = &alternate_entry_then_arguments,
+            },
+            .else_edge = .{
+                .target = 2,
+                .arguments = &alternate_entry_else_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{ 3, 4 },
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 3,
+                .arguments = &alternate_entry_then_call_arguments,
+            },
+            .continuation = .{
+                .target = 4,
+                .arguments = &alternate_entry_return_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 2,
+        .parameters = &.{ 5, 6 },
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 3,
+                .arguments = &alternate_entry_else_call_arguments,
+            },
+            .continuation = .{
+                .target = 4,
+                .arguments = &alternate_entry_return_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 3,
+        .function_id = 1,
+        .parameters = &.{ 7, 8 },
+        .instructions = &alternate_entry_helper_instructions,
+        .terminator = .{ .return_to_caller = 9 },
+    },
+    .{
+        .id = 4,
+        .role = .terminal_handoff,
+        .parameters = &.{10},
+        .terminator = .{ .return_value = 10 },
+    },
+};
+
+const AlternateEntryBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum {
+        arithmetic_overflow,
+    };
+    pub const constants = .{@as(u32, 0)};
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "alternate-call-entry-provenance",
+        .value_types = &.{
+            .{ .scalar = .u32 }, // 0: input
+            .{ .scalar = .u32 }, // 1: zero
+            .{ .scalar = .boolean }, // 2: input equals zero
+            .{ .scalar = .u32 }, // 3: then input
+            .{ .scalar = .u32 }, // 4: then zero
+            .{ .scalar = .u32 }, // 5: else input
+            .{ .scalar = .u32 }, // 6: else zero
+            .{ .scalar = .u32 }, // 7: helper input
+            .{ .scalar = .u32 }, // 8: helper zero
+            .{ .scalar = .u32 }, // 9: helper result
+            .{ .scalar = .u32 }, // 10: root result
+        },
+        .blocks = &alternate_entry_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+        .functions = &.{
+            .{
+                .id = 0,
+                .entry = 0,
+                .result_type = .{ .scalar = .u32 },
+            },
+            .{
+                .id = 1,
+                .entry = 3,
+                .result_type = .{ .scalar = .u32 },
+            },
+        },
+    };
+};
+
+const AlternateEntryProgram = program_v2.program(
+    "alternate-call-entry-provenance",
+    AlternateEntryBody,
+);
+
 const self_target_call_arguments = [_]cir.EdgeArgument{.{ .value = 0 }};
 const self_target_return_arguments = [_]cir.EdgeArgument{.@"resume"};
 const self_target_blocks = [_]cir.Block{
@@ -576,6 +725,126 @@ test "call-created entry binds parent and child arguments" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         RecursiveMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "machine call stack rejects an authentic alternate call entry" {
+    const then_call_entry_id = blk: {
+        for (AlternateEntryProgram.rnf.entryTransitionSlice()) |transition| {
+            if (transition.source_block == 1 and
+                transition.edge_kind == .call and
+                transition.target_block == 3)
+            {
+                break :blk transition.constructor_id;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    const else_call_entry_id = blk: {
+        for (AlternateEntryProgram.rnf.entryTransitionSlice()) |transition| {
+            if (transition.source_block == 2 and
+                transition.edge_kind == .call and
+                transition.target_block == 3)
+            {
+                break :blk transition.constructor_id;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expect(then_call_entry_id != else_call_entry_id);
+    try std.testing.expectEqual(
+        .call_entry,
+        AlternateEntryProgram.rnf.constructors[then_call_entry_id].origin,
+    );
+    try std.testing.expectEqual(
+        .call_entry,
+        AlternateEntryProgram.rnf.constructors[else_call_entry_id].origin,
+    );
+
+    const AlternateEntryMachine = AlternateEntryProgram.compile(.{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+
+    const then_state = try AlternateEntryMachine.initialState(
+        std.testing.allocator,
+        0,
+    );
+    defer AlternateEntryMachine.deinitState(then_state);
+    var then_fuel: u64 = 4;
+    try std.testing.expectEqual(
+        AlternateEntryMachine.Outcome.yielded,
+        try AlternateEntryMachine.step(then_state, &then_fuel),
+    );
+    const then_encoded = try AlternateEntryMachine.encodeState(
+        std.testing.allocator,
+        then_state,
+    );
+    defer std.testing.allocator.free(then_encoded);
+
+    const else_state = try AlternateEntryMachine.initialState(
+        std.testing.allocator,
+        1,
+    );
+    defer AlternateEntryMachine.deinitState(else_state);
+    var else_fuel: u64 = 4;
+    try std.testing.expectEqual(
+        AlternateEntryMachine.Outcome.yielded,
+        try AlternateEntryMachine.step(else_state, &else_fuel),
+    );
+    const else_encoded = try AlternateEntryMachine.encodeState(
+        std.testing.allocator,
+        else_state,
+    );
+    defer std.testing.allocator.free(else_encoded);
+
+    const frame_count_offset = state_header_length - 8;
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        std.mem.readInt(u32, then_encoded[frame_count_offset..][0..4], .little),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        std.mem.readInt(u32, else_encoded[frame_count_offset..][0..4], .little),
+    );
+    const then_parent_environment_length = std.mem.readInt(
+        u32,
+        then_encoded[state_header_length + 4 ..][0..4],
+        .little,
+    );
+    const else_parent_environment_length = std.mem.readInt(
+        u32,
+        else_encoded[state_header_length + 4 ..][0..4],
+        .little,
+    );
+    const then_child_offset = state_header_length +
+        frame_header_length + then_parent_environment_length;
+    const else_child_offset = state_header_length +
+        frame_header_length + else_parent_environment_length;
+    try std.testing.expectEqual(
+        @as(u32, @intCast(then_call_entry_id)),
+        std.mem.readInt(u32, then_encoded[then_child_offset..][0..4], .little),
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(else_call_entry_id)),
+        std.mem.readInt(u32, else_encoded[else_child_offset..][0..4], .little),
+    );
+    try std.testing.expectEqual(
+        then_encoded.len - then_child_offset,
+        else_encoded.len - else_child_offset,
+    );
+
+    const forged = try std.testing.allocator.dupe(u8, then_encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.copyForwards(
+        u8,
+        forged[then_child_offset..],
+        else_encoded[else_child_offset..],
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AlternateEntryMachine.decodeState(std.testing.allocator, forged),
     );
 }
 

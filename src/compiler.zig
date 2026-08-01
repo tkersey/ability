@@ -4185,12 +4185,17 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 inline else => |child_environment, child_tag| blk: {
                     const child_constructor_id: usize =
                         comptime @intFromEnum(child_tag);
-                    if (comptime child_constructor_id != call_entry_constructor_id) {
-                        break :blk;
-                    }
                     const child_constructor = comptime normal_form.constructors[
                         child_constructor_id
                     ];
+                    if (comptime child_constructor.origin == .call_entry and
+                        child_constructor_id != call_entry_constructor_id)
+                    {
+                        break :blk error.ProgramContractViolation;
+                    }
+                    if (comptime child_constructor_id != call_entry_constructor_id) {
+                        break :blk;
+                    }
                     if (comptime child_constructor.origin != .call_entry) {
                         @compileError("call transition must select a call-entry constructor");
                     }
