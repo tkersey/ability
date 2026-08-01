@@ -273,8 +273,8 @@ fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
         \\set -eu
         \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
         \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
-        \\find src examples test bench -type f -name '*.zig' | sort > "$tmp.actual"
-        \\grep -E '^(src|examples|test|bench)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
+        \\find src examples test -type f -name '*.zig' | sort > "$tmp.actual"
+        \\grep -E '^(src|examples|test)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
     lint_step.dependOn(&guard.step);
@@ -1124,7 +1124,6 @@ pub fn build(b: *std.Build) void {
             b.path("src"),
             b.path("examples"),
             b.path("test"),
-            b.path("bench"),
             b.path("conformance"),
         },
         .exclude = &.{},
