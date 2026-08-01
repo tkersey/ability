@@ -64,6 +64,53 @@ const CompiledMachine = Program.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+const CanonicalTextLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity = "test.canonical-text.v1";
+    pub const Payload = Text4;
+    pub const Resume = Text4;
+};
+const canonical_text_arguments = [_]cir.EdgeArgument{.@"resume"};
+const canonical_text_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 1,
+                .arguments = &canonical_text_arguments,
+            },
+            .resume_type = .{ .schema = 0 },
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .return_value = 1 },
+    },
+};
+const CanonicalTextBody = struct {
+    pub const InitialArgs = Text4;
+    pub const Result = Text4;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{CanonicalTextLookup};
+    pub const schema_types = .{Text4};
+    pub const control_ir: cir.Program = .{
+        .label = "canonical-text-ingress",
+        .value_types = &.{ .{ .schema = 0 }, .{ .schema = 0 } },
+        .blocks = &canonical_text_blocks,
+        .entry = 0,
+        .result_type = .{ .schema = 0 },
+    };
+};
+const CanonicalTextMachine = program_v2.program(
+    "canonical-text-ingress",
+    CanonicalTextBody,
+).compile(.{});
+
 const helper_call_arguments = [_]cir.EdgeArgument{.{ .value = 0 }};
 const helper_return_arguments = [_]cir.EdgeArgument{.@"resume"};
 const helper_effect_arguments = [_]cir.EdgeArgument{.@"resume"};
@@ -360,6 +407,45 @@ test "Program.compile generates direct exact-live RNF Machine" {
     try std.testing.expectEqual(@as(u32, 42), done.value().*);
 }
 
+test "Machine canonicalizes typed initial and response ingress" {
+    var initial = try Text4.fromSlice("in");
+    initial.storage[3] = 0xa1;
+    const state = try CanonicalTextMachine.initialState(
+        std.testing.allocator,
+        initial,
+    );
+    defer CanonicalTextMachine.deinitState(state);
+
+    var fuel: u64 = 8;
+    const request = switch (try CanonicalTextMachine.step(state, &fuel)) {
+        .request => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    switch (request.value) {
+        .s0 => |payload| {
+            try std.testing.expectEqualStrings("in", payload.slice());
+            try std.testing.expectEqual(@as(u8, 0), payload.storage[3]);
+        },
+    }
+
+    const prepared_resume = try CanonicalTextMachine.prepareResume(
+        state,
+        request,
+    );
+    defer CanonicalTextMachine.deinitPreparedResume(prepared_resume);
+    var response = try Text4.fromSlice("ok");
+    response.storage[3] = 0xb2;
+    try CanonicalTextMachine.@"resume"(prepared_resume, response);
+
+    const done = switch (try CanonicalTextMachine.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqualStrings("ok", done.value().slice());
+    try std.testing.expectEqual(@as(u8, 0), done.value().storage[3]);
+}
+
 test "Program.compile identity derives from semantics and excludes labels" {
     const First = program_v2.program(
         "first-debug-label",
@@ -460,14 +546,14 @@ test "Driver handles effects without owning another reducer" {
     var local = try LocalDriver.init(std.testing.allocator, 9);
     defer local.deinit();
     var handler = struct {
+        pub const semantic_site_identities = .{Lookup.semantic_identity};
+
         pub fn handle(
             _: *@This(),
-            comptime tag: anytype,
-            payload: anytype,
-            _: anytype,
-        ) !switch (tag) {
-            .s0 => u32,
-        } {
+            comptime Site: type,
+            payload: Site.Payload,
+            _: CompiledMachine.RequestIdentity,
+        ) !Site.Resume {
             return payload * 2;
         }
     }{};
@@ -488,14 +574,14 @@ test "Driver returns the exact pending request and retries handler errors" {
         attempts: u8 = 0,
         identities: [2][32]u8 = undefined,
 
+        pub const semantic_site_identities = .{Lookup.semantic_identity};
+
         pub fn handle(
             self: *@This(),
-            comptime tag: anytype,
-            payload: anytype,
-            identity: anytype,
-        ) error{Transient}!switch (tag) {
-            .s0 => u32,
-        } {
+            comptime Site: type,
+            payload: Site.Payload,
+            identity: CompiledMachine.RequestIdentity,
+        ) error{Transient}!Site.Resume {
             self.identities[self.attempts] = identity.digest;
             self.attempts += 1;
             if (self.attempts == 1) return error.Transient;
@@ -562,14 +648,14 @@ test "Driver allocates a multi-frame resume before invoking its handler" {
     var handler = struct {
         attempts: u8 = 0,
 
+        pub const semantic_site_identities = .{Lookup.semantic_identity};
+
         pub fn handle(
             self: *@This(),
-            comptime tag: anytype,
-            payload: anytype,
-            _: anytype,
-        ) !switch (tag) {
-            .s0 => u32,
-        } {
+            comptime Site: type,
+            payload: Site.Payload,
+            _: HelperEffectMachine.RequestIdentity,
+        ) !Site.Resume {
             self.attempts += 1;
             return payload * 2;
         }
@@ -608,14 +694,14 @@ test "Machine preflights the complete response state before request authority" {
     var handler = struct {
         attempts: u8 = 0,
 
+        pub const semantic_site_identities = .{LargeLookup.semantic_identity};
+
         pub fn handle(
             self: *@This(),
-            comptime tag: anytype,
-            _: anytype,
-            _: anytype,
-        ) !switch (tag) {
-            .s0 => LargeResponse,
-        } {
+            comptime Site: type,
+            _: Site.Payload,
+            _: LargeResponseMachine.RequestIdentity,
+        ) !Site.Resume {
             self.attempts += 1;
             return null;
         }

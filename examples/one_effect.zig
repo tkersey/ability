@@ -64,14 +64,14 @@ pub fn main() !void {
     defer driver.deinit();
 
     var handlers = struct {
+        pub const semantic_site_identities = .{Lookup.semantic_identity};
+
         pub fn handle(
             _: *@This(),
-            comptime tag: anytype,
-            payload: anytype,
-            _: anytype,
-        ) !switch (tag) {
-            .s0 => u32,
-        } {
+            comptime Site: type,
+            payload: Site.Payload,
+            _: Machine.RequestIdentity,
+        ) !Site.Resume {
             return payload * 2;
         }
     }{};

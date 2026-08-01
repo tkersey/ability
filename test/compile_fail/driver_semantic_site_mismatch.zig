@@ -5,7 +5,7 @@ const std = @import("std");
 
 const Lookup = struct {
     pub const id: u32 = 0;
-    pub const semantic_identity = "compile-fail.driver-response.v1";
+    pub const semantic_identity = "compile-fail.driver-semantic-site.actual.v1";
     pub const Payload = u32;
     pub const Resume = u32;
 };
@@ -40,7 +40,7 @@ const Body = struct {
     pub const effect_sites = .{Lookup};
     pub const schema_types = .{};
     pub const control_ir: cir.Program = .{
-        .label = "driver-response-type-mismatch",
+        .label = "driver-semantic-site-mismatch",
         .value_types = &.{
             .{ .scalar = .u32 },
             .{ .scalar = .u32 },
@@ -52,24 +52,26 @@ const Body = struct {
 };
 
 const Machine = program_v2.program(
-    "driver-response-type-mismatch",
+    "driver-semantic-site-mismatch",
     Body,
 ).compile(.{});
 
-test "Driver rejects a handler response mismatch before execution" {
+test "Driver rejects an unadmitted same-shaped semantic site" {
     const LocalDriver = driver.Driver(Machine);
     var local = try LocalDriver.init(std.testing.allocator, 7);
     defer local.deinit();
     var handler = struct {
-        pub const semantic_site_identities = .{Lookup.semantic_identity};
+        pub const semantic_site_identities = .{
+            "compile-fail.driver-semantic-site.expected.v1",
+        };
 
         pub fn handle(
             _: *@This(),
             comptime Site: type,
-            _: Site.Payload,
+            payload: Site.Payload,
             _: Machine.RequestIdentity,
-        ) !bool {
-            return true;
+        ) !Site.Resume {
+            return payload;
         }
     }{};
     var fuel: u64 = 8;

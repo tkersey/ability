@@ -90,9 +90,12 @@ structural portable schemas. Source block, function, value, schema, and
 constant-table numbering cannot grant identity merely by rearranging dead
 source declarations.
 
-`boundary.Driver(Machine)` is the local convenience layer. Its typed handler
-receives `(tag, payload, request_identity)` after the complete resume candidate
-has been prepared. A retry of the same parked request supplies the same
-`RequestIdentity`, allowing handler-local policy and idempotency to bind the
-exact pending authority. The Driver delegates every transition to this ABI and
-owns no reducer of its own.
+`boundary.Driver(Machine)` is the local convenience layer. A handler declares
+`semantic_site_identities` as its compile-time capability set. The Driver
+rejects an unadmitted site before authority, then supplies
+`(comptime Site, payload, request_identity)` after the complete resume
+candidate has been prepared. `Site` carries the semantic identity and exact
+payload/resume contract; dense request tags remain internal union coordinates.
+A retry of the same parked request supplies the same `RequestIdentity`, allowing
+handler-local policy and idempotency to bind the exact pending authority. The
+Driver delegates every transition to this ABI and owns no reducer of its own.

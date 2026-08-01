@@ -1317,13 +1317,16 @@ pub fn Machine(
             allocator: std.mem.Allocator,
             args: InitialArgs,
         ) Error!State {
-            _ = portable_value.encodedSize(InitialArgs, args) catch
+            const canonical_args = portable_value.canonicalValue(
+                InitialArgs,
+                args,
+            ) catch
                 return error.ProgramContractViolation;
             var value: StoredState = .{
                 .allocator = allocator,
                 .frames = try FrameStack.initOne(
                     allocator,
-                    Definition.initial(args),
+                    Definition.initial(canonical_args),
                 ),
             };
             errdefer value.frames.deinit(allocator);

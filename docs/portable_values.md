@@ -23,7 +23,9 @@ boundary.Vector(T, MaxItems)
 
 Capacity is compile-time and contract-bearing. Canonical encoding stores only
 logical length and live contents; spare storage and allocator identity are not
-observable. Vector pop, truncate, and clear reset every vacated element to its
+observable. Machine initialization and effect resumption recursively rebuild
+typed values into that same canonical representation before the values enter
+authoritative RNF state. Vector pop, truncate, and clear reset every vacated element to its
 canonical default before returning. Bytes truncate and clear likewise zero every
 vacated byte, including malformed-length repair, so logically removed data does
 not remain observable through public storage. Capacity overflow and invalid

@@ -1038,6 +1038,10 @@ pub fn build(b: *std.Build) void {
             "Boundary Machine response type must match the selected effect site Resume type",
         },
         .{
+            "test/compile_fail/driver_semantic_site_mismatch.zig",
+            "Boundary Driver handler does not admit effect site semantic identity",
+        },
+        .{
             "test/compile_fail/effect_handler_type_mismatch.zig",
             "effect handler function input must match source Payload",
         },

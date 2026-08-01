@@ -31,9 +31,18 @@ function measure(
   return samples[Math.floor(samples.length / 2)];
 }
 
+function bindMachineWorkload(run) {
+  let response = 16;
+  return () => {
+    response += 1;
+    return run(response) === response ? 1 : 0;
+  };
+}
+
 const [wasmPath, exportName] = process.argv.slice(2);
 if (wasmPath === "--self-test") {
   let calls = 0;
+  let staleChecksumRejected = false;
   try {
     measure(
       () => {
@@ -46,12 +55,31 @@ if (wasmPath === "--self-test") {
     );
   } catch (error) {
     if (error.message === "WASM performance measured invocation failed") {
-      process.stdout.write("wasm_measurement_falsifier=pass\n");
-      process.exit(0);
+      staleChecksumRejected = true;
+    } else {
+      throw error;
     }
-    throw error;
   }
-  throw new Error("WASM performance stale-checksum falsifier was accepted");
+  if (!staleChecksumRejected) {
+    throw new Error("WASM performance stale-checksum falsifier was accepted");
+  }
+
+  let constantExportRejected = false;
+  try {
+    measure(bindMachineWorkload(() => 1), 1, 1, 1);
+  } catch (error) {
+    if (error.message === "WASM performance warmup invocation failed") {
+      constantExportRejected = true;
+    } else {
+      throw error;
+    }
+  }
+  if (!constantExportRejected) {
+    throw new Error("WASM performance constant export was accepted");
+  }
+
+  process.stdout.write("wasm_measurement_falsifier=pass\n");
+  process.exit(0);
 }
 if (!wasmPath || !exportName) {
   throw new Error("usage: node measure_wasm.mjs <machine.wasm> <export>");
@@ -69,4 +97,7 @@ if (typeof run !== "function") {
   throw new Error(`missing WASM performance export: ${exportName}`);
 }
 
-process.stdout.write(`${measure(run)}\n`);
+const workload = exportName === "boundaryMachinePerformanceOneEffect"
+  ? bindMachineWorkload(run)
+  : run;
+process.stdout.write(`${measure(workload)}\n`);

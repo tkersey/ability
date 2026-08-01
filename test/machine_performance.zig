@@ -78,7 +78,7 @@ var wasm_restored_storage: [4096]u8 = undefined;
 
 /// Import-free one-effect WASM witness for the same compiled Machine measured
 /// by the native performance test.
-pub export fn boundaryMachinePerformanceOneEffect() u32 {
+pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {
     var source = std.heap.FixedBufferAllocator.init(&wasm_source_storage);
     const state =
         PerformanceMachine.initialState(source.allocator(), {}) catch return 0;
@@ -117,7 +117,7 @@ pub export fn boundaryMachinePerformanceOneEffect() u32 {
     defer PerformanceMachine.deinitPreparedResume(prepared_resume);
     PerformanceMachine.@"resume"(
         prepared_resume,
-        @as(i32, @intCast(payload_length)),
+        response,
     ) catch return 0;
 
     const done = switch (PerformanceMachine.step(
@@ -128,7 +128,7 @@ pub export fn boundaryMachinePerformanceOneEffect() u32 {
         else => return 0,
     };
     defer done.deinit();
-    return if (done.value().* == @as(i32, @intCast(payload_length))) 1 else 0;
+    return done.value().*;
 }
 
 fn oneEffectLifecycle() !u64 {

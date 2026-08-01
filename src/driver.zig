@@ -5,6 +5,27 @@ pub fn Driver(comptime Machine: type) type {
     return struct {
         const Self = @This();
 
+        fn requireSemanticSite(
+            comptime Handler: type,
+            comptime Site: type,
+        ) void {
+            if (!@hasDecl(Handler, "semantic_site_identities")) {
+                @compileError(
+                    "Boundary Driver handlers must declare semantic_site_identities",
+                );
+            }
+            inline for (Handler.semantic_site_identities) |identity| {
+                if (std.mem.eql(
+                    u8,
+                    identity,
+                    Site.semantic_identity,
+                )) return;
+            }
+            @compileError(
+                "Boundary Driver handler does not admit effect site semantic identity",
+            );
+        }
+
         /// Outcomes not consumed internally by typed effect handlers.
         pub const Outcome = union(enum) {
             yielded,
@@ -54,6 +75,13 @@ pub fn Driver(comptime Machine: type) type {
                     }
                     switch (request.value) {
                         inline else => |payload, tag| {
+                            const Site = Machine.EffectRow.site(
+                                comptime @intFromEnum(tag),
+                            );
+                            comptime requireSemanticSite(
+                                @TypeOf(handlers.*),
+                                Site,
+                            );
                             const prepared_resume =
                                 try Machine.prepareResume(
                                     self.state,
@@ -63,16 +91,13 @@ pub fn Driver(comptime Machine: type) type {
                                 prepared_resume,
                             );
                             const response = handlers.handle(
-                                tag,
+                                Site,
                                 payload,
                                 request.identity,
                             ) catch |err| return .{ .handler_error = .{
                                 .request = request,
                                 .err = err,
                             } };
-                            const Site = Machine.EffectRow.site(
-                                comptime @intFromEnum(tag),
-                            );
                             if (comptime @TypeOf(response) != Site.Resume) {
                                 @compileError(
                                     "Boundary Machine response type must match the selected effect site Resume type",

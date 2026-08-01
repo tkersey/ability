@@ -51,6 +51,9 @@ require_current_wasm_schema() {
     rg -Fq 'pub const Resume = i32;' "$current_source"
     rg -Fq 'pub const Result = i32;' "$current_source"
     rg -Fq 'RequestPayload.fromSlice("payload")' "$current_source"
+    rg -Fq \
+        'pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {' \
+        "$current_source"
 }
 
 require_baseline_wasm_schema() {

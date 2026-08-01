@@ -3983,7 +3983,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     if (@TypeOf(response) != Site.Resume) {
                         break :blk error.ProgramContractViolation;
                     }
-                    _ = portable_value.encodedSize(
+                    const canonical_response = portable_value.canonicalValue(
                         Site.Resume,
                         response,
                     ) catch break :blk error.ProgramContractViolation;
@@ -4009,7 +4009,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     applyResumeEdge(
                         suspension.continuation,
                         &store,
-                        response,
+                        canonical_response,
                     );
                     break :blk frameForIncoming(
                         constructor.source_block,

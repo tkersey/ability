@@ -532,6 +532,7 @@ pub fn assertPortable(comptime T: type) void {
 
 fn canonicalDefaultValue(comptime T: type) T {
     comptime assertPortable(T);
+    if (comptime maximumEncodedSize(T) == 0) return std.mem.zeroes(T);
     if (comptime isBytes(T) or isText(T) or isVector(T)) return T.empty();
     return switch (@typeInfo(T)) {
         .void => {},
@@ -564,6 +565,79 @@ fn canonicalDefaultValue(comptime T: type) T {
                 }
             }
             unreachable;
+        },
+        else => unreachable,
+    };
+}
+
+/// Rebuild one portable value into its unique owned representation.
+pub fn canonicalValue(comptime T: type, value: T) Error!T {
+    comptime assertPortable(T);
+    if (comptime maximumEncodedSize(T) == 0) return std.mem.zeroes(T);
+    if (comptime isBytes(T) or isText(T)) {
+        if (value.logical_length > T.maximum_length) return error.Malformed;
+        return T.fromSlice(value.storage[0..@intCast(value.logical_length)]);
+    }
+    if (comptime isVector(T)) {
+        if (value.logical_length > T.maximum_length) return error.Malformed;
+        var result = T.empty();
+        if (comptime maximumEncodedSize(T.ElementType) == 0) {
+            result.logical_length = value.logical_length;
+            return result;
+        }
+        for (value.slice(), 0..) |item, index| {
+            result.storage[index] = try canonicalValue(T.ElementType, item);
+        }
+        result.logical_length = value.logical_length;
+        return result;
+    }
+    return switch (@typeInfo(T)) {
+        .void => {},
+        .bool, .int => value,
+        .array => |info| blk: {
+            var result: T = undefined;
+            for (value, 0..) |item, index| {
+                result[index] = try canonicalValue(info.child, item);
+            }
+            break :blk result;
+        },
+        .optional => |info| if (value) |payload|
+            try canonicalValue(info.child, payload)
+        else
+            null,
+        .@"enum" => |info| blk: {
+            const raw = @intFromEnum(value);
+            inline for (info.fields) |field| {
+                if (raw == field.value) break :blk @field(T, field.name);
+            }
+            break :blk error.InvalidTag;
+        },
+        .@"struct" => |info| blk: {
+            var result: T = undefined;
+            inline for (info.fields) |field| {
+                @field(result, field.name) = try canonicalValue(
+                    field.type,
+                    @field(value, field.name),
+                );
+            }
+            break :blk result;
+        },
+        .@"union" => |info| blk: {
+            const Tag = info.tag_type.?;
+            const active_tag = std.meta.activeTag(value);
+            inline for (info.fields) |field| {
+                if (active_tag == @field(Tag, field.name)) {
+                    break :blk @unionInit(
+                        T,
+                        field.name,
+                        try canonicalValue(
+                            field.type,
+                            @field(value, field.name),
+                        ),
+                    );
+                }
+            }
+            break :blk error.InvalidTag;
         },
         else => unreachable,
     };
@@ -1228,6 +1302,25 @@ test "Bytes encoding observes logical bytes and ignores spare capacity" {
     );
 }
 
+test "canonicalValue recursively removes bounded spare storage" {
+    const Item = struct {
+        label: Text(4),
+    };
+    const Items = Vector(Item, 2);
+
+    var label = try Text(4).fromSlice("ok");
+    label.storage[3] = 0xff;
+    var items = Items.empty();
+    items.storage[0] = .{ .label = label };
+    items.logical_length = 1;
+    items.storage[1].label.storage[0] = 0xee;
+
+    const canonical = try canonicalValue(Items, items);
+    try std.testing.expectEqualStrings("ok", canonical.storage[0].label.slice());
+    try std.testing.expectEqual(@as(u8, 0), canonical.storage[0].label.storage[3]);
+    try std.testing.expectEqual(@as(u8, 0), canonical.storage[1].label.storage[0]);
+}
+
 test "Bytes shrinking resets every vacated byte" {
     const Value = Bytes(8);
     var value = try Value.fromSlice("secrets!");
@@ -1659,6 +1752,17 @@ test "zero-width vector codec and equality are constant in logical length" {
     );
     maximum.clear();
     try std.testing.expectEqual(@as(u32, 0), maximum.len());
+}
+
+test "zero-width aggregate defaults are constant in aggregate width" {
+    const Element = [10_000]void;
+    const Values = Vector(Element, 1);
+    var values = Values.empty();
+
+    try values.push(undefined);
+    try std.testing.expectEqual(@as(u32, 1), values.len());
+    values.clear();
+    try std.testing.expectEqual(@as(u32, 0), values.len());
 }
 
 test "nested zero-width portable values use one canonical constant-time quotient" {
