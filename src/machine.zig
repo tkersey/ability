@@ -1449,6 +1449,13 @@ pub fn Machine(
             return .yielded;
         }
 
+        fn definitionCostOverflows(frame: Frame) bool {
+            if (comptime hasDeclSafe(Definition, "costOverflows")) {
+                return Definition.costOverflows(frame);
+            }
+            return false;
+        }
+
         /// Run direct generated segments to one request, yield, result, or failure.
         pub fn step(state: State, caller_fuel: *u64) Error!Outcome {
             const original = storedConst(state);
@@ -1460,6 +1467,9 @@ pub fn Machine(
                 return error.ProgramContractViolation;
             }
             if (caller_fuel.* < original_minimum_cost) return .yielded;
+            if (definitionCostOverflows(original_frame)) {
+                return .{ .failed = .execution_budget_exceeded };
+            }
             const original_cost = Definition.cost(original_frame);
             if (original_cost < original_minimum_cost) {
                 return error.ProgramContractViolation;
@@ -1482,6 +1492,12 @@ pub fn Machine(
                 if (minimum_cost == 0) return error.ProgramContractViolation;
                 if (remaining_fuel < minimum_cost) {
                     return commitYield(state, &candidate, caller_fuel, remaining_fuel);
+                }
+                if (first_cost == null and definitionCostOverflows(frame)) {
+                    candidate.terminal = true;
+                    try commit(state, &candidate);
+                    caller_fuel.* = remaining_fuel;
+                    return .{ .failed = .execution_budget_exceeded };
                 }
                 const cost = first_cost orelse Definition.cost(frame);
                 first_cost = null;

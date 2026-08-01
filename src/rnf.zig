@@ -1750,25 +1750,14 @@ pub fn NormalForm(
                 }
             }
 
-            for (canonical_values.values[0..canonical_values.len]) |value| {
-                if (!required.contains(value)) continue;
-                if (comptime maximum_environment_fields == 0) {
-                    return error.TooManyEnvironmentFields;
-                }
-                if (constructor.environment_len == maximum_environment_fields) {
-                    return error.TooManyEnvironmentFields;
-                }
-                constructor.environment[constructor.environment_len] = .{
-                    .value = value,
-                    .value_type = program.value_types[@intCast(value)],
-                };
-                constructor.environment_len += 1;
-            }
             const source_function = program.blocks[
                 @intCast(source_block)
             ].function_id;
             if (source_function != 0) {
                 constructor.has_activation_context = true;
+                if (comptime maximum_environment_fields == 0) {
+                    return error.TooManyEnvironmentFields;
+                }
                 var function_entry: control_ir.BlockId = undefined;
                 for (program.functions) |function| {
                     if (function.id == source_function) {
@@ -1789,8 +1778,7 @@ pub fn NormalForm(
                         }
                     }
                     if (!is_entry_parameter) continue;
-                    if (constructor.environment_len +
-                        constructor.activation_len + 1 >=
+                    if (constructor.activation_len + 1 >=
                         maximum_environment_fields)
                     {
                         return error.TooManyEnvironmentFields;
@@ -1801,12 +1789,36 @@ pub fn NormalForm(
                     };
                     constructor.activation_len += 1;
                 }
-                if (constructor.environment_len +
-                    constructor.activation_len + 1 >
+            }
+            for (canonical_values.values[0..canonical_values.len]) |value| {
+                if (!required.contains(value)) continue;
+                var activation_owned = false;
+                for (constructor.activationFields()) |field| {
+                    if (field.value == value) {
+                        activation_owned = true;
+                        break;
+                    }
+                }
+                if (constructor.origin == .call_entry and activation_owned) {
+                    continue;
+                }
+                if (comptime maximum_environment_fields == 0) {
+                    return error.TooManyEnvironmentFields;
+                }
+                const activation_count = if (constructor.has_activation_context)
+                    constructor.activation_len + 1
+                else
+                    0;
+                if (constructor.environment_len + activation_count ==
                     maximum_environment_fields)
                 {
                     return error.TooManyEnvironmentFields;
                 }
+                constructor.environment[constructor.environment_len] = .{
+                    .value = value,
+                    .value_type = program.value_types[@intCast(value)],
+                };
+                constructor.environment_len += 1;
             }
             for (self.constructorSlice()) |*existing| {
                 if (equivalent(existing, &constructor)) return existing.id;
@@ -4819,11 +4831,7 @@ test "RNF projects caller facts while call stacks own argument binding" {
         @as(control_ir.ValueId, 2),
         call_entry.activationFields()[0].value,
     );
-    try std.testing.expectEqual(@as(usize, 1), call_entry.environment_len);
-    try std.testing.expectEqual(
-        @as(control_ir.ValueId, 2),
-        call_entry.environmentFields()[0].value,
-    );
+    try std.testing.expectEqual(@as(usize, 0), call_entry.environment_len);
     try std.testing.expectEqual(@as(usize, 1), call_entry.invariant_len);
     switch (call_entry.invariantTerms()[0]) {
         .integer_zero => |fact| {

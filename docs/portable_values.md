@@ -23,7 +23,9 @@ boundary.Vector(T, MaxItems)
 
 Capacity is compile-time and contract-bearing. Canonical encoding stores only
 logical length and live contents; spare storage and allocator identity are not
-observable. Capacity overflow and invalid UTF-8 fail before mutation.
+observable. Vector pop, truncate, and clear reset every vacated element to its
+canonical default before returning. Capacity overflow and invalid UTF-8 fail
+before mutation.
 
 The source algebra includes deterministic fixed-width integer computation,
 branching, product construction/extraction, vector construction and access, and

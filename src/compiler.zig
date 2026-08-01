@@ -273,6 +273,9 @@ fn segmentStoreType(
     inline for (constructor.environmentFields()) |field| {
         included[@intCast(field.value)] = true;
     }
+    inline for (constructor.activationFields()) |field| {
+        included[@intCast(field.value)] = true;
+    }
     const block = program.blocks[@intCast(constructor.source_block)];
     inline for (block.instructions) |instruction| {
         included[@intCast(instruction.result)] = true;
@@ -1920,7 +1923,7 @@ fn compilerSemanticDigest(
     canonical: anytype,
 ) [32]u8 {
     var hasher = SemanticHasher.init(.{});
-    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v3");
+    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
     semanticHashBytes(
         &hasher,
         "segment-fuel=preflight-resource-shape-v3",
@@ -2391,6 +2394,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const field = comptime constructor.activation[field_index];
                     @field(store, activationValueName(field.value)) =
                         @field(environment, activationValueName(field.value));
+                    @field(store, valueName(field.value)) =
+                        @field(environment, activationValueName(field.value));
                 }
             }
             inline for (0..constructor.environment_len) |field_index| {
@@ -2398,6 +2403,27 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 @field(store, valueName(field.value)) =
                     @field(environment, valueName(field.value));
             }
+        }
+
+        fn environmentValue(
+            comptime constructor_id: usize,
+            environment: anytype,
+            comptime value: control_ir.ValueId,
+        ) @FieldType(ValueCatalog, valueName(value)) {
+            const constructor = comptime normal_form.constructors[constructor_id];
+            inline for (0..constructor.environment_len) |field_index| {
+                const field = comptime constructor.environment[field_index];
+                if (field.value == value) {
+                    return @field(environment, valueName(value));
+                }
+            }
+            inline for (0..constructor.activation_len) |field_index| {
+                const field = comptime constructor.activation[field_index];
+                if (field.value == value) {
+                    return @field(environment, activationValueName(value));
+                }
+            }
+            unreachable;
         }
 
         fn frameForBlock(
@@ -2570,8 +2596,17 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             );
         }
 
-        fn addFuelCost(total: *u64, amount: u64) void {
-            total.* +|= amount;
+        const PreparedCost = struct {
+            value: u64,
+            overflowed: bool = false,
+        };
+
+        fn addFuelCost(total: *PreparedCost, amount: u64) void {
+            total.value = std.math.add(u64, total.value, amount) catch {
+                total.overflowed = true;
+                total.value = std.math.maxInt(u64);
+                return;
+            };
         }
 
         fn encodedBytes(comptime T: type, value: T) u64 {
@@ -3571,14 +3606,18 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         fn preflightCostConstructor(
             comptime constructor_id: usize,
             environment: anytype,
-        ) u64 {
+        ) PreparedCost {
             const constructor = comptime normal_form.constructors[constructor_id];
-            var fuel_cost = baseCostForConstructor(constructor_id);
+            var fuel_cost: PreparedCost = .{
+                .value = baseCostForConstructor(constructor_id),
+            };
+            var sizes = [_]u64{0} ** limits.maximum_values;
             inline for (0..constructor.activation_len) |field_index| {
                 const field = comptime constructor.activation[field_index];
                 const name = comptime activationValueName(field.value);
                 const Value = @FieldType(@TypeOf(environment), name);
                 const size = encodedBytes(Value, @field(environment, name));
+                sizes[@intCast(field.value)] = size;
                 addFuelCost(
                     &fuel_cost,
                     dynamicBytesCost(Value, size),
@@ -3589,12 +3628,13 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             {
                 return fuel_cost;
             }
-            var sizes = [_]u64{0} ** limits.maximum_values;
+            var store: SegmentStore(constructor_id) = undefined;
+            loadEnvironment(constructor_id, environment, &store);
             inline for (0..constructor.environment_len) |field_index| {
                 const field = comptime constructor.environment[field_index];
                 const name = comptime valueName(field.value);
                 const Value = @FieldType(ValueCatalog, name);
-                const size = encodedBytes(Value, @field(environment, name));
+                const size = encodedBytes(Value, @field(store, name));
                 sizes[@intCast(field.value)] = size;
                 addFuelCost(
                     &fuel_cost,
@@ -3793,7 +3833,16 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 inline else => |environment, tag| preflightCostConstructor(
                     comptime @intFromEnum(tag),
                     environment,
-                ),
+                ).value,
+            };
+        }
+
+        pub fn costOverflows(frame: Frame) bool {
+            return switch (frame) {
+                inline else => |environment, tag| preflightCostConstructor(
+                    comptime @intFromEnum(tag),
+                    environment,
+                ).overflowed,
             };
         }
 
@@ -3829,7 +3878,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const payload_value = suspension.request_values[0];
                     break :blk requestFor(
                         suspension.site_id.?,
-                        @field(environment, valueName(payload_value)),
+                        environmentValue(
+                            constructor_id,
+                            environment,
+                            payload_value,
+                        ),
                     );
                 },
             };
@@ -3909,7 +3962,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     if (!portable_value.eqlValue(
                         @TypeOf(@field(request, request_field)),
                         @field(request, request_field),
-                        @field(environment, valueName(payload_value)),
+                        environmentValue(
+                            constructor_id,
+                            environment,
+                            payload_value,
+                        ),
                     )) {
                         break :blk error.ProgramContractViolation;
                     }
@@ -4016,7 +4073,11 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             var store: SegmentStore(constructor_id) = undefined;
             loadEnvironment(constructor_id, environment, &store);
             const name = comptime valueName(result);
-            const actual = @field(environment, name);
+            const actual = environmentValue(
+                constructor_id,
+                environment,
+                result,
+            );
             if (executeInstructions(validation_block, &store) != null) {
                 return false;
             }
@@ -4036,91 +4097,93 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             environment: anytype,
         ) error{ProgramContractViolation}!void {
             const constructor = comptime normal_form.constructors[constructor_id];
+            var store: SegmentStore(constructor_id) = undefined;
+            loadEnvironment(constructor_id, environment, &store);
             inline for (0..constructor.invariant_len) |term_index| {
                 const term = comptime constructor.invariants[term_index];
                 const accepted = switch (term) {
                     .boolean => |predicate| @field(
-                        environment,
+                        store,
                         valueName(predicate.value),
                     ) == predicate.expected,
                     .boolean_copy => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == @field(
-                        environment,
+                        store,
                         valueName(definition.source),
                     ),
                     .boolean_not => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == !@field(
-                        environment,
+                        store,
                         valueName(definition.operand),
                     ),
                     .boolean_binary => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == (switch (definition.operation) {
                         .@"and" => @field(
-                            environment,
+                            store,
                             valueName(definition.left),
                         ) and @field(
-                            environment,
+                            store,
                             valueName(definition.right),
                         ),
                         .@"or" => @field(
-                            environment,
+                            store,
                             valueName(definition.left),
                         ) or @field(
-                            environment,
+                            store,
                             valueName(definition.right),
                         ),
                     }),
                     .boolean_select => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == if (@field(
-                        environment,
+                        store,
                         valueName(definition.condition),
                     ))
                         @field(
-                            environment,
+                            store,
                             valueName(definition.then_value),
                         )
                     else
                         @field(
-                            environment,
+                            store,
                             valueName(definition.else_value),
                         ),
                     .value_copy => |definition| portable_value.eqlValue(
                         @TypeOf(@field(
-                            environment,
+                            store,
                             valueName(definition.result),
                         )),
-                        @field(environment, valueName(definition.result)),
-                        @field(environment, valueName(definition.source)),
+                        @field(store, valueName(definition.result)),
+                        @field(store, valueName(definition.source)),
                     ),
                     .value_constant => |definition| invariantValueMatches(
-                        @field(environment, valueName(definition.result)),
+                        @field(store, valueName(definition.result)),
                         definition.contents,
                     ),
                     .value_select => |definition| portable_value.eqlValue(
                         @TypeOf(@field(
-                            environment,
+                            store,
                             valueName(definition.result),
                         )),
-                        @field(environment, valueName(definition.result)),
+                        @field(store, valueName(definition.result)),
                         if (@field(
-                            environment,
+                            store,
                             valueName(definition.condition),
                         ))
                             @field(
-                                environment,
+                                store,
                                 valueName(definition.then_value),
                             )
                         else
                             @field(
-                                environment,
+                                store,
                                 valueName(definition.else_value),
                             ),
                     ),
@@ -4131,7 +4194,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     ),
                     .product_extract_result => |definition| blk: {
                         const product = @field(
-                            environment,
+                            store,
                             valueName(definition.product),
                         );
                         const Product = @TypeOf(product);
@@ -4140,13 +4203,13 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         ];
                         break :blk portable_value.eqlValue(
                             field.type,
-                            @field(environment, valueName(definition.result)),
+                            @field(store, valueName(definition.result)),
                             @field(product, field.name),
                         );
                     },
                     .sum_extract_result => |definition| blk: {
                         const sum = @field(
-                            environment,
+                            store,
                             valueName(definition.sum),
                         );
                         const Sum = @TypeOf(sum);
@@ -4159,65 +4222,65 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         }
                         break :blk portable_value.eqlValue(
                             field.type,
-                            @field(environment, valueName(definition.result)),
+                            @field(store, valueName(definition.result)),
                             @field(sum, field.name),
                         );
                     },
                     .bounded_length_result => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == @field(
-                        environment,
+                        store,
                         valueName(definition.bounded),
                     ).len(),
                     .integer_unary_result => |definition| rnf.integerUnaryDefinitionHolds(
-                        @field(environment, valueName(definition.result)),
-                        @field(environment, valueName(definition.operand)),
+                        @field(store, valueName(definition.result)),
+                        @field(store, valueName(definition.operand)),
                         definition.operation,
                     ),
                     .integer_binary_result => |definition| rnf.integerBinaryDefinitionHolds(
-                        @field(environment, valueName(definition.result)),
-                        @field(environment, valueName(definition.left)),
-                        @field(environment, valueName(definition.right)),
+                        @field(store, valueName(definition.result)),
+                        @field(store, valueName(definition.left)),
+                        @field(store, valueName(definition.right)),
                         definition.operation,
                     ),
                     .integer_convert_result => |definition| rnf.integerConvertDefinitionHolds(
-                        @field(environment, valueName(definition.result)),
-                        @field(environment, valueName(definition.operand)),
+                        @field(store, valueName(definition.result)),
+                        @field(store, valueName(definition.operand)),
                     ),
                     .integer_zero => |predicate| (@field(
-                        environment,
+                        store,
                         valueName(predicate.value),
                     ) == 0) == predicate.equal,
                     .integer_zero_result => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == (@field(
-                        environment,
+                        store,
                         valueName(definition.value),
                     ) == 0),
                     .integer_relation => |predicate| rnf.integerRelationHolds(
-                        @field(environment, valueName(predicate.left)),
-                        @field(environment, valueName(predicate.right)),
+                        @field(store, valueName(predicate.left)),
+                        @field(store, valueName(predicate.right)),
                         predicate.relation,
                     ) == predicate.expected,
                     .integer_relation_result => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == rnf.integerRelationHolds(
-                        @field(environment, valueName(definition.left)),
-                        @field(environment, valueName(definition.right)),
+                        @field(store, valueName(definition.left)),
+                        @field(store, valueName(definition.right)),
                         definition.relation,
                     ),
                     .sum_case => |predicate| (algebraicCaseIndex(@field(
-                        environment,
+                        store,
                         valueName(predicate.value),
                     )) == predicate.case_index) == predicate.equal,
                     .sum_case_result => |definition| @field(
-                        environment,
+                        store,
                         valueName(definition.result),
                     ) == (algebraicCaseIndex(@field(
-                        environment,
+                        store,
                         valueName(definition.value),
                     )) == definition.case_index),
                 };
@@ -4283,6 +4346,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         ) bool {
             const constructor = comptime normal_form.constructors[constructor_id];
             inline for (constructor.environmentFields()) |field| {
+                if (field.value == value) return true;
+            }
+            inline for (constructor.activationFields()) |field| {
                 if (field.value == value) return true;
             }
             return false;
@@ -4356,12 +4422,13 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                                     const equal = portable_value.eqlValue(
                                         Value,
                                         @field(
-                                            parent_environment,
-                                            valueName(source),
-                                        ),
-                                        @field(
                                             child_environment,
                                             activationValueName(parameter),
+                                        ),
+                                        environmentValue(
+                                            parent_constructor_id,
+                                            parent_environment,
+                                            source,
                                         ),
                                     );
                                     if (!equal) {

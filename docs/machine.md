@@ -45,7 +45,9 @@ result. Before executing the segment, a generated resource-shape pass starts
 from the exact environment and propagates canonical encoded sizes through the
 closed instruction sequence. It uses exact subvalue sizes when they are
 available and contract-bounded upper estimates otherwise; it does not construct
-the result or invoke the segment plan. Insufficient caller fuel therefore
+the result or invoke the segment plan. Cost addition is checked; a mathematical
+cost beyond `u64` fails with `execution_budget_exceeded` before the overflowing
+segment executes. Insufficient caller fuel therefore
 yields at the same constructor before reducer execution, while an exhausted
 Machine budget terminates with `execution_budget_exceeded`. If earlier segments
 completed in the same call, their exact scheduled charges remain reflected in

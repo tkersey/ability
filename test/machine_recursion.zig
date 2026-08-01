@@ -562,6 +562,187 @@ const HelperBackedgeProgram = program_v2.program(
     HelperBackedgeBody,
 );
 
+const ObserveCurrent = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity = "observe-current.v1";
+    pub const Payload = u32;
+    pub const Resume = u32;
+};
+const observed_root_call_arguments = [_]cir.EdgeArgument{
+    .{ .value = 1 },
+    .{ .value = 0 },
+};
+const observed_root_return_arguments = [_]cir.EdgeArgument{.@"resume"};
+const observed_effect_arguments = [_]cir.EdgeArgument{
+    .{ .value = 2 },
+    .{ .value = 3 },
+    .@"resume",
+};
+const observed_then_arguments = [_]cir.EdgeArgument{
+    .{ .value = 4 },
+    .{ .value = 5 },
+};
+const observed_else_arguments = [_]cir.EdgeArgument{.{ .value = 4 }};
+const observed_repeat_arguments = [_]cir.EdgeArgument{
+    .{ .value = 11 },
+    .{ .value = 9 },
+};
+const observed_root_instructions = [_]cir.Instruction{.{
+    .kind = .constant,
+    .result = 1,
+    .operation = .{ .constant = 0 },
+}};
+const observed_compare_instructions = [_]cir.Instruction{.{
+    .kind = .pure,
+    .result = 7,
+    .operands = &.{ 4, 5 },
+    .operation = .integer_less_than,
+}};
+const observed_increment_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 10,
+        .operation = .{ .constant = 1 },
+    },
+    .{
+        .kind = .pure,
+        .result = 11,
+        .operands = &.{ 8, 10 },
+        .operation = .integer_add,
+    },
+};
+const observed_backedge_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &observed_root_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 1,
+                .arguments = &observed_root_call_arguments,
+            },
+            .continuation = .{
+                .target = 5,
+                .arguments = &observed_root_return_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 1,
+        .function_id = 1,
+        .role = .loop_header,
+        .parameters = &.{ 2, 3 },
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{2},
+            .continuation = .{
+                .target = 2,
+                .arguments = &observed_effect_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 2,
+        .function_id = 1,
+        .parameters = &.{ 4, 5, 6 },
+        .instructions = &observed_compare_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 7,
+            .then_edge = .{
+                .target = 3,
+                .arguments = &observed_then_arguments,
+            },
+            .else_edge = .{
+                .target = 4,
+                .arguments = &observed_else_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 3,
+        .function_id = 1,
+        .parameters = &.{ 8, 9 },
+        .instructions = &observed_increment_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .explicit_yield,
+            .continuation = .{
+                .target = 1,
+                .arguments = &observed_repeat_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 4,
+        .function_id = 1,
+        .parameters = &.{12},
+        .terminator = .{ .return_to_caller = 12 },
+    },
+    .{
+        .id = 5,
+        .role = .terminal_handoff,
+        .parameters = &.{13},
+        .terminator = .{ .return_value = 13 },
+    },
+};
+
+const ObservedBackedgeBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum {
+        arithmetic_overflow,
+    };
+    pub const constants = .{
+        @as(u32, 0),
+        @as(u32, 1),
+    };
+    pub const effect_sites = .{ObserveCurrent};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "observed-helper-entry-backedge",
+        .value_types = &.{
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .boolean },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+        },
+        .blocks = &observed_backedge_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+        .functions = &.{
+            .{
+                .id = 0,
+                .entry = 0,
+                .result_type = .{ .scalar = .u32 },
+            },
+            .{
+                .id = 1,
+                .entry = 1,
+                .result_type = .{ .scalar = .u32 },
+            },
+        },
+    };
+};
+
+const ObservedBackedgeProgram = program_v2.program(
+    "observed-helper-entry-backedge",
+    ObservedBackedgeBody,
+);
+
 test "compiled bounded recursive frames survive canonical round trip" {
     var call_return_count: usize = 0;
     for (Program.rnf.constructorSlice()) |constructor| {
@@ -638,6 +819,26 @@ test "helper entry backedges rebind future state without overwriting activation 
         .suspension,
         HelperBackedgeProgram.rnf.constructors[progressed_entry_id].origin,
     );
+    const call_entry = HelperBackedgeProgram.rnf.constructors[call_entry_id];
+    const progressed_entry = HelperBackedgeProgram.rnf.constructors[
+        progressed_entry_id
+    ];
+    try std.testing.expect(call_entry.activation_len > 0);
+    for (call_entry.activationFields()) |activation_field| {
+        for (call_entry.environmentFields()) |environment_field| {
+            try std.testing.expect(
+                activation_field.value != environment_field.value,
+            );
+        }
+    }
+    var progressed_overlap = false;
+    for (progressed_entry.activationFields()) |activation_field| {
+        for (progressed_entry.environmentFields()) |environment_field| {
+            progressed_overlap = progressed_overlap or
+                activation_field.value == environment_field.value;
+        }
+    }
+    try std.testing.expect(progressed_overlap);
 
     const BackedgeMachine = HelperBackedgeProgram.compile(.{
         .maximum_frames = 2,
@@ -668,6 +869,70 @@ test "helper entry backedges rebind future state without overwriting activation 
         try BackedgeMachine.step(restored, &caller_fuel),
     );
     const done = switch (try BackedgeMachine.step(restored, &caller_fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 2), done.value().*);
+}
+
+test "progressed helper requests observe current environment before activation" {
+    const ObservedMachine = ObservedBackedgeProgram.compile(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const state = try ObservedMachine.initialState(std.testing.allocator, 2);
+    defer ObservedMachine.deinitState(state);
+    var caller_fuel: u64 = 64;
+
+    const first = switch (try ObservedMachine.step(state, &caller_fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    switch (first.value) {
+        .s0 => |payload| try std.testing.expectEqual(@as(u32, 0), payload),
+    }
+    {
+        const prepared = try ObservedMachine.prepareResume(state, first);
+        defer ObservedMachine.deinitPreparedResume(prepared);
+        try ObservedMachine.@"resume"(prepared, @as(u32, 0));
+    }
+    try std.testing.expectEqual(
+        ObservedMachine.Outcome.yielded,
+        try ObservedMachine.step(state, &caller_fuel),
+    );
+
+    const second = switch (try ObservedMachine.step(state, &caller_fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    switch (second.value) {
+        .s0 => |payload| try std.testing.expectEqual(@as(u32, 1), payload),
+    }
+    {
+        const prepared = try ObservedMachine.prepareResume(state, second);
+        defer ObservedMachine.deinitPreparedResume(prepared);
+        try ObservedMachine.@"resume"(prepared, @as(u32, 0));
+    }
+    try std.testing.expectEqual(
+        ObservedMachine.Outcome.yielded,
+        try ObservedMachine.step(state, &caller_fuel),
+    );
+
+    const third = switch (try ObservedMachine.step(state, &caller_fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    switch (third.value) {
+        .s0 => |payload| try std.testing.expectEqual(@as(u32, 2), payload),
+    }
+    {
+        const prepared = try ObservedMachine.prepareResume(state, third);
+        defer ObservedMachine.deinitPreparedResume(prepared);
+        try ObservedMachine.@"resume"(prepared, @as(u32, 0));
+    }
+    const done = switch (try ObservedMachine.step(state, &caller_fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,
     };

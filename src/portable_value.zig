@@ -336,21 +336,32 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
             if (self.logical_length > maximum_items) return null;
             if (self.logical_length == 0) return null;
             self.logical_length -= 1;
-            return self.storage[@intCast(self.logical_length)];
+            const index: usize = @intCast(self.logical_length);
+            const item = self.storage[index];
+            self.storage[index] = canonicalDefaultValue(Element);
+            return item;
         }
 
         /// Shorten the vector without observing spare storage.
         pub fn truncate(self: *Self, new_length: u32) void {
             if (self.logical_length > maximum_items) {
+                for (&self.storage) |*item| {
+                    item.* = canonicalDefaultValue(Element);
+                }
                 self.logical_length = 0;
                 return;
             }
-            if (new_length < self.logical_length) self.logical_length = new_length;
+            if (new_length >= self.logical_length) return;
+            const old_length = self.logical_length;
+            for (self.storage[new_length..old_length]) |*item| {
+                item.* = canonicalDefaultValue(Element);
+            }
+            self.logical_length = new_length;
         }
 
         /// Clear all logical elements.
         pub fn clear(self: *Self) void {
-            self.logical_length = 0;
+            self.truncate(0);
         }
 
         /// Compare logical elements structurally.
@@ -1225,6 +1236,38 @@ test "canonical equality ignores spare storage recursively" {
     };
 
     try std.testing.expect(eqlValue(Items, left, right));
+}
+
+test "vector shrinking resets every vacated product slot" {
+    const Item = struct {
+        secret: u32,
+        present: bool,
+    };
+    const Items = Vector(Item, 3);
+
+    var items = try Items.fromSlice(&.{
+        .{ .secret = 11, .present = true },
+        .{ .secret = 22, .present = true },
+        .{ .secret = 33, .present = true },
+    });
+    const popped = items.pop().?;
+    try std.testing.expectEqual(@as(u32, 33), popped.secret);
+    try std.testing.expectEqual(@as(u32, 0), items.storage[2].secret);
+    try std.testing.expect(!items.storage[2].present);
+
+    items.truncate(1);
+    try std.testing.expectEqual(@as(u32, 0), items.storage[1].secret);
+    try std.testing.expect(!items.storage[1].present);
+
+    items.clear();
+    try std.testing.expectEqual(@as(u32, 0), items.storage[0].secret);
+    try std.testing.expect(!items.storage[0].present);
+
+    items.storage[2] = .{ .secret = 99, .present = true };
+    items.logical_length = 4;
+    items.truncate(0);
+    try std.testing.expectEqual(@as(u32, 0), items.storage[2].secret);
+    try std.testing.expect(!items.storage[2].present);
 }
 
 test "bounded defaults initialize all storage and malformed lengths stay total" {

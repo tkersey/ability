@@ -29,31 +29,45 @@ const blocks = [_]cir.Block{
     },
 };
 
-const Body = struct {
-    pub const InitialArgs = Text;
-    pub const Result = Text;
-    pub const Failure = enum {
-        capacity_exceeded,
-        invalid_utf8,
+fn BodyWithBlockCost(comptime block_cost: u64) type {
+    return struct {
+        pub const InitialArgs = Text;
+        pub const Result = Text;
+        pub const Failure = enum {
+            capacity_exceeded,
+            invalid_utf8,
+        };
+        pub const constants = .{
+            Text.fromSlice("!") catch unreachable,
+        };
+        pub const effect_sites = .{};
+        pub const schema_types = .{Text};
+        pub const block_costs = [_]u64{block_cost};
+        pub const control_ir: cir.Program = .{
+            .label = "dynamic-fuel",
+            .value_types = &.{ text_type, text_type, text_type },
+            .blocks = &blocks,
+            .entry = 0,
+            .result_type = text_type,
+        };
     };
-    pub const constants = .{
-        Text.fromSlice("!") catch unreachable,
-    };
-    pub const effect_sites = .{};
-    pub const schema_types = .{Text};
-    pub const control_ir: cir.Program = .{
-        .label = "dynamic-fuel",
-        .value_types = &.{ text_type, text_type, text_type },
-        .blocks = &blocks,
-        .entry = 0,
-        .result_type = text_type,
-    };
-};
+}
+
+const Body = BodyWithBlockCost(3);
 
 const Machine = program_v2.program("dynamic-fuel", Body).compile(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 64,
+});
+
+const OverflowMachine = program_v2.program(
+    "dynamic-fuel-overflow",
+    BodyWithBlockCost(std.math.maxInt(u64)),
+).compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = std.math.maxInt(u64),
 });
 
 fn requiredFuel(input: Text, expected: []const u8) !u64 {
@@ -100,4 +114,24 @@ test "canonical dynamic size changes fuel without changing transactional yield" 
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN!",
     );
     try std.testing.expect(long_fuel > short_fuel);
+}
+
+test "dynamic fuel addition overflow fails before mutation" {
+    const state = try OverflowMachine.initialState(
+        std.testing.allocator,
+        try Text.fromSlice("a"),
+    );
+    defer OverflowMachine.deinitState(state);
+    const before = try OverflowMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    var caller_fuel: u64 = std.math.maxInt(u64);
+
+    try std.testing.expectEqual(
+        OverflowMachine.Outcome{ .failed = .execution_budget_exceeded },
+        try OverflowMachine.step(state, &caller_fuel),
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), caller_fuel);
+    const after = try OverflowMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }

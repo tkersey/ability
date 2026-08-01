@@ -23,8 +23,10 @@ environment_bytes      exact constructor schema
 
 For a non-root constructor, that schema begins with compiler-generated
 activation context: the call-entry constructor id and the typed invocation
-arguments that were live at the callee entry. Future-live values follow as a
-separate product. Both products are Machine-identity-bearing, bounded by the
+arguments that were live at the callee entry. An immediate call-entry frame
+omits those parameters from the future-live product, leaving one persisted
+authority. A progressed loop may retain its distinct current value. Both
+products are Machine-identity-bearing, bounded by the
 constructor field ceiling, and encoded without source or interpreter cursors.
 
 An await-effect constructor owns pending effect state; there is no independent

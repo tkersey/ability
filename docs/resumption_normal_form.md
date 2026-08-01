@@ -16,7 +16,9 @@ Every non-root constructor also carries a distinct activation context: the
 parent-selected call-entry constructor id and exactly the callee entry
 parameters live when that invocation began. The compiler initializes this
 product only at the call edge and preserves it through every callee transition.
-It is not part of the mutable future-value environment, so loop backedges may
+Activation-owned parameters are omitted from the immediate call-entry future
+environment. After progress, a loop-carried current value may coexist because
+it no longer means the immutable invocation argument; backedges can therefore
 rebind entry value ids without erasing invocation identity.
 
 Compiler classifications include entry, segment entry, loop header, await

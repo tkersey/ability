@@ -26,7 +26,8 @@ source -> portable types -> Control IR -> algebraic lowering
 6. Backward liveness computes each continuation's exact ordered future
    environment and, for non-root continuations, the distinct function-entry
    parameters live at invocation. The latter form immutable activation context
-   and are not aliases of mutable loop-carried values.
+   and are the sole persisted authority at immediate call entry. A progressed
+   loop may additionally retain a semantically distinct current value.
 7. Path facts become bounded constructor-local invariants.
 8. RNF canonicalization hash-conses exact equivalent futures, then assigns
    dense constructor ids and static reducer entries. Equivalence requires the
