@@ -1,4 +1,6 @@
+// zlinter-disable require_doc_comment
 const std = @import("std");
+const zlinter = @import("zlinter");
 
 const CoreModules = struct {
     agent_profile: *std.Build.Module,
@@ -262,6 +264,20 @@ fn parseTestArgs(b: *std.Build) TestArgs {
                 .{@errorName(err)},
             ),
     };
+}
+
+fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
+    const guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
+        \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
+        \\find src examples test bench -type f -name '*.zig' | sort > "$tmp.actual"
+        \\grep -E '^(src|examples|test|bench)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
+        \\diff -u "$tmp.expected" "$tmp.actual"
+    });
+    lint_step.dependOn(&guard.step);
 }
 
 fn addTestArtifactWithArgs(
@@ -1098,8 +1114,43 @@ pub fn build(b: *std.Build) void {
         "test",
         "examples",
     });
-    const lint_step = b.step("lint", "Check Boundary Zig formatting.");
+    const lint_step = b.step("lint", "Lint Boundary Zig source.");
     lint_step.dependOn(&format_command.step);
+    addZigPathCoverageGuard(b, lint_step);
+    var lint_builder = zlinter.builder(b, .{});
+    lint_builder.addPaths(.{
+        .include = &.{
+            b.path("build.zig"),
+            b.path("src"),
+            b.path("examples"),
+            b.path("test"),
+            b.path("bench"),
+            b.path("conformance"),
+        },
+        .exclude = &.{},
+    });
+    inline for ([_]zlinter.BuiltinLintRule{
+        .file_naming,
+        .import_ordering,
+        .no_comment_out_code,
+        .no_deprecated,
+        .no_hidden_allocations,
+        .no_literal_only_bool_expression,
+        .no_panic,
+        .no_todo,
+        .require_errdefer_dealloc,
+        .require_exhaustive_enum_switch,
+    }) |rule| {
+        lint_builder.addRule(.{ .builtin = rule }, .{});
+    }
+    const saved_global_cache_path = b.graph.global_cache_root.path;
+    if (saved_global_cache_path) |path| {
+        if (!std.Io.Dir.path.isAbsolute(path)) {
+            b.graph.global_cache_root.path = b.pathFromRoot(path);
+        }
+    }
+    defer b.graph.global_cache_root.path = saved_global_cache_path;
+    lint_step.dependOn(lint_builder.build());
 
     const check_step = b.step("check", "Run the full Boundary Machine proof.");
     inline for (.{

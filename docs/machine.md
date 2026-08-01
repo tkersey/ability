@@ -63,14 +63,14 @@ State mutation is transactional. Invalid responses, allocation failure, frame
 overflow, and state-limit failure preserve authoritative state and caller fuel.
 Direct effect handling first calls `prepareResume`, which validates the pending
 request and allocates the complete candidate continuation before external
-authority runs. The caller then either commits that candidate with `resume` or
-releases it with `deinitPreparedResume`; every successfully prepared candidate
-must follow exactly one of those ownership paths. A prepared candidate holds a
-private lease on its source state allocation, so calling `deinitState` first
-defers physical release until every prepared candidate is consumed or
-abandoned. The lease is live ownership only and does not alter canonical state
-bytes or Machine identity. `boundary.Driver` enforces this ordering for typed
-local handlers.
+authority runs. Every successful `prepareResume` returns an owner that the
+caller must release with `deinitPreparedResume` on every path. `resume` commits
+the prepared candidate but does not release that owner; abandonment skips
+`resume` but still releases the owner. A prepared candidate holds a private
+lease on its source state allocation, so calling `deinitState` first defers
+physical release until every prepared owner is released. The lease is live
+ownership only and does not alter canonical state bytes or Machine identity.
+`boundary.Driver` enforces this ordering for typed local handlers.
 Pending requests expose a derived `RequestIdentity` bound to the Machine
 contract, sequence, complete canonical continuation stack, continuation
 constructor, residual site, and canonical payload. The continuation digest

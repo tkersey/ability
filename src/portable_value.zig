@@ -1,5 +1,15 @@
 const std = @import("std");
 
+fn copyPossiblyOverlapping(destination: []u8, source: []const u8) void {
+    std.debug.assert(destination.len == source.len);
+    if (source.len == 0) return;
+    if (@intFromPtr(destination.ptr) <= @intFromPtr(source.ptr)) {
+        std.mem.copyForwards(u8, destination, source);
+    } else {
+        std.mem.copyBackwards(u8, destination, source);
+    }
+}
+
 /// Portable-value operation and canonical-codec failures.
 pub const Error = error{
     CapacityExceeded,
@@ -71,7 +81,7 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
             const end = std.math.add(usize, start, suffix.len) catch
                 return error.CapacityExceeded;
             if (end > maximum_bytes) return error.CapacityExceeded;
-            @memcpy(self.storage[start..end], suffix);
+            copyPossiblyOverlapping(self.storage[start..end], suffix);
             self.logical_length = @intCast(end);
         }
 
@@ -193,7 +203,7 @@ pub fn Text(comptime maximum_bytes: usize) type {
                 return error.InvalidUtf8;
             }
             if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
-            @memcpy(self.storage[start..end], suffix);
+            copyPossiblyOverlapping(self.storage[start..end], suffix);
             self.logical_length = @intCast(end);
         }
 
@@ -1350,6 +1360,35 @@ test "Text append rejects an invalid current prefix before mutation" {
     try std.testing.expectError(error.InvalidUtf8, value.append("a"));
     try std.testing.expectEqualDeep(before, value);
     try std.testing.expect(!eqlValue(Value, value, value));
+}
+
+test "Bytes and Text append preserve overlapping suffixes in both directions" {
+    const TestBytes = Bytes(8);
+    const TestText = Text(8);
+
+    var backward_bytes = TestBytes.empty();
+    @memcpy(backward_bytes.storage[0..6], "abcdef");
+    backward_bytes.logical_length = 2;
+    try backward_bytes.append(backward_bytes.storage[0..4]);
+    try std.testing.expectEqualStrings("ababcd", backward_bytes.slice());
+
+    var forward_bytes = TestBytes.empty();
+    @memcpy(forward_bytes.storage[0..6], "abcdef");
+    forward_bytes.logical_length = 2;
+    try forward_bytes.append(forward_bytes.storage[3..6]);
+    try std.testing.expectEqualStrings("abdef", forward_bytes.slice());
+
+    var backward_text = TestText.empty();
+    @memcpy(backward_text.storage[0..6], "abcdef");
+    backward_text.logical_length = 2;
+    try backward_text.append(backward_text.storage[0..4]);
+    try std.testing.expectEqualStrings("ababcd", backward_text.slice());
+
+    var forward_text = TestText.empty();
+    @memcpy(forward_text.storage[0..6], "abcdef");
+    forward_text.logical_length = 2;
+    try forward_text.append(forward_text.storage[3..6]);
+    try std.testing.expectEqualStrings("abdef", forward_text.slice());
 }
 
 test "bounded byte and text ordering rejects malformed operands" {

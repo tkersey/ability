@@ -116,14 +116,12 @@ test "canonical dynamic size changes fuel without changing transactional yield" 
     try std.testing.expect(long_fuel > short_fuel);
 }
 
-test "dynamic fuel addition overflow fails before mutation" {
+test "dynamic fuel addition overflow commits terminal failure" {
     const state = try OverflowMachine.initialState(
         std.testing.allocator,
         try Text.fromSlice("a"),
     );
     defer OverflowMachine.deinitState(state);
-    const before = try OverflowMachine.encodeState(std.testing.allocator, state);
-    defer std.testing.allocator.free(before);
     var caller_fuel: u64 = std.math.maxInt(u64);
 
     try std.testing.expectEqual(
@@ -131,9 +129,20 @@ test "dynamic fuel addition overflow fails before mutation" {
         try OverflowMachine.step(state, &caller_fuel),
     );
     try std.testing.expectEqual(std.math.maxInt(u64), caller_fuel);
-    const after = try OverflowMachine.encodeState(std.testing.allocator, state);
-    defer std.testing.allocator.free(after);
-    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OverflowMachine.encodeState(std.testing.allocator, state),
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OverflowMachine.cloneState(std.testing.allocator, state),
+    );
+    var retry_fuel: u64 = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        OverflowMachine.step(state, &retry_fuel),
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), retry_fuel);
 }
 
 const TextPair = struct {

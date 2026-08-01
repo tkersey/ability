@@ -1514,6 +1514,7 @@ pub fn Machine(
             }
             if (caller_fuel.* < original_minimum_cost) return .yielded;
             if (definitionCostOverflows(original_frame)) {
+                stored(state).terminal = true;
                 return .{ .failed = .execution_budget_exceeded };
             }
             const original_cost = Definition.cost(original_frame);
