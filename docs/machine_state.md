@@ -37,9 +37,13 @@ allocator capacities, padding, nominal type names, function/block/instruction
 cursors, local-slot bitmaps, condition caches, or generic after stack.
 
 The allocator-backed live state is a private ownership carrier, not a second
-portable representation. It allocates exactly the logical typed frame count;
-`maximum_frames` is an admission bound and never becomes spare inline storage.
-Candidate transitions clone only those logical frames before commit.
+portable representation. Initial and decoded states allocate exactly the
+logical typed frame count. A retained live state may preserve the bounded
+high-water capacity it already reached, and candidate transitions clone that
+private capacity while copying only logical frames. This prevents repeated
+unwind/regrow histories from extending the predecessor allocation chain under
+allocators that cannot resize in place. `maximum_frames` remains the admission
+bound, and canonical state bytes still encode only logical frames.
 
 Decode is fail-closed. It checks the exact Machine digest, versions, total
 length, frame bounds, dense constructor schemas, portable-value bounds,

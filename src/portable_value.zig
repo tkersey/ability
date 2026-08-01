@@ -109,15 +109,19 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
         /// Shorten the logical value.
         pub fn truncate(self: *Self, new_length: u32) void {
             if (self.logical_length > maximum_bytes) {
+                @memset(&self.storage, 0);
                 self.logical_length = 0;
                 return;
             }
-            if (new_length < self.logical_length) self.logical_length = new_length;
+            if (new_length >= self.logical_length) return;
+            const old_length = self.logical_length;
+            @memset(self.storage[new_length..old_length], 0);
+            self.logical_length = new_length;
         }
 
         /// Clear the logical value without exposing spare storage.
         pub fn clear(self: *Self) void {
-            self.logical_length = 0;
+            self.truncate(0);
         }
 
         /// Compare canonical logical contents.
@@ -345,16 +349,20 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         /// Shorten the vector without observing spare storage.
         pub fn truncate(self: *Self, new_length: u32) void {
             if (self.logical_length > maximum_items) {
-                for (&self.storage) |*item| {
-                    item.* = canonicalDefaultValue(Element);
+                if (comptime maximumEncodedSize(Element) != 0) {
+                    for (&self.storage) |*item| {
+                        item.* = canonicalDefaultValue(Element);
+                    }
                 }
                 self.logical_length = 0;
                 return;
             }
             if (new_length >= self.logical_length) return;
             const old_length = self.logical_length;
-            for (self.storage[new_length..old_length]) |*item| {
-                item.* = canonicalDefaultValue(Element);
+            if (comptime maximumEncodedSize(Element) != 0) {
+                for (self.storage[new_length..old_length]) |*item| {
+                    item.* = canonicalDefaultValue(Element);
+                }
             }
             self.logical_length = new_length;
         }
@@ -1210,6 +1218,37 @@ test "Bytes encoding observes logical bytes and ignores spare capacity" {
     );
 }
 
+test "Bytes shrinking resets every vacated byte" {
+    const Value = Bytes(8);
+    var value = try Value.fromSlice("secrets!");
+
+    value.truncate(3);
+    try std.testing.expectEqualSlices(u8, "sec", value.slice());
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 0, 0, 0, 0 },
+        value.storage[3..],
+    );
+
+    value.clear();
+    try std.testing.expectEqual(@as(u32, 0), value.logical_length);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 0, 0, 0, 0, 0, 0, 0 },
+        &value.storage,
+    );
+
+    @memset(&value.storage, 0xa5);
+    value.logical_length = 9;
+    value.truncate(0);
+    try std.testing.expectEqual(@as(u32, 0), value.logical_length);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 0, 0, 0, 0, 0, 0, 0 },
+        &value.storage,
+    );
+}
+
 test "canonical equality ignores spare storage recursively" {
     const Item = struct {
         title: Text(16),
@@ -1570,6 +1609,17 @@ test "zero-width vector codec and equality are constant in logical length" {
     try std.testing.expectEqualSlices(u8, &bytes, &encoded);
     try std.testing.expect(decoded.eql(&decoded));
     try std.testing.expect(eqlValue(Values, decoded, decoded));
+
+    const MaximumValues = Vector(void, std.math.maxInt(u32));
+    var maximum = MaximumValues.empty();
+    maximum.logical_length = std.math.maxInt(u32);
+    maximum.truncate(std.math.maxInt(u32) - 1);
+    try std.testing.expectEqual(
+        @as(u32, std.math.maxInt(u32) - 1),
+        maximum.len(),
+    );
+    maximum.clear();
+    try std.testing.expectEqual(@as(u32, 0), maximum.len());
 }
 
 test "nested zero-width portable values use one canonical constant-time quotient" {

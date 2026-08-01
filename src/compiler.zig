@@ -2676,11 +2676,14 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             comptime block: control_ir.Block,
             comptime value: control_ir.ValueId,
             environment: anytype,
+            available: *const [limits.maximum_values]bool,
         ) ?u64 {
-            const instruction = comptime definingInstructionInBlock(
+            const maybe_instruction = comptime definingInstructionInBlock(
                 block,
                 value,
-            ) orelse return null;
+            );
+            if (comptime maybe_instruction == null) return null;
+            const instruction = comptime maybe_instruction.?;
             if (instruction.operation != .vector_get or
                 instruction.operands.len != 2)
             {
@@ -2688,9 +2691,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             }
             const vector_name = comptime valueName(instruction.operands[0]);
             const index_name = comptime valueName(instruction.operands[1]);
-            const Environment = @TypeOf(environment);
-            if (comptime !@hasField(Environment, vector_name) or
-                !@hasField(Environment, index_name))
+            if (!available[@intCast(instruction.operands[0])] or
+                !available[@intCast(instruction.operands[1])])
             {
                 return null;
             }
@@ -2706,22 +2708,24 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             comptime field_index: usize,
             environment: anytype,
             sizes: *const [limits.maximum_values]u64,
+            available: *const [limits.maximum_values]bool,
         ) ?u64 {
             const product_name = comptime valueName(product_value);
             const Product = @FieldType(ValueCatalog, product_name);
             const field = std.meta.fields(Product)[field_index];
-            const Environment = @TypeOf(environment);
-            if (comptime @hasField(Environment, product_name)) {
+            if (available[@intCast(product_value)]) {
                 const product = @field(environment, product_name);
                 return encodedBytes(
                     field.type,
                     @field(product, field.name),
                 );
             }
-            const instruction = comptime definingInstructionInBlock(
+            const maybe_instruction = comptime definingInstructionInBlock(
                 block,
                 product_value,
-            ) orelse return null;
+            );
+            if (comptime maybe_instruction == null) return null;
+            const instruction = comptime maybe_instruction.?;
             return switch (instruction.operation) {
                 .copy => exactProductFieldBytes(
                     block,
@@ -2729,6 +2733,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     field_index,
                     environment,
                     sizes,
+                    available,
                 ),
                 .product_construct => sizes[
                     @intCast(instruction.operands[field_index])
@@ -2742,6 +2747,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         field_index,
                         environment,
                         sizes,
+                        available,
                     ),
                 .vector_get => blk: {
                     const vector_name = comptime valueName(
@@ -2750,8 +2756,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const index_name = comptime valueName(
                         instruction.operands[1],
                     );
-                    if (comptime !@hasField(Environment, vector_name) or
-                        !@hasField(Environment, index_name))
+                    if (!available[@intCast(instruction.operands[0])] or
+                        !available[@intCast(instruction.operands[1])])
                     {
                         break :blk null;
                     }
@@ -2773,6 +2779,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             comptime instruction: control_ir.Instruction,
             environment: anytype,
             sizes: *const [limits.maximum_values]u64,
+            available: *const [limits.maximum_values]bool,
         ) u64 {
             const result_name = comptime valueName(instruction.result);
             const ResultType = @FieldType(ValueCatalog, result_name);
@@ -2797,6 +2804,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     field_index,
                     environment,
                     sizes,
+                    available,
                 ) orelse maximum,
                 .product_replace => maximum,
                 .sum_construct => boundedBytes(
@@ -2821,6 +2829,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     block,
                     instruction.result,
                     environment,
+                    available,
                 ) orelse maximum,
                 .vector_set => maximum,
                 .vector_push => boundedBytes(
@@ -3612,12 +3621,14 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 .value = baseCostForConstructor(constructor_id),
             };
             var sizes = [_]u64{0} ** limits.maximum_values;
+            var available = [_]bool{false} ** limits.maximum_values;
             inline for (0..constructor.activation_len) |field_index| {
                 const field = comptime constructor.activation[field_index];
                 const name = comptime activationValueName(field.value);
                 const Value = @FieldType(@TypeOf(environment), name);
                 const size = encodedBytes(Value, @field(environment, name));
                 sizes[@intCast(field.value)] = size;
+                available[@intCast(field.value)] = true;
                 addFuelCost(
                     &fuel_cost,
                     dynamicBytesCost(Value, size),
@@ -3636,6 +3647,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 const Value = @FieldType(ValueCatalog, name);
                 const size = encodedBytes(Value, @field(store, name));
                 sizes[@intCast(field.value)] = size;
+                available[@intCast(field.value)] = true;
                 addFuelCost(
                     &fuel_cost,
                     dynamicBytesCost(Value, size),
@@ -3659,8 +3671,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 const result_size = resultEncodedBytes(
                     block,
                     instruction,
-                    environment,
+                    store,
                     &sizes,
+                    &available,
                 );
                 sizes[@intCast(instruction.result)] = result_size;
                 addFuelCost(

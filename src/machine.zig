@@ -557,7 +557,13 @@ pub fn Machine(
                 self: *const Stack,
                 allocator: std.mem.Allocator,
             ) Error!Stack {
-                return self.cloneExact(allocator);
+                return switch (self.*) {
+                    .many => |allocation| self.cloneWithCapacity(
+                        allocator,
+                        allocation.capacity,
+                    ),
+                    .empty, .one => self.cloneExact(allocator),
+                };
             }
 
             fn deinit(self: *Stack, allocator: std.mem.Allocator) void {

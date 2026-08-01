@@ -195,6 +195,259 @@ const Body = struct {
 
 const Program = program_v2.program("bounded-recursive-helper", Body);
 
+const staged_second_call_arguments = [_]cir.EdgeArgument{
+    .{ .value = 16 },
+    .{ .value = 17 },
+    .{ .value = 18 },
+};
+const staged_third_call_arguments = [_]cir.EdgeArgument{
+    .{ .value = 19 },
+    .{ .value = 20 },
+    .{ .value = 22 },
+};
+const staged_first_yield_arguments = [_]cir.EdgeArgument{.{ .value = 15 }};
+const staged_second_yield_arguments = [_]cir.EdgeArgument{.{ .value = 21 }};
+const staged_base_yield_arguments = [_]cir.EdgeArgument{.{ .value = 14 }};
+const staged_second_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 16,
+        .operation = .{ .constant = 2 },
+    },
+    .{
+        .kind = .constant,
+        .result = 17,
+        .operation = .{ .constant = 0 },
+    },
+};
+const staged_third_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 19,
+        .operation = .{ .constant = 3 },
+    },
+    .{
+        .kind = .constant,
+        .result = 20,
+        .operation = .{ .constant = 0 },
+    },
+};
+const staged_blocks = [_]cir.Block{
+    blocks[0],
+    blocks[1],
+    blocks[2],
+    .{
+        .id = 3,
+        .function_id = 1,
+        .parameters = &.{14},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .explicit_yield,
+            .continuation = .{
+                .target = 10,
+                .arguments = &staged_base_yield_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 4,
+        .parameters = &.{15},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .explicit_yield,
+            .continuation = .{
+                .target = 6,
+                .arguments = &staged_first_yield_arguments,
+            },
+        } },
+    },
+    blocks[5],
+    .{
+        .id = 6,
+        .parameters = &.{18},
+        .instructions = &staged_second_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 1,
+                .arguments = &staged_second_call_arguments,
+            },
+            .continuation = .{
+                .target = 7,
+                .arguments = &root_return_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 7,
+        .parameters = &.{21},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .explicit_yield,
+            .continuation = .{
+                .target = 8,
+                .arguments = &staged_second_yield_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 8,
+        .parameters = &.{22},
+        .instructions = &staged_third_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 1,
+                .arguments = &staged_third_call_arguments,
+            },
+            .continuation = .{
+                .target = 9,
+                .arguments = &root_return_arguments,
+            },
+            .resume_type = .{ .scalar = .u32 },
+        } },
+    },
+    .{
+        .id = 9,
+        .role = .terminal_handoff,
+        .parameters = &.{23},
+        .terminator = .{ .return_value = 23 },
+    },
+    .{
+        .id = 10,
+        .function_id = 1,
+        .role = .call_return,
+        .parameters = &.{24},
+        .terminator = .{ .return_to_caller = 24 },
+    },
+};
+const StagedRegrowthBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum { arithmetic_overflow };
+    pub const constants = .{
+        @as(u32, 0),
+        @as(u32, 1),
+        @as(u32, 5),
+        @as(u32, 6),
+    };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "staged-recursive-regrowth",
+        .value_types = &.{
+            .{ .scalar = .u32 }, // 0
+            .{ .scalar = .u32 }, // 1
+            .{ .scalar = .u32 }, // 2
+            .{ .scalar = .u32 }, // 3
+            .{ .scalar = .u32 }, // 4
+            .{ .scalar = .u32 }, // 5
+            .{ .scalar = .boolean }, // 6
+            .{ .scalar = .u32 }, // 7
+            .{ .scalar = .u32 }, // 8
+            .{ .scalar = .u32 }, // 9
+            .{ .scalar = .u32 }, // 10
+            .{ .scalar = .u32 }, // 11
+            .{ .scalar = .u32 }, // 12
+            .{ .scalar = .u32 }, // 13
+            .{ .scalar = .u32 }, // 14
+            .{ .scalar = .u32 }, // 15
+            .{ .scalar = .u32 }, // 16
+            .{ .scalar = .u32 }, // 17
+            .{ .scalar = .u32 }, // 18
+            .{ .scalar = .u32 }, // 19
+            .{ .scalar = .u32 }, // 20
+            .{ .scalar = .u32 }, // 21
+            .{ .scalar = .u32 }, // 22
+            .{ .scalar = .u32 }, // 23
+            .{ .scalar = .u32 }, // 24
+        },
+        .blocks = &staged_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+        .functions = &.{
+            .{
+                .id = 0,
+                .entry = 0,
+                .result_type = .{ .scalar = .u32 },
+            },
+            .{
+                .id = 1,
+                .entry = 1,
+                .result_type = .{ .scalar = .u32 },
+            },
+        },
+    };
+};
+const StagedRegrowthProgram = program_v2.program(
+    "staged-recursive-regrowth",
+    StagedRegrowthBody,
+);
+
+const NonResizingAllocator = struct {
+    child: std.mem.Allocator,
+    allocation_count: usize = 0,
+    free_count: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        length: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const result = self.child.rawAlloc(
+            length,
+            alignment,
+            return_address,
+        );
+        if (result != null) self.allocation_count += 1;
+        return result;
+    }
+
+    fn resize(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) bool {
+        return false;
+    }
+
+    fn remap(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) ?[*]u8 {
+        return null;
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.free_count += 1;
+        self.child.rawFree(memory, alignment, return_address);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+};
+
 const alternate_entry_then_arguments = [_]cir.EdgeArgument{
     .{ .value = 0 },
     .{ .value = 1 },
@@ -1289,6 +1542,60 @@ test "fixed-buffer state owns every recursive growth predecessor" {
     result.deinit();
     RecursiveMachine.deinitState(state);
     try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
+}
+
+test "retained capacity bounds repeated recursive unwind and regrowth" {
+    const StagedMachine = StagedRegrowthProgram.compile(.{
+        .maximum_frames = 8,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 512,
+    });
+    var non_resizing = NonResizingAllocator{
+        .child = std.testing.allocator,
+    };
+    const state = try StagedMachine.initialState(
+        non_resizing.allocator(),
+        4,
+    );
+
+    const expected_depths = [_]u32{ 6, 1, 7, 1, 8 };
+    inline for (expected_depths) |expected_depth| {
+        var caller_fuel: u64 = 128;
+        try std.testing.expectEqual(
+            StagedMachine.Outcome.yielded,
+            try StagedMachine.step(state, &caller_fuel),
+        );
+        try StagedMachine.validateState(state);
+        const encoded = try StagedMachine.encodeState(
+            std.testing.allocator,
+            state,
+        );
+        defer std.testing.allocator.free(encoded);
+        const frame_count_offset = state_header_length - 8;
+        try std.testing.expectEqual(
+            expected_depth,
+            std.mem.readInt(
+                u32,
+                encoded[frame_count_offset..][0..4],
+                .little,
+            ),
+        );
+    }
+    var completion_fuel: u64 = 128;
+    const result = switch (try StagedMachine.step(
+        state,
+        &completion_fuel,
+    )) {
+        .done => |done| done,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u32, 46), result.value().*);
+    result.deinit();
+    StagedMachine.deinitState(state);
+    try std.testing.expectEqual(
+        non_resizing.allocation_count,
+        non_resizing.free_count,
+    );
 }
 
 test "fixed-buffer decoded terminal state fully releases in ownership order" {
