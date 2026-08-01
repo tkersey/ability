@@ -464,6 +464,7 @@ test "Driver handles effects without owning another reducer" {
             _: *@This(),
             comptime tag: anytype,
             payload: anytype,
+            _: anytype,
         ) !switch (tag) {
             .s0 => u32,
         } {
@@ -485,14 +486,17 @@ test "Driver returns the exact pending request and retries handler errors" {
     defer local.deinit();
     var handler = struct {
         attempts: u8 = 0,
+        identities: [2][32]u8 = undefined,
 
         pub fn handle(
             self: *@This(),
             comptime tag: anytype,
             payload: anytype,
+            identity: anytype,
         ) error{Transient}!switch (tag) {
             .s0 => u32,
         } {
+            self.identities[self.attempts] = identity.digest;
             self.attempts += 1;
             if (self.attempts == 1) return error.Transient;
             return payload * 2;
@@ -525,6 +529,16 @@ test "Driver returns the exact pending request and retries handler errors" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u8, 2), handler.attempts);
+    try std.testing.expectEqualSlices(
+        u8,
+        &handler.identities[0],
+        &handler.identities[1],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &handler_error.request.identity.digest,
+        &handler.identities[0],
+    );
     try std.testing.expectEqual(@as(u32, 18), done.value().*);
 }
 
@@ -552,6 +566,7 @@ test "Driver allocates a multi-frame resume before invoking its handler" {
             self: *@This(),
             comptime tag: anytype,
             payload: anytype,
+            _: anytype,
         ) !switch (tag) {
             .s0 => u32,
         } {
@@ -596,6 +611,7 @@ test "Machine preflights the complete response state before request authority" {
         pub fn handle(
             self: *@This(),
             comptime tag: anytype,
+            _: anytype,
             _: anytype,
         ) !switch (tag) {
             .s0 => LargeResponse,

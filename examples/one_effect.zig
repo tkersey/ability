@@ -68,6 +68,7 @@ pub fn main() !void {
             _: *@This(),
             comptime tag: anytype,
             payload: anytype,
+            _: anytype,
         ) !switch (tag) {
             .s0 => u32,
         } {

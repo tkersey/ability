@@ -1006,52 +1006,69 @@ const LocalText = portable_value.Text(8);
 const LocalTextLookup = struct {
     pub const id: u32 = 0;
     pub const semantic_identity =
-        "test.constructor-invariant.local-text.v1";
+        "test.constructor-invariant.target-edge-text.v1";
     pub const Payload = LocalText;
     pub const Resume = u32;
 };
 
 const local_text_instructions = [_]cir.Instruction{
     .{
-        .kind = .copy,
+        .kind = .constant,
         .result = 1,
-        .operands = &.{0},
-        .operation = .copy,
+        .operation = .{ .constant = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{ 0, 1 },
+        .operation = .text_append_scalar,
     },
 };
+const local_text_edge_arguments = [_]cir.EdgeArgument{.{ .value = 2 }};
 const local_text_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
 const local_text_blocks = [_]cir.Block{
     .{
         .id = 0,
         .parameters = &.{0},
         .instructions = &local_text_instructions,
+        .terminator = .{ .jump = .{
+            .target = 1,
+            .arguments = &local_text_edge_arguments,
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{3},
         .terminator = .{ .@"suspend" = .{
             .kind = .effect,
             .site_id = 0,
-            .request_values = &.{1},
+            .request_values = &.{3},
             .continuation = .{
-                .target = 1,
+                .target = 2,
                 .arguments = &local_text_resume_arguments,
             },
             .resume_type = u32_type,
         } },
     },
     .{
-        .id = 1,
-        .parameters = &.{2},
-        .terminator = .{ .return_value = 2 },
+        .id = 2,
+        .parameters = &.{4},
+        .terminator = .{ .return_value = 4 },
     },
 };
 
 const LocalTextBody = struct {
     pub const InitialArgs = LocalText;
     pub const Result = u32;
-    pub const Failure = enum { rejected };
+    pub const Failure = enum { rejected, capacity_exceeded, invalid_utf8 };
+    pub const constants = .{@as(u32, 'b')};
     pub const effect_sites = .{LocalTextLookup};
     pub const schema_types = .{LocalText};
     pub const control_ir: cir.Program = .{
         .label = "local-text-constructor-invariant",
         .value_types = &.{
+            cir.ValueType{ .schema = 0 },
+            u32_type,
             cir.ValueType{ .schema = 0 },
             cir.ValueType{ .schema = 0 },
             u32_type,
@@ -1071,6 +1088,101 @@ const LocalTextMachine = LocalTextProgram.compile(.{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
 });
+
+const TargetEdgeAlgebraicKind = enum { sum, optional };
+
+fn TargetEdgeAlgebraicProgram(
+    comptime kind: TargetEdgeAlgebraicKind,
+) type {
+    return struct {
+        const Constructed = if (kind == .sum) Choice else ?u32;
+
+        const Lookup = struct {
+            pub const id: u32 = 0;
+            pub const semantic_identity = if (kind == .sum)
+                "test.constructor-invariant.target-edge-sum.v1"
+            else
+                "test.constructor-invariant.target-edge-optional.v1";
+            pub const Payload = Constructed;
+            pub const Resume = u32;
+        };
+
+        const instructions = [_]cir.Instruction{.{
+            .kind = .pure,
+            .result = 1,
+            .operands = &.{0},
+            .operation = if (kind == .sum)
+                .{ .sum_construct = 0 }
+            else
+                .optional_some,
+        }};
+        const edge_arguments = [_]cir.EdgeArgument{.{ .value = 1 }};
+        const resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+        const blocks = [_]cir.Block{
+            .{
+                .id = 0,
+                .parameters = &.{0},
+                .instructions = &instructions,
+                .terminator = .{ .jump = .{
+                    .target = 1,
+                    .arguments = &edge_arguments,
+                } },
+            },
+            .{
+                .id = 1,
+                .parameters = &.{2},
+                .terminator = .{ .@"suspend" = .{
+                    .kind = .effect,
+                    .site_id = 0,
+                    .request_values = &.{2},
+                    .continuation = .{
+                        .target = 2,
+                        .arguments = &resume_arguments,
+                    },
+                    .resume_type = u32_type,
+                } },
+            },
+            .{
+                .id = 2,
+                .parameters = &.{3},
+                .terminator = .{ .return_value = 3 },
+            },
+        };
+
+        const Body = struct {
+            pub const InitialArgs = u32;
+            pub const Result = u32;
+            pub const Failure = enum { rejected };
+            pub const effect_sites = .{Lookup};
+            pub const schema_types = .{Constructed};
+            pub const control_ir: cir.Program = .{
+                .label = if (kind == .sum)
+                    "target-edge-sum-construction"
+                else
+                    "target-edge-optional-construction",
+                .value_types = &.{
+                    u32_type,
+                    cir.ValueType{ .schema = 0 },
+                    cir.ValueType{ .schema = 0 },
+                    u32_type,
+                },
+                .blocks = &blocks,
+                .entry = 0,
+                .result_type = u32_type,
+            };
+        };
+
+        pub const Program = program_v2.program(Body.control_ir.label, Body);
+        pub const Machine = Program.compile(.{
+            .maximum_frames = 4,
+            .maximum_state_bytes = 4096,
+            .maximum_machine_fuel = 32,
+        });
+    };
+}
+
+const TargetEdgeSum = TargetEdgeAlgebraicProgram(.sum);
+const TargetEdgeOptional = TargetEdgeAlgebraicProgram(.optional);
 
 fn ClassificationOnlyProgram(comptime role: cir.BlockRole) type {
     return struct {
@@ -1697,10 +1809,10 @@ test "Boolean constants retain canonical definition witnesses" {
     );
 }
 
-test "suspension environments retain local definition closure" {
+test "target-edge Text values retain executable source definitions" {
     const awaiting = blk: {
         for (LocalTextProgram.rnf.constructorSlice()) |*constructor| {
-            if (constructor.source_block == 0 and
+            if (constructor.source_block == 1 and
                 constructor.kind == .await_effect)
             {
                 break :blk constructor;
@@ -1708,14 +1820,18 @@ test "suspension environments retain local definition closure" {
         }
         return error.TestExpectedEqual;
     };
-    var saw_copy = false;
+    var saw_definition = false;
     for (awaiting.invariantTerms()) |term| switch (term) {
-        .value_copy => |definition| {
-            saw_copy = definition.result == 1 and definition.source == 0;
+        .instruction_result => |definition| {
+            saw_definition = definition.result == 3 and
+                definition.definition == 2 and
+                definition.operand_count == 2 and
+                definition.operands[0] == 0 and
+                definition.operands[1] == 1;
         },
         else => {},
     };
-    try std.testing.expect(saw_copy);
+    try std.testing.expect(saw_definition);
 
     const initial = try LocalText.fromSlice("a");
     const state = try LocalTextMachine.initialState(
@@ -1723,7 +1839,7 @@ test "suspension environments retain local definition closure" {
         initial,
     );
     defer LocalTextMachine.deinitState(state);
-    var fuel: u64 = 8;
+    var fuel: u64 = 32;
     _ = switch (try LocalTextMachine.step(state, &fuel)) {
         .request => |request| request,
         else => return error.TestUnexpectedResult,
@@ -1736,11 +1852,76 @@ test "suspension environments retain local definition closure" {
     const forged = try std.testing.allocator.dupe(u8, encoded);
     defer std.testing.allocator.free(forged);
     const source_size = try portable_value.encodedSize(LocalText, initial);
-    forged[first_environment_offset + source_size + 4] = 'b';
+    const target_offset = first_environment_offset + source_size + 4;
+    forged[target_offset + 4] = 'c';
     try std.testing.expectError(
         error.ProgramContractViolation,
         LocalTextMachine.decodeState(std.testing.allocator, forged),
     );
+}
+
+fn expectTargetEdgeAlgebraicDefinition(
+    comptime Witness: type,
+    comptime payload_offset: usize,
+) !void {
+    const awaiting = blk: {
+        for (Witness.Program.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 1 and
+                constructor.kind == .await_effect)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_definition = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .instruction_result => |definition| {
+            saw_definition = definition.result == 2 and
+                definition.definition == 1 and
+                definition.operand_count == 1 and
+                definition.operands[0] == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_definition);
+
+    const state = try Witness.Machine.initialState(
+        std.testing.allocator,
+        7,
+    );
+    defer Witness.Machine.deinitState(state);
+    var fuel: u64 = 16;
+    _ = switch (try Witness.Machine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try Witness.Machine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    const target_offset = first_environment_offset + @sizeOf(u32);
+    std.mem.writeInt(
+        u32,
+        forged[target_offset + payload_offset ..][0..4],
+        8,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        Witness.Machine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "target-edge sum payloads retain executable source definitions" {
+    try expectTargetEdgeAlgebraicDefinition(TargetEdgeSum, 4);
+}
+
+test "target-edge optional payloads retain executable source definitions" {
+    try expectTargetEdgeAlgebraicDefinition(TargetEdgeOptional, 1);
 }
 
 test "bounded collection lengths are authenticated locally" {

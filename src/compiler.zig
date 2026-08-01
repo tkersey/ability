@@ -7,6 +7,9 @@ const std = @import("std");
 const implementation_limits: control_ir.CompilerLimits = .{};
 const compiler_evaluation_branch_quota = 1_000_000;
 const dynamic_fuel_quantum_bytes: u64 = 16;
+// Advance this domain whenever deterministic segment charging changes.
+const segment_fuel_semantic_domain =
+    "segment-fuel=preflight-resource-shape-v4";
 
 const ResidualResponseMode = enum {
     single_resume,
@@ -1776,10 +1779,14 @@ fn semanticHashInvariant(
             semanticHashU16(hasher, canonical.valueId(definition.then_value));
             semanticHashU16(hasher, canonical.valueId(definition.else_value));
         },
-        .instruction_result => |definition| semanticHashU16(
-            hasher,
-            canonical.valueId(definition.result),
-        ),
+        .instruction_result => |definition| {
+            semanticHashU16(hasher, canonical.valueId(definition.result));
+            semanticHashU16(hasher, canonical.valueId(definition.definition));
+            semanticHashU16(hasher, definition.operand_count);
+            for (definition.operands[0..definition.operand_count]) |operand| {
+                semanticHashU16(hasher, canonical.valueId(operand));
+            }
+        },
         .product_extract_result => |definition| {
             semanticHashU16(hasher, canonical.valueId(definition.result));
             semanticHashU16(hasher, canonical.valueId(definition.product));
@@ -1926,7 +1933,7 @@ fn compilerSemanticDigest(
     semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
     semanticHashBytes(
         &hasher,
-        "segment-fuel=preflight-resource-shape-v3",
+        segment_fuel_semantic_domain,
     );
     semanticHashU64(&hasher, dynamic_fuel_quantum_bytes);
     semanticHashSchema(Body.InitialArgs, &hasher);
@@ -4065,12 +4072,18 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             comptime constructor_id: usize,
             environment: anytype,
             comptime result: control_ir.ValueId,
+            comptime definition: control_ir.ValueId,
+            comptime operand_count: u8,
+            comptime operands: [3]control_ir.ValueId,
         ) bool {
-            const instruction = comptime definingInstructionForValue(
-                result,
+            const source_instruction = comptime definingInstructionForValue(
+                definition,
             ) orelse @compileError(
                 "generated instruction-result invariant has no definition",
             );
+            comptime var instruction = source_instruction;
+            instruction.result = result;
+            instruction.operands = operands[0..operand_count];
             const instructions = [_]control_ir.Instruction{instruction};
             const constructor = comptime normal_form.constructors[
                 constructor_id
@@ -4204,6 +4217,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         constructor_id,
                         environment,
                         definition.result,
+                        definition.definition,
+                        definition.operand_count,
+                        definition.operands,
                     ),
                     .product_extract_result => |definition| blk: {
                         const product = @field(

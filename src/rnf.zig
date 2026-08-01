@@ -120,6 +120,9 @@ pub const InvariantTerm = union(enum) {
     },
     instruction_result: struct {
         result: control_ir.ValueId,
+        definition: control_ir.ValueId,
+        operand_count: u8,
+        operands: [3]control_ir.ValueId,
     },
     product_extract_result: struct {
         result: control_ir.ValueId,
@@ -235,7 +238,12 @@ pub const InvariantTerm = union(enum) {
             .value_copy => |term| {
                 changed = required.insert(term.source) or changed;
             },
-            .value_constant, .instruction_result => {},
+            .value_constant => {},
+            .instruction_result => |term| {
+                for (term.operands[0..term.operand_count]) |operand| {
+                    changed = required.insert(operand) or changed;
+                }
+            },
             .value_select => |term| {
                 changed = required.insert(term.condition) or changed;
                 changed = required.insert(term.then_value) or changed;
@@ -301,7 +309,12 @@ pub const InvariantTerm = union(enum) {
                 _ = required.insert(term.then_value);
                 _ = required.insert(term.else_value);
             },
-            .instruction_result => |term| _ = required.insert(term.result),
+            .instruction_result => |term| {
+                _ = required.insert(term.result);
+                for (term.operands[0..term.operand_count]) |operand| {
+                    _ = required.insert(operand);
+                }
+            },
             .value_copy => |term| {
                 _ = required.insert(term.result);
                 _ = required.insert(term.source);
@@ -410,7 +423,14 @@ pub const InvariantTerm = union(enum) {
             },
             .instruction_result => |term| switch (other) {
                 .instruction_result => |other_term| term.result ==
-                    other_term.result,
+                    other_term.result and
+                    term.definition == other_term.definition and
+                    term.operand_count == other_term.operand_count and
+                    std.mem.eql(
+                        control_ir.ValueId,
+                        term.operands[0..term.operand_count],
+                        other_term.operands[0..other_term.operand_count],
+                    ),
                 else => false,
             },
             .product_extract_result => |term| switch (other) {
@@ -1335,10 +1355,37 @@ pub fn NormalForm(
                     }
                     break :blk false;
                 },
-                .instruction_result => |left_term| {
+                .instruction_result => |left_term| blk: {
                     const right_term = right.instruction_result;
-                    return canonical_values.ordinal(left_term.result) <
-                        canonical_values.ordinal(right_term.result);
+                    const left_result = canonical_values.ordinal(left_term.result);
+                    const right_result = canonical_values.ordinal(right_term.result);
+                    if (left_result != right_result) {
+                        break :blk left_result < right_result;
+                    }
+                    const left_definition = canonical_values.ordinal(
+                        left_term.definition,
+                    );
+                    const right_definition = canonical_values.ordinal(
+                        right_term.definition,
+                    );
+                    if (left_definition != right_definition) {
+                        break :blk left_definition < right_definition;
+                    }
+                    if (left_term.operand_count != right_term.operand_count) {
+                        break :blk left_term.operand_count <
+                            right_term.operand_count;
+                    }
+                    for (
+                        left_term.operands[0..left_term.operand_count],
+                        right_term.operands[0..right_term.operand_count],
+                    ) |left_operand, right_operand| {
+                        const left_ordinal = canonical_values.ordinal(left_operand);
+                        const right_ordinal = canonical_values.ordinal(right_operand);
+                        if (left_ordinal != right_ordinal) {
+                            break :blk left_ordinal < right_ordinal;
+                        }
+                    }
+                    break :blk false;
                 },
                 .product_extract_result => |left_term| blk: {
                     const right_term = right.product_extract_result;
@@ -1878,6 +1925,22 @@ pub fn NormalForm(
             }
         };
 
+        fn instructionResultTerm(
+            result: control_ir.ValueId,
+            definition: control_ir.ValueId,
+            operands: []const control_ir.ValueId,
+        ) Error!InvariantTerm {
+            if (operands.len > 3) return error.UnsupportedInvariantDefinition;
+            var stored_operands = [_]control_ir.ValueId{0} ** 3;
+            @memcpy(stored_operands[0..operands.len], operands);
+            return .{ .instruction_result = .{
+                .result = result,
+                .definition = definition,
+                .operand_count = @intCast(operands.len),
+                .operands = stored_operands,
+            } };
+        }
+
         fn canonicalDefinitionRoot(
             program: control_ir.Program,
             value: control_ir.ValueId,
@@ -2205,12 +2268,55 @@ pub fn NormalForm(
                         retain_for_invariant,
                         definition.result,
                     );
-                    for (results.slice()) |result_value| {
-                        if (result_value != definition.result) continue;
-                        try result.insert(.{ .instruction_result = .{
-                            .result = result_value,
-                        } });
+                    var operands: [3]Projection = .{ .{}, .{}, .{} };
+                    for (
+                        definition.operands[0..definition.operand_count],
+                        0..,
+                    ) |operand, operand_index| {
+                        operands[operand_index] = projectValues(
+                            program,
+                            source_block,
+                            edge,
+                            target_live,
+                            true,
+                            operand,
+                        );
                     }
+                    for (results.slice()) |result_value| switch (definition.operand_count) {
+                        0 => try result.insert(try instructionResultTerm(
+                            result_value,
+                            definition.definition,
+                            &.{},
+                        )),
+                        1 => for (operands[0].slice()) |operand_0| {
+                            try result.insert(try instructionResultTerm(
+                                result_value,
+                                definition.definition,
+                                &.{operand_0},
+                            ));
+                        },
+                        2 => for (operands[0].slice()) |operand_0| {
+                            for (operands[1].slice()) |operand_1| {
+                                try result.insert(try instructionResultTerm(
+                                    result_value,
+                                    definition.definition,
+                                    &.{ operand_0, operand_1 },
+                                ));
+                            }
+                        },
+                        3 => for (operands[0].slice()) |operand_0| {
+                            for (operands[1].slice()) |operand_1| {
+                                for (operands[2].slice()) |operand_2| {
+                                    try result.insert(try instructionResultTerm(
+                                        result_value,
+                                        definition.definition,
+                                        &.{ operand_0, operand_1, operand_2 },
+                                    ));
+                                }
+                            }
+                        },
+                        else => return error.UnsupportedInvariantDefinition,
+                    };
                 },
                 .product_extract_result => |definition| {
                     const results = projectValues(
@@ -2876,6 +2982,9 @@ pub fn NormalForm(
                     return true;
                 },
                 .sum_construct => |case_index| {
+                    if (instruction.operands.len != 0) {
+                        return error.UnsupportedInvariantDefinition;
+                    }
                     try facts.insert(.{ .value_constant = .{
                         .result = value,
                         .contents = .{ .sum_case = case_index },
@@ -2890,11 +2999,7 @@ pub fn NormalForm(
                     return true;
                 },
                 .optional_some => {
-                    try facts.insert(.{ .value_constant = .{
-                        .result = value,
-                        .contents = .{ .sum_case = 1 },
-                    } });
-                    return true;
+                    return error.UnsupportedInvariantDefinition;
                 },
                 .product_extract => |field_index| {
                     try facts.insert(.{ .product_extract_result = .{
@@ -2947,6 +3052,7 @@ pub fn NormalForm(
         fn addInstructionDefinition(
             program: control_ir.Program,
             value: control_ir.ValueId,
+            result_value: control_ir.ValueId,
             environment: *Set,
             facts: *FactSet,
             visited: *Set,
@@ -2962,12 +3068,17 @@ pub fn NormalForm(
                 try addInstructionDefinition(
                     program,
                     operand,
+                    operand,
                     environment,
                     facts,
                     visited,
                 );
             }
-            try facts.insert(.{ .instruction_result = .{ .result = value } });
+            try facts.insert(try instructionResultTerm(
+                result_value,
+                value,
+                instruction.operands,
+            ));
         }
 
         fn addEnvironmentDefinitions(
@@ -2982,6 +3093,7 @@ pub fn NormalForm(
                 if (!present) continue;
                 try addInstructionDefinition(
                     program,
+                    @intCast(value_index),
                     @intCast(value_index),
                     environment,
                     facts,
@@ -3073,6 +3185,18 @@ pub fn NormalForm(
                                 );
                             }
                             continue;
+                        }
+                        if (has_definition) {
+                            var executable_visited = Set.empty();
+                            var retained = target_live;
+                            try addInstructionDefinition(
+                                program,
+                                canonical_source,
+                                parameter,
+                                &retained,
+                                facts,
+                                &executable_visited,
+                            );
                         }
                     },
                     .@"resume" => {},

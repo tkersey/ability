@@ -12,6 +12,194 @@ const CoreModules = struct {
     rnf: *std.Build.Module,
 };
 
+const TestArgs = struct {
+    filters: []const []const u8,
+    passthrough: []const []const u8,
+};
+
+fn parseTestArgs(b: *std.Build) TestArgs {
+    const args = b.args orelse return .{
+        .filters = &.{},
+        .passthrough = &.{},
+    };
+
+    var filters: std.ArrayList([]const u8) = .empty;
+    var passthrough: std.ArrayList([]const u8) = .empty;
+
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--test-filter")) {
+            index += 1;
+            if (index >= args.len or args[index].len == 0) {
+                std.process.fatal(
+                    "Expected a non-empty pattern after '--test-filter'.",
+                    .{},
+                );
+            }
+            filters.append(b.allocator, args[index]) catch |err|
+                std.process.fatal(
+                    "unable to store test filter: {s}",
+                    .{@errorName(err)},
+                );
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--test-filter=")) {
+            const pattern = arg["--test-filter=".len..];
+            if (pattern.len == 0) {
+                std.process.fatal(
+                    "Expected '--test-filter=' to include a non-empty pattern.",
+                    .{},
+                );
+            }
+            filters.append(b.allocator, pattern) catch |err|
+                std.process.fatal(
+                    "unable to store test filter: {s}",
+                    .{@errorName(err)},
+                );
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--seed")) {
+            index += 1;
+            if (index >= args.len or args[index].len == 0) {
+                std.process.fatal(
+                    "Expected an unsigned 32-bit integer after '--seed'.",
+                    .{},
+                );
+            }
+            _ = std.fmt.parseUnsigned(u32, args[index], 0) catch
+                std.process.fatal(
+                    "Expected '--seed' to contain an unsigned 32-bit integer; got '{s}'.",
+                    .{args[index]},
+                );
+            passthrough.append(
+                b.allocator,
+                b.fmt("--seed={s}", .{args[index]}),
+            ) catch |err| std.process.fatal(
+                "unable to store test runner seed: {s}",
+                .{@errorName(err)},
+            );
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--seed=")) {
+            const seed = arg["--seed=".len..];
+            if (seed.len == 0) {
+                std.process.fatal(
+                    "Expected '--seed=' to include an unsigned 32-bit integer.",
+                    .{},
+                );
+            }
+            _ = std.fmt.parseUnsigned(u32, seed, 0) catch
+                std.process.fatal(
+                    "Expected '--seed' to contain an unsigned 32-bit integer; got '{s}'.",
+                    .{seed},
+                );
+            passthrough.append(b.allocator, arg) catch |err|
+                std.process.fatal(
+                    "unable to store test runner seed: {s}",
+                    .{@errorName(err)},
+                );
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--cache-dir")) {
+            index += 1;
+            if (index >= args.len or args[index].len == 0) {
+                std.process.fatal(
+                    "Expected a path after '--cache-dir'.",
+                    .{},
+                );
+            }
+            passthrough.append(
+                b.allocator,
+                b.fmt("--cache-dir={s}", .{args[index]}),
+            ) catch |err| std.process.fatal(
+                "unable to store test runner cache directory: {s}",
+                .{@errorName(err)},
+            );
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--cache-dir=")) {
+            if (arg["--cache-dir=".len..].len == 0) {
+                std.process.fatal(
+                    "Expected '--cache-dir=' to include a path.",
+                    .{},
+                );
+            }
+            passthrough.append(b.allocator, arg) catch |err|
+                std.process.fatal(
+                    "unable to store test runner cache directory: {s}",
+                    .{@errorName(err)},
+                );
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--max-warnings")) {
+            index += 1;
+            if (index >= args.len or args[index].len == 0) {
+                std.process.fatal(
+                    "Expected a non-empty limit after '--max-warnings'.",
+                    .{},
+                );
+            }
+            _ = std.fmt.parseUnsigned(usize, args[index], 10) catch
+                std.process.fatal(
+                    "Expected '--max-warnings' to contain an unsigned integer; got '{s}'.",
+                    .{args[index]},
+                );
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--max-warnings=")) {
+            const limit = arg["--max-warnings=".len..];
+            if (limit.len == 0) {
+                std.process.fatal(
+                    "Expected '--max-warnings=' to include a non-empty limit.",
+                    .{},
+                );
+            }
+            _ = std.fmt.parseUnsigned(usize, limit, 10) catch
+                std.process.fatal(
+                    "Expected '--max-warnings' to contain an unsigned integer; got '{s}'.",
+                    .{limit},
+                );
+            continue;
+        }
+        passthrough.append(b.allocator, arg) catch |err|
+            std.process.fatal(
+                "unable to store test runner argument: {s}",
+                .{@errorName(err)},
+            );
+    }
+
+    return .{
+        .filters = filters.toOwnedSlice(b.allocator) catch |err|
+            std.process.fatal(
+                "unable to finalize test filters: {s}",
+                .{@errorName(err)},
+            ),
+        .passthrough = passthrough.toOwnedSlice(b.allocator) catch |err|
+            std.process.fatal(
+                "unable to finalize test runner arguments: {s}",
+                .{@errorName(err)},
+            ),
+    };
+}
+
+fn addTestArtifactWithArgs(
+    b: *std.Build,
+    step: *std.Build.Step,
+    root_module: *std.Build.Module,
+    test_args: TestArgs,
+) void {
+    const tests = b.addTest(.{
+        .root_module = root_module,
+        .filters = test_args.filters,
+    });
+    const run = b.addRunArtifact(tests);
+    if (test_args.passthrough.len != 0) {
+        run.addArgs(test_args.passthrough);
+    }
+    step.dependOn(&run.step);
+}
+
 fn addTestArtifact(
     b: *std.Build,
     step: *std.Build.Step,
@@ -34,6 +222,7 @@ fn addExpectedCompileFailure(
         .optimize = .Debug,
     });
     module.addImport("control_ir", core.control_ir);
+    module.addImport("driver", core.driver);
     module.addImport("portable_value", core.portable_value);
     module.addImport("program_v2", core.program_v2);
     const compilation = b.addTest(.{ .root_module = module });
@@ -150,6 +339,7 @@ fn programTestModule(
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_args = parseTestArgs(b);
     const core = addCoreModules(b, target, optimize);
     const host_core = addCoreModules(b, b.graph.host, optimize);
 
@@ -184,13 +374,13 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(&one_effect_example.step);
 
     const test_step = b.step("test", "Run the Boundary Machine test suite.");
-    addTestArtifact(b, test_step, boundary);
-    addTestArtifact(b, test_step, core.agent_profile);
-    addTestArtifact(b, test_step, core.control_ir);
-    addTestArtifact(b, test_step, core.effect_v2);
-    addTestArtifact(b, test_step, core.machine);
-    addTestArtifact(b, test_step, core.portable_value);
-    addTestArtifact(b, test_step, core.rnf);
+    addTestArtifactWithArgs(b, test_step, boundary, test_args);
+    addTestArtifactWithArgs(b, test_step, core.agent_profile, test_args);
+    addTestArtifactWithArgs(b, test_step, core.control_ir, test_args);
+    addTestArtifactWithArgs(b, test_step, core.effect_v2, test_args);
+    addTestArtifactWithArgs(b, test_step, core.machine, test_args);
+    addTestArtifactWithArgs(b, test_step, core.portable_value, test_args);
+    addTestArtifactWithArgs(b, test_step, core.rnf, test_args);
 
     const program_operations = programTestModule(
         b,
@@ -728,6 +918,10 @@ pub fn build(b: *std.Build) void {
             "effect resume type does not match its site",
         },
         .{
+            "test/compile_fail/driver_response_type_mismatch.zig",
+            "Boundary Machine response type must match the selected effect site Resume type",
+        },
+        .{
             "test/compile_fail/effect_handler_type_mismatch.zig",
             "effect handler function input must match source Payload",
         },
@@ -790,7 +984,7 @@ pub fn build(b: *std.Build) void {
         machine_yield,
         agent_loop,
     }) |integration_module| {
-        addTestArtifact(b, test_step, integration_module);
+        addTestArtifactWithArgs(b, test_step, integration_module, test_args);
     }
     test_step.dependOn(compile_fail_step);
     test_step.dependOn(parity_step);

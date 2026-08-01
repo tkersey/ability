@@ -65,10 +65,19 @@ pub fn Driver(comptime Machine: type) type {
                             const response = handlers.handle(
                                 tag,
                                 payload,
+                                request.identity,
                             ) catch |err| return .{ .handler_error = .{
                                 .request = request,
                                 .err = err,
                             } };
+                            const Site = Machine.EffectRow.site(
+                                comptime @intFromEnum(tag),
+                            );
+                            if (comptime @TypeOf(response) != Site.Resume) {
+                                @compileError(
+                                    "Boundary Machine response type must match the selected effect site Resume type",
+                                );
+                            }
                             try Machine.@"resume"(
                                 prepared_resume,
                                 response,
