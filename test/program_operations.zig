@@ -161,6 +161,103 @@ test "compiled pure operations construct products vectors and text" {
     try std.testing.expectEqual(@as(u32, 8), result.total);
 }
 
+const ConstantTitles = portable_value.Vector(Title, 2);
+const ConstantResult = struct {
+    title: Title,
+    titles: ConstantTitles,
+};
+
+const dirty_constant = blk: {
+    var result = ConstantResult{
+        .title = Title.fromSlice("root") catch unreachable,
+        .titles = ConstantTitles.empty(),
+    };
+    result.title.storage[15] = 0xa1;
+
+    var item = Title.fromSlice("item") catch unreachable;
+    item.storage[15] = 0xb2;
+    result.titles.push(item) catch unreachable;
+
+    var spare = Title.fromSlice("spare") catch unreachable;
+    spare.storage[15] = 0xc3;
+    result.titles.storage[1] = spare;
+    break :blk result;
+};
+
+const constant_value_types = [_]cir.ValueType{
+    .{ .schema = 0 },
+};
+const constant_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 0,
+        .operation = .{ .constant = 0 },
+    },
+};
+const constant_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &constant_instructions,
+        .terminator = .{ .return_value = 0 },
+    },
+};
+
+const ConstantBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = ConstantResult;
+    pub const Failure = enum { unreachable_failure };
+    pub const contract_bytes = "canonical-compiler-constant\x00v1";
+    pub const constants = .{dirty_constant};
+    pub const effect_sites = .{};
+    pub const schema_types = .{ConstantResult};
+    pub const control_ir: cir.Program = .{
+        .label = "canonical-compiler-constant",
+        .value_types = &constant_value_types,
+        .blocks = &constant_blocks,
+        .entry = 0,
+        .result_type = .{ .schema = 0 },
+    };
+};
+
+const ConstantMachine = program_v2.program(
+    "canonical-compiler-constant",
+    ConstantBody,
+).compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 8,
+});
+
+test "compiler constants materialize canonical portable representations" {
+    const state = try ConstantMachine.initialState(std.testing.allocator, {});
+    defer ConstantMachine.deinitState(state);
+
+    var fuel: u64 = 8;
+    const done = switch (try ConstantMachine.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+
+    const result = done.value();
+    try std.testing.expectEqualStrings("root", result.title.slice());
+    try std.testing.expectEqual(@as(u8, 0), result.title.storage[15]);
+    try std.testing.expectEqual(@as(u32, 1), result.titles.len());
+    try std.testing.expectEqualStrings(
+        "item",
+        result.titles.storage[0].slice(),
+    );
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        result.titles.storage[0].storage[15],
+    );
+    try std.testing.expectEqual(@as(u32, 0), result.titles.storage[1].len());
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        result.titles.storage[1].storage[15],
+    );
+}
+
 const failure_blocks = [_]cir.Block{
     .{
         .id = 0,

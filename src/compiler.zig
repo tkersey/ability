@@ -2934,7 +2934,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 switch (instruction.operation) {
                     .metadata => unreachable,
                     .constant => |constant_index| {
-                        @field(store, result_name) = Body.constants[constant_index];
+                        const Constant = @TypeOf(Body.constants[constant_index]);
+                        const canonical = comptime portable_value.canonicalValue(
+                            Constant,
+                            Body.constants[constant_index],
+                        ) catch unreachable;
+                        @field(store, result_name) = canonical;
                     },
                     .copy => {
                         @field(store, result_name) = @field(
