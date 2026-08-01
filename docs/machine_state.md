@@ -40,5 +40,11 @@ arithmetic, and trailing bytes. Sequence cannot exceed cumulative fuel, and a
 parked request must have a nonzero sequence. Decode executes no effects or user
 callbacks.
 
+The bytes are transferable bearer authority. Decode validates the current
+cumulative counter against fixed bounds and local arithmetic relations; it does
+not claim that an unsigned self-contained counter authenticates the history that
+issued it. World and host persistence own branch-head retention, rollback, and
+replay policy.
+
 State bytes are compatible only when the Machine contract digest is identical.
 There is no automatic migration from `ABL_STM1`.

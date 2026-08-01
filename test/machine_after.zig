@@ -75,15 +75,24 @@ test "Program.compile persists local after in RNF with zero after sites" {
     for (Program.rnf.constructorSlice()) |constructor| {
         if (constructor.kind != .after_handler) continue;
         after_count += 1;
-        try std.testing.expectEqual(@as(usize, 2), constructor.environment_len);
+        const expected_environment = [_]cir.ValueId{ 1, 2 };
         try std.testing.expectEqual(
-            @as(cir.ValueId, 1),
-            constructor.environment[0].value,
+            expected_environment.len,
+            constructor.environment_len,
         );
-        try std.testing.expectEqual(
-            @as(cir.ValueId, 2),
-            constructor.environment[1].value,
-        );
+        for (
+            constructor.environmentFields(),
+            expected_environment,
+        ) |field, expected_value| {
+            try std.testing.expectEqual(expected_value, field.value);
+        }
+
+        var saw_historical_edge_copy = false;
+        for (constructor.invariantTerms()) |term| switch (term) {
+            .value_copy => saw_historical_edge_copy = true,
+            else => {},
+        };
+        try std.testing.expect(!saw_historical_edge_copy);
     }
     try std.testing.expectEqual(@as(usize, 1), after_count);
 

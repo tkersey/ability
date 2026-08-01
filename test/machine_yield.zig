@@ -71,7 +71,7 @@ const CheckpointMachine = CheckpointProgram.compile(.{
 
 test "explicit yield persists the continuation before returning to the caller" {
     try std.testing.expectEqual(
-        @as(usize, 3),
+        @as(usize, 2),
         ExplicitProgram.rnf.constructor_count,
     );
     const checkpoint = &ExplicitProgram.rnf.constructors[1];
@@ -82,6 +82,10 @@ test "explicit yield persists the continuation before returning to the caller" {
         @as(cir.ValueId, 1),
         checkpoint.environment[0].value,
     );
+    for (checkpoint.invariantTerms()) |term| switch (term) {
+        .value_copy => return error.TestUnexpectedResult,
+        else => {},
+    };
 
     const state = try ExplicitMachine.initialState(std.testing.allocator, 11);
     defer ExplicitMachine.deinitState(state);

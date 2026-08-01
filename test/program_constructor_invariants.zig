@@ -1128,8 +1128,85 @@ fn ClassificationOnlyProgram(comptime role: cir.BlockRole) type {
 const SegmentClassification = ClassificationOnlyProgram(.segment);
 const LoopClassification = ClassificationOnlyProgram(.loop_header);
 
+test "parked block entry validates in target coordinates" {
+    const transition = blk: {
+        for (SegmentClassification.Program.rnf.entryTransitionSlice()) |candidate| {
+            if (candidate.source_block == 0 and
+                candidate.edge_kind == .jump and
+                candidate.target_block == 1)
+            {
+                break :blk candidate;
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+    const parked = &SegmentClassification.Program.rnf.constructors[
+        transition.constructor_id
+    ];
+    try std.testing.expectEqual(@as(usize, 1), parked.environment_len);
+    try std.testing.expectEqual(@as(cir.ValueId, 1), parked.environment[0].value);
+
+    var saw_edge_definition = false;
+    var saw_historical_edge_copy = false;
+    for (parked.invariantTerms()) |term| switch (term) {
+        .value_constant => |definition| {
+            saw_edge_definition = definition.result == 1 and switch (definition.contents) {
+                .unsigned => |value| value == 7,
+                else => false,
+            };
+        },
+        .value_copy => saw_historical_edge_copy = true,
+        else => {},
+    };
+    try std.testing.expect(saw_edge_definition);
+    try std.testing.expect(!saw_historical_edge_copy);
+
+    const state = try SegmentClassification.Machine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer SegmentClassification.Machine.deinitState(state);
+    var caller_fuel: u64 = 2;
+    try std.testing.expectEqual(
+        .yielded,
+        std.meta.activeTag(try SegmentClassification.Machine.step(
+            state,
+            &caller_fuel,
+        )),
+    );
+    const encoded = try SegmentClassification.Machine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset..][0..4],
+        8,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        SegmentClassification.Machine.decodeState(
+            std.testing.allocator,
+            forged,
+        ),
+    );
+}
+
 test "sum branches persist the source case and reject a forged local path" {
-    const awaiting_left = &SumProgram.rnf.constructors[2];
+    const awaiting_left = blk: {
+        for (SumProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.kind == .await_effect and
+                constructor.source_block == 1)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
     try std.testing.expectEqual(@as(usize, 1), awaiting_left.environment_len);
     try std.testing.expectEqual(
         @as(cir.ValueId, 0),
@@ -1199,7 +1276,16 @@ test "public resume consumes only preallocated response authority" {
 }
 
 test "optional branches use the same canonical sum-case invariant" {
-    const awaiting_some = &OptionalProgram.rnf.constructors[2];
+    const awaiting_some = blk: {
+        for (OptionalProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.kind == .await_effect and
+                constructor.source_block == 1)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
     try std.testing.expectEqual(@as(usize, 1), awaiting_some.environment_len);
     try std.testing.expectEqual(
         @as(cir.ValueId, 0),
@@ -1264,8 +1350,8 @@ test "derived live predicates retain their local defining equation" {
     );
     var saw_operand_fact = false;
     var saw_definition = false;
-    var saw_copy = false;
     var saw_constant = false;
+    var saw_historical_edge_copy = false;
     for (awaiting.invariantTerms()) |term| switch (term) {
         .integer_zero => |fact| {
             saw_operand_fact = fact.value == 1 and !fact.equal;
@@ -1274,9 +1360,6 @@ test "derived live predicates retain their local defining equation" {
             saw_definition =
                 definition.result == 3 and definition.value == 1;
         },
-        .value_copy => |definition| {
-            saw_copy = definition.result == 1 and definition.source == 0;
-        },
         .value_constant => |definition| {
             saw_constant = definition.result == 0 and
                 switch (definition.contents) {
@@ -1284,12 +1367,16 @@ test "derived live predicates retain their local defining equation" {
                     else => false,
                 };
         },
+        .value_copy => |definition| {
+            saw_historical_edge_copy = definition.result == 3 and
+                definition.source == 2;
+        },
         else => {},
     };
     try std.testing.expect(saw_operand_fact);
     try std.testing.expect(saw_definition);
-    try std.testing.expect(saw_copy);
     try std.testing.expect(saw_constant);
+    try std.testing.expect(!saw_historical_edge_copy);
 
     const state = try DerivedMachine.initialState(std.testing.allocator, {});
     defer DerivedMachine.deinitState(state);

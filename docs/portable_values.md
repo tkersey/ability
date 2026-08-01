@@ -30,7 +30,9 @@ branching, product construction/extraction, vector construction and access, and
 bounded text/byte construction. Text and Bytes expose canonical logical length,
 copy, comparison, join, and append operations; Bytes also admits one-byte
 scalar append, while Text admits Unicode-scalar and integer formatting.
-Operations charge deterministic fuel.
+Ordering returns an error for malformed logical lengths, and Text ordering
+also rejects invalid UTF-8 before comparing bytes. Operations charge
+deterministic fuel.
 
 Unsupported values include `usize`, `isize`, raw pointers, arbitrary slices,
 floats, function values, opaque host handles, non-exhaustive enums, comptime

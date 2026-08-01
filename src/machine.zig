@@ -1,6 +1,8 @@
 const portable_value = @import("portable_value");
 const std = @import("std");
 
+const machine_evaluation_branch_quota = 1_000_000;
+
 /// Canonical RNF state encoding selected for Machine ABI v2.
 pub const StateEncoding = enum {
     rnf_v1,
@@ -75,7 +77,6 @@ fn requireDefinition(comptime Definition: type) void {
         "Transition",
         "contract_bytes",
         "initial",
-        "minimumCumulativeFuel",
         "minimumCost",
         "cost",
         "plan",
@@ -217,6 +218,7 @@ pub fn Machine(
     comptime options: Options,
 ) type {
     comptime {
+        @setEvalBranchQuota(machine_evaluation_branch_quota);
         requireDefinition(Definition);
         assertDenseFrameTags(Definition.Frame);
         assertDenseRequestTags(
@@ -306,27 +308,134 @@ pub fn Machine(
             ProgramContractViolation,
         };
 
-        /// Private live ownership carrier. Canonical ABL_RNF2 bytes remain the
-        /// transferable authority; allocator-backed storage owns exactly the
-        /// logical typed frames needed by the direct reducer.
+        /// Private live ownership carrier. One semantic frame version is one
+        /// physical allocation, so the predecessor chain is also the exact
+        /// reverse allocation order. Canonical ABL_RNF2 bytes remain the
+        /// transferable authority.
         const FrameAllocation = struct {
-            list: std.ArrayList(Frame),
             predecessor: ?*@This() = null,
+            logical_length: usize,
+            capacity: usize,
+            byte_length: usize,
+
+            const block_alignment = std.mem.Alignment.of(@This()).max(
+                std.mem.Alignment.of(Frame),
+            );
+            const frame_offset = std.mem.Alignment.of(Frame).forward(
+                @sizeOf(@This()),
+            );
+
+            fn byteLength(capacity: usize) Error!usize {
+                if (capacity == 0 or capacity > options.maximum_frames) {
+                    return error.ProgramContractViolation;
+                }
+                const frame_bytes = std.math.mul(
+                    usize,
+                    capacity,
+                    @sizeOf(Frame),
+                ) catch return error.ProgramContractViolation;
+                const unaligned_length = std.math.add(
+                    usize,
+                    frame_offset,
+                    frame_bytes,
+                ) catch return error.ProgramContractViolation;
+                const alignment_mask =
+                    block_alignment.toByteUnits() - 1;
+                const padded_length = std.math.add(
+                    usize,
+                    unaligned_length,
+                    alignment_mask,
+                ) catch return error.ProgramContractViolation;
+                return padded_length & ~alignment_mask;
+            }
+
+            fn bytes(
+                self: *@This(),
+            ) []align(block_alignment.toByteUnits()) u8 {
+                const pointer: [*]align(block_alignment.toByteUnits()) u8 =
+                    @ptrCast(@alignCast(self));
+                return pointer[0..self.byte_length];
+            }
+
+            fn allFrames(self: *const @This()) []const Frame {
+                const pointer: [*]const u8 = @ptrCast(self);
+                const frames: [*]const Frame = @ptrCast(@alignCast(
+                    pointer + frame_offset,
+                ));
+                return frames[0..self.capacity];
+            }
+
+            fn allFramesMut(self: *@This()) []Frame {
+                const pointer: [*]u8 = @ptrCast(self);
+                const frames: [*]Frame = @ptrCast(@alignCast(
+                    pointer + frame_offset,
+                ));
+                return frames[0..self.capacity];
+            }
+
+            fn items(self: *const @This()) []const Frame {
+                return self.allFrames()[0..self.logical_length];
+            }
+
+            fn itemsMut(self: *@This()) []Frame {
+                return self.allFramesMut()[0..self.logical_length];
+            }
 
             fn create(
                 allocator: std.mem.Allocator,
                 capacity: usize,
             ) Error!*@This() {
-                const allocation = allocator.create(@This()) catch
-                    return error.OutOfMemory;
-                errdefer allocator.destroy(allocation);
+                const byte_length = try byteLength(capacity);
+                const block = allocator.alignedAlloc(
+                    u8,
+                    block_alignment,
+                    byte_length,
+                ) catch return error.OutOfMemory;
+                errdefer allocator.free(block);
+                const allocation: *@This() = @ptrCast(block.ptr);
                 allocation.* = .{
-                    .list = std.ArrayList(Frame).initCapacity(
-                        allocator,
-                        capacity,
-                    ) catch return error.OutOfMemory,
+                    .logical_length = 0,
+                    .capacity = capacity,
+                    .byte_length = byte_length,
                 };
                 return allocation;
+            }
+
+            fn growInPlace(
+                self: *@This(),
+                allocator: std.mem.Allocator,
+                capacity: usize,
+            ) Error!bool {
+                if (capacity <= self.capacity) return true;
+                const byte_length = try byteLength(capacity);
+                if (!allocator.resize(self.bytes(), byte_length)) return false;
+                self.capacity = capacity;
+                self.byte_length = byte_length;
+                return true;
+            }
+
+            fn attachPredecessor(
+                self: *@This(),
+                predecessor: *@This(),
+            ) Error!void {
+                var tail = self;
+                var allocation_count: usize = 1;
+                while (tail.predecessor) |next| {
+                    allocation_count = std.math.add(
+                        usize,
+                        allocation_count,
+                        1,
+                    ) catch return error.ProgramContractViolation;
+                    if (allocation_count > maximum_frame_allocations) {
+                        return error.ProgramContractViolation;
+                    }
+                    tail = next;
+                }
+                tail.predecessor = predecessor;
+                if (!self.chainConsistent()) {
+                    tail.predecessor = null;
+                    return error.ProgramContractViolation;
+                }
             }
 
             fn deinitChain(
@@ -336,40 +445,31 @@ pub fn Machine(
                 var allocation_cursor: ?*@This() = first;
                 while (allocation_cursor) |allocation| {
                     const predecessor = allocation.predecessor;
-                    allocation.list.deinit(allocator);
-                    allocator.destroy(allocation);
+                    allocator.free(allocation.bytes());
                     allocation_cursor = predecessor;
                 }
             }
 
             fn currentConsistent(self: *const @This()) bool {
-                return self.list.items.len >= 1 and
-                    self.list.items.len <= options.maximum_frames and
-                    (@sizeOf(Frame) == 0 or
-                        (self.list.capacity >= self.list.items.len and
-                            self.list.capacity <= options.maximum_frames));
+                const expected_byte_length = byteLength(self.capacity) catch
+                    return false;
+                return self.logical_length >= 1 and
+                    self.logical_length <= self.capacity and
+                    self.capacity <= options.maximum_frames and
+                    self.byte_length == expected_byte_length;
             }
 
             fn chainConsistent(self: *const @This()) bool {
                 var allocation_cursor: ?*const @This() = self;
-                var newer_capacity: ?usize = null;
-                var allocation_count: u32 = 0;
+                var allocation_count: usize = 0;
                 while (allocation_cursor) |allocation| {
                     if (!allocation.currentConsistent()) return false;
-                    if (@sizeOf(Frame) != 0) {
-                        if (newer_capacity) |capacity| {
-                            if (allocation.list.capacity >= capacity) {
-                                return false;
-                            }
-                        }
-                        newer_capacity = allocation.list.capacity;
-                    }
                     allocation_count = std.math.add(
-                        u32,
+                        usize,
                         allocation_count,
                         1,
                     ) catch return false;
-                    if (allocation_count > options.maximum_frames) {
+                    if (allocation_count > maximum_frame_allocations) {
                         return false;
                     }
                     allocation_cursor = allocation.predecessor;
@@ -377,6 +477,14 @@ pub fn Machine(
                 return true;
             }
         };
+
+        const maximum_frame_allocations = std.math.mul(
+            usize,
+            options.maximum_frames,
+            2,
+        ) catch @compileError(
+            "Boundary Machine maximum_frames exceeds frame ownership bounds",
+        );
 
         const FrameStack = union(enum) {
             const Stack = @This();
@@ -398,7 +506,7 @@ pub fn Machine(
                     allocator,
                     logical_length,
                 );
-                allocation.list.items.len = @intCast(logical_length);
+                allocation.logical_length = @intCast(logical_length);
                 return .{ .many = allocation };
             }
 
@@ -419,7 +527,7 @@ pub fn Machine(
                     .empty => .empty,
                     .one => |frame| .{ .one = frame },
                     .many => |allocation| blk: {
-                        if (many_capacity < allocation.list.items.len or
+                        if (many_capacity < allocation.logical_length or
                             many_capacity > options.maximum_frames)
                         {
                             return error.ProgramContractViolation;
@@ -428,8 +536,10 @@ pub fn Machine(
                             allocator,
                             many_capacity,
                         );
-                        copy.list.appendSliceAssumeCapacity(
-                            allocation.list.items,
+                        copy.logical_length = allocation.logical_length;
+                        @memcpy(
+                            copy.itemsMut(),
+                            allocation.items(),
                         );
                         break :blk .{ .many = copy };
                     },
@@ -478,9 +588,7 @@ pub fn Machine(
                 return switch (self.*) {
                     .empty => 0,
                     .one => 1,
-                    .many => |allocation| @intCast(
-                        allocation.list.items.len,
-                    ),
+                    .many => |allocation| @intCast(allocation.logical_length),
                 };
             }
 
@@ -488,7 +596,7 @@ pub fn Machine(
                 return switch (self.*) {
                     .empty => &.{},
                     .one => @as(*const [1]Frame, @ptrCast(&self.one)),
-                    .many => |allocation| allocation.list.items,
+                    .many => |allocation| allocation.items(),
                 };
             }
 
@@ -498,9 +606,7 @@ pub fn Machine(
                 }
                 return switch (self.*) {
                     .one => self.one,
-                    .many => |allocation| allocation.list.items[
-                        @intCast(index)
-                    ],
+                    .many => |allocation| allocation.items()[@intCast(index)],
                     .empty => null,
                 };
             }
@@ -511,7 +617,7 @@ pub fn Machine(
                 }
                 switch (self.*) {
                     .one => self.one = frame,
-                    .many => |allocation| allocation.list.items[
+                    .many => |allocation| allocation.itemsMut()[
                         @intCast(index)
                     ] = frame,
                     .empty => unreachable,
@@ -533,21 +639,36 @@ pub fn Machine(
                             allocator,
                             2,
                         );
-                        allocation.list.appendAssumeCapacity(first);
-                        allocation.list.appendAssumeCapacity(frame);
+                        allocation.logical_length = 2;
+                        allocation.itemsMut()[0] = first;
+                        allocation.itemsMut()[1] = frame;
                         self.* = .{ .many = allocation };
                     },
                     .many => |allocation| {
-                        if (@sizeOf(Frame) != 0 and
-                            allocation.list.capacity <
-                                allocation.list.items.len + 1)
+                        const next_length = std.math.add(
+                            usize,
+                            allocation.logical_length,
+                            1,
+                        ) catch return error.ProgramContractViolation;
+                        if (allocation.capacity < next_length and
+                            !try allocation.growInPlace(allocator, next_length))
                         {
-                            allocation.list.ensureTotalCapacityPrecise(
+                            const replacement = try FrameAllocation.create(
                                 allocator,
-                                allocation.list.items.len + 1,
-                            ) catch return error.OutOfMemory;
+                                next_length,
+                            );
+                            replacement.logical_length =
+                                allocation.logical_length;
+                            @memcpy(
+                                replacement.itemsMut(),
+                                allocation.items(),
+                            );
+                            replacement.predecessor = allocation;
+                            self.many = replacement;
                         }
-                        allocation.list.appendAssumeCapacity(frame);
+                        const active = self.many;
+                        active.logical_length = next_length;
+                        active.itemsMut()[next_length - 1] = frame;
                     },
                 }
             }
@@ -566,13 +687,13 @@ pub fn Machine(
                         break :blk frame;
                     },
                     .many => |allocation| blk: {
-                        const next_length = allocation.list.items.len - 1;
-                        const result = allocation.list.items[next_length];
+                        const next_length = allocation.logical_length - 1;
+                        const result = allocation.items()[next_length];
                         if (next_length == 0) {
                             allocation.deinitChain(allocator);
                             self.* = .empty;
                         } else {
-                            allocation.list.items.len = next_length;
+                            allocation.logical_length = next_length;
                         }
                         break :blk result;
                     },
@@ -590,21 +711,18 @@ pub fn Machine(
                 switch (self.*) {
                     .many => |destination| switch (candidate.*) {
                         .one => |frame| {
-                            destination.list.items.len = 1;
-                            destination.list.items[0] = frame;
+                            destination.logical_length = 1;
+                            destination.itemsMut()[0] = frame;
                             candidate.* = .empty;
                             return;
                         },
                         .many => |source| {
-                            if (@sizeOf(Frame) == 0 or
-                                source.list.items.len <=
-                                    destination.list.capacity)
-                            {
-                                destination.list.items.len =
-                                    source.list.items.len;
+                            if (source.logical_length <= destination.capacity) {
+                                destination.logical_length =
+                                    source.logical_length;
                                 @memcpy(
-                                    destination.list.items,
-                                    source.list.items,
+                                    destination.itemsMut(),
+                                    source.items(),
                                 );
                                 source.deinitChain(allocator);
                                 candidate.* = .empty;
@@ -618,10 +736,7 @@ pub fn Machine(
                 switch (self.*) {
                     .many => switch (candidate.*) {
                         .many => |source| {
-                            if (source.predecessor != null) {
-                                return error.ProgramContractViolation;
-                            }
-                            source.predecessor = self.many;
+                            try source.attachPredecessor(self.many);
                             self.* = candidate.take();
                             return;
                         },
@@ -644,10 +759,7 @@ pub fn Machine(
                 switch (self.*) {
                     .many => |destination| switch (candidate.*) {
                         .many => |source| {
-                            if (source.predecessor != null) {
-                                return error.ProgramContractViolation;
-                            }
-                            source.predecessor = destination;
+                            try source.attachPredecessor(destination);
                             self.* = candidate.take();
                             return;
                         },
@@ -808,6 +920,7 @@ pub fn Machine(
         }
 
         fn frameId(frame: Frame) Error!u32 {
+            @setEvalBranchQuota(machine_evaluation_branch_quota);
             return portable_value.unionTag(Frame, frame) catch
                 return error.ProgramContractViolation;
         }
@@ -987,6 +1100,7 @@ pub fn Machine(
         }
 
         fn stateSize(value: *const StoredState) Error!usize {
+            @setEvalBranchQuota(machine_evaluation_branch_quota);
             if (value.terminal or value.frames.len() == 0) {
                 return error.ProgramContractViolation;
             }
@@ -1006,6 +1120,7 @@ pub fn Machine(
             value: *const StoredState,
             request: Request,
         ) Error!usize {
+            @setEvalBranchQuota(machine_evaluation_branch_quota);
             const frame = try top(value);
             const current_payload_size =
                 try portable_value.unionPayloadEncodedSize(Frame, frame);
@@ -1036,6 +1151,7 @@ pub fn Machine(
             value: *const StoredState,
             output: []u8,
         ) Error!void {
+            @setEvalBranchQuota(machine_evaluation_branch_quota);
             const required = try stateSize(value);
             if (output.len != required) return error.ProgramContractViolation;
             var writer: ByteWriter = .{ .bytes = output };
@@ -1070,6 +1186,7 @@ pub fn Machine(
         fn canonicalContinuationDigest(
             value: *const StoredState,
         ) Error![32]u8 {
+            @setEvalBranchQuota(machine_evaluation_branch_quota);
             _ = try stateSize(value);
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
             hasher.update(state_magic);
@@ -1118,11 +1235,6 @@ pub fn Machine(
             for (value.frames.slice()) |frame| {
                 Definition.validateFrame(frame) catch
                     return error.ProgramContractViolation;
-                if (value.cumulative_fuel <
-                    Definition.minimumCumulativeFuel(frame))
-                {
-                    return error.ProgramContractViolation;
-                }
             }
             Definition.validateStack(value.frames.slice()) catch
                 return error.ProgramContractViolation;
@@ -1348,6 +1460,11 @@ pub fn Machine(
                 return error.ProgramContractViolation;
             }
             if (caller_fuel.* < original_minimum_cost) return .yielded;
+            const original_cost = Definition.cost(original_frame);
+            if (original_cost < original_minimum_cost) {
+                return error.ProgramContractViolation;
+            }
+            if (caller_fuel.* < original_cost) return .yielded;
 
             var candidate = original.*;
             candidate.frames = try original.frames.cloneForStep(
@@ -1357,6 +1474,7 @@ pub fn Machine(
             candidate.request_identity = null;
             candidate.terminal_result = null;
             var remaining_fuel = caller_fuel.*;
+            var first_cost: ?u64 = original_cost;
 
             while (true) {
                 const frame = try top(&candidate);
@@ -1365,7 +1483,8 @@ pub fn Machine(
                 if (remaining_fuel < minimum_cost) {
                     return commitYield(state, &candidate, caller_fuel, remaining_fuel);
                 }
-                const cost = Definition.cost(frame);
+                const cost = first_cost orelse Definition.cost(frame);
+                first_cost = null;
                 if (cost < minimum_cost) return error.ProgramContractViolation;
                 if (remaining_fuel < cost) {
                     return commitYield(state, &candidate, caller_fuel, remaining_fuel);
@@ -1532,6 +1651,7 @@ pub fn Machine(
             allocator: std.mem.Allocator,
             bytes: []const u8,
         ) Error!State {
+            @setEvalBranchQuota(machine_evaluation_branch_quota);
             if (bytes.len > options.maximum_state_bytes) {
                 return error.ProgramContractViolation;
             }
@@ -1635,13 +1755,6 @@ const TestDefinition = struct {
 
     fn initial(seed: InitialArgs) Frame {
         return .{ .entry = .{ .seed = seed } };
-    }
-
-    fn minimumCumulativeFuel(frame: Frame) u64 {
-        return switch (frame) {
-            .entry => 0,
-            .loop_header, .await_increment => 1,
-        };
     }
 
     fn minimumCost(_: Frame) u64 {
@@ -1751,7 +1864,6 @@ const AlternateTestDefinition = struct {
     const Transition = TestDefinition.Transition;
     const contract_bytes = "test-direct-rnf\x00semantic-alternative";
     const initial = TestDefinition.initial;
-    const minimumCumulativeFuel = TestDefinition.minimumCumulativeFuel;
     const minimumCost = TestDefinition.minimumCost;
     const cost = TestDefinition.cost;
     const plan = TestDefinition.plan;
@@ -1781,13 +1893,6 @@ const BudgetTestDefinition = struct {
 
     fn initial(_: InitialArgs) Frame {
         return .{ .entry = .{} };
-    }
-
-    fn minimumCumulativeFuel(frame: Frame) u64 {
-        return switch (frame) {
-            .entry => 0,
-            .finish => 1,
-        };
     }
 
     fn minimumCost(_: Frame) u64 {
@@ -1861,10 +1966,6 @@ const LargeFrameDefinition = struct {
         return .{ .entry = .{ .payload = LargeFrameText.empty() } };
     }
 
-    fn minimumCumulativeFuel(_: Frame) u64 {
-        return 0;
-    }
-
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
@@ -1930,13 +2031,6 @@ const MalformedRequestDefinition = struct {
 
     fn initial(_: InitialArgs) Frame {
         return .{ .entry = .{} };
-    }
-
-    fn minimumCumulativeFuel(frame: Frame) u64 {
-        return switch (frame) {
-            .entry => 0,
-            .awaiting_lookup => 1,
-        };
     }
 
     fn minimumCost(_: Frame) u64 {
@@ -2017,13 +2111,6 @@ const UnresumableRequestDefinition = struct {
         return .{ .entry = .{} };
     }
 
-    fn minimumCumulativeFuel(frame: Frame) u64 {
-        return switch (frame) {
-            .entry => 0,
-            .awaiting, .resumed => 1,
-        };
-    }
-
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
@@ -2100,10 +2187,6 @@ const CostPreflightDefinition = struct {
         return .{ .entry = .{} };
     }
 
-    fn minimumCumulativeFuel(_: Frame) u64 {
-        return 0;
-    }
-
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
@@ -2178,19 +2261,15 @@ const ZeroFuelStackDefinition = struct {
         return .{ .entry = .{} };
     }
 
-    fn minimumCumulativeFuel(frame: Frame) u64 {
-        return switch (frame) {
-            .entry => 0,
-            .parent, .child => 1,
-        };
-    }
-
     fn minimumCost(_: Frame) u64 {
         return 1;
     }
 
-    fn cost(_: Frame) u64 {
-        return 1;
+    fn cost(frame: Frame) u64 {
+        return switch (frame) {
+            .child => 5,
+            .entry, .parent => 1,
+        };
     }
 
     fn plan(frame: Frame, accepted_cost: u64) struct {
@@ -2704,7 +2783,7 @@ test "terminal budget failure retains prior segment charges" {
     try std.testing.expectEqual(@as(u64, 4), caller_fuel);
 }
 
-test "decode rejects cumulative fuel below the constructor arrival floor" {
+test "decode treats bounded cumulative fuel as bearer state rather than history proof" {
     const BudgetMachine = Machine(BudgetTestDefinition, .{
         .maximum_frames = 1,
         .maximum_state_bytes = 4096,
@@ -2732,13 +2811,11 @@ test "decode rejects cumulative fuel below the constructor arrival floor" {
         0,
         .little,
     );
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        BudgetMachine.decodeState(
-            std.testing.allocator,
-            forged[0..encoded.len],
-        ),
+    const decoded = try BudgetMachine.decodeState(
+        std.testing.allocator,
+        forged[0..encoded.len],
     );
+    defer BudgetMachine.deinitState(decoded);
 }
 
 test "caller fuel preflight does not execute the segment plan" {
@@ -2811,6 +2888,45 @@ test "zero caller fuel yields a multi-frame state without allocation" {
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), no_fuel);
     const after = try ZeroFuelMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+}
+
+test "insufficient first dynamic cost yields a multi-frame state without allocation" {
+    const DynamicFuelMachine = Machine(ZeroFuelStackDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 16,
+    });
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const state = try DynamicFuelMachine.initialState(failing.allocator(), {});
+    defer DynamicFuelMachine.deinitState(state);
+    var setup_fuel: u64 = 1;
+    try std.testing.expectEqual(
+        DynamicFuelMachine.Outcome.yielded,
+        try DynamicFuelMachine.step(state, &setup_fuel),
+    );
+    const before = try DynamicFuelMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(before);
+
+    failing.fail_index = failing.allocations;
+    var insufficient_fuel: u64 = 4;
+    try std.testing.expectEqual(
+        DynamicFuelMachine.Outcome.yielded,
+        try DynamicFuelMachine.step(state, &insufficient_fuel),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u64, 4), insufficient_fuel);
+    const after = try DynamicFuelMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
 }

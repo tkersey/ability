@@ -2,6 +2,9 @@ const cir = @import("control_ir");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
+const state_header_length = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
+const frame_header_length = 4 + 4;
+
 const root_call_arguments = [_]cir.EdgeArgument{
     .{ .value = 0 },
     .{ .value = 1 },
@@ -455,6 +458,38 @@ test "compiled bounded recursive frames survive canonical round trip" {
 }
 
 test "helper entry backedges persist only future-local callee state" {
+    const call_entry_id = blk: {
+        for (HelperBackedgeProgram.rnf.entryTransitionSlice()) |transition| {
+            if (transition.source_block == 0 and
+                transition.edge_kind == .call and
+                transition.target_block == 1)
+            {
+                break :blk transition.constructor_id;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    const progressed_entry_id = blk: {
+        for (HelperBackedgeProgram.rnf.entryTransitionSlice()) |transition| {
+            if (transition.source_block == 2 and
+                transition.edge_kind == .suspension_continuation and
+                transition.target_block == 1)
+            {
+                break :blk transition.constructor_id;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expect(call_entry_id != progressed_entry_id);
+    try std.testing.expectEqual(
+        .call_entry,
+        HelperBackedgeProgram.rnf.constructors[call_entry_id].origin,
+    );
+    try std.testing.expectEqual(
+        .suspension,
+        HelperBackedgeProgram.rnf.constructors[progressed_entry_id].origin,
+    );
+
     const BackedgeMachine = HelperBackedgeProgram.compile(.{
         .maximum_frames = 2,
         .maximum_state_bytes = 4096,
@@ -489,6 +524,59 @@ test "helper entry backedges persist only future-local callee state" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 2), done.value().*);
+}
+
+test "call-created entry binds parent and child arguments" {
+    const RecursiveMachine = Program.compile(.{
+        .maximum_frames = 8,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const state = try RecursiveMachine.initialState(std.testing.allocator, 3);
+    defer RecursiveMachine.deinitState(state);
+
+    var enter_helper_fuel: u64 = 3;
+    try std.testing.expectEqual(
+        RecursiveMachine.Outcome.yielded,
+        try RecursiveMachine.step(state, &enter_helper_fuel),
+    );
+    const encoded = try RecursiveMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+
+    const authentic = try RecursiveMachine.decodeState(
+        std.testing.allocator,
+        encoded,
+    );
+    RecursiveMachine.deinitState(authentic);
+
+    const frame_count_offset = state_header_length - 8;
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        std.mem.readInt(u32, encoded[frame_count_offset..][0..4], .little),
+    );
+    const parent_environment_length = std.mem.readInt(
+        u32,
+        encoded[state_header_length + 4 ..][0..4],
+        .little,
+    );
+    const child_environment_offset = state_header_length +
+        frame_header_length + parent_environment_length +
+        frame_header_length;
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[child_environment_offset..][0..4],
+        4,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        RecursiveMachine.decodeState(std.testing.allocator, forged),
+    );
 }
 
 test "shallow recursive stepping allocates from logical depth" {
@@ -725,10 +813,11 @@ test "call continuation may return to its own source block" {
         }
         switch (constructor.origin) {
             .block_entry => block_entry_count += 1,
+            .call_entry => {},
             .suspension => suspension_count += 1,
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), block_entry_count);
+    try std.testing.expectEqual(@as(usize, 2), block_entry_count);
     try std.testing.expectEqual(@as(usize, 1), suspension_count);
 
     const SelfTargetMachine = SelfTargetProgram.compile(.{

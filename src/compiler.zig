@@ -654,86 +654,6 @@ fn minimumSourceBlockCost(
     return minimumBlockCost(program.blocks[block_id]);
 }
 
-fn lowerMinimumArrival(
-    comptime maximum_blocks: usize,
-    arrivals: *[maximum_blocks]u64,
-    target: control_ir.BlockId,
-    candidate: u64,
-    changed: *bool,
-) void {
-    if (candidate >= arrivals[target]) return;
-    arrivals[target] = candidate;
-    changed.* = true;
-}
-
-fn minimumBlockArrivalFuel(
-    comptime Body: type,
-    comptime maximum_blocks: usize,
-    comptime program: control_ir.Program,
-) [maximum_blocks]u64 {
-    const unreachable_fuel = std.math.maxInt(u64);
-    var arrivals = [_]u64{unreachable_fuel} ** maximum_blocks;
-    arrivals[program.entry] = 0;
-    for (0..program.blocks.len) |_| {
-        var changed = false;
-        for (program.blocks) |block| {
-            const arrival = arrivals[block.id];
-            if (arrival == unreachable_fuel) continue;
-            const after = arrival +| minimumSourceBlockCost(
-                Body,
-                program,
-                block.id,
-            );
-            switch (block.terminator) {
-                .jump => |edge| lowerMinimumArrival(
-                    maximum_blocks,
-                    &arrivals,
-                    edge.target,
-                    after,
-                    &changed,
-                ),
-                .branch => |branch| {
-                    lowerMinimumArrival(
-                        maximum_blocks,
-                        &arrivals,
-                        branch.then_edge.target,
-                        after,
-                        &changed,
-                    );
-                    lowerMinimumArrival(
-                        maximum_blocks,
-                        &arrivals,
-                        branch.else_edge.target,
-                        after,
-                        &changed,
-                    );
-                },
-                .@"suspend" => |suspension| {
-                    if (suspension.callee) |callee| {
-                        lowerMinimumArrival(
-                            maximum_blocks,
-                            &arrivals,
-                            callee.target,
-                            after,
-                            &changed,
-                        );
-                    }
-                    lowerMinimumArrival(
-                        maximum_blocks,
-                        &arrivals,
-                        suspension.continuation.target,
-                        after,
-                        &changed,
-                    );
-                },
-                .return_value, .return_to_caller, .fail => {},
-            }
-        }
-        if (!changed) break;
-    }
-    return arrivals;
-}
-
 fn requireOperandCount(
     comptime instruction: control_ir.Instruction,
     comptime expected: usize,
@@ -2075,6 +1995,25 @@ fn compilerSemanticDigest(
             semanticHashInvariant(&hasher, invariant, canonical);
         }
     }
+    semanticHashU32(
+        &hasher,
+        @intCast(normal_form.entry_transition_count),
+    );
+    for (normal_form.entryTransitionSlice()) |transition| {
+        semanticHashU16(
+            &hasher,
+            canonical.blockId(transition.source_block),
+        );
+        semanticHashU8(
+            &hasher,
+            @intCast(@intFromEnum(transition.edge_kind)),
+        );
+        semanticHashU16(
+            &hasher,
+            canonical.blockId(transition.target_block),
+        );
+        semanticHashU32(&hasher, transition.constructor_id);
+    }
     semanticHashU32(&hasher, 0);
 
     var digest: [32]u8 = undefined;
@@ -2150,11 +2089,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         ) catch |err|
             @compileError("Boundary RNF synthesis failed: " ++ @errorName(err));
     };
-    const minimum_block_arrival_fuel = comptime minimumBlockArrivalFuel(
-        Body,
-        limits.maximum_blocks,
-        program,
-    );
     const generated_operation_count = comptime generatedReducerOperationCount(
         program,
         normal_form,
@@ -2281,9 +2215,16 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             source_function: control_ir.FunctionId,
             resume_target: ?control_ir.BlockId,
         };
+        pub const DebugEntryTransitionMetadata = struct {
+            source_block: control_ir.BlockId,
+            edge_kind: rnf.IncomingEdgeKind,
+            target_block: control_ir.BlockId,
+            constructor_id: u32,
+        };
         pub const DebugMetadata = struct {
             program_label: []const u8,
             constructors: [normal_form.constructor_count]DebugConstructorMetadata,
+            entry_transitions: [normal_form.entry_transition_count]DebugEntryTransitionMetadata,
         };
         pub const debug_metadata: DebugMetadata = blk: {
             var constructors: [normal_form.constructor_count]DebugConstructorMetadata =
@@ -2304,9 +2245,23 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     .resume_target = constructor.resume_target,
                 };
             }
+            var entry_transitions: [normal_form.entry_transition_count]DebugEntryTransitionMetadata =
+                undefined;
+            for (
+                normal_form.entryTransitionSlice(),
+                0..,
+            ) |transition, index| {
+                entry_transitions[index] = .{
+                    .source_block = transition.source_block,
+                    .edge_kind = transition.edge_kind,
+                    .target_block = transition.target_block,
+                    .constructor_id = transition.constructor_id,
+                };
+            }
             break :blk .{
                 .program_label = label,
                 .constructors = constructors,
+                .entry_transitions = entry_transitions,
             };
         };
         pub const reachable_block_count = reachability.count;
@@ -2350,6 +2305,22 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             @compileError("RNF is missing a direct constructor for a Control IR block");
         }
 
+        fn constructorForIncoming(
+            comptime source_block: control_ir.BlockId,
+            comptime edge_kind: rnf.IncomingEdgeKind,
+            comptime target_block: control_ir.BlockId,
+        ) usize {
+            inline for (normal_form.entryTransitionSlice()) |transition| {
+                if (transition.source_block == source_block and
+                    transition.edge_kind == edge_kind and
+                    transition.target_block == target_block)
+                {
+                    return transition.constructor_id;
+                }
+            }
+            @compileError("RNF is missing an edge-specific constructor for a Control IR block");
+        }
+
         fn loadEnvironment(
             comptime constructor_id: usize,
             environment: anytype,
@@ -2384,6 +2355,20 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 constructorName(constructor_id),
                 environment,
             );
+        }
+
+        fn frameForIncoming(
+            comptime source_block: control_ir.BlockId,
+            comptime edge_kind: rnf.IncomingEdgeKind,
+            comptime target_block: control_ir.BlockId,
+            store: anytype,
+        ) Frame {
+            const constructor_id = comptime constructorForIncoming(
+                source_block,
+                edge_kind,
+                target_block,
+            );
+            return awaitingFrame(constructor_id, store);
         }
 
         fn applyOrdinaryEdge(
@@ -2455,6 +2440,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         }
 
         fn checkpointFrame(
+            comptime source_block: control_ir.BlockId,
             comptime suspension: control_ir.Suspension,
             store: anytype,
         ) Frame {
@@ -2463,18 +2449,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 suspension.continuation,
                 &continuation_store,
             );
-            inline for (0..normal_form.constructor_count) |candidate_id| {
-                const candidate = comptime normal_form.constructors[
-                    candidate_id
-                ];
-                if (candidate.kind == .caller_fuel_yield and
-                    candidate.source_block == suspension.continuation.target and
-                    candidate.resume_target == suspension.continuation.target)
-                {
-                    return awaitingFrame(candidate_id, &continuation_store);
-                }
-            }
-            unreachable;
+            return frameForIncoming(
+                source_block,
+                .suspension_continuation,
+                suspension.continuation.target,
+                &continuation_store,
+            );
         }
 
         fn addFuelCost(total: *u64, amount: u64) void {
@@ -3475,56 +3455,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             );
         }
 
-        fn minimumArrivalForConstructor(comptime constructor_id: usize) u64 {
-            const unreachable_fuel = std.math.maxInt(u64);
-            const constructor = comptime normal_form.constructors[constructor_id];
-            if (constructor.origin == .block_entry) {
-                const arrival = minimum_block_arrival_fuel[
-                    constructor.source_block
-                ];
-                if (arrival == unreachable_fuel) unreachable;
-                return arrival;
-            }
-            if (constructor.kind == .caller_fuel_yield) {
-                var arrival: u64 = unreachable_fuel;
-                inline for (program.blocks) |block| {
-                    switch (block.terminator) {
-                        .@"suspend" => |suspension| {
-                            if ((suspension.kind == .explicit_yield or
-                                suspension.kind == .caller_fuel) and
-                                suspension.continuation.target ==
-                                    constructor.source_block)
-                            {
-                                const source_arrival =
-                                    minimum_block_arrival_fuel[block.id];
-                                if (source_arrival == unreachable_fuel) continue;
-                                arrival = @min(
-                                    arrival,
-                                    source_arrival +| minimumSourceBlockCost(
-                                        Body,
-                                        program,
-                                        block.id,
-                                    ),
-                                );
-                            }
-                        },
-                        else => {},
-                    }
-                }
-                if (arrival == unreachable_fuel) unreachable;
-                return arrival;
-            }
-            const source_arrival = minimum_block_arrival_fuel[
-                constructor.source_block
-            ];
-            if (source_arrival == unreachable_fuel) unreachable;
-            return source_arrival +| minimumSourceBlockCost(
-                Body,
-                program,
-                constructor.source_block,
-            );
-        }
-
         fn preflightCostConstructor(
             comptime constructor_id: usize,
             environment: anytype,
@@ -3601,7 +3531,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             const transition: Transition = switch (block.terminator) {
                 .jump => |edge| blk: {
                     applyOrdinaryEdge(edge, &store);
-                    break :blk .{ .next = frameForBlock(edge.target, &store) };
+                    break :blk .{ .next = frameForIncoming(
+                        block.id,
+                        .jump,
+                        edge.target,
+                        &store,
+                    ) };
                 },
                 .branch => |branch| blk: {
                     const condition = @field(
@@ -3611,7 +3546,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     if (condition) {
                         applyOrdinaryEdge(branch.then_edge, &store);
                         break :blk .{
-                            .next = frameForBlock(
+                            .next = frameForIncoming(
+                                block.id,
+                                .branch_then,
                                 branch.then_edge.target,
                                 &store,
                             ),
@@ -3619,7 +3556,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     }
                     applyOrdinaryEdge(branch.else_edge, &store);
                     break :blk .{
-                        .next = frameForBlock(
+                        .next = frameForIncoming(
+                            block.id,
+                            .branch_else,
                             branch.else_edge.target,
                             &store,
                         ),
@@ -3664,7 +3603,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                                         candidate_id,
                                         &store,
                                     ),
-                                    .callee = frameForBlock(
+                                    .callee = frameForIncoming(
+                                        block.id,
+                                        .call,
                                         callee.target,
                                         &callee_store,
                                     ),
@@ -3674,10 +3615,18 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         unreachable;
                     },
                     .explicit_yield => .{
-                        .yielded = checkpointFrame(suspension, &store),
+                        .yielded = checkpointFrame(
+                            block.id,
+                            suspension,
+                            &store,
+                        ),
                     },
                     .caller_fuel => .{
-                        .next = checkpointFrame(suspension, &store),
+                        .next = checkpointFrame(
+                            block.id,
+                            suspension,
+                            &store,
+                        ),
                     },
                 },
                 .return_value => |maybe_value| .{ .done = if (maybe_value) |value|
@@ -3713,14 +3662,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const constructor_id: usize = comptime @intFromEnum(tag);
                     return baseCostForConstructor(constructor_id);
                 },
-            };
-        }
-
-        pub fn minimumCumulativeFuel(frame: Frame) u64 {
-            return switch (frame) {
-                inline else => |_, tag| minimumArrivalForConstructor(
-                    comptime @intFromEnum(tag),
-                ),
             };
         }
 
@@ -3793,7 +3734,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     const suspension = comptime program.blocks[
                         constructor.source_block
                     ].terminator.@"suspend";
-                    const target_constructor_id = comptime constructorForBlock(
+                    const target_constructor_id = comptime constructorForIncoming(
+                        constructor.source_block,
+                        .suspension_continuation,
                         suspension.continuation.target,
                     );
                     const Environment = @FieldType(
@@ -3854,7 +3797,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         &store,
                         response,
                     );
-                    break :blk frameForBlock(
+                    break :blk frameForIncoming(
+                        constructor.source_block,
+                        .suspension_continuation,
                         suspension.continuation.target,
                         &store,
                     );
@@ -3910,7 +3855,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                                     &store,
                                     payload,
                                 );
-                                break :return_blk frameForBlock(
+                                break :return_blk frameForIncoming(
+                                    constructor.source_block,
+                                    .suspension_continuation,
                                     suspension.continuation.target,
                                     &store,
                                 );
@@ -4207,12 +4154,99 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
+        fn constructorRetainsValue(
+            comptime constructor_id: usize,
+            comptime value: control_ir.ValueId,
+        ) bool {
+            const constructor = comptime normal_form.constructors[constructor_id];
+            inline for (constructor.environmentFields()) |field| {
+                if (field.value == value) return true;
+            }
+            return false;
+        }
+
+        fn validateCallEntryArguments(
+            comptime parent_constructor_id: usize,
+            parent_environment: anytype,
+            comptime suspension: control_ir.Suspension,
+            child: Frame,
+        ) error{ProgramContractViolation}!void {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
+            const parent_constructor = comptime normal_form.constructors[
+                parent_constructor_id
+            ];
+            const callee = comptime suspension.callee.?;
+            const call_entry_constructor_id = comptime constructorForIncoming(
+                parent_constructor.source_block,
+                .call,
+                callee.target,
+            );
+            return switch (child) {
+                inline else => |child_environment, child_tag| blk: {
+                    const child_constructor_id: usize =
+                        comptime @intFromEnum(child_tag);
+                    if (comptime child_constructor_id != call_entry_constructor_id) {
+                        break :blk;
+                    }
+                    const child_constructor = comptime normal_form.constructors[
+                        child_constructor_id
+                    ];
+                    if (comptime child_constructor.origin != .call_entry) {
+                        @compileError("call transition must select a call-entry constructor");
+                    }
+                    const target = comptime program.blocks[@intCast(callee.target)];
+                    inline for (
+                        target.parameters,
+                        callee.arguments,
+                    ) |parameter, argument| {
+                        if (!comptime constructorRetainsValue(
+                            child_constructor_id,
+                            parameter,
+                        )) continue;
+                        switch (argument) {
+                            .value => |source| {
+                                if (!comptime constructorRetainsValue(
+                                    parent_constructor_id,
+                                    source,
+                                )) {
+                                    @compileError(
+                                        "call return frame must retain every live call argument",
+                                    );
+                                }
+                                const Value = typeForValue(
+                                    Body,
+                                    program.value_types[@intCast(parameter)],
+                                );
+                                const equal = portable_value.eqlValue(
+                                    Value,
+                                    @field(
+                                        parent_environment,
+                                        valueName(source),
+                                    ),
+                                    @field(
+                                        child_environment,
+                                        valueName(parameter),
+                                    ),
+                                );
+                                if (!equal) {
+                                    break :blk error.ProgramContractViolation;
+                                }
+                            },
+                            .@"resume" => @compileError(
+                                "call edge cannot carry a resume value",
+                            ),
+                        }
+                    }
+                },
+            };
+        }
+
         fn validateStackPair(
             parent: Frame,
             child: Frame,
         ) error{ProgramContractViolation}!void {
             return switch (parent) {
-                inline else => |_, tag| blk: {
+                inline else => |environment, tag| blk: {
                     const constructor_id: usize =
                         comptime @intFromEnum(tag);
                     if (!comptime isAwaitCallConstructor(constructor_id)) {
@@ -4225,6 +4259,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         constructor.source_block
                     ].terminator.@"suspend";
                     try validateCallCallee(
+                        suspension,
+                        child,
+                    );
+                    try validateCallEntryArguments(
+                        constructor_id,
+                        environment,
                         suspension,
                         child,
                     );

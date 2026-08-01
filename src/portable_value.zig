@@ -128,11 +128,11 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
         }
 
         /// Lexicographically compare logical bytes.
-        pub fn order(self: *const Self, other: *const Self) std.math.Order {
+        pub fn order(self: *const Self, other: *const Self) Error!std.math.Order {
             if (self.logical_length > maximum_bytes or
                 other.logical_length > maximum_bytes)
             {
-                return .eq;
+                return error.Malformed;
             }
             return std.mem.order(u8, self.slice(), other.slice());
         }
@@ -241,11 +241,16 @@ pub fn Text(comptime maximum_bytes: usize) type {
         }
 
         /// Lexicographically compare UTF-8 bytes without locale semantics.
-        pub fn order(self: *const Self, other: *const Self) std.math.Order {
+        pub fn order(self: *const Self, other: *const Self) Error!std.math.Order {
             if (self.logical_length > maximum_bytes or
                 other.logical_length > maximum_bytes)
             {
-                return .eq;
+                return error.Malformed;
+            }
+            if (!std.unicode.utf8ValidateSlice(self.slice()) or
+                !std.unicode.utf8ValidateSlice(other.slice()))
+            {
+                return error.InvalidUtf8;
             }
             return std.mem.order(u8, self.slice(), other.slice());
         }
@@ -1263,6 +1268,40 @@ test "Text append rejects an invalid current prefix before mutation" {
     try std.testing.expectError(error.InvalidUtf8, value.append("a"));
     try std.testing.expectEqualDeep(before, value);
     try std.testing.expect(!eqlValue(Value, value, value));
+}
+
+test "bounded byte and text ordering rejects malformed operands" {
+    const ByteValue = Bytes(2);
+    const TextValue = Text(2);
+
+    const byte_left = try ByteValue.fromSlice("a");
+    const byte_right = try ByteValue.fromSlice("b");
+    try std.testing.expectEqual(std.math.Order.lt, try byte_left.order(&byte_right));
+
+    var malformed_bytes = byte_left;
+    malformed_bytes.logical_length = 3;
+    try std.testing.expectError(
+        error.Malformed,
+        malformed_bytes.order(&byte_right),
+    );
+
+    const text_left = try TextValue.fromSlice("a");
+    const text_right = try TextValue.fromSlice("b");
+    try std.testing.expectEqual(std.math.Order.lt, try text_left.order(&text_right));
+
+    var malformed_text = text_left;
+    malformed_text.logical_length = 3;
+    try std.testing.expectError(
+        error.Malformed,
+        malformed_text.order(&text_right),
+    );
+
+    var invalid_utf8 = text_left;
+    invalid_utf8.storage[0] = 0xff;
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        invalid_utf8.order(&text_right),
+    );
 }
 
 test "generic vector equality rejects malformed logical lengths" {

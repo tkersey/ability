@@ -313,20 +313,32 @@ test "Research Digest v2 formats capability data inside the Machine" {
             continue;
         }
         saw_loop_body = true;
-        try std.testing.expectEqual(@as(usize, 4), constructor.environment_len);
-        for (constructor.environmentFields()) |field| {
-            try std.testing.expect(field.value != 10);
+        const expected_environment = [_]cir.ValueId{ 11, 12, 13, 14 };
+        try std.testing.expectEqual(
+            expected_environment.len,
+            constructor.environment_len,
+        );
+        for (
+            constructor.environmentFields(),
+            expected_environment,
+        ) |field, expected_value| {
+            try std.testing.expectEqual(expected_value, field.value);
         }
-        try std.testing.expectEqual(@as(usize, 1), constructor.invariant_len);
-        switch (constructor.invariantTerms()[0]) {
+
+        var saw_loop_predicate = false;
+        var saw_historical_edge_copy = false;
+        for (constructor.invariantTerms()) |term| switch (term) {
             .integer_relation => |predicate| {
-                try std.testing.expectEqual(@as(cir.ValueId, 13), predicate.left);
-                try std.testing.expectEqual(@as(cir.ValueId, 12), predicate.right);
-                try std.testing.expectEqual(.less_than, predicate.relation);
-                try std.testing.expect(predicate.expected);
+                saw_loop_predicate = predicate.left == 13 and
+                    predicate.right == 12 and
+                    predicate.relation == .less_than and
+                    predicate.expected;
             },
-            else => return error.TestUnexpectedResult,
-        }
+            .value_copy => saw_historical_edge_copy = true,
+            else => {},
+        };
+        try std.testing.expect(saw_loop_predicate);
+        try std.testing.expect(!saw_historical_edge_copy);
     }
     try std.testing.expect(saw_loop_body);
 
