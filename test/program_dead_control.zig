@@ -469,10 +469,10 @@ test "unreachable control creates no constructor, authority, or identity delta" 
     for (WithDeadProgram.rnf.constructorSlice()) |constructor| {
         try std.testing.expect(constructor.source_block < 2);
     }
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        WithDead.EffectRow.source_site_count,
-    );
+    try std.testing.expect(!@hasDecl(
+        WithDead.EffectRow,
+        "source_site_count",
+    ));
     try std.testing.expectEqual(
         @as(usize, 1),
         WithDead.EffectRow.operation_site_count,

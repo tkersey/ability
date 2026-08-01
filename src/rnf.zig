@@ -1,6 +1,11 @@
 const control_ir = @import("control_ir");
 const std = @import("std");
 
+/// Implementation ceiling for one compiler-known executable definition.
+/// The active source program may lower this through `compiler_limits`.
+pub const maximum_executable_definition_operands: usize =
+    (control_ir.CompilerLimits{}).maximum_values;
+
 /// Compiler classifications for generated continuation constructors.
 pub const ConstructorKind = enum {
     entry,
@@ -122,7 +127,7 @@ pub const InvariantTerm = union(enum) {
         result: control_ir.ValueId,
         definition: control_ir.ValueId,
         operand_count: u8,
-        operands: [3]control_ir.ValueId,
+        operands: [maximum_executable_definition_operands]control_ir.ValueId,
     },
     product_extract_result: struct {
         result: control_ir.ValueId,
@@ -1930,8 +1935,12 @@ pub fn NormalForm(
             definition: control_ir.ValueId,
             operands: []const control_ir.ValueId,
         ) Error!InvariantTerm {
-            if (operands.len > 3) return error.UnsupportedInvariantDefinition;
-            var stored_operands = [_]control_ir.ValueId{0} ** 3;
+            if (operands.len > maximum_executable_definition_operands) {
+                return error.UnsupportedInvariantDefinition;
+            }
+            var stored_operands =
+                [_]control_ir.ValueId{0} **
+                maximum_executable_definition_operands;
             @memcpy(stored_operands[0..operands.len], operands);
             return .{ .instruction_result = .{
                 .result = result,
@@ -1939,6 +1948,37 @@ pub fn NormalForm(
                 .operand_count = @intCast(operands.len),
                 .operands = stored_operands,
             } };
+        }
+
+        fn insertProjectedInstructionResult(
+            result: *FactSet,
+            result_value: control_ir.ValueId,
+            definition: control_ir.ValueId,
+            projections: *const [maximum_executable_definition_operands]Projection,
+            operand_count: usize,
+            operand_index: usize,
+            selected: *[maximum_executable_definition_operands]control_ir.ValueId,
+        ) Error!void {
+            if (operand_index == operand_count) {
+                try result.insert(try instructionResultTerm(
+                    result_value,
+                    definition,
+                    selected[0..operand_count],
+                ));
+                return;
+            }
+            for (projections[operand_index].slice()) |operand| {
+                selected[operand_index] = operand;
+                try insertProjectedInstructionResult(
+                    result,
+                    result_value,
+                    definition,
+                    projections,
+                    operand_count,
+                    operand_index + 1,
+                    selected,
+                );
+            }
         }
 
         fn canonicalDefinitionRoot(
@@ -2268,7 +2308,9 @@ pub fn NormalForm(
                         retain_for_invariant,
                         definition.result,
                     );
-                    var operands: [3]Projection = .{ .{}, .{}, .{} };
+                    var operands =
+                        [_]Projection{.{}} **
+                        maximum_executable_definition_operands;
                     for (
                         definition.operands[0..definition.operand_count],
                         0..,
@@ -2282,41 +2324,20 @@ pub fn NormalForm(
                             operand,
                         );
                     }
-                    for (results.slice()) |result_value| switch (definition.operand_count) {
-                        0 => try result.insert(try instructionResultTerm(
+                    var selected =
+                        [_]control_ir.ValueId{0} **
+                        maximum_executable_definition_operands;
+                    for (results.slice()) |result_value| {
+                        try insertProjectedInstructionResult(
+                            result,
                             result_value,
                             definition.definition,
-                            &.{},
-                        )),
-                        1 => for (operands[0].slice()) |operand_0| {
-                            try result.insert(try instructionResultTerm(
-                                result_value,
-                                definition.definition,
-                                &.{operand_0},
-                            ));
-                        },
-                        2 => for (operands[0].slice()) |operand_0| {
-                            for (operands[1].slice()) |operand_1| {
-                                try result.insert(try instructionResultTerm(
-                                    result_value,
-                                    definition.definition,
-                                    &.{ operand_0, operand_1 },
-                                ));
-                            }
-                        },
-                        3 => for (operands[0].slice()) |operand_0| {
-                            for (operands[1].slice()) |operand_1| {
-                                for (operands[2].slice()) |operand_2| {
-                                    try result.insert(try instructionResultTerm(
-                                        result_value,
-                                        definition.definition,
-                                        &.{ operand_0, operand_1, operand_2 },
-                                    ));
-                                }
-                            }
-                        },
-                        else => return error.UnsupportedInvariantDefinition,
-                    };
+                            &operands,
+                            definition.operand_count,
+                            0,
+                            &selected,
+                        );
+                    }
                 },
                 .product_extract_result => |definition| {
                     const results = projectValues(
@@ -2649,6 +2670,37 @@ pub fn NormalForm(
             }
         }
 
+        fn addAnalysisInstructionDefinition(
+            program: control_ir.Program,
+            value: control_ir.ValueId,
+            result_value: control_ir.ValueId,
+            facts: *AnalysisFactSet,
+            visited: *Set,
+        ) Error!void {
+            if (!visited.insert(value)) return;
+            const instruction = definingInstruction(program, value) orelse
+                return;
+            if (instruction.kind == .pure and
+                instruction.operation == .metadata)
+            {
+                return error.UnsupportedInvariantDefinition;
+            }
+            for (instruction.operands) |operand| {
+                try addAnalysisInstructionDefinition(
+                    program,
+                    operand,
+                    operand,
+                    facts,
+                    visited,
+                );
+            }
+            try facts.insert(try instructionResultTerm(
+                result_value,
+                value,
+                instruction.operands,
+            ));
+        }
+
         fn collectBooleanDefinitions(
             program: control_ir.Program,
             constant_values: []const ?InvariantValue,
@@ -2822,7 +2874,16 @@ pub fn NormalForm(
                         &definition_visited,
                     );
                 },
-                else => {},
+                else => {
+                    var definition_visited = Set.empty();
+                    try addAnalysisInstructionDefinition(
+                        program,
+                        value,
+                        value,
+                        facts,
+                        &definition_visited,
+                    );
+                },
             }
         }
 
@@ -2855,12 +2916,21 @@ pub fn NormalForm(
                     if (value >= constant_values.len) {
                         return error.UnsupportedInvariantDefinition;
                     }
-                    const contents = constant_values[@intCast(value)] orelse
-                        return error.UnsupportedInvariantDefinition;
-                    try facts.insert(.{ .value_constant = .{
-                        .result = value,
-                        .contents = contents,
-                    } });
+                    if (constant_values[@intCast(value)]) |contents| {
+                        try facts.insert(.{ .value_constant = .{
+                            .result = value,
+                            .contents = contents,
+                        } });
+                    } else {
+                        var definition_visited = Set.empty();
+                        try addAnalysisInstructionDefinition(
+                            program,
+                            value,
+                            value,
+                            facts,
+                            &definition_visited,
+                        );
+                    }
                     return true;
                 },
                 .integer_add,
@@ -2982,13 +3052,21 @@ pub fn NormalForm(
                     return true;
                 },
                 .sum_construct => |case_index| {
-                    if (instruction.operands.len != 0) {
-                        return error.UnsupportedInvariantDefinition;
+                    if (instruction.operands.len == 0) {
+                        try facts.insert(.{ .value_constant = .{
+                            .result = value,
+                            .contents = .{ .sum_case = case_index },
+                        } });
+                    } else {
+                        var definition_visited = Set.empty();
+                        try addAnalysisInstructionDefinition(
+                            program,
+                            value,
+                            value,
+                            facts,
+                            &definition_visited,
+                        );
                     }
-                    try facts.insert(.{ .value_constant = .{
-                        .result = value,
-                        .contents = .{ .sum_case = case_index },
-                    } });
                     return true;
                 },
                 .optional_none => {
@@ -2999,7 +3077,15 @@ pub fn NormalForm(
                     return true;
                 },
                 .optional_some => {
-                    return error.UnsupportedInvariantDefinition;
+                    var definition_visited = Set.empty();
+                    try addAnalysisInstructionDefinition(
+                        program,
+                        value,
+                        value,
+                        facts,
+                        &definition_visited,
+                    );
+                    return true;
                 },
                 .product_extract => |field_index| {
                     try facts.insert(.{ .product_extract_result = .{
@@ -3045,7 +3131,17 @@ pub fn NormalForm(
                     )) return error.UnsupportedInvariantDefinition;
                     return true;
                 },
-                else => error.UnsupportedInvariantDefinition,
+                else => {
+                    var definition_visited = Set.empty();
+                    try addAnalysisInstructionDefinition(
+                        program,
+                        value,
+                        value,
+                        facts,
+                        &definition_visited,
+                    );
+                    return true;
+                },
             };
         }
 
@@ -3060,7 +3156,9 @@ pub fn NormalForm(
             if (!visited.insert(value)) return;
             const instruction = definingInstruction(program, value) orelse
                 return;
-            if (instruction.operation == .metadata) {
+            if (instruction.kind == .pure and
+                instruction.operation == .metadata)
+            {
                 return error.UnsupportedInvariantDefinition;
             }
             for (instruction.operands) |operand| {
@@ -3088,18 +3186,6 @@ pub fn NormalForm(
             facts: *FactSet,
         ) Error!void {
             const original = environment.*;
-            var visited = Set.empty();
-            for (original.bits, 0..) |present, value_index| {
-                if (!present) continue;
-                try addInstructionDefinition(
-                    program,
-                    @intCast(value_index),
-                    @intCast(value_index),
-                    environment,
-                    facts,
-                    &visited,
-                );
-            }
             var representable: AnalysisFactSet = .{};
             for (original.bits, 0..) |present, value_index| {
                 if (!present) continue;
@@ -3138,6 +3224,27 @@ pub fn NormalForm(
             }
             for (representable.terms[0..representable.len]) |term| {
                 try facts.insert(term);
+            }
+            var visited = Set.empty();
+            for (original.bits, 0..) |present, value_index| {
+                if (!present) continue;
+                const value: control_ir.ValueId = @intCast(value_index);
+                var has_definition = false;
+                for (representable.terms[0..representable.len]) |term| {
+                    if (term.definitionResult() == value) {
+                        has_definition = true;
+                        break;
+                    }
+                }
+                if (has_definition) continue;
+                try addInstructionDefinition(
+                    program,
+                    value,
+                    value,
+                    environment,
+                    facts,
+                    &visited,
+                );
             }
         }
 
@@ -3621,7 +3728,7 @@ pub fn NormalForm(
             generated: GeneratedFacts,
         ) Error!void {
             const target_index: usize = @intCast(edge.target);
-            const environment = liveness.entry_live[target_index];
+            var environment = liveness.entry_live[target_index];
             var facts = try transferFacts(
                 program,
                 source_block,
@@ -3640,6 +3747,12 @@ pub fn NormalForm(
                     &facts,
                 );
             }
+            try addEnvironmentDefinitions(
+                program,
+                constant_values,
+                &environment,
+                &facts,
+            );
             const target = program.blocks[target_index];
             const constructor_id = try result.appendConstructor(
                 program,

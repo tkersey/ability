@@ -1156,16 +1156,31 @@ pub fn Liveness(
             return result;
         }
 
-        fn addTerminatorUses(block: Block, set: *Set) void {
+        fn addTerminatorUses(
+            self: Self,
+            program: Program,
+            block: Block,
+            set: *Set,
+        ) void {
             switch (block.terminator) {
                 .branch => |branch| _ = set.insert(branch.condition),
                 .@"suspend" => |suspension| {
                     for (suspension.request_values) |value| _ = set.insert(value);
                     if (suspension.callee) |callee| {
-                        for (callee.arguments) |argument| switch (argument) {
-                            .value => |value| _ = set.insert(value),
-                            .@"resume" => {},
-                        };
+                        const target_index: usize = @intCast(callee.target);
+                        const target = program.blocks[target_index];
+                        for (
+                            target.parameters,
+                            callee.arguments,
+                        ) |parameter, argument| {
+                            if (!self.entry_live[target_index].contains(
+                                parameter,
+                            )) continue;
+                            switch (argument) {
+                                .value => |value| _ = set.insert(value),
+                                .@"resume" => {},
+                            }
+                        }
                     }
                 },
                 .return_value => |maybe_value| {
@@ -1191,7 +1206,7 @@ pub fn Liveness(
                     const block = program.blocks[remaining];
                     const outgoing = analysis.blockOut(program, block);
                     var live = outgoing;
-                    addTerminatorUses(block, &live);
+                    analysis.addTerminatorUses(program, block, &live);
 
                     var instruction_index = block.instructions.len;
                     while (instruction_index > 0) {
@@ -1600,6 +1615,69 @@ test "validation accepts a typed helper call and caller continuation" {
     };
 
     try validate(8, 8, program);
+}
+
+test "liveness omits call arguments paired with dead callee parameters" {
+    const u32_type: ValueType = .{ .scalar = .u32 };
+    const call_arguments = [_]EdgeArgument{
+        .{ .value = 0 },
+        .{ .value = 1 },
+    };
+    const resume_arguments = [_]EdgeArgument{.@"resume"};
+    const blocks = [_]Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 0, 1 },
+            .terminator = .{ .@"suspend" = .{
+                .kind = .call,
+                .callee_function = 1,
+                .callee = .{
+                    .target = 2,
+                    .arguments = &call_arguments,
+                },
+                .continuation = .{
+                    .target = 1,
+                    .arguments = &resume_arguments,
+                },
+                .resume_type = u32_type,
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{4},
+            .terminator = .{ .return_value = 4 },
+        },
+        .{
+            .id = 2,
+            .function_id = 1,
+            .parameters = &.{ 2, 3 },
+            .terminator = .{ .return_to_caller = 2 },
+        },
+    };
+    const functions = [_]Function{
+        .{ .id = 0, .entry = 0, .result_type = u32_type },
+        .{ .id = 1, .entry = 2, .result_type = u32_type },
+    };
+    const program: Program = .{
+        .label = "dead-callee-argument-liveness",
+        .value_types = &.{
+            u32_type,
+            u32_type,
+            u32_type,
+            u32_type,
+            u32_type,
+        },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = u32_type,
+        .functions = &functions,
+    };
+
+    const analysis = try Liveness(8, 4).analyze(program);
+    try std.testing.expect(analysis.entry_live[0].contains(0));
+    try std.testing.expect(!analysis.entry_live[0].contains(1));
+    try std.testing.expect(analysis.entry_live[2].contains(2));
+    try std.testing.expect(!analysis.entry_live[2].contains(3));
 }
 
 test "validation rejects caller values used directly inside a helper" {

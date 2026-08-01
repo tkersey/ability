@@ -113,7 +113,23 @@ fn invariantConstantValue(comptime T: type, value: T) ?rnf.InvariantValue {
             .{ .signed = @intCast(value) }
         else
             .{ .unsigned = @intCast(value) },
-        .optional, .@"union" => .{ .sum_case = algebraicCaseIndex(value) },
+        .optional => if (value == null)
+            .{ .sum_case = 0 }
+        else
+            null,
+        .@"union" => |info| blk: {
+            const Tag = info.tag_type orelse break :blk null;
+            const active = std.meta.activeTag(value);
+            inline for (info.fields, 0..) |field, index| {
+                if (active == @field(Tag, field.name)) {
+                    break :blk if (field.type == void)
+                        .{ .sum_case = @intCast(index) }
+                    else
+                        null;
+                }
+            }
+            unreachable;
+        },
         else => null,
     };
 }
@@ -2226,7 +2242,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         pub const ReturnValue = ReturnValueType;
         pub const EffectRow = struct {
             pub const ResponseMode = ResidualResponseMode;
-            pub const source_site_count: usize = Body.effect_sites.len;
             pub const operation_site_count: usize =
                 residual_effects.residual_count;
             pub const after_site_count: usize = 0;
@@ -2245,7 +2260,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 );
                 return struct {
                     pub const site_ordinal: u32 = @intCast(ordinal);
-                    pub const source_site_ordinal: u32 = source_ordinal;
                     pub const Payload = ResidualSite.Payload;
                     pub const Resume = ResidualSite.Resume;
                     pub const Result = ResidualSite.Resume;
@@ -4074,7 +4088,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             comptime result: control_ir.ValueId,
             comptime definition: control_ir.ValueId,
             comptime operand_count: u8,
-            comptime operands: [3]control_ir.ValueId,
+            comptime operands: [rnf.maximum_executable_definition_operands]control_ir.ValueId,
         ) bool {
             const source_instruction = comptime definingInstructionForValue(
                 definition,

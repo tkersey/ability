@@ -287,8 +287,7 @@ within_ratio "$current_decode_median" "$baseline_decode_median" 125 100
 
 if ! install_output=$(
     cd "$baseline_source"
-    "$zig_exe" build install -Doptimize="$wasm_optimization"
-  2>&1
+    "$zig_exe" build install -Doptimize="$wasm_optimization" 2>&1
 ); then
     printf '%s\n' "$install_output" >&2
     exit 1

@@ -123,17 +123,17 @@ const Canonical = program_v2.program(
 ).compile(options);
 
 test "compiler eliminates unreferenced effects and canonicalizes residual ordinals" {
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        WithUnused.EffectRow.source_site_count,
-    );
+    try std.testing.expect(!@hasDecl(
+        WithUnused.EffectRow,
+        "source_site_count",
+    ));
     try std.testing.expectEqual(
         @as(usize, 1),
         WithUnused.EffectRow.operation_site_count,
     );
     const Site = WithUnused.EffectRow.site(0);
     try std.testing.expectEqual(@as(u32, 0), Site.site_ordinal);
-    try std.testing.expectEqual(@as(u32, 1), Site.source_site_ordinal);
+    try std.testing.expect(!@hasDecl(Site, "source_site_ordinal"));
     try std.testing.expectEqualStrings(
         "lookup.authority.v1",
         Site.semantic_identity,

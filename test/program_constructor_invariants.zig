@@ -572,6 +572,255 @@ const ConstantOptionalMachine = ConstantOptionalProgram.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+const WideProduct = struct {
+    first: u32,
+    second: u32,
+    third: u32,
+    fourth: u32,
+};
+
+const WideProductLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.wide-product.v1";
+    pub const Payload = WideProduct;
+    pub const Resume = u32;
+};
+
+const wide_product_instructions = [_]cir.Instruction{
+    .{ .kind = .constant, .result = 0, .operation = .{ .constant = 0 } },
+    .{ .kind = .constant, .result = 1, .operation = .{ .constant = 1 } },
+    .{ .kind = .constant, .result = 2, .operation = .{ .constant = 2 } },
+    .{ .kind = .constant, .result = 3, .operation = .{ .constant = 3 } },
+    .{
+        .kind = .pure,
+        .result = 4,
+        .operands = &.{ 0, 1, 2, 3 },
+        .operation = .product_construct,
+    },
+};
+const wide_product_edge_arguments = [_]cir.EdgeArgument{.{ .value = 4 }};
+const wide_product_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const wide_product_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &wide_product_instructions,
+        .terminator = .{ .jump = .{
+            .target = 1,
+            .arguments = &wide_product_edge_arguments,
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{5},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{5},
+            .continuation = .{
+                .target = 2,
+                .arguments = &wide_product_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .parameters = &.{6},
+        .terminator = .{ .return_value = 6 },
+    },
+};
+
+const WideProductBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const constants = .{
+        @as(u32, 1),
+        @as(u32, 2),
+        @as(u32, 3),
+        @as(u32, 4),
+    };
+    pub const effect_sites = .{WideProductLookup};
+    pub const schema_types = .{WideProduct};
+    pub const control_ir: cir.Program = .{
+        .label = "wide-product-constructor-invariant",
+        .value_types = &.{
+            u32_type,
+            u32_type,
+            u32_type,
+            u32_type,
+            cir.ValueType{ .schema = 0 },
+            cir.ValueType{ .schema = 0 },
+            u32_type,
+        },
+        .blocks = &wide_product_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const WideProductProgram = program_v2.program(
+    "wide-product-constructor-invariant",
+    WideProductBody,
+);
+const WideProductMachine = WideProductProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 64,
+});
+
+const AggregateBranchInput = struct {
+    selected: bool,
+    retained: u32,
+};
+
+const AggregateBranchLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.aggregate-branch.v1";
+    pub const Payload = AggregateBranchInput;
+    pub const Resume = u32;
+};
+
+const aggregate_branch_instructions = [_]cir.Instruction{.{
+    .kind = .pure,
+    .result = 1,
+    .operands = &.{0},
+    .operation = .{ .product_extract = 0 },
+}};
+const aggregate_branch_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const aggregate_branch_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &aggregate_branch_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 1,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{
+        .id = 1,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 3,
+                .arguments = &aggregate_branch_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .terminator = .{ .fail = 0 },
+    },
+    .{
+        .id = 3,
+        .parameters = &.{2},
+        .terminator = .{ .return_value = 2 },
+    },
+};
+
+const AggregateBranchBody = struct {
+    pub const InitialArgs = AggregateBranchInput;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{AggregateBranchLookup};
+    pub const schema_types = .{AggregateBranchInput};
+    pub const control_ir: cir.Program = .{
+        .label = "aggregate-branch-constructor-invariant",
+        .value_types = &.{
+            cir.ValueType{ .schema = 0 },
+            bool_type,
+            u32_type,
+        },
+        .blocks = &aggregate_branch_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const AggregateBranchProgram = program_v2.program(
+    "aggregate-branch-constructor-invariant",
+    AggregateBranchBody,
+);
+const AggregateBranchMachine = AggregateBranchProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
+const LiveThroughLookup = struct {
+    pub const id: u32 = 0;
+    pub const semantic_identity =
+        "test.constructor-invariant.live-through.v1";
+    pub const Payload = u32;
+    pub const Resume = u32;
+};
+
+const live_through_instructions = [_]cir.Instruction{.{
+    .kind = .constant,
+    .result = 0,
+    .operation = .{ .constant = 0 },
+}};
+const live_through_resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+const live_through_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &live_through_instructions,
+        .terminator = .{ .jump = .{ .target = 1 } },
+    },
+    .{
+        .id = 1,
+        .role = .loop_header,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .effect,
+            .site_id = 0,
+            .request_values = &.{0},
+            .continuation = .{
+                .target = 2,
+                .arguments = &live_through_resume_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 2,
+        .parameters = &.{1},
+        .terminator = .{ .return_value = 1 },
+    },
+};
+
+const LiveThroughBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const constants = .{@as(u32, 7)};
+    pub const effect_sites = .{LiveThroughLookup};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "live-through-constructor-invariant",
+        .value_types = &.{ u32_type, u32_type },
+        .blocks = &live_through_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+
+const LiveThroughProgram = program_v2.program(
+    "live-through-constructor-invariant",
+    LiveThroughBody,
+);
+const LiveThroughMachine = LiveThroughProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+
 const RetainedProduct = struct {
     selected: u32,
     retained: u32,
@@ -1617,46 +1866,220 @@ test "closed arithmetic definitions bind retained branch operands" {
     );
 }
 
-test "algebraic constants have canonical sum-case witnesses" {
-    inline for (.{
-        .{
-            .Program = ConstantAlgebraicProgram,
-            .Machine = ConstantAlgebraicMachine,
-            .expected_case = @as(u16, 0),
-        },
-        .{
-            .Program = ConstantOptionalProgram,
-            .Machine = ConstantOptionalMachine,
-            .expected_case = @as(u16, 0),
-        },
-    }) |witness| {
-        var saw_constant = false;
-        for (witness.Program.rnf.constructorSlice()) |constructor| {
-            if (constructor.kind != .await_effect) continue;
-            for (constructor.invariantTerms()) |term| switch (term) {
-                .value_constant => |definition| {
-                    saw_constant = switch (definition.contents) {
-                        .sum_case => |case_index| case_index ==
-                            witness.expected_case,
-                        else => false,
-                    };
-                },
-                else => {},
-            };
+test "payload-bearing algebraic constants retain executable definitions" {
+    const awaiting = blk: {
+        for (ConstantAlgebraicProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.kind == .await_effect) break :blk constructor;
         }
-        try std.testing.expect(saw_constant);
+        return error.TestExpectedEqual;
+    };
+    var saw_definition = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .instruction_result => |definition| {
+            saw_definition = definition.result == 0 and
+                definition.definition == 0 and
+                definition.operand_count == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_definition);
 
-        const state = try witness.Machine.initialState(
-            std.testing.allocator,
-            {},
-        );
-        defer witness.Machine.deinitState(state);
-        var fuel: u64 = 8;
-        _ = switch (try witness.Machine.step(state, &fuel)) {
-            .request => |request| request,
-            else => return error.TestUnexpectedResult,
+    const state = try ConstantAlgebraicMachine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer ConstantAlgebraicMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try ConstantAlgebraicMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try ConstantAlgebraicMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset + 4 ..][0..4],
+        8,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        ConstantAlgebraicMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "payload-free algebraic constants retain canonical case witnesses" {
+    var saw_constant = false;
+    for (ConstantOptionalProgram.rnf.constructorSlice()) |constructor| {
+        if (constructor.kind != .await_effect) continue;
+        for (constructor.invariantTerms()) |term| switch (term) {
+            .value_constant => |definition| {
+                saw_constant = switch (definition.contents) {
+                    .sum_case => |case_index| case_index == 0,
+                    else => false,
+                };
+            },
+            else => {},
         };
     }
+    try std.testing.expect(saw_constant);
+}
+
+test "wide product definitions survive target-edge projection" {
+    const target_entry = blk: {
+        for (WideProductProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 1 and
+                constructor.origin == .block_entry)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_definition = false;
+    for (target_entry.invariantTerms()) |term| switch (term) {
+        .instruction_result => |definition| {
+            saw_definition = definition.result == 5 and
+                definition.definition == 4 and
+                definition.operand_count == 4 and
+                std.mem.eql(
+                    cir.ValueId,
+                    definition.operands[0..4],
+                    &.{ 0, 1, 2, 3 },
+                );
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_definition);
+
+    const state = try WideProductMachine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer WideProductMachine.deinitState(state);
+    var fuel: u64 = 6;
+    try std.testing.expectEqual(
+        .yielded,
+        std.meta.activeTag(try WideProductMachine.step(state, &fuel)),
+    );
+    const encoded = try WideProductMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset + 16 ..][0..4],
+        9,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        WideProductMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "predecessor-defined live-through values retain local definitions" {
+    const target_entry = blk: {
+        for (LiveThroughProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.source_block == 1 and
+                constructor.origin == .block_entry)
+            {
+                break :blk constructor;
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_definition = false;
+    for (target_entry.invariantTerms()) |term| switch (term) {
+        .value_constant => |definition| {
+            saw_definition = definition.result == 0 and
+                switch (definition.contents) {
+                    .unsigned => |value| value == 7,
+                    else => false,
+                };
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_definition);
+
+    const state = try LiveThroughMachine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer LiveThroughMachine.deinitState(state);
+    var fuel: u64 = 2;
+    try std.testing.expectEqual(
+        .yielded,
+        std.meta.activeTag(try LiveThroughMachine.step(state, &fuel)),
+    );
+    const encoded = try LiveThroughMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    std.mem.writeInt(
+        u32,
+        forged[first_environment_offset..][0..4],
+        8,
+        .little,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        LiveThroughMachine.decodeState(std.testing.allocator, forged),
+    );
+}
+
+test "aggregate-derived branch booleans retain executable definitions" {
+    const awaiting = blk: {
+        for (AggregateBranchProgram.rnf.constructorSlice()) |*constructor| {
+            if (constructor.kind == .await_effect) break :blk constructor;
+        }
+        return error.TestExpectedEqual;
+    };
+    var saw_definition = false;
+    for (awaiting.invariantTerms()) |term| switch (term) {
+        .instruction_result => |definition| {
+            saw_definition = definition.result == 1 and
+                definition.definition == 1 and
+                definition.operand_count == 1 and
+                definition.operands[0] == 0;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_definition);
+
+    const state = try AggregateBranchMachine.initialState(
+        std.testing.allocator,
+        .{ .selected = true, .retained = 9 },
+    );
+    defer AggregateBranchMachine.deinitState(state);
+    var fuel: u64 = 8;
+    _ = switch (try AggregateBranchMachine.step(state, &fuel)) {
+        .request => |request| request,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try AggregateBranchMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(encoded);
+    const forged = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(forged);
+    forged[first_environment_offset] = 0;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        AggregateBranchMachine.decodeState(std.testing.allocator, forged),
+    );
 }
 
 test "retained product extracts are authenticated locally" {
