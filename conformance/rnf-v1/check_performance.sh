@@ -37,12 +37,10 @@ require_optimization_mode() {
     esac
 }
 
-current_runtime_semantic_module_count() {
+require_complete_current_topology() {
     source_root=$1
     topology_receipt=$2
-    reducer_receipt=$3
     test -f "$topology_receipt" || return 1
-    test -f "$reducer_receipt" || return 1
 
     core_module_count=$(
         sed -n 's/^core_module_count=//p' "$topology_receipt"
@@ -65,18 +63,68 @@ current_runtime_semantic_module_count() {
     source_module_count=$(printf '%s\n' "$expected_sources" | sed '/^$/d' | wc -l | tr -d ' ')
     test "$source_module_count" -eq "$((core_module_count + 1))" ||
         return 1
+}
+
+require_single_reducer_receipt() {
+    reducer_receipt=$1
+    test -f "$reducer_receipt" || return 1
 
     test "$(grep -Fxc 'single_boundary_reducer=true' \
-        "$reducer_receipt")" -eq 1 || return 1
-    test "$(grep -Fxc 'runtime_semantic_module_count=1' \
         "$reducer_receipt")" -eq 1 || return 1
     test "$(grep -Fxc \
         'reducer_public_entry=Program.compile(...).step' \
         "$reducer_receipt")" -eq 1 || return 1
     test "$(grep -Fxc 'program_compile_surface_count=1' \
         "$reducer_receipt")" -eq 1 || return 1
-    test "$(wc -l <"$reducer_receipt" | tr -d ' ')" -eq 4 || return 1
-    printf '%s\n' 1
+    test "$(wc -l <"$reducer_receipt" | tr -d ' ')" -eq 3 || return 1
+}
+
+current_runtime_semantic_source_owners() {
+    source_root=$1
+    {
+        rg -l \
+            '^[[:space:]]*pub fn plan\(frame: Frame, accepted_cost: u64\) Plan \{$' \
+            "$source_root/src" --glob '*.zig' || test "$?" -eq 1
+        rg -l \
+            '^[[:space:]]*pub fn step\(state: State, caller_fuel: \*u64\) Error!Outcome \{$' \
+            "$source_root/src" --glob '*.zig' || test "$?" -eq 1
+    } | sed "s#^$source_root/##" | sort -u
+}
+
+current_runtime_semantic_module_count() {
+    source_root=$1
+    topology_receipt=$2
+    require_complete_current_topology "$source_root" "$topology_receipt"
+
+    rg -Fqx 'const compiler = @import("compiler");' \
+        "$source_root/src/program_v2.zig"
+    rg -Fqx 'const machine = @import("machine");' \
+        "$source_root/src/program_v2.zig"
+    rg -Fq 'const Definition = compiler.DefinitionFor(label, Body);' \
+        "$source_root/src/program_v2.zig"
+    rg -Fq 'return machine.Machine(Definition, options);' \
+        "$source_root/src/program_v2.zig"
+
+    actual_owners=$(current_runtime_semantic_source_owners "$source_root")
+    expected_owners=$(printf '%s\n' src/compiler.zig src/machine.zig)
+    test "$actual_owners" = "$expected_owners" || return 1
+    printf '%s\n' "$actual_owners" | sed '/^$/d' | wc -l | tr -d ' '
+}
+
+baseline_runtime_semantic_module_count() {
+    baseline_root=$1
+    owner_count=0
+    while IFS='|' read -r source_path semantic_marker; do
+        test -f "$baseline_root/$source_path" || return 1
+        rg -Fq "$semantic_marker" "$baseline_root/$source_path" || return 1
+        owner_count=$((owner_count + 1))
+    done <<'EOF'
+src/interpreter.zig|pub const runSteps = kernel.runSteps;
+src/lowered_machine.zig|pub fn runExplicitPure(
+src/program/loaded_execution.zig|pub fn decodeExecutablePlanImage(
+src/program_api.zig|pub fn staticMachine(
+EOF
+    printf '%s\n' "$owner_count"
 }
 
 require_current_wasm_schema() {
@@ -206,41 +254,58 @@ self_test() {
     trap cleanup_topology_test EXIT HUP INT TERM
     mkdir "$topology_test_root/src"
     touch "$topology_test_root/src/root.zig"
-    touch "$topology_test_root/src/machine.zig"
+    printf '%s\n' \
+        'const compiler = @import("compiler");' \
+        'const machine = @import("machine");' \
+        'const Definition = compiler.DefinitionFor(label, Body);' \
+        'return machine.Machine(Definition, options);' \
+        >"$topology_test_root/src/program_v2.zig"
+    printf '%s\n' \
+        '        pub fn plan(frame: Frame, accepted_cost: u64) Plan {' \
+        >"$topology_test_root/src/compiler.zig"
+    printf '%s\n' \
+        '        pub fn step(state: State, caller_fuel: *u64) Error!Outcome {' \
+        >"$topology_test_root/src/machine.zig"
     topology_test_receipt="$topology_test_root/topology.txt"
     reducer_test_receipt="$topology_test_root/reducer.txt"
     printf '%s\n' \
-        'core_module_count=1' \
+        'core_module_count=3' \
         'source_module root src/root.zig' \
+        'source_module compiler src/compiler.zig' \
         'source_module machine src/machine.zig' \
+        'source_module program_v2 src/program_v2.zig' \
         >"$topology_test_receipt"
     printf '%s\n' \
         'single_boundary_reducer=true' \
-        'runtime_semantic_module_count=1' \
         'reducer_public_entry=Program.compile(...).step' \
         'program_compile_surface_count=1' \
         >"$reducer_test_receipt"
+    require_single_reducer_receipt "$reducer_test_receipt"
     test "$(current_runtime_semantic_module_count \
         "$topology_test_root" \
-        "$topology_test_receipt" \
-        "$reducer_test_receipt")" -eq 1
-    sed 's/runtime_semantic_module_count=1/runtime_semantic_module_count=2/' \
-        "$reducer_test_receipt" >"$reducer_test_receipt.invalid"
-    if current_runtime_semantic_module_count \
-        "$topology_test_root" \
-        "$topology_test_receipt" \
-        "$reducer_test_receipt.invalid" >/dev/null 2>&1
-    then
-        echo "self-declared alternate reducer count was accepted" >&2
+        "$topology_test_receipt")" -eq 2
+    printf '%s\n' 'runtime_semantic_module_count=1' \
+        >>"$reducer_test_receipt"
+    if require_single_reducer_receipt "$reducer_test_receipt"; then
+        echo "semantic source-owner count in reducer receipt was accepted" >&2
         exit 1
     fi
-    touch "$topology_test_root/src/alternate_reducer.zig"
+    printf '%s\n' \
+        '        pub fn step(state: State, caller_fuel: *u64) Error!Outcome {' \
+        >"$topology_test_root/src/alternate_reducer.zig"
+    printf '%s\n' \
+        'core_module_count=4' \
+        'source_module root src/root.zig' \
+        'source_module alternate src/alternate_reducer.zig' \
+        'source_module compiler src/compiler.zig' \
+        'source_module machine src/machine.zig' \
+        'source_module program_v2 src/program_v2.zig' \
+        >"$topology_test_receipt"
     if current_runtime_semantic_module_count \
         "$topology_test_root" \
-        "$topology_test_receipt" \
-        "$reducer_test_receipt" >/dev/null 2>&1
+        "$topology_test_receipt" >/dev/null 2>&1
     then
-        echo "unclassified production reducer was accepted" >&2
+        echo "alternate runtime semantic source owner was accepted" >&2
         exit 1
     fi
     cleanup_topology_test
@@ -462,21 +527,14 @@ within_ratio \
     "$runtime_maximum_numerator" \
     "$runtime_maximum_denominator"
 
-baseline_runtime_semantic_modules=0
-for path in \
-    src/interpreter.zig \
-    src/lowered_machine.zig \
-    src/program/loaded_execution.zig \
-    src/program_api.zig
-do
-    test -f "$baseline_source/$path"
-    baseline_runtime_semantic_modules=$((baseline_runtime_semantic_modules + 1))
-done
+require_single_reducer_receipt "$reducer_receipt"
+baseline_runtime_semantic_modules=$(
+    baseline_runtime_semantic_module_count "$baseline_source"
+)
 current_runtime_semantic_modules=$(
     current_runtime_semantic_module_count \
         "$repository_root" \
-        "$topology_receipt" \
-        "$reducer_receipt"
+        "$topology_receipt"
 )
 test "$current_runtime_semantic_modules" \
     -lt "$baseline_runtime_semantic_modules"

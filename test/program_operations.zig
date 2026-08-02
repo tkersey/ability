@@ -258,6 +258,62 @@ test "compiler constants materialize canonical portable representations" {
     );
 }
 
+const array_constant_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 0,
+        .operation = .{ .constant = 1 },
+    },
+};
+const array_constant_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &array_constant_instructions,
+        .terminator = .{ .return_value = 0 },
+    },
+};
+
+const ArrayConstantBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum { unreachable_failure };
+    pub const constants = [_]u32{ 13, 29 };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "homogeneous-array-constants",
+        .value_types = &.{.{ .scalar = .u32 }},
+        .blocks = &array_constant_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+    };
+};
+
+const ArrayConstantMachine = program_v2.program(
+    "homogeneous-array-constants",
+    ArrayConstantBody,
+).compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 8,
+});
+
+test "homogeneous array constants compile and retain indexed semantics" {
+    const state = try ArrayConstantMachine.initialState(
+        std.testing.allocator,
+        {},
+    );
+    defer ArrayConstantMachine.deinitState(state);
+
+    var fuel: u64 = 8;
+    const done = switch (try ArrayConstantMachine.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 29), done.value().*);
+}
+
 const failure_blocks = [_]cir.Block{
     .{
         .id = 0,

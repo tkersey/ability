@@ -25,7 +25,7 @@ The paired one-effect witness measures:
 - canonical parked-state bytes;
 - the one-effect WASM lifecycle and artifact size with both current and
   baseline artifacts compiled in the build-selected ReleaseSmall mode; and
-- production runtime semantic modules.
+- the source modules that own production runtime semantics.
 
 The baseline compile observation and the outer Zig build summary report compile
 time and peak compiler RSS for the paired witness builds. Release proof runs
@@ -33,10 +33,12 @@ from an empty package/cache so those observations are not cache-hit timings.
 
 The gate rejects native or WASM runtime above 1.25 times the v0.7.0 median, a
 WASM artifact above 1.5 times the v0.7.0 artifact, any parked-state growth, or
-failure to reduce the four predecessor runtime-semantic modules to the
-source-derived generated Machine owner count. State and WASM sizes are
-deterministic. Runtime is a same-host paired measurement rather than a portable
-absolute threshold.
+failure to reduce the four predecessor runtime-semantic source owners to the
+current source-derived compiler-plan and Machine-step owners. This ownership
+metric is deliberately separate from the executable singularity proof, which
+reflects the public `Program.compile(...).step` surface. State and WASM sizes
+are deterministic. Runtime is a same-host paired measurement rather than a
+portable absolute threshold.
 
 Run:
 

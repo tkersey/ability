@@ -1315,6 +1315,10 @@ fn validateBody(
     if (typeForValue(Body, program.result_type) != Body.Result) {
         @compileError("Control IR result type does not match Result");
     }
+    switch (@typeInfo(Body.Failure)) {
+        .@"enum" => {},
+        else => @compileError("Body.Failure must be an exhaustive enum"),
+    }
     portable_value.assertPortable(Body.InitialArgs);
     portable_value.assertPortable(Body.Result);
     portable_value.assertPortable(Body.Failure);
@@ -1620,14 +1624,14 @@ fn semanticHashConstantAt(
     comptime index: usize,
 ) void {
     if (!hasDeclSafe(Body, "constants")) unreachable;
-    const fields = @typeInfo(@TypeOf(Body.constants)).@"struct".fields;
-    if (index >= fields.len) unreachable;
-    const Constant = fields[index].type;
+    if (index >= Body.constants.len) unreachable;
+    const value = Body.constants[index];
+    const Constant = @TypeOf(value);
     semanticHashSchema(Constant, hasher);
     var encoded: [portable_value.maximumEncodedSize(Constant)]u8 = undefined;
     const length = portable_value.encode(
         Constant,
-        Body.constants[index],
+        value,
         &encoded,
     ) catch unreachable;
     semanticHashBytes(hasher, encoded[0..length]);

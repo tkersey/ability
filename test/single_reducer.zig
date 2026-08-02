@@ -109,12 +109,10 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
     try stdout.print(
         "single_boundary_reducer={}\n" ++
-            "runtime_semantic_module_count={d}\n" ++
             "reducer_public_entry=Program.compile(...).step\n" ++
             "program_compile_surface_count={d}\n",
         .{
             reducerDeclarationCount(Machine) == 1,
-            reducerDeclarationCount(Machine),
             functionDeclarationCount(Program),
         },
     );

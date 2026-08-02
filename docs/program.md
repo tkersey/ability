@@ -13,12 +13,13 @@ const Machine = Program.compile(.{
 
 `Body` declares:
 
-- `InitialArgs`, `Result`, and authored `Failure` types;
+- portable `InitialArgs` and `Result` types, plus an exhaustive authored
+  `Failure` enum;
 - a tuple of typed `effect_sites`;
 - optional declarative `effect_handlers`;
 - optional declarative `effect_morphisms`;
 - a tuple of structured `schema_types`;
-- optional canonical constants;
+- optional canonical constants in a heterogeneous tuple or homogeneous array;
 - optional bounded `compiler_limits`;
 - one typed `control_ir`.
 
