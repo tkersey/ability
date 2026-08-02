@@ -26,6 +26,11 @@ const CoreModuleId = enum {
     rnf,
 };
 
+const CoreModuleRole = enum {
+    support,
+    runtime_semantics,
+};
+
 fn coreModulePath(module: CoreModuleId) []const u8 {
     return switch (module) {
         .agent_profile => "src/agent_profile.zig",
@@ -38,6 +43,33 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .program_v2 => "src/program_v2.zig",
         .rnf => "src/rnf.zig",
     };
+}
+
+fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
+    return switch (module) {
+        .compiler, .machine => .runtime_semantics,
+        .agent_profile,
+        .control_ir,
+        .driver,
+        .effect_v2,
+        .portable_value,
+        .program_v2,
+        .rnf,
+        => .support,
+    };
+}
+
+fn requireDirectDependency(
+    owner: *std.Build.Step,
+    dependency: *std.Build.Step,
+) void {
+    for (owner.dependencies.items) |candidate| {
+        if (candidate == dependency) return;
+    }
+    std.process.fatal(
+        "build step '{s}' must directly depend on '{s}'",
+        .{ owner.name, dependency.name },
+    );
 }
 
 comptime {
@@ -876,26 +908,35 @@ pub fn build(b: *std.Build) void {
         "boundary-core-module-topology.txt",
         b.fmt(
             "core_module_count={d}\n" ++
-                "source_module root src/root.zig\n" ++
-                "source_module agent_profile {s}\n" ++
-                "source_module compiler {s}\n" ++
-                "source_module control_ir {s}\n" ++
-                "source_module driver {s}\n" ++
-                "source_module effect_v2 {s}\n" ++
-                "source_module machine {s}\n" ++
-                "source_module portable_value {s}\n" ++
-                "source_module program_v2 {s}\n" ++
-                "source_module rnf {s}\n",
+                "source_module root support src/root.zig\n" ++
+                "source_module agent_profile {s} {s}\n" ++
+                "source_module compiler {s} {s}\n" ++
+                "source_module control_ir {s} {s}\n" ++
+                "source_module driver {s} {s}\n" ++
+                "source_module effect_v2 {s} {s}\n" ++
+                "source_module machine {s} {s}\n" ++
+                "source_module portable_value {s} {s}\n" ++
+                "source_module program_v2 {s} {s}\n" ++
+                "source_module rnf {s} {s}\n",
             .{
                 std.meta.fields(CoreModules).len,
+                @tagName(coreModuleRole(.agent_profile)),
                 coreModulePath(.agent_profile),
+                @tagName(coreModuleRole(.compiler)),
                 coreModulePath(.compiler),
+                @tagName(coreModuleRole(.control_ir)),
                 coreModulePath(.control_ir),
+                @tagName(coreModuleRole(.driver)),
                 coreModulePath(.driver),
+                @tagName(coreModuleRole(.effect_v2)),
                 coreModulePath(.effect_v2),
+                @tagName(coreModuleRole(.machine)),
                 coreModulePath(.machine),
+                @tagName(coreModuleRole(.portable_value)),
                 coreModulePath(.portable_value),
+                @tagName(coreModuleRole(.program_v2)),
                 coreModulePath(.program_v2),
+                @tagName(coreModuleRole(.rnf)),
                 coreModulePath(.rnf),
             },
         ),
@@ -1130,21 +1171,10 @@ pub fn build(b: *std.Build) void {
     defer b.graph.global_cache_root.path = saved_global_cache_path;
     lint_step.dependOn(lint_builder.build());
 
-    const receipt_falsifier_command = b.addSystemCommand(&.{
-        "sh",
-        "-c",
-        \\set -eu
-        \\test ! -e conformance/rnf-v1/check_receipt.sh
-        \\test "$(rg -Fxc '    const release_proof_step = b.step(' build.zig)" -eq 1
-        \\rg -Fq '    receipt_command.step.dependOn(release_proof_step);' build.zig
-        \\rg -Fq '    check_step.dependOn(release_proof_step);' build.zig
-        \\rg -Fq '    check_step.dependOn(receipt_step);' build.zig
-    });
     const receipt_falsifier_step = b.step(
         "check-boundary-machine-receipt-falsifiers",
-        "Prove that no directly invokable unbound completion receipt remains.",
+        "Prove completion receipt reachability from the live build graph.",
     );
-    receipt_falsifier_step.dependOn(&receipt_falsifier_command.step);
 
     const release_proof_step = b.step(
         "check-boundary-machine-release-proof",
@@ -1210,4 +1240,8 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Run the full Boundary Machine proof.");
     check_step.dependOn(release_proof_step);
     check_step.dependOn(receipt_step);
+
+    requireDirectDependency(&receipt_command.step, release_proof_step);
+    requireDirectDependency(check_step, release_proof_step);
+    requireDirectDependency(check_step, receipt_step);
 }

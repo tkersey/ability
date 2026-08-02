@@ -78,9 +78,15 @@ temporary tree and builds its focused StaticMachine witness with the same Zig
 toolchain as the RNF witness. It records compile time and peak compiler memory,
 then compares paired native lifecycle and decode medians, import-free WASM
 lifecycle medians, canonical parked-state size, one-effect WASM size, and
-runtime-semantic module count against the specified hard gates. This bounded
-reference is conformance-only: no legacy runtime source or reducer is imported
-into the production module graph. Because the proof authenticates and exports
-the historical tag, it runs only from a tagged Boundary source checkout with
-local `.git` metadata. Extracted package consumers retain the current-version
-focused proofs but cannot reproduce or claim the historical release comparison.
+runtime-semantic source-role count against the specified hard gates. The
+current role count comes from an exhaustive build-owned classification and is
+only a source-complexity measurement; public Program/Machine reflection plus
+the deletion and no-interpreter gates own normative reducer singularity. Both
+WASM exports accept the same changing `i32` response and expose the same
+response-plus-lifecycle checksum through one unconditional adapter. This
+bounded reference is conformance-only: no legacy runtime source or reducer is
+imported into the production module graph. Because the proof authenticates and
+exports the historical tag, it runs only from a tagged Boundary source checkout
+with local `.git` metadata. Extracted package consumers retain the
+current-version focused proofs but cannot reproduce or claim the historical
+release comparison.

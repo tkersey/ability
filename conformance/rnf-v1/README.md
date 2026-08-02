@@ -25,7 +25,7 @@ The paired one-effect witness measures:
 - canonical parked-state bytes;
 - the one-effect WASM lifecycle and artifact size with both current and
   baseline artifacts compiled in the build-selected ReleaseSmall mode; and
-- the source modules that own production runtime semantics.
+- an exhaustive build-owned classification of production source-module roles.
 
 The baseline compile observation and the outer Zig build summary report compile
 time and peak compiler RSS for the paired witness builds. Release proof runs
@@ -34,11 +34,14 @@ from an empty package/cache so those observations are not cache-hit timings.
 The gate rejects native or WASM runtime above 1.25 times the v0.7.0 median, a
 WASM artifact above 1.5 times the v0.7.0 artifact, any parked-state growth, or
 failure to reduce the four predecessor runtime-semantic source owners to the
-current source-derived compiler-plan and Machine-step owners. This ownership
-metric is deliberately separate from the executable singularity proof, which
-reflects the public `Program.compile(...).step` surface. State and WASM sizes
-are deterministic. Runtime is a same-host paired measurement rather than a
-portable absolute threshold.
+current build-classified `runtime_semantics` roles. The role classification is
+an exhaustive source-complexity metric, never reducer authority. Executable
+singularity is proved separately by reflecting the public
+`Program.compile(...).step` surface and by the deletion/no-interpreter gates.
+Both WASM artifacts accept the same changing `i32` response and return the same
+response-plus-lifecycle checksum through one unconditional workload adapter.
+State and WASM sizes are deterministic. Runtime is a same-host paired
+measurement rather than a portable absolute threshold.
 
 Run:
 

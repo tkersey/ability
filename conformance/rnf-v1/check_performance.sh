@@ -49,9 +49,22 @@ require_complete_current_topology() {
         ''|*[!0-9]*) return 1 ;;
     esac
 
+    awk '
+        NR == 1 {
+            if ($0 !~ /^core_module_count=[0-9]+$/) exit 1
+            next
+        }
+        {
+            if (NF != 4 || $1 != "source_module") exit 1
+            if ($3 != "support" && $3 != "runtime_semantics") exit 1
+        }
+        END {
+            if (NR < 2) exit 1
+        }
+    ' "$topology_receipt" || return 1
+
     expected_sources=$(
-        sed -n 's/^source_module [^ ]* \([^ ]*\)$/\1/p' \
-            "$topology_receipt" |
+        awk '$1 == "source_module" { print $4 }' "$topology_receipt" |
             sort
     )
     actual_sources=$(
@@ -63,6 +76,13 @@ require_complete_current_topology() {
     source_module_count=$(printf '%s\n' "$expected_sources" | sed '/^$/d' | wc -l | tr -d ' ')
     test "$source_module_count" -eq "$((core_module_count + 1))" ||
         return 1
+    test "$(awk '$1 == "source_module" { print $2 }' \
+        "$topology_receipt" | sort -u | wc -l | tr -d ' ')" \
+        -eq "$source_module_count" || return 1
+    test "$(printf '%s\n' "$expected_sources" | sort -u | \
+        wc -l | tr -d ' ')" -eq "$source_module_count" || return 1
+    test "$(grep -Fxc 'source_module root support src/root.zig' \
+        "$topology_receipt")" -eq 1 || return 1
 }
 
 require_single_reducer_receipt() {
@@ -79,36 +99,14 @@ require_single_reducer_receipt() {
     test "$(wc -l <"$reducer_receipt" | tr -d ' ')" -eq 3 || return 1
 }
 
-current_runtime_semantic_source_owners() {
-    source_root=$1
-    {
-        rg -l \
-            '^[[:space:]]*pub fn plan\(frame: Frame, accepted_cost: u64\) Plan \{$' \
-            "$source_root/src" --glob '*.zig' || test "$?" -eq 1
-        rg -l \
-            '^[[:space:]]*pub fn step\(state: State, caller_fuel: \*u64\) Error!Outcome \{$' \
-            "$source_root/src" --glob '*.zig' || test "$?" -eq 1
-    } | sed "s#^$source_root/##" | sort -u
-}
-
 current_runtime_semantic_module_count() {
     source_root=$1
     topology_receipt=$2
     require_complete_current_topology "$source_root" "$topology_receipt"
-
-    rg -Fqx 'const compiler = @import("compiler");' \
-        "$source_root/src/program_v2.zig"
-    rg -Fqx 'const machine = @import("machine");' \
-        "$source_root/src/program_v2.zig"
-    rg -Fq 'const Definition = compiler.DefinitionFor(label, Body);' \
-        "$source_root/src/program_v2.zig"
-    rg -Fq 'return machine.Machine(Definition, options);' \
-        "$source_root/src/program_v2.zig"
-
-    actual_owners=$(current_runtime_semantic_source_owners "$source_root")
-    expected_owners=$(printf '%s\n' src/compiler.zig src/machine.zig)
-    test "$actual_owners" = "$expected_owners" || return 1
-    printf '%s\n' "$actual_owners" | sed '/^$/d' | wc -l | tr -d ' '
+    awk '
+        $1 == "source_module" && $3 == "runtime_semantics" { count += 1 }
+        END { print count + 0 }
+    ' "$topology_receipt"
 }
 
 baseline_runtime_semantic_module_count() {
@@ -147,6 +145,15 @@ require_baseline_wasm_schema() {
     rg -Fq '.payload_codec = .string' "$baseline_wasm_source"
     rg -Fq '.resume_codec = .i32' "$baseline_wasm_source"
     rg -Fq '.result_codec = .i32' "$baseline_wasm_source"
+    rg -Fq \
+        'export fn boundaryStaticMachineWasm32Smoke(response: i32) i32 {' \
+        "$baseline_wasm_source"
+    rg -Fq \
+        'Machine.@"resume"(restored_state, restored_request, response)' \
+        "$baseline_wasm_source"
+    rg -Fq \
+        'std.math.add(i32, result.value(), @as(i32, @intCast(expected.len * 2)))' \
+        "$baseline_wasm_source"
 }
 
 within_ratio() {
@@ -225,7 +232,7 @@ self_test() {
         echo "state-size regression was accepted" >&2
         exit 1
     fi
-    test 1 -lt 4 ||
+    test 2 -lt 4 ||
         { echo "semantic-module reduction was rejected" >&2; exit 1; }
     if test 4 -lt 4; then
         echo "semantic-module non-reduction was accepted" >&2
@@ -253,27 +260,19 @@ self_test() {
     }
     trap cleanup_topology_test EXIT HUP INT TERM
     mkdir "$topology_test_root/src"
-    touch "$topology_test_root/src/root.zig"
-    printf '%s\n' \
-        'const compiler = @import("compiler");' \
-        'const machine = @import("machine");' \
-        'const Definition = compiler.DefinitionFor(label, Body);' \
-        'return machine.Machine(Definition, options);' \
-        >"$topology_test_root/src/program_v2.zig"
-    printf '%s\n' \
-        '        pub fn plan(frame: Frame, accepted_cost: u64) Plan {' \
-        >"$topology_test_root/src/compiler.zig"
-    printf '%s\n' \
-        '        pub fn step(state: State, caller_fuel: *u64) Error!Outcome {' \
-        >"$topology_test_root/src/machine.zig"
+    touch \
+        "$topology_test_root/src/root.zig" \
+        "$topology_test_root/src/program_v2.zig" \
+        "$topology_test_root/src/compiler.zig" \
+        "$topology_test_root/src/machine.zig"
     topology_test_receipt="$topology_test_root/topology.txt"
     reducer_test_receipt="$topology_test_root/reducer.txt"
     printf '%s\n' \
         'core_module_count=3' \
-        'source_module root src/root.zig' \
-        'source_module compiler src/compiler.zig' \
-        'source_module machine src/machine.zig' \
-        'source_module program_v2 src/program_v2.zig' \
+        'source_module root support src/root.zig' \
+        'source_module compiler runtime_semantics src/compiler.zig' \
+        'source_module machine runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
         >"$topology_test_receipt"
     printf '%s\n' \
         'single_boundary_reducer=true' \
@@ -287,25 +286,60 @@ self_test() {
     printf '%s\n' 'runtime_semantic_module_count=1' \
         >>"$reducer_test_receipt"
     if require_single_reducer_receipt "$reducer_test_receipt"; then
-        echo "semantic source-owner count in reducer receipt was accepted" >&2
+        echo "extra source metric in reducer receipt was accepted" >&2
+        exit 1
+    fi
+    touch "$topology_test_root/src/alternate_reducer.zig"
+    printf '%s\n' \
+        'core_module_count=4' \
+        'source_module root support src/root.zig' \
+        'source_module alternate runtime_semantics src/alternate_reducer.zig' \
+        'source_module compiler runtime_semantics src/compiler.zig' \
+        'source_module machine runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
+        >"$topology_test_receipt"
+    test "$(current_runtime_semantic_module_count \
+        "$topology_test_root" \
+        "$topology_test_receipt")" -eq 3
+    printf '%s\n' \
+        'core_module_count=4' \
+        'source_module root support src/root.zig' \
+        'source_module compiler runtime_semantics src/compiler.zig' \
+        'source_module machine runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
+        >"$topology_test_receipt"
+    if require_complete_current_topology \
+        "$topology_test_root" "$topology_test_receipt"
+    then
+        echo "missing source role was accepted" >&2
         exit 1
     fi
     printf '%s\n' \
-        '        pub fn step(state: State, caller_fuel: *u64) Error!Outcome {' \
-        >"$topology_test_root/src/alternate_reducer.zig"
+        'core_module_count=4' \
+        'source_module root support src/root.zig' \
+        'source_module alternate unknown src/alternate_reducer.zig' \
+        'source_module compiler runtime_semantics src/compiler.zig' \
+        'source_module machine runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
+        >"$topology_test_receipt"
+    if require_complete_current_topology \
+        "$topology_test_root" "$topology_test_receipt"
+    then
+        echo "unknown source role was accepted" >&2
+        exit 1
+    fi
     printf '%s\n' \
         'core_module_count=4' \
-        'source_module root src/root.zig' \
-        'source_module alternate src/alternate_reducer.zig' \
-        'source_module compiler src/compiler.zig' \
-        'source_module machine src/machine.zig' \
-        'source_module program_v2 src/program_v2.zig' \
+        'source_module root support src/root.zig' \
+        'source_module compiler support src/alternate_reducer.zig' \
+        'source_module compiler runtime_semantics src/compiler.zig' \
+        'source_module machine runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
         >"$topology_test_receipt"
-    if current_runtime_semantic_module_count \
-        "$topology_test_root" \
-        "$topology_test_receipt" >/dev/null 2>&1
+    if require_complete_current_topology \
+        "$topology_test_root" "$topology_test_receipt"
     then
-        echo "alternate runtime semantic source owner was accepted" >&2
+        echo "duplicate source identity was accepted" >&2
         exit 1
     fi
     cleanup_topology_test
@@ -318,6 +352,15 @@ self_test() {
     rg -Fq '+        .resume_codec = .i32' \
         "$script_directory/v0.7.0-performance.patch"
     rg -Fq '+        .result_codec = .i32' \
+        "$script_directory/v0.7.0-performance.patch"
+    rg -Fq \
+        '+export fn boundaryStaticMachineWasm32Smoke(response: i32) i32 {' \
+        "$script_directory/v0.7.0-performance.patch"
+    rg -Fq \
+        '+    Machine.@"resume"(restored_state, restored_request, response)' \
+        "$script_directory/v0.7.0-performance.patch"
+    rg -Fq \
+        '+    return std.math.add(i32, result.value(), @as(i32, @intCast(expected.len * 2))) catch return 0;' \
         "$script_directory/v0.7.0-performance.patch"
     node "$script_directory/measure_wasm.mjs" --self-test |
         grep -qx 'wasm_measurement_falsifier=pass'

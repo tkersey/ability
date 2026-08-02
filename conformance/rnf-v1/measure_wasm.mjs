@@ -112,7 +112,5 @@ if (typeof run !== "function") {
   throw new Error(`missing WASM performance export: ${exportName}`);
 }
 
-const workload = exportName === "boundaryMachinePerformanceOneEffect"
-  ? bindMachineWorkload(run)
-  : run;
+const workload = bindMachineWorkload(run);
 process.stdout.write(`${measure(workload)}\n`);

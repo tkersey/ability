@@ -143,7 +143,8 @@ index 7f5ffb1..f9b356f 100644
          .terminators = &terminators,
          .instructions = &instructions,
 @@ -153,31 +153,36 @@ var restored_storage: [64 * 1024]u8 = undefined;
- export fn boundaryStaticMachineWasm32Smoke() u32 {
+-export fn boundaryStaticMachineWasm32Smoke() u32 {
++export fn boundaryStaticMachineWasm32Smoke(response: i32) i32 {
 -    const expected = @as(usize, std.math.maxInt(u32));
 +    const expected = "payload";
      var source = std.heap.FixedBufferAllocator.init(&source_storage);
@@ -175,7 +176,7 @@ index 7f5ffb1..f9b356f 100644
 +        restored_request.payload([]const u8) catch return 0,
 +        expected,
 +    )) return 0;
-+    Machine.@"resume"(restored_state, restored_request, @as(i32, 7)) catch return 0;
++    Machine.@"resume"(restored_state, restored_request, response) catch return 0;
 -
 +
      var result = switch (Machine.reduce(restored_state, &fuel) catch return 0) {
@@ -184,7 +185,7 @@ index 7f5ffb1..f9b356f 100644
      };
      defer result.deinit();
 -    return if (result.value() == expected) 1 else 0;
-+    return if (result.value() == 7) 1 else 0;
++    return std.math.add(i32, result.value(), @as(i32, @intCast(expected.len * 2))) catch return 0;
  }
 diff --git a/test/static_machine_test.zig b/test/static_machine_test.zig
 index 22f4ca4..4217f67 100644
