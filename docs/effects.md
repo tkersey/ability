@@ -63,6 +63,13 @@ their compile-time capability. `contract_digest` additionally binds the dense
 residual ordinal for Machine and request identity. The source `Body` and its
 accidental declarations remain private.
 
+A production handler owns its admitted `semantic_contract_digest`
+independently of the Machine it is asked to handle. It must not derive that
+capability declaration from `Machine.EffectRow`, because doing so would approve
+semantic drift automatically. The shipped one-effect example pins the digest
+as handler-owned bytes, so a source-contract change requires an explicit
+handler-owner update before the example compiles again.
+
 `Machine.step` can park at one effect constructor and return one typed request.
 The canonical state retains the exact continuation environment. After the
 caller validates and supplies the typed response, `Machine.resume` replaces the

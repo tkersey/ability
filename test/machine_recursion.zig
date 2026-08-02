@@ -388,6 +388,8 @@ const NonResizingAllocator = struct {
     child: std.mem.Allocator,
     allocation_count: usize = 0,
     free_count: usize = 0,
+    live_bytes: usize = 0,
+    peak_live_bytes: usize = 0,
 
     fn allocator(self: *@This()) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &vtable };
@@ -405,7 +407,14 @@ const NonResizingAllocator = struct {
             alignment,
             return_address,
         );
-        if (result != null) self.allocation_count += 1;
+        if (result != null) {
+            self.allocation_count += 1;
+            self.live_bytes += length;
+            self.peak_live_bytes = @max(
+                self.peak_live_bytes,
+                self.live_bytes,
+            );
+        }
         return result;
     }
 
@@ -437,6 +446,7 @@ const NonResizingAllocator = struct {
     ) void {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.free_count += 1;
+        self.live_bytes -= memory.len;
         self.child.rawFree(memory, alignment, return_address);
     }
 
@@ -1650,6 +1660,48 @@ test "retained capacity bounds repeated recursive unwind and regrowth" {
     try std.testing.expectEqual(
         non_resizing.allocation_count,
         non_resizing.free_count,
+    );
+}
+
+test "non-resizing recursive frame storage remains linear" {
+    const maximum_frames = 66;
+    const RecursiveMachine = Program.compile(.{
+        .maximum_frames = maximum_frames,
+        .maximum_state_bytes = 1 << 20,
+        .maximum_machine_fuel = 4096,
+    });
+    var non_resizing = NonResizingAllocator{
+        .child = std.testing.allocator,
+    };
+    const state = try RecursiveMachine.initialState(
+        non_resizing.allocator(),
+        64,
+    );
+
+    var done: ?*RecursiveMachine.OwnedResult = null;
+    for (0..4096) |_| {
+        var caller_fuel: u64 = 64;
+        switch (try RecursiveMachine.step(state, &caller_fuel)) {
+            .yielded => try RecursiveMachine.validateState(state),
+            .done => |result| {
+                done = result;
+                break;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    const result = done orelse return error.TestUnexpectedResult;
+    result.deinit();
+    RecursiveMachine.deinitState(state);
+
+    try std.testing.expectEqual(@as(usize, 0), non_resizing.live_bytes);
+    try std.testing.expectEqual(
+        non_resizing.allocation_count,
+        non_resizing.free_count,
+    );
+    try std.testing.expect(
+        non_resizing.peak_live_bytes <=
+            8 * maximum_frames * @sizeOf(RecursiveMachine.FrameType),
     );
 }
 

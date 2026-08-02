@@ -656,12 +656,21 @@ pub fn Machine(
                             allocation.logical_length,
                             1,
                         ) catch return error.ProgramContractViolation;
+                        const doubled_capacity = std.math.mul(
+                            usize,
+                            allocation.capacity,
+                            2,
+                        ) catch options.maximum_frames;
+                        const next_capacity = @min(
+                            options.maximum_frames,
+                            @max(next_length, doubled_capacity),
+                        );
                         if (allocation.capacity < next_length and
-                            !try allocation.growInPlace(allocator, next_length))
+                            !try allocation.growInPlace(allocator, next_capacity))
                         {
                             const replacement = try FrameAllocation.create(
                                 allocator,
-                                next_length,
+                                next_capacity,
                             );
                             replacement.logical_length =
                                 allocation.logical_length;
