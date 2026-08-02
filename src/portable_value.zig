@@ -302,6 +302,12 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
             return canonicalValue(Element, item);
         }
 
+        fn canonicalElementAt(self: *const Self, index: u32) ?Element {
+            if (self.logical_length > maximum_items or
+                index >= self.logical_length) return null;
+            return canonicalElement(self.storage[@intCast(index)]) catch null;
+        }
+
         /// Copy a logical element slice.
         pub fn fromSlice(items: []const Element) Error!Self {
             if (items.len > maximum_items) return error.CapacityExceeded;
@@ -326,9 +332,7 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
 
         /// Return one element by value, never by portable pointer identity.
         pub fn get(self: *const Self, index: u32) ?Element {
-            if (self.logical_length > maximum_items or
-                index >= self.logical_length) return null;
-            return self.storage[@intCast(index)];
+            return self.canonicalElementAt(index);
         }
 
         /// Replace one logical element.
@@ -353,9 +357,10 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         pub fn pop(self: *Self) ?Element {
             if (self.logical_length > maximum_items) return null;
             if (self.logical_length == 0) return null;
-            self.logical_length -= 1;
-            const index: usize = @intCast(self.logical_length);
-            const item = self.storage[index];
+            const next_length = self.logical_length - 1;
+            const item = self.canonicalElementAt(next_length) orelse return null;
+            self.logical_length = next_length;
+            const index: usize = @intCast(next_length);
             self.storage[index] = canonicalDefaultValue(Element);
             return item;
         }
@@ -1381,6 +1386,35 @@ test "Vector canonicalizes nested elements at every ingress" {
         @as(u8, 0),
         pushed.storage[0].tags.storage[0].storage[1],
     );
+}
+
+test "Vector by-value egress rejects malformed nested elements" {
+    const Item = Text(2);
+    const Items = Vector(Item, 1);
+
+    var malformed = Items.empty();
+    malformed.storage[0].storage[0] = 0xff;
+    malformed.storage[0].logical_length = 1;
+    malformed.logical_length = 1;
+    const before = malformed;
+
+    try std.testing.expectEqual(@as(?Item, null), malformed.get(0));
+    try std.testing.expectEqual(@as(?Item, null), malformed.pop());
+    try std.testing.expectEqualDeep(before, malformed);
+
+    var dirty = Items.empty();
+    dirty.storage[0] = try Item.fromSlice("x");
+    dirty.storage[0].storage[1] = 0xee;
+    dirty.logical_length = 1;
+
+    const observed = dirty.get(0).?;
+    try std.testing.expectEqualStrings("x", observed.slice());
+    try std.testing.expectEqual(@as(u8, 0), observed.storage[1]);
+
+    const removed = dirty.pop().?;
+    try std.testing.expectEqualStrings("x", removed.slice());
+    try std.testing.expectEqual(@as(u8, 0), removed.storage[1]);
+    try std.testing.expectEqualDeep(Items.empty(), dirty);
 }
 
 test "Bytes shrinking resets every vacated byte" {
