@@ -160,9 +160,11 @@ test "compiler eliminates unreferenced effects and canonicalizes residual ordina
     switch (request.value) {
         .s0 => |payload| try std.testing.expectEqual(@as(u32, 7), payload),
     }
-    const prepared_resume = try WithUnused.prepareResume(state, request);
-    defer WithUnused.deinitPreparedResume(prepared_resume);
-    try WithUnused.@"resume"(prepared_resume, @as(u32, 11));
+    {
+        const prepared_resume = try WithUnused.prepareResume(state, request);
+        defer WithUnused.deinitPreparedResume(prepared_resume);
+        try WithUnused.@"resume"(prepared_resume, @as(u32, 11));
+    }
     const done = switch (try WithUnused.step(state, &fuel)) {
         .done => |value| value,
         else => return error.TestUnexpectedResult,

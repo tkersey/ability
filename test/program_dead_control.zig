@@ -502,9 +502,11 @@ test "unreachable control creates no constructor, authority, or identity delta" 
     switch (request.value) {
         .s0 => |payload| try std.testing.expectEqual(@as(u32, 7), payload),
     }
-    const prepared_resume = try WithDead.prepareResume(state, request);
-    defer WithDead.deinitPreparedResume(prepared_resume);
-    try WithDead.@"resume"(prepared_resume, @as(u32, 11));
+    {
+        const prepared_resume = try WithDead.prepareResume(state, request);
+        defer WithDead.deinitPreparedResume(prepared_resume);
+        try WithDead.@"resume"(prepared_resume, @as(u32, 11));
+    }
     const done = switch (try WithDead.step(state, &fuel)) {
         .done => |value| value,
         else => return error.TestUnexpectedResult,

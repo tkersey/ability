@@ -1199,6 +1199,55 @@ test "progressed helper requests observe current environment before activation" 
     try std.testing.expectEqual(@as(u32, 2), done.value().*);
 }
 
+test "linear PreparedResume reclaims fixed-buffer capacity before reduction" {
+    const ObservedMachine = ObservedBackedgeProgram.compile(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    var backing: [64 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+
+    {
+        const state = try ObservedMachine.initialState(fixed.allocator(), 2);
+        defer ObservedMachine.deinitState(state);
+        var caller_fuel: u64 = 64;
+        const request = switch (try ObservedMachine.step(state, &caller_fuel)) {
+            .request => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        const parked_high_water = fixed.end_index;
+
+        for (0..32) |_| {
+            const abandoned = try ObservedMachine.prepareResume(state, request);
+            try std.testing.expectError(
+                error.ProgramContractViolation,
+                ObservedMachine.prepareResume(state, request),
+            );
+            ObservedMachine.deinitPreparedResume(abandoned);
+            try std.testing.expectEqual(parked_high_water, fixed.end_index);
+        }
+
+        {
+            const prepared = try ObservedMachine.prepareResume(state, request);
+            defer ObservedMachine.deinitPreparedResume(prepared);
+            try ObservedMachine.@"resume"(prepared, @as(u32, 0));
+            const fuel_before = caller_fuel;
+            try std.testing.expectError(
+                error.ProgramContractViolation,
+                ObservedMachine.step(state, &caller_fuel),
+            );
+            try std.testing.expectEqual(fuel_before, caller_fuel);
+        }
+
+        try std.testing.expectEqual(
+            ObservedMachine.Outcome.yielded,
+            try ObservedMachine.step(state, &caller_fuel),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
+}
+
 test "progressed helper rejects an authentic child from another invocation" {
     const BackedgeMachine = HelperBackedgeProgram.compile(.{
         .maximum_frames = 2,

@@ -110,15 +110,17 @@ pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {
         .s0 => |value| value.len(),
     };
     if (restored_payload_length != payload_length) return 0;
-    const prepared_resume = PerformanceMachine.prepareResume(
-        restored_state,
-        restored_request,
-    ) catch return 0;
-    defer PerformanceMachine.deinitPreparedResume(prepared_resume);
-    PerformanceMachine.@"resume"(
-        prepared_resume,
-        response,
-    ) catch return 0;
+    {
+        const prepared_resume = PerformanceMachine.prepareResume(
+            restored_state,
+            restored_request,
+        ) catch return 0;
+        defer PerformanceMachine.deinitPreparedResume(prepared_resume);
+        PerformanceMachine.@"resume"(
+            prepared_resume,
+            response,
+        ) catch return 0;
+    }
 
     const done = switch (PerformanceMachine.step(
         restored_state,

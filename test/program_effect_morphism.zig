@@ -119,9 +119,11 @@ test "declarative effect morphism lowers to the canonical residual contract" {
     switch (request.value) {
         .s0 => |payload| try std.testing.expectEqual(@as(u32, 7), payload),
     }
-    const prepared_resume = try Morphed.prepareResume(state, request);
-    defer Morphed.deinitPreparedResume(prepared_resume);
-    try Morphed.@"resume"(prepared_resume, @as(u32, 11));
+    {
+        const prepared_resume = try Morphed.prepareResume(state, request);
+        defer Morphed.deinitPreparedResume(prepared_resume);
+        try Morphed.@"resume"(prepared_resume, @as(u32, 11));
+    }
     const done = switch (try Morphed.step(state, &fuel)) {
         .done => |value| value,
         else => return error.TestUnexpectedResult,

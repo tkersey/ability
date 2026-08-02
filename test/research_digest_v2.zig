@@ -389,15 +389,17 @@ test "Research Digest v2 formats capability data inside the Machine" {
         .title = try Title.fromSlice("Beta"),
         .summary = try Summary.fromSlice("Second"),
     });
-    const prepared_resume = try DigestMachine.prepareResume(
-        pending_state,
-        request,
-    );
-    defer DigestMachine.deinitPreparedResume(prepared_resume);
-    try DigestMachine.@"resume"(
-        prepared_resume,
-        ResearchResponse{ .items = items },
-    );
+    {
+        const prepared_resume = try DigestMachine.prepareResume(
+            pending_state,
+            request,
+        );
+        defer DigestMachine.deinitPreparedResume(prepared_resume);
+        try DigestMachine.@"resume"(
+            prepared_resume,
+            ResearchResponse{ .items = items },
+        );
+    }
 
     var loop_fuel: u64 = 24;
     switch (try DigestMachine.step(pending_state, &loop_fuel)) {

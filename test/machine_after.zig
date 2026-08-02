@@ -111,9 +111,11 @@ test "Program.compile persists local after in RNF with zero after sites" {
         .request => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    const prepared_resume = try AfterMachine.prepareResume(state, request);
-    defer AfterMachine.deinitPreparedResume(prepared_resume);
-    try AfterMachine.@"resume"(prepared_resume, @as(u32, 40));
+    {
+        const prepared_resume = try AfterMachine.prepareResume(state, request);
+        defer AfterMachine.deinitPreparedResume(prepared_resume);
+        try AfterMachine.@"resume"(prepared_resume, @as(u32, 40));
+    }
 
     var insufficient_after_fuel: u64 = 0;
     try std.testing.expectEqual(

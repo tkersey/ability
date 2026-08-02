@@ -812,10 +812,10 @@ pub fn Machine(
             // This cache is private live-state acceleration, never authority
             // and never part of ABL_RNF2 encoding or Machine identity.
             request_identity: ?RequestIdentity = null,
-            // PreparedResume retains a raw pointer to this allocation until it
-            // is consumed or abandoned. These private lease fields never
-            // enter canonical state bytes or Machine identity.
-            prepared_resume_leases: usize = 0,
+            // One PreparedResume retains a raw pointer to this allocation
+            // until it is released. The private linear lease never enters
+            // canonical state bytes or Machine identity.
+            prepared_resume_active: bool = false,
             release_requested: bool = false,
             terminal_result: ?*OwnedResult = null,
             terminal: bool = false,
@@ -911,7 +911,7 @@ pub fn Machine(
 
         fn destroyStateStorage(state: State) void {
             const value = stored(state);
-            std.debug.assert(value.prepared_resume_leases == 0);
+            std.debug.assert(!value.prepared_resume_active);
             std.debug.assert(value.terminal_result == null);
             const allocator = value.allocator;
             value.frames.deinit(allocator);
@@ -921,7 +921,7 @@ pub fn Machine(
         fn releaseStateStorageIfReady(state: State) void {
             const value = stored(state);
             if (!value.release_requested or
-                value.prepared_resume_leases != 0 or
+                value.prepared_resume_active or
                 value.terminal_result != null)
             {
                 return;
@@ -931,8 +931,8 @@ pub fn Machine(
 
         fn releasePreparedResumeLease(state: State) void {
             const value = stored(state);
-            std.debug.assert(value.prepared_resume_leases != 0);
-            value.prepared_resume_leases -= 1;
+            std.debug.assert(value.prepared_resume_active);
+            value.prepared_resume_active = false;
             releaseStateStorageIfReady(state);
         }
 
@@ -1364,7 +1364,7 @@ pub fn Machine(
             copy.* = original.*;
             copy.allocator = allocator;
             copy.frames = .empty;
-            copy.prepared_resume_leases = 0;
+            copy.prepared_resume_active = false;
             copy.release_requested = false;
             copy.terminal_result = null;
             copy.frames = try original.frames.cloneExact(allocator);
@@ -1441,7 +1441,7 @@ pub fn Machine(
             {
                 return error.ProgramContractViolation;
             }
-            if (original.prepared_resume_leases == std.math.maxInt(usize)) {
+            if (original.prepared_resume_active) {
                 return error.ProgramContractViolation;
             }
 
@@ -1455,12 +1455,12 @@ pub fn Machine(
                 .candidate = original.*,
             };
             value.candidate.frames = .empty;
-            value.candidate.prepared_resume_leases = 0;
+            value.candidate.prepared_resume_active = false;
             value.candidate.release_requested = false;
             value.candidate.terminal_result = null;
             value.candidate.frames =
                 try original.frames.cloneExact(original.allocator);
-            stored(state).prepared_resume_leases += 1;
+            stored(state).prepared_resume_active = true;
             return @ptrCast(value);
         }
 
@@ -1525,6 +1525,9 @@ pub fn Machine(
         pub fn step(state: State, caller_fuel: *u64) Error!Outcome {
             const original = storedConst(state);
             try validateLiveStateHeader(original);
+            if (original.prepared_resume_active) {
+                return error.ProgramContractViolation;
+            }
             const original_frame = try top(original);
             if (Definition.current(original_frame) != null) {
                 return error.ProgramContractViolation;
@@ -2497,24 +2500,26 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
         error.ProgramContractViolation,
         TestMachine.prepareResume(resumed_state, stale),
     );
-    const first_prepared_resume = try TestMachine.prepareResume(
-        resumed_state,
-        first,
-    );
-    defer TestMachine.deinitPreparedResume(first_prepared_resume);
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        TestMachine.@"resume"(first_prepared_resume, @as(u16, 4)),
-    );
-    try std.testing.expect(TestDefinition.requestEql(
-        first.value,
-        (try TestMachine.current(resumed_state)).value,
-    ));
-    try TestMachine.@"resume"(first_prepared_resume, @as(u32, 4));
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        TestMachine.@"resume"(first_prepared_resume, @as(u32, 4)),
-    );
+    {
+        const first_prepared_resume = try TestMachine.prepareResume(
+            resumed_state,
+            first,
+        );
+        defer TestMachine.deinitPreparedResume(first_prepared_resume);
+        try std.testing.expectError(
+            error.ProgramContractViolation,
+            TestMachine.@"resume"(first_prepared_resume, @as(u16, 4)),
+        );
+        try std.testing.expect(TestDefinition.requestEql(
+            first.value,
+            (try TestMachine.current(resumed_state)).value,
+        ));
+        try TestMachine.@"resume"(first_prepared_resume, @as(u32, 4));
+        try std.testing.expectError(
+            error.ProgramContractViolation,
+            TestMachine.@"resume"(first_prepared_resume, @as(u32, 4)),
+        );
+    }
 
     const second = switch (try TestMachine.step(resumed_state, &fuel)) {
         .request => |request| request,
@@ -2525,12 +2530,14 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
         @as(u32, 4),
         second.value.increment.payload,
     );
-    const second_prepared_resume = try TestMachine.prepareResume(
-        resumed_state,
-        second,
-    );
-    defer TestMachine.deinitPreparedResume(second_prepared_resume);
-    try TestMachine.@"resume"(second_prepared_resume, @as(u32, 5));
+    {
+        const second_prepared_resume = try TestMachine.prepareResume(
+            resumed_state,
+            second,
+        );
+        defer TestMachine.deinitPreparedResume(second_prepared_resume);
+        try TestMachine.@"resume"(second_prepared_resume, @as(u32, 5));
+    }
 
     const done = switch (try TestMachine.step(resumed_state, &fuel)) {
         .done => |result| result,
@@ -2540,7 +2547,7 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     try std.testing.expectEqual(@as(u32, 5), done.value().*);
 }
 
-test "PreparedResume leases source state until every candidate is released" {
+test "PreparedResume is one linear source state lease" {
     const TestMachine = Machine(TestDefinition, .{
         .maximum_frames = 4,
         .maximum_state_bytes = 4096,
@@ -2552,13 +2559,20 @@ test "PreparedResume leases source state until every candidate is released" {
         .request => |pending| pending,
         else => return error.TestUnexpectedResult,
     };
-    const abandoned = try TestMachine.prepareResume(state, request);
-    const committed = try TestMachine.prepareResume(state, request);
+    const prepared_resume = try TestMachine.prepareResume(state, request);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        TestMachine.prepareResume(state, request),
+    );
+    const fuel_before = fuel;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        TestMachine.step(state, &fuel),
+    );
+    try std.testing.expectEqual(fuel_before, fuel);
 
     TestMachine.deinitState(state);
-    TestMachine.deinitPreparedResume(abandoned);
-    try TestMachine.@"resume"(committed, @as(u32, 4));
-    TestMachine.deinitPreparedResume(committed);
+    TestMachine.deinitPreparedResume(prepared_resume);
 }
 
 test "minimum state ceiling admits exactly one empty canonical frame" {
@@ -2854,16 +2868,20 @@ test "Machine terminal result allocation failure is retryable" {
         .request => |request| request,
         else => return error.TestUnexpectedResult,
     };
-    const first_prepared_resume = try TestMachine.prepareResume(state, first);
-    defer TestMachine.deinitPreparedResume(first_prepared_resume);
-    try TestMachine.@"resume"(first_prepared_resume, @as(u32, 4));
+    {
+        const first_prepared_resume = try TestMachine.prepareResume(state, first);
+        defer TestMachine.deinitPreparedResume(first_prepared_resume);
+        try TestMachine.@"resume"(first_prepared_resume, @as(u32, 4));
+    }
     const second = switch (try TestMachine.step(state, &caller_fuel)) {
         .request => |request| request,
         else => return error.TestUnexpectedResult,
     };
-    const second_prepared_resume = try TestMachine.prepareResume(state, second);
-    defer TestMachine.deinitPreparedResume(second_prepared_resume);
-    try TestMachine.@"resume"(second_prepared_resume, @as(u32, 5));
+    {
+        const second_prepared_resume = try TestMachine.prepareResume(state, second);
+        defer TestMachine.deinitPreparedResume(second_prepared_resume);
+        try TestMachine.@"resume"(second_prepared_resume, @as(u32, 5));
+    }
 
     const before = try TestMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(before);

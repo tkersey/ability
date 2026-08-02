@@ -401,9 +401,11 @@ test "Program.compile generates direct exact-live RNF Machine" {
         &request.identity.digest,
         &unchanged.identity.digest,
     );
-    const prepared_resume = try CompiledMachine.prepareResume(state, request);
-    defer CompiledMachine.deinitPreparedResume(prepared_resume);
-    try CompiledMachine.@"resume"(prepared_resume, @as(u32, 42));
+    {
+        const prepared_resume = try CompiledMachine.prepareResume(state, request);
+        defer CompiledMachine.deinitPreparedResume(prepared_resume);
+        try CompiledMachine.@"resume"(prepared_resume, @as(u32, 42));
+    }
     const done = switch (try CompiledMachine.step(state, &fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,
@@ -433,14 +435,16 @@ test "Machine canonicalizes typed initial and response ingress" {
         },
     }
 
-    const prepared_resume = try CanonicalTextMachine.prepareResume(
-        state,
-        request,
-    );
-    defer CanonicalTextMachine.deinitPreparedResume(prepared_resume);
-    var response = try Text4.fromSlice("ok");
-    response.storage[3] = 0xb2;
-    try CanonicalTextMachine.@"resume"(prepared_resume, response);
+    {
+        const prepared_resume = try CanonicalTextMachine.prepareResume(
+            state,
+            request,
+        );
+        defer CanonicalTextMachine.deinitPreparedResume(prepared_resume);
+        var response = try Text4.fromSlice("ok");
+        response.storage[3] = 0xb2;
+        try CanonicalTextMachine.@"resume"(prepared_resume, response);
+    }
 
     const done = switch (try CanonicalTextMachine.step(state, &fuel)) {
         .done => |result| result,
@@ -852,28 +856,30 @@ test "resume validates a future-dead response before consuming the request" {
         .request => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    const prepared_resume = try IgnoredResponseMachine.prepareResume(
-        state,
-        request,
-    );
-    defer IgnoredResponseMachine.deinitPreparedResume(prepared_resume);
-    var malformed = Text4.empty();
-    malformed.logical_length = 5;
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        IgnoredResponseMachine.@"resume"(prepared_resume, malformed),
-    );
-    const unchanged = try IgnoredResponseMachine.current(state);
-    try std.testing.expectEqualSlices(
-        u8,
-        &request.identity.digest,
-        &unchanged.identity.digest,
-    );
+    {
+        const prepared_resume = try IgnoredResponseMachine.prepareResume(
+            state,
+            request,
+        );
+        defer IgnoredResponseMachine.deinitPreparedResume(prepared_resume);
+        var malformed = Text4.empty();
+        malformed.logical_length = 5;
+        try std.testing.expectError(
+            error.ProgramContractViolation,
+            IgnoredResponseMachine.@"resume"(prepared_resume, malformed),
+        );
+        const unchanged = try IgnoredResponseMachine.current(state);
+        try std.testing.expectEqualSlices(
+            u8,
+            &request.identity.digest,
+            &unchanged.identity.digest,
+        );
 
-    try IgnoredResponseMachine.@"resume"(
-        prepared_resume,
-        try Text4.fromSlice("ok"),
-    );
+        try IgnoredResponseMachine.@"resume"(
+            prepared_resume,
+            try Text4.fromSlice("ok"),
+        );
+    }
     const done = switch (try IgnoredResponseMachine.step(state, &fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,

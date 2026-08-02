@@ -296,15 +296,17 @@ test "agent loop survives repeated typed effect boundaries" {
         else => return error.TestUnexpectedResult,
     }
     try freshInstance(&state);
-    const first_prepared_resume = try AgentMachine.prepareResume(
-        state,
-        first_model,
-    );
-    defer AgentMachine.deinitPreparedResume(first_prepared_resume);
-    try AgentMachine.@"resume"(
-        first_prepared_resume,
-        Action{ .tool = 9 },
-    );
+    {
+        const first_prepared_resume = try AgentMachine.prepareResume(
+            state,
+            first_model,
+        );
+        defer AgentMachine.deinitPreparedResume(first_prepared_resume);
+        try AgentMachine.@"resume"(
+            first_prepared_resume,
+            Action{ .tool = 9 },
+        );
+    }
 
     const tool = switch (try AgentMachine.step(state, &fuel)) {
         .request => |request| request,
@@ -316,9 +318,11 @@ test "agent loop survives repeated typed effect boundaries" {
         else => return error.TestUnexpectedResult,
     }
     try freshInstance(&state);
-    const tool_prepared_resume = try AgentMachine.prepareResume(state, tool);
-    defer AgentMachine.deinitPreparedResume(tool_prepared_resume);
-    try AgentMachine.@"resume"(tool_prepared_resume, @as(u32, 42));
+    {
+        const tool_prepared_resume = try AgentMachine.prepareResume(state, tool);
+        defer AgentMachine.deinitPreparedResume(tool_prepared_resume);
+        try AgentMachine.@"resume"(tool_prepared_resume, @as(u32, 42));
+    }
 
     const second_model = switch (try AgentMachine.step(state, &fuel)) {
         .request => |request| request,
@@ -350,15 +354,17 @@ test "agent loop survives repeated typed effect boundaries" {
     defer std.testing.allocator.free(after_stale);
     try std.testing.expectEqualSlices(u8, before_stale, after_stale);
 
-    const second_prepared_resume = try AgentMachine.prepareResume(
-        state,
-        second_model,
-    );
-    defer AgentMachine.deinitPreparedResume(second_prepared_resume);
-    try AgentMachine.@"resume"(
-        second_prepared_resume,
-        Action{ .final = 77 },
-    );
+    {
+        const second_prepared_resume = try AgentMachine.prepareResume(
+            state,
+            second_model,
+        );
+        defer AgentMachine.deinitPreparedResume(second_prepared_resume);
+        try AgentMachine.@"resume"(
+            second_prepared_resume,
+            Action{ .final = 77 },
+        );
+    }
     const done = switch (try AgentMachine.step(state, &fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,
