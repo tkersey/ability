@@ -958,6 +958,10 @@ pub fn build(b: *std.Build) void {
     });
 
     const performance_command = b.addSystemCommand(&.{"sh"});
+    performance_command.setEnvironmentVariable(
+        "ZIG_GLOBAL_CACHE_DIR",
+        b.graph.global_cache_root.path orelse ".",
+    );
     performance_command.addFileArg(
         b.path("conformance/rnf-v1/check_performance.sh"),
     );

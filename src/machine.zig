@@ -781,17 +781,20 @@ pub fn Machine(
         /// Machine-branded live state owner.
         pub const State = *StateStorage;
 
-        /// Heap owner for one completed result. Its private rendezvous with
-        /// terminal State makes either public deinitialization order valid.
-        pub const OwnedResult = struct {
+        const OwnedResultValue = struct {
             allocator: std.mem.Allocator,
             state: State,
             result: Result,
             state_released: bool = false,
+        };
 
+        /// Opaque heap owner for one completed result. Its private rendezvous
+        /// with terminal State makes either public deinitialization order
+        /// valid without exposing copyable ownership state.
+        pub const OwnedResult = opaque {
             /// Borrow the result until this owner is deinitialized.
             pub fn value(self: *const OwnedResult) *const Result {
-                return &self.result;
+                return &ownedResultConst(self).result;
             }
 
             /// Release the terminal result owner.
@@ -891,6 +894,14 @@ pub fn Machine(
             return @ptrCast(@alignCast(prepared_resume));
         }
 
+        fn ownedResult(owner: *OwnedResult) *OwnedResultValue {
+            return @ptrCast(@alignCast(owner));
+        }
+
+        fn ownedResultConst(owner: *const OwnedResult) *const OwnedResultValue {
+            return @ptrCast(@alignCast(owner));
+        }
+
         fn own(allocator: std.mem.Allocator, value: *StoredState) Error!State {
             const result = allocator.create(StoredState) catch return error.OutOfMemory;
             result.* = value.*;
@@ -926,13 +937,14 @@ pub fn Machine(
         }
 
         fn releaseOwnedResult(owner: *OwnedResult) void {
-            const state = owner.state;
+            const owner_value = ownedResult(owner);
+            const state = owner_value.state;
             const value = stored(state);
             std.debug.assert(value.terminal_result == owner);
-            const allocator = owner.allocator;
-            const state_released = owner.state_released;
+            const allocator = owner_value.allocator;
+            const state_released = owner_value.state_released;
             value.terminal_result = null;
-            allocator.destroy(owner);
+            allocator.destroy(owner_value);
             if (state_released) {
                 value.release_requested = true;
                 releaseStateStorageIfReady(state);
@@ -1364,7 +1376,7 @@ pub fn Machine(
             const value = stored(state);
             value.release_requested = true;
             if (value.terminal_result) |result| {
-                result.state_released = true;
+                ownedResult(result).state_released = true;
                 return;
             }
             releaseStateStorageIfReady(state);
@@ -1678,14 +1690,15 @@ pub fn Machine(
                         return .{ .request = outcome_request };
                     },
                     .done => |result| {
-                        const owned = original.allocator.create(OwnedResult) catch
+                        const owned_value = original.allocator.create(OwnedResultValue) catch
                             return error.OutOfMemory;
-                        owned.* = .{
+                        owned_value.* = .{
                             .allocator = original.allocator,
                             .state = state,
                             .result = result,
                         };
-                        errdefer original.allocator.destroy(owned);
+                        errdefer original.allocator.destroy(owned_value);
+                        const owned: *OwnedResult = @ptrCast(owned_value);
                         candidate.terminal = true;
                         try commitTerminal(state, &candidate);
                         stored(state).terminal_result = owned;
@@ -2432,6 +2445,15 @@ fn nextFuzzWord(state: *u64) u64 {
     value ^= value << 17;
     state.* = value;
     return value;
+}
+
+test "Machine completed result ownership is opaque" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    try std.testing.expect(@typeInfo(TestMachine.OwnedResult) == .@"opaque");
 }
 
 test "direct Machine reducer resumes from canonical fresh-instance state" {
