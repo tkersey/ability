@@ -1246,6 +1246,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(receipt_step);
 
     requireDirectDependency(&receipt_command.step, release_proof_step);
+    requireDirectDependency(receipt_step, &receipt_command.step);
     requireDirectDependency(check_step, release_proof_step);
     requireDirectDependency(check_step, receipt_step);
 }

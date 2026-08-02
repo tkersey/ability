@@ -71,7 +71,12 @@ await constructor transactionally. Each request carries a derived
 effect-site ordinal, structural effect-site digest, canonical payload digest,
 and a domain-separated SHA-256 digest of that tuple. The identity is
 reconstructed from canonical state rather than persisted as an independent
-authority. Stale, forged, duplicate, or cross-Machine responses are rejected.
+authority. Stale, forged, or cross-Machine responses are rejected. A second
+response to the same already-advanced live State owner is rejected as stale.
+Cloned, decoded, replayed, or branched equivalent State owners reconstruct the
+same identity and may each accept one matching response; World and world-host
+own branch-head advancement, replay policy, and external idempotency across
+those owners.
 
 Boundary-local after behavior compiles into RNF constructors. A completed
 Machine exposes `EffectRow.after_site_count == 0` to World.

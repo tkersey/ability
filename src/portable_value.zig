@@ -297,13 +297,17 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
             return .{};
         }
 
+        fn canonicalElement(item: Element) Error!Element {
+            _ = try encodedSize(Element, item);
+            return canonicalValue(Element, item);
+        }
+
         /// Copy a logical element slice.
         pub fn fromSlice(items: []const Element) Error!Self {
             if (items.len > maximum_items) return error.CapacityExceeded;
             var result = Self.empty();
             for (items, 0..) |item, index| {
-                _ = try encodedSize(Element, item);
-                result.storage[index] = item;
+                result.storage[index] = try canonicalElement(item);
             }
             result.logical_length = @intCast(items.len);
             return result;
@@ -331,8 +335,8 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         pub fn set(self: *Self, index: u32, item: Element) Error!void {
             if (self.logical_length > maximum_items) return error.Malformed;
             if (index >= self.logical_length) return error.CapacityExceeded;
-            _ = try encodedSize(Element, item);
-            self.storage[@intCast(index)] = item;
+            const canonical = try canonicalElement(item);
+            self.storage[@intCast(index)] = canonical;
         }
 
         /// Append one element atomically.
@@ -340,8 +344,8 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
             if (self.logical_length > maximum_items) return error.Malformed;
             const index: usize = @intCast(self.logical_length);
             if (index == maximum_items) return error.CapacityExceeded;
-            _ = try encodedSize(Element, item);
-            self.storage[index] = item;
+            const canonical = try canonicalElement(item);
+            self.storage[index] = canonical;
             self.logical_length += 1;
         }
 
@@ -1334,6 +1338,49 @@ test "canonicalValue recursively removes bounded spare storage" {
     try std.testing.expectEqualStrings("ok", canonical.storage[0].label.slice());
     try std.testing.expectEqual(@as(u8, 0), canonical.storage[0].label.storage[3]);
     try std.testing.expectEqual(@as(u8, 0), canonical.storage[1].label.storage[0]);
+}
+
+test "Vector canonicalizes nested elements at every ingress" {
+    const Tag = Text(2);
+    const Tags = Vector(Tag, 1);
+    const Item = struct {
+        label: Text(4),
+        tags: Tags,
+    };
+    const Items = Vector(Item, 1);
+
+    var label = try Text(4).fromSlice("ok");
+    label.storage[3] = 0xff;
+    var tag = try Tag.fromSlice("x");
+    tag.storage[1] = 0xee;
+    var tags = Tags.empty();
+    tags.storage[0] = tag;
+    tags.logical_length = 1;
+    const dirty: Item = .{ .label = label, .tags = tags };
+
+    const from_slice = try Items.fromSlice(&.{dirty});
+    try std.testing.expectEqual(@as(u8, 0), from_slice.storage[0].label.storage[3]);
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        from_slice.storage[0].tags.storage[0].storage[1],
+    );
+
+    var set_items = Items.empty();
+    try set_items.push(canonicalDefaultValue(Item));
+    try set_items.set(0, dirty);
+    try std.testing.expectEqual(@as(u8, 0), set_items.storage[0].label.storage[3]);
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        set_items.storage[0].tags.storage[0].storage[1],
+    );
+
+    var pushed = Items.empty();
+    try pushed.push(dirty);
+    try std.testing.expectEqual(@as(u8, 0), pushed.storage[0].label.storage[3]);
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        pushed.storage[0].tags.storage[0].storage[1],
+    );
 }
 
 test "Bytes shrinking resets every vacated byte" {
