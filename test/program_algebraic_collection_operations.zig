@@ -255,28 +255,32 @@ test "compiled products sums optionals vectors text and bytes are first order" {
     try std.testing.expect(result.none == null);
     try std.testing.expectEqual(@as(u32, 2), result.value_count);
     try std.testing.expectEqual(@as(u32, 8), result.value_at_one);
-    try std.testing.expectEqual(@as(u32, 1), result.popped.values.len());
+    try std.testing.expectEqual(@as(u32, 1), try result.popped.values.len());
     try std.testing.expectEqual(@as(u32, 8), result.popped.value.?);
-    try std.testing.expectEqual(@as(u32, 0), result.truncated.len());
-    try std.testing.expectEqual(@as(u32, 0), result.cleared.len());
+    try std.testing.expectEqual(@as(u32, 0), try result.truncated.len());
+    try std.testing.expectEqual(@as(u32, 0), try result.cleared.len());
     try std.testing.expectEqualStrings("alpha!42-7", try result.formatted.slice());
     try std.testing.expectEqualStrings("al", try result.copied_text.slice());
     try std.testing.expectEqual(@as(i8, -1), result.text_comparison);
     try std.testing.expectEqualStrings("alpha-beta", try result.joined.slice());
     try std.testing.expectEqual(@as(u32, 10), result.text_length);
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, result.bytes.slice());
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, result.copied_bytes.slice());
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, try result.bytes.slice());
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 1, 2 },
+        try result.copied_bytes.slice(),
+    );
     try std.testing.expectEqual(@as(i8, 0), result.bytes_comparison);
     try std.testing.expectEqual(@as(u32, 3), result.bytes_length);
     try std.testing.expectEqualSlices(
         u8,
         &.{ 1, 2, 3, 1, 2 },
-        result.joined_bytes.slice(),
+        try result.joined_bytes.slice(),
     );
     try std.testing.expectEqualSlices(
         u8,
         &.{ 1, 2, 3, 1, 2, 4 },
-        result.scalar_bytes.slice(),
+        try result.scalar_bytes.slice(),
     );
     switch (result.choice) {
         .value => |value| try std.testing.expectEqual(@as(u32, 7), value),

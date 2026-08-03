@@ -63,15 +63,21 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
             return result;
         }
 
-        /// Return the target-neutral logical length.
-        pub fn len(self: *const Self) u32 {
+        /// Return the validated target-neutral logical length.
+        pub fn len(self: *const Self) Error!u32 {
+            if (self.logical_length > maximum_bytes) return error.Malformed;
             return self.logical_length;
         }
 
-        /// Borrow only initialized logical bytes.
-        pub fn slice(self: *const Self) []const u8 {
+        fn logicalSlice(self: *const Self) []const u8 {
             if (self.logical_length > maximum_bytes) return &.{};
             return self.storage[0..@intCast(self.logical_length)];
+        }
+
+        /// Borrow validated initialized logical bytes.
+        pub fn slice(self: *const Self) Error![]const u8 {
+            _ = try self.len();
+            return self.logicalSlice();
         }
 
         /// Append atomically, failing before mutation on overflow.
@@ -138,7 +144,9 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
         pub fn eql(self: *const Self, other: *const Self) bool {
             if (self.logical_length > maximum_bytes or
                 other.logical_length > maximum_bytes) return false;
-            return std.mem.eql(u8, self.slice(), other.slice());
+            const self_slice = self.slice() catch return false;
+            const other_slice = other.slice() catch return false;
+            return std.mem.eql(u8, self_slice, other_slice);
         }
 
         /// Lexicographically compare logical bytes.
@@ -148,7 +156,7 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
             {
                 return error.Malformed;
             }
-            return std.mem.order(u8, self.slice(), other.slice());
+            return std.mem.order(u8, try self.slice(), try other.slice());
         }
     };
 }
@@ -181,8 +189,9 @@ pub fn Text(comptime maximum_bytes: usize) type {
             return result;
         }
 
-        /// Return the logical UTF-8 byte length.
-        pub fn len(self: *const Self) u32 {
+        /// Return the validated logical UTF-8 byte length.
+        pub fn len(self: *const Self) Error!u32 {
+            if (self.logical_length > maximum_bytes) return error.Malformed;
             return self.logical_length;
         }
 
@@ -319,8 +328,9 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
             return result;
         }
 
-        /// Return the logical element count.
-        pub fn len(self: *const Self) u32 {
+        /// Return the validated logical element count.
+        pub fn len(self: *const Self) Error!u32 {
+            if (self.logical_length > maximum_items) return error.Malformed;
             return self.logical_length;
         }
 
@@ -1029,7 +1039,7 @@ fn encodeInto(comptime T: type, value: T, writer: anytype) Error!void {
     if (comptime maximumEncodedSize(T) == 0) return;
     if (comptime isBytes(T)) {
         writer.writeInt(u32, value.logical_length);
-        writer.write(value.slice());
+        writer.write(try value.slice());
         return;
     }
     if (comptime isText(T)) {
@@ -1432,7 +1442,7 @@ test "Bytes shrinking resets every vacated byte" {
     var value = try Value.fromSlice("secrets!");
 
     value.truncate(3);
-    try std.testing.expectEqualSlices(u8, "sec", value.slice());
+    try std.testing.expectEqualSlices(u8, "sec", try value.slice());
     try std.testing.expectEqualSlices(
         u8,
         &.{ 0, 0, 0, 0, 0 },
@@ -1532,15 +1542,25 @@ test "bounded defaults initialize all storage and malformed lengths stay total" 
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &text.storage);
     try std.testing.expectEqual(@as(u32, 0), items.storage[0].count);
     try std.testing.expectEqual(@as(u32, 0), items.storage[1].count);
-    try std.testing.expectEqual(@as(u32, 0), items.storage[0].title.len());
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        try items.storage[0].title.len(),
+    );
+
+    var malformed_bytes = bytes;
+    malformed_bytes.logical_length = 5;
+    try std.testing.expectError(error.Malformed, malformed_bytes.len());
+    try std.testing.expectError(error.Malformed, malformed_bytes.slice());
 
     var malformed_text = text;
     malformed_text.logical_length = 5;
+    try std.testing.expectError(error.Malformed, malformed_text.len());
     try std.testing.expectError(error.Malformed, malformed_text.slice());
     try std.testing.expectError(error.Malformed, malformed_text.append("x"));
 
     var malformed_items = items;
     malformed_items.logical_length = 3;
+    try std.testing.expectError(error.Malformed, malformed_items.len());
     try std.testing.expectEqual(@as(usize, 0), malformed_items.logicalSlice().len);
     try std.testing.expectEqual(@as(?Item, null), malformed_items.get(0));
     try std.testing.expectError(
@@ -1570,13 +1590,13 @@ test "Bytes and Text append preserve overlapping suffixes in both directions" {
     @memcpy(backward_bytes.storage[0..6], "abcdef");
     backward_bytes.logical_length = 2;
     try backward_bytes.append(backward_bytes.storage[0..4]);
-    try std.testing.expectEqualStrings("ababcd", backward_bytes.slice());
+    try std.testing.expectEqualStrings("ababcd", try backward_bytes.slice());
 
     var forward_bytes = TestBytes.empty();
     @memcpy(forward_bytes.storage[0..6], "abcdef");
     forward_bytes.logical_length = 2;
     try forward_bytes.append(forward_bytes.storage[3..6]);
-    try std.testing.expectEqualStrings("abdef", forward_bytes.slice());
+    try std.testing.expectEqualStrings("abdef", try forward_bytes.slice());
 
     var backward_text = TestText.empty();
     @memcpy(backward_text.storage[0..6], "abcdef");
@@ -1646,7 +1666,7 @@ test "vector validates nested bounded values before mutation" {
     var values = Values.empty();
 
     try std.testing.expectError(error.Malformed, values.push(malformed));
-    try std.testing.expectEqual(@as(u32, 0), values.len());
+    try std.testing.expectEqual(@as(u32, 0), try values.len());
 }
 
 test "portable schema identity is structural and capacity-bearing" {
@@ -1907,7 +1927,7 @@ test "invalid tagged union tags fail canonical sizing before mutation" {
 
     var values = Vector(Sum, 1).empty();
     try std.testing.expectError(error.InvalidTag, values.push(invalid));
-    try std.testing.expectEqual(@as(u32, 0), values.len());
+    try std.testing.expectEqual(@as(u32, 0), try values.len());
     values.storage[0] = invalid;
     values.logical_length = 1;
     try std.testing.expect(!values.eql(&values));
@@ -1918,7 +1938,7 @@ test "zero-width vector codec and equality are constant in logical length" {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, Values.maximum_length, .little);
     const decoded = try decodeExact(Values, &bytes);
-    try std.testing.expectEqual(@as(u32, 1_000_000), decoded.len());
+    try std.testing.expectEqual(@as(u32, 1_000_000), try decoded.len());
     try std.testing.expectEqual(@as(usize, 4), maximumEncodedSize(Values));
     try std.testing.expectEqual(@as(usize, 4), try encodedSize(Values, decoded));
 
@@ -1937,10 +1957,10 @@ test "zero-width vector codec and equality are constant in logical length" {
     maximum.truncate(std.math.maxInt(u32) - 1);
     try std.testing.expectEqual(
         @as(u32, std.math.maxInt(u32) - 1),
-        maximum.len(),
+        try maximum.len(),
     );
     maximum.clear();
-    try std.testing.expectEqual(@as(u32, 0), maximum.len());
+    try std.testing.expectEqual(@as(u32, 0), try maximum.len());
 }
 
 test "zero-width aggregate defaults are constant in aggregate width" {
@@ -1949,9 +1969,9 @@ test "zero-width aggregate defaults are constant in aggregate width" {
     var values = Values.empty();
 
     try values.push(undefined);
-    try std.testing.expectEqual(@as(u32, 1), values.len());
+    try std.testing.expectEqual(@as(u32, 1), try values.len());
     values.clear();
-    try std.testing.expectEqual(@as(u32, 0), values.len());
+    try std.testing.expectEqual(@as(u32, 0), try values.len());
 }
 
 test "nested zero-width portable values use one canonical constant-time quotient" {

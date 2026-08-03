@@ -35,9 +35,11 @@ effect resumption validate and canonicalize owned copies before accepting them.
 Pointer addresses and spare capacity never participate in canonical equality,
 encoding, state, or Machine identity. Vector exposes elements through canonical
 by-value `get` and `pop`; it does not provide a borrowed arbitrary-element slice.
-`Text.slice` is a fallible borrowed source view: it rejects an excessive logical
-length or invalid UTF-8 before returning bytes. The unchecked logical slice is
-private to validation-owning portable-value internals.
+`Bytes.slice`, `Text.slice`, and every bounded `len` observer are fallible source
+views: they reject an excessive logical length before returning a canonical-
+looking value, and `Text.slice` also rejects invalid UTF-8. Unchecked logical
+length and slice access remain private to validation-owning portable-value
+internals.
 
 Vector pop, truncate, and clear reset every vacated element to its canonical
 default before returning. Bytes truncate and clear likewise zero every vacated

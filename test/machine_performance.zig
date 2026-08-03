@@ -90,7 +90,7 @@ pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {
         else => return 0,
     };
     const payload_length = switch (request.value) {
-        .s0 => |value| value.len(),
+        .s0 => |value| value.len() catch return 0,
     };
     if (payload_length != 7) return 0;
 
@@ -107,7 +107,7 @@ pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {
     const restored_request =
         PerformanceMachine.current(restored_state) catch return 0;
     const restored_payload_length = switch (restored_request.value) {
-        .s0 => |value| value.len(),
+        .s0 => |value| value.len() catch return 0,
     };
     if (restored_payload_length != payload_length) return 0;
     {
@@ -153,7 +153,7 @@ fn oneEffectLifecycle() !u64 {
     const payload = switch (request.value) {
         .s0 => |value| value,
     };
-    return payload.len();
+    return try payload.len();
 }
 
 fn decodeLifecycle(encoded: []const u8) !u64 {
@@ -166,7 +166,7 @@ fn decodeLifecycle(encoded: []const u8) !u64 {
     const payload = switch (request.value) {
         .s0 => |value| value,
     };
-    return payload.len();
+    return try payload.len();
 }
 
 fn median(input: [sample_count]u64) u64 {

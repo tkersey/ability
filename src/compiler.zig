@@ -3286,7 +3286,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         @field(store, result_name) = @field(
                             store,
                             valueName(instruction.operands[0]),
-                        ).len();
+                        ).len() catch unreachable;
                     },
                     .vector_get => {
                         @field(store, result_name) = @field(
@@ -3365,7 +3365,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         @field(store, result_name) = @field(
                             store,
                             valueName(instruction.operands[0]),
-                        ).len();
+                        ).len() catch unreachable;
                     },
                     .text_append => {
                         var text = @field(
@@ -3509,7 +3509,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         @field(store, result_name) = @field(
                             store,
                             valueName(instruction.operands[0]),
-                        ).len();
+                        ).len() catch unreachable;
                     },
                     .bytes_append => {
                         var bytes = @field(
@@ -3520,7 +3520,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             store,
                             valueName(instruction.operands[1]),
                         );
-                        bytes.append(suffix.slice()) catch
+                        bytes.append(suffix.slice() catch unreachable) catch
                             return failureNamed(Body, "capacity_exceeded");
                         @field(store, result_name) = bytes;
                     },
@@ -3572,8 +3572,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         );
                         @field(store, result_name) = switch (std.mem.order(
                             u8,
-                            left.slice(),
-                            right.slice(),
+                            left.slice() catch unreachable,
+                            right.slice() catch unreachable,
                         )) {
                             .lt => -1,
                             .eq => 0,
@@ -3593,9 +3593,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             store,
                             valueName(instruction.operands[2]),
                         );
-                        bytes.append(separator.slice()) catch
+                        bytes.append(separator.slice() catch unreachable) catch
                             return failureNamed(Body, "capacity_exceeded");
-                        bytes.append(right.slice()) catch
+                        bytes.append(right.slice() catch unreachable) catch
                             return failureNamed(Body, "capacity_exceeded");
                         @field(store, result_name) = bytes;
                     },
@@ -4300,7 +4300,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     ) == @field(
                         store,
                         valueName(definition.bounded),
-                    ).len(),
+                    ).len() catch unreachable,
                     .integer_unary_result => |definition| rnf.integerUnaryDefinitionHolds(
                         @field(store, valueName(definition.result)),
                         @field(store, valueName(definition.operand)),
