@@ -1107,6 +1107,32 @@ pub fn build(b: *std.Build) void {
         );
     }
 
+    const public_surface_compile_fail_sources = b.addWriteFiles();
+    const vector_borrowed_slice_source = public_surface_compile_fail_sources.add(
+        "vector_borrowed_slice.zig",
+        \\const portable_value = @import("portable_value");
+        \\
+        \\comptime {
+        \\    const value = portable_value.Vector(u32, 1).empty();
+        \\    _ = value.slice();
+        \\}
+        \\
+        \\pub fn main() void {}
+    );
+    const vector_borrowed_slice_module = b.createModule(.{
+        .root_source_file = vector_borrowed_slice_source,
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    vector_borrowed_slice_module.addImport("portable_value", host_core.portable_value);
+    const vector_borrowed_slice_compilation = b.addTest(.{
+        .root_module = vector_borrowed_slice_module,
+    });
+    vector_borrowed_slice_compilation.expect_errors = .{
+        .contains = "no field or member function named 'slice' in 'portable_value.Vector(u32,1)'",
+    };
+    compile_fail_step.dependOn(&vector_borrowed_slice_compilation.step);
+
     inline for (.{
         program_operations,
         integer_boolean_operations,

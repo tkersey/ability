@@ -324,8 +324,8 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
             return self.logical_length;
         }
 
-        /// Borrow only initialized logical elements.
-        pub fn slice(self: *const Self) []const Element {
+        /// Borrow initialized logical elements only within canonical internals.
+        fn logicalSlice(self: *const Self) []const Element {
             if (self.logical_length > maximum_items) return &.{};
             return self.storage[0..@intCast(self.logical_length)];
         }
@@ -397,7 +397,7 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
                 other.logical_length > maximum_items) return false;
             if (self.logical_length != other.logical_length) return false;
             if (comptime maximumEncodedSize(Element) == 0) return true;
-            for (self.slice(), other.slice()) |left, right| {
+            for (self.logicalSlice(), other.logicalSlice()) |left, right| {
                 if (!eqlValue(Element, left, right)) return false;
             }
             return true;
@@ -594,7 +594,7 @@ pub fn canonicalValue(comptime T: type, value: T) Error!T {
             result.logical_length = value.logical_length;
             return result;
         }
-        for (value.slice(), 0..) |item, index| {
+        for (value.logicalSlice(), 0..) |item, index| {
             result.storage[index] = try canonicalValue(T.ElementType, item);
         }
         result.logical_length = value.logical_length;
@@ -838,7 +838,7 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
         if (value.logical_length > T.maximum_length) return error.Malformed;
         if (comptime maximumEncodedSize(T.ElementType) == 0) return 4;
         var total: usize = 4;
-        for (value.slice()) |item| {
+        for (value.logicalSlice()) |item| {
             total = try checkedAdd(total, try encodedSize(T.ElementType, item));
         }
         return total;
@@ -1035,7 +1035,9 @@ fn encodeInto(comptime T: type, value: T, writer: anytype) Error!void {
     if (comptime isVector(T)) {
         writer.writeInt(u32, value.logical_length);
         if (comptime maximumEncodedSize(T.ElementType) == 0) return;
-        for (value.slice()) |item| try encodeInto(T.ElementType, item, writer);
+        for (value.logicalSlice()) |item| {
+            try encodeInto(T.ElementType, item, writer);
+        }
         return;
     }
     switch (@typeInfo(T)) {
@@ -1531,7 +1533,7 @@ test "bounded defaults initialize all storage and malformed lengths stay total" 
 
     var malformed_items = items;
     malformed_items.logical_length = 3;
-    try std.testing.expectEqual(@as(usize, 0), malformed_items.slice().len);
+    try std.testing.expectEqual(@as(usize, 0), malformed_items.logicalSlice().len);
     try std.testing.expectEqual(@as(?Item, null), malformed_items.get(0));
     try std.testing.expectError(
         error.Malformed,
