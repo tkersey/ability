@@ -1,51 +1,110 @@
 // zlinter-disable require_doc_comment
-const package = @import("build.zig.zon");
 const std = @import("std");
 const zlinter = @import("zlinter");
 
 const CoreModules = struct {
-    boundary_build_metadata: *std.Build.Module,
-    portable_core: *std.Build.Module,
-    lowered_machine: *std.Build.Module,
-    prompt_contract: *std.Build.Module,
-    frontend: *std.Build.Module,
-    effect_ir: *std.Build.Module,
-    helper_body_ir: *std.Build.Module,
-    internal_kernel: *std.Build.Module,
-    internal_program_plan: *std.Build.Module,
-    loaded_execution: *std.Build.Module,
-    interpreter: *std.Build.Module,
-    lowering_api: *std.Build.Module,
-    parity_scenarios: *std.Build.Module,
+    agent_profile: *std.Build.Module,
+    compiler: *std.Build.Module,
+    control_ir: *std.Build.Module,
+    driver: *std.Build.Module,
+    effect_v2: *std.Build.Module,
+    machine: *std.Build.Module,
+    portable_value: *std.Build.Module,
+    program_v2: *std.Build.Module,
+    rnf: *std.Build.Module,
 };
+
+const CoreModuleId = enum {
+    agent_profile,
+    compiler,
+    control_ir,
+    driver,
+    effect_v2,
+    machine,
+    portable_value,
+    program_v2,
+    rnf,
+};
+
+const CoreModuleRole = enum {
+    support,
+    runtime_semantics,
+};
+
+fn coreModulePath(module: CoreModuleId) []const u8 {
+    return switch (module) {
+        .agent_profile => "src/agent_profile.zig",
+        .compiler => "src/compiler.zig",
+        .control_ir => "src/control_ir.zig",
+        .driver => "src/driver.zig",
+        .effect_v2 => "src/effect_v2.zig",
+        .machine => "src/machine.zig",
+        .portable_value => "src/portable_value.zig",
+        .program_v2 => "src/program_v2.zig",
+        .rnf => "src/rnf.zig",
+    };
+}
+
+fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
+    return switch (module) {
+        .compiler, .machine => .runtime_semantics,
+        .agent_profile,
+        .control_ir,
+        .driver,
+        .effect_v2,
+        .portable_value,
+        .program_v2,
+        .rnf,
+        => .support,
+    };
+}
+
+fn requireDirectDependency(
+    owner: *std.Build.Step,
+    dependency: *std.Build.Step,
+) void {
+    for (owner.dependencies.items) |candidate| {
+        if (candidate == dependency) return;
+    }
+    std.process.fatal(
+        "build step '{s}' must directly depend on '{s}'",
+        .{ owner.name, dependency.name },
+    );
+}
+
+comptime {
+    @setEvalBranchQuota(10_000);
+    const module_fields = std.meta.fields(CoreModules);
+    const module_ids = std.meta.fields(CoreModuleId);
+    if (module_fields.len != module_ids.len) {
+        @compileError("Boundary core-module topology is not total");
+    }
+    for (module_fields) |field| {
+        if (std.meta.stringToEnum(CoreModuleId, field.name) == null) {
+            @compileError(
+                "Boundary core module lacks a source identity: " ++ field.name,
+            );
+        }
+    }
+    for (module_ids, 0..) |field, index| {
+        const module: CoreModuleId = @enumFromInt(field.value);
+        for (module_ids[index + 1 ..]) |other_field| {
+            const other: CoreModuleId = @enumFromInt(other_field.value);
+            if (std.mem.eql(
+                u8,
+                coreModulePath(module),
+                coreModulePath(other),
+            )) {
+                @compileError("Boundary core-module topology has duplicate source paths");
+            }
+        }
+    }
+}
 
 const TestArgs = struct {
     filters: []const []const u8,
     passthrough: []const []const u8,
 };
-
-fn readBuildFile(b: *std.Build, path: []const u8) []const u8 {
-    return std.Io.Dir.cwd().readFileAlloc(
-        std.Io.Threaded.global_single_threaded.io(),
-        b.pathFromRoot(path),
-        b.allocator,
-        .limited(1024 * 1024),
-    ) catch |err| std.process.fatal("unable to read release input '{s}': {s}", .{
-        path,
-        @errorName(err),
-    });
-}
-
-fn absoluteBuildDirectoryPath(
-    b: *std.Build,
-    directory: std.Build.Cache.Directory,
-    label: []const u8,
-) []const u8 {
-    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const length = directory.handle.realPath(b.graph.io, &buffer) catch |err|
-        std.process.fatal("unable to resolve {s}: {s}", .{ label, @errorName(err) });
-    return b.dupe(buffer[0..length]);
-}
 
 fn parseTestArgs(b: *std.Build) TestArgs {
     const args = b.args orelse return .{
@@ -62,120 +121,155 @@ fn parseTestArgs(b: *std.Build) TestArgs {
         if (std.mem.eql(u8, arg, "--test-filter")) {
             index += 1;
             if (index >= args.len or args[index].len == 0) {
-                std.process.fatal("Expected a non-empty pattern after '--test-filter'.", .{});
+                std.process.fatal(
+                    "Expected a non-empty pattern after '--test-filter'.",
+                    .{},
+                );
             }
             filters.append(b.allocator, args[index]) catch |err|
-                std.process.fatal("unable to store test filter: {s}", .{@errorName(err)});
+                std.process.fatal(
+                    "unable to store test filter: {s}",
+                    .{@errorName(err)},
+                );
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--test-filter=")) {
             const pattern = arg["--test-filter=".len..];
             if (pattern.len == 0) {
-                std.process.fatal("Expected '--test-filter=' to include a non-empty pattern.", .{});
+                std.process.fatal(
+                    "Expected '--test-filter=' to include a non-empty pattern.",
+                    .{},
+                );
             }
             filters.append(b.allocator, pattern) catch |err|
-                std.process.fatal("unable to store test filter: {s}", .{@errorName(err)});
+                std.process.fatal(
+                    "unable to store test filter: {s}",
+                    .{@errorName(err)},
+                );
             continue;
         }
         if (std.mem.eql(u8, arg, "--seed")) {
             index += 1;
             if (index >= args.len or args[index].len == 0) {
-                std.process.fatal("Expected an unsigned 32-bit integer after '--seed'.", .{});
+                std.process.fatal(
+                    "Expected an unsigned 32-bit integer after '--seed'.",
+                    .{},
+                );
             }
             _ = std.fmt.parseUnsigned(u32, args[index], 0) catch
-                std.process.fatal("Expected '--seed' to contain an unsigned 32-bit integer; got '{s}'.", .{args[index]});
-            passthrough.append(b.allocator, b.fmt("--seed={s}", .{args[index]})) catch |err|
-                std.process.fatal("unable to store test runner seed: {s}", .{@errorName(err)});
+                std.process.fatal(
+                    "Expected '--seed' to contain an unsigned 32-bit integer; got '{s}'.",
+                    .{args[index]},
+                );
+            passthrough.append(
+                b.allocator,
+                b.fmt("--seed={s}", .{args[index]}),
+            ) catch |err| std.process.fatal(
+                "unable to store test runner seed: {s}",
+                .{@errorName(err)},
+            );
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--seed=")) {
             const seed = arg["--seed=".len..];
             if (seed.len == 0) {
-                std.process.fatal("Expected '--seed=' to include an unsigned 32-bit integer.", .{});
+                std.process.fatal(
+                    "Expected '--seed=' to include an unsigned 32-bit integer.",
+                    .{},
+                );
             }
             _ = std.fmt.parseUnsigned(u32, seed, 0) catch
-                std.process.fatal("Expected '--seed' to contain an unsigned 32-bit integer; got '{s}'.", .{seed});
+                std.process.fatal(
+                    "Expected '--seed' to contain an unsigned 32-bit integer; got '{s}'.",
+                    .{seed},
+                );
             passthrough.append(b.allocator, arg) catch |err|
-                std.process.fatal("unable to store test runner seed: {s}", .{@errorName(err)});
+                std.process.fatal(
+                    "unable to store test runner seed: {s}",
+                    .{@errorName(err)},
+                );
             continue;
         }
         if (std.mem.eql(u8, arg, "--cache-dir")) {
             index += 1;
             if (index >= args.len or args[index].len == 0) {
-                std.process.fatal("Expected a path after '--cache-dir'.", .{});
+                std.process.fatal(
+                    "Expected a path after '--cache-dir'.",
+                    .{},
+                );
             }
-            passthrough.append(b.allocator, b.fmt("--cache-dir={s}", .{args[index]})) catch |err|
-                std.process.fatal("unable to store test runner cache directory: {s}", .{@errorName(err)});
+            passthrough.append(
+                b.allocator,
+                b.fmt("--cache-dir={s}", .{args[index]}),
+            ) catch |err| std.process.fatal(
+                "unable to store test runner cache directory: {s}",
+                .{@errorName(err)},
+            );
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--cache-dir=")) {
             if (arg["--cache-dir=".len..].len == 0) {
-                std.process.fatal("Expected '--cache-dir=' to include a path.", .{});
+                std.process.fatal(
+                    "Expected '--cache-dir=' to include a path.",
+                    .{},
+                );
             }
             passthrough.append(b.allocator, arg) catch |err|
-                std.process.fatal("unable to store test runner cache directory: {s}", .{@errorName(err)});
+                std.process.fatal(
+                    "unable to store test runner cache directory: {s}",
+                    .{@errorName(err)},
+                );
             continue;
         }
         if (std.mem.eql(u8, arg, "--max-warnings")) {
             index += 1;
             if (index >= args.len or args[index].len == 0) {
-                std.process.fatal("Expected a non-empty limit after '--max-warnings'.", .{});
+                std.process.fatal(
+                    "Expected a non-empty limit after '--max-warnings'.",
+                    .{},
+                );
             }
             _ = std.fmt.parseUnsigned(usize, args[index], 10) catch
-                std.process.fatal("Expected '--max-warnings' to contain an unsigned integer; got '{s}'.", .{args[index]});
+                std.process.fatal(
+                    "Expected '--max-warnings' to contain an unsigned integer; got '{s}'.",
+                    .{args[index]},
+                );
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--max-warnings=")) {
             const limit = arg["--max-warnings=".len..];
             if (limit.len == 0) {
-                std.process.fatal("Expected '--max-warnings=' to include a non-empty limit.", .{});
+                std.process.fatal(
+                    "Expected '--max-warnings=' to include a non-empty limit.",
+                    .{},
+                );
             }
             _ = std.fmt.parseUnsigned(usize, limit, 10) catch
-                std.process.fatal("Expected '--max-warnings' to contain an unsigned integer; got '{s}'.", .{limit});
+                std.process.fatal(
+                    "Expected '--max-warnings' to contain an unsigned integer; got '{s}'.",
+                    .{limit},
+                );
             continue;
         }
         passthrough.append(b.allocator, arg) catch |err|
-            std.process.fatal("unable to store test runner argument: {s}", .{@errorName(err)});
+            std.process.fatal(
+                "unable to store test runner argument: {s}",
+                .{@errorName(err)},
+            );
     }
 
     return .{
         .filters = filters.toOwnedSlice(b.allocator) catch |err|
-            std.process.fatal("unable to finalize test filters: {s}", .{@errorName(err)}),
+            std.process.fatal(
+                "unable to finalize test filters: {s}",
+                .{@errorName(err)},
+            ),
         .passthrough = passthrough.toOwnedSlice(b.allocator) catch |err|
-            std.process.fatal("unable to finalize test runner arguments: {s}", .{@errorName(err)}),
+            std.process.fatal(
+                "unable to finalize test runner arguments: {s}",
+                .{@errorName(err)},
+            ),
     };
-}
-
-fn addRunArtifactWithArgs(
-    b: *std.Build,
-    artifact: *std.Build.Step.Compile,
-    args: []const []const u8,
-) *std.Build.Step.Run {
-    const run = b.addRunArtifact(artifact);
-    if (args.len != 0) run.addArgs(args);
-    return run;
-}
-
-fn addTestArtifact(
-    b: *std.Build,
-    test_step: *std.Build.Step,
-    root_module: *std.Build.Module,
-    test_args: TestArgs,
-) void {
-    const tests = b.addTest(.{ .root_module = root_module, .filters = test_args.filters });
-    test_step.dependOn(&addRunArtifactWithArgs(b, tests, test_args.passthrough).step);
-}
-
-fn addCompileFailArtifact(
-    b: *std.Build,
-    compile_fail_step: *std.Build.Step,
-    root_module: *std.Build.Module,
-    expected_error: []const u8,
-) *std.Build.Step.Compile {
-    const tests = b.addTest(.{ .root_module = root_module });
-    tests.expect_errors = .{ .contains = expected_error };
-    compile_fail_step.dependOn(&tests.step);
-    return tests;
 }
 
 fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
@@ -185,11 +279,58 @@ fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
         \\set -eu
         \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
         \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
-        \\find src examples test bench -type f -name '*.zig' | sort > "$tmp.actual"
-        \\grep -E '^(src|examples|test|bench)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
+        \\find src examples test -type f -name '*.zig' | sort > "$tmp.actual"
+        \\grep -E '^(src|examples|test)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
     lint_step.dependOn(&guard.step);
+}
+
+fn addTestArtifactWithArgs(
+    b: *std.Build,
+    step: *std.Build.Step,
+    root_module: *std.Build.Module,
+    test_args: TestArgs,
+) void {
+    const tests = b.addTest(.{
+        .root_module = root_module,
+        .filters = test_args.filters,
+    });
+    const run = b.addRunArtifact(tests);
+    if (test_args.passthrough.len != 0) {
+        run.addArgs(test_args.passthrough);
+    }
+    step.dependOn(&run.step);
+}
+
+fn addTestArtifact(
+    b: *std.Build,
+    step: *std.Build.Step,
+    root_module: *std.Build.Module,
+) void {
+    const tests = b.addTest(.{ .root_module = root_module });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addExpectedCompileFailure(
+    b: *std.Build,
+    step: *std.Build.Step,
+    core: CoreModules,
+    path: []const u8,
+    expected_error: []const u8,
+) void {
+    const module = b.createModule(.{
+        .root_source_file = b.path(path),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    module.addImport("control_ir", core.control_ir);
+    module.addImport("driver", core.driver);
+    module.addImport("portable_value", core.portable_value);
+    module.addImport("program_v2", core.program_v2);
+    const compilation = b.addTest(.{ .root_module = module });
+    compilation.expect_errors = .{ .contains = expected_error };
+    step.dependOn(&compilation.step);
 }
 
 fn addCoreModules(
@@ -197,1787 +338,890 @@ fn addCoreModules(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) CoreModules {
-    const metadata_options = b.addOptions();
-    metadata_options.addOption([]const u8, "boundary_package_version", package.version);
-    metadata_options.addOption([]const u8, "minimum_zig_version", package.minimum_zig_version);
-    const boundary_build_metadata = metadata_options.createModule();
-
-    const portable_core = b.createModule(.{
-        .root_source_file = b.path("src/portable_core.zig"),
+    const control_ir = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.control_ir)),
         .target = target,
         .optimize = optimize,
     });
-    const effect_ir = b.createModule(.{
-        .root_source_file = b.path("src/effect_ir.zig"),
+    const portable_value = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.portable_value)),
         .target = target,
         .optimize = optimize,
     });
-    const parity_scenarios = b.createModule(.{
-        .root_source_file = b.path("src/parity_scenarios.zig"),
+    const machine = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.machine)),
         .target = target,
         .optimize = optimize,
     });
-    const helper_body_ir = b.createModule(.{
-        .root_source_file = b.path("src/private_modules/helper_body_ir_build.zig"),
+    machine.addImport("portable_value", portable_value);
+    const rnf = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.rnf)),
         .target = target,
         .optimize = optimize,
     });
-    const program_frontend = b.createModule(.{
-        .root_source_file = b.path("src/program_frontend.zig"),
+    rnf.addImport("control_ir", control_ir);
+    const compiler = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
         .optimize = optimize,
     });
-    program_frontend.addImport("effect_ir", effect_ir);
-    program_frontend.addImport("helper_body_ir", helper_body_ir);
-    program_frontend.addImport("parity_scenarios", parity_scenarios);
-    const internal_program_plan = b.createModule(.{
-        .root_source_file = b.path("src/internal_program_plan.zig"),
+    compiler.addImport("control_ir", control_ir);
+    compiler.addImport("machine", machine);
+    compiler.addImport("portable_value", portable_value);
+    compiler.addImport("rnf", rnf);
+    const program_v2 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.program_v2)),
         .target = target,
         .optimize = optimize,
     });
-    internal_program_plan.addImport("effect_ir", effect_ir);
-    internal_program_plan.addImport("program_frontend", program_frontend);
-    helper_body_ir.addImport("internal_program_plan", internal_program_plan);
-    helper_body_ir.addImport("effect_ir", effect_ir);
-
-    const loaded_execution = b.createModule(.{
-        .root_source_file = b.path("src/program/loaded_execution.zig"),
+    program_v2.addImport("compiler", compiler);
+    program_v2.addImport("machine", machine);
+    const driver = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.driver)),
         .target = target,
         .optimize = optimize,
     });
-    loaded_execution.addImport("internal_program_plan", internal_program_plan);
-
-    const internal_kernel = b.createModule(.{
-        .root_source_file = b.path("src/private_modules/internal_kernel_build.zig"),
+    const effect_v2 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.effect_v2)),
         .target = target,
         .optimize = optimize,
     });
-    internal_kernel.addImport("internal_program_plan", internal_program_plan);
-    internal_kernel.addImport("parity_scenarios", parity_scenarios);
-
-    const lowered_machine = b.createModule(.{
-        .root_source_file = b.path("src/private_modules/lowered_machine_build.zig"),
+    const agent_profile = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.agent_profile)),
         .target = target,
         .optimize = optimize,
     });
-    lowered_machine.addImport("internal_kernel", internal_kernel);
-    lowered_machine.addImport("portable_core", portable_core);
-    lowered_machine.addImport("parity_scenarios", parity_scenarios);
-
-    const prompt_contract = b.createModule(.{
-        .root_source_file = b.path("src/prompt_contract.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    prompt_contract.addImport("portable_core", portable_core);
-
-    const frontend = b.createModule(.{
-        .root_source_file = b.path("src/frontend.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    frontend.addImport("lowered_machine", lowered_machine);
-    frontend.addImport("portable_core", portable_core);
-    frontend.addImport("prompt_contract_support", prompt_contract);
-
-    const interpreter = b.createModule(.{
-        .root_source_file = b.path("src/interpreter.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    interpreter.addImport("internal_kernel", internal_kernel);
-
-    const lowering_api = b.createModule(.{
-        .root_source_file = b.path("src/lowering_api.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    lowering_api.addImport("lowered_machine", lowered_machine);
-    lowering_api.addImport("internal_program_plan", internal_program_plan);
+    agent_profile.addImport("program_v2", program_v2);
 
     return .{
-        .boundary_build_metadata = boundary_build_metadata,
-        .portable_core = portable_core,
-        .lowered_machine = lowered_machine,
-        .prompt_contract = prompt_contract,
-        .frontend = frontend,
-        .effect_ir = effect_ir,
-        .helper_body_ir = helper_body_ir,
-        .internal_kernel = internal_kernel,
-        .internal_program_plan = internal_program_plan,
-        .loaded_execution = loaded_execution,
-        .interpreter = interpreter,
-        .lowering_api = lowering_api,
-        .parity_scenarios = parity_scenarios,
+        .agent_profile = agent_profile,
+        .compiler = compiler,
+        .control_ir = control_ir,
+        .driver = driver,
+        .effect_v2 = effect_v2,
+        .machine = machine,
+        .portable_value = portable_value,
+        .program_v2 = program_v2,
+        .rnf = rnf,
     };
 }
 
-fn wireBoundaryImports(mod: *std.Build.Module, core: CoreModules) void {
-    mod.addImport("boundary_build_metadata", core.boundary_build_metadata);
-    mod.addImport("portable_core", core.portable_core);
-    mod.addImport("lowered_machine", core.lowered_machine);
-    mod.addImport("prompt_contract_support", core.prompt_contract);
-    mod.addImport("frontend_support", core.frontend);
-    mod.addImport("effect_ir", core.effect_ir);
-    mod.addImport("helper_body_ir", core.helper_body_ir);
-    mod.addImport("internal_kernel", core.internal_kernel);
-    mod.addImport("internal_program_plan", core.internal_program_plan);
-    mod.addImport("loaded_execution", core.loaded_execution);
-    mod.addImport("interpreter", core.interpreter);
-    mod.addImport("lowering_api", core.lowering_api);
-    mod.addImport("parity_scenarios", core.parity_scenarios);
+fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
+    module.addImport("agent_profile", core.agent_profile);
+    module.addImport("control_ir", core.control_ir);
+    module.addImport("driver", core.driver);
+    module.addImport("effect_v2", core.effect_v2);
+    module.addImport("machine", core.machine);
+    module.addImport("portable_value", core.portable_value);
+    module.addImport("program_v2", core.program_v2);
+}
+
+fn programTestModule(
+    b: *std.Build,
+    core: CoreModules,
+    path: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    include_driver: bool,
+    include_portable_value: bool,
+) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path(path),
+        .target = target,
+        .optimize = optimize,
+    });
+    module.addImport("control_ir", core.control_ir);
+    module.addImport("program_v2", core.program_v2);
+    if (include_driver) module.addImport("driver", core.driver);
+    if (include_portable_value) {
+        module.addImport("portable_value", core.portable_value);
+    }
+    return module;
 }
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const test_args = parseTestArgs(b);
-    const proof_test_args = TestArgs{ .filters = &.{}, .passthrough = &.{} };
     const core = addCoreModules(b, target, optimize);
     const host_core = addCoreModules(b, b.graph.host, optimize);
-
-    const boundary_shared = b.createModule(.{
-        .root_source_file = b.path("src/boundary_shared.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(boundary_shared, core);
-
-    const host_boundary_shared = b.createModule(.{
-        .root_source_file = b.path("src/boundary_shared.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(host_boundary_shared, host_core);
-
-    const protocol_mod = b.createModule(.{
-        .root_source_file = b.path("src/protocol.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(protocol_mod, core);
-
-    const host_protocol_mod = b.createModule(.{
-        .root_source_file = b.path("src/protocol.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(host_protocol_mod, host_core);
-
-    const protocol_artifacts_mod = b.createModule(.{
-        .root_source_file = b.path("src/protocol_artifacts.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(protocol_artifacts_mod, host_core);
-    protocol_artifacts_mod.addImport("protocol", host_protocol_mod);
 
     const boundary = b.addModule("boundary", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    boundary.addImport("boundary_shared", boundary_shared);
-
+    wirePublicImports(boundary, core);
     const host_boundary = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
-    host_boundary.addImport("boundary_shared", host_boundary_shared);
+    wirePublicImports(host_boundary, host_core);
 
-    const lib_check = b.addLibrary(.{
+    const library = b.addLibrary(.{
         .linkage = .static,
         .name = "boundary",
         .root_module = boundary,
     });
-    b.installArtifact(lib_check);
+    b.installArtifact(library);
 
-    const test_step = b.step("test", "Run the boundary test suite.");
-    const check_step = b.step("check", "Run the full Boundary validation suite.");
-    check_step.dependOn(test_step);
-    addTestArtifact(b, test_step, boundary, test_args);
-    addTestArtifact(b, test_step, boundary_shared, test_args);
-    addTestArtifact(b, test_step, core.effect_ir, test_args);
-    addTestArtifact(b, test_step, core.frontend, test_args);
-    const lowering_api_capacity_test = b.addTest(.{
-        .root_module = core.lowering_api,
-        .filters = &.{"StaticMachine control-path capacity has a fixed compact scratch bound"},
-    });
-    test_step.dependOn(&addRunArtifactWithArgs(b, lowering_api_capacity_test, &.{}).step);
-    addTestArtifact(b, test_step, core.internal_kernel, test_args);
-    addTestArtifact(b, test_step, core.internal_program_plan, test_args);
-    addTestArtifact(b, test_step, core.loaded_execution, test_args);
-    addTestArtifact(b, test_step, core.lowered_machine, test_args);
-    addTestArtifact(b, test_step, core.portable_core, test_args);
-    addTestArtifact(b, test_step, protocol_mod, test_args);
-    addTestArtifact(b, test_step, protocol_artifacts_mod, test_args);
-
-    const protocol_manifest_step = b.step("check-boundary-protocol-manifest", "Check Boundary v0 protocol manifest encoding and fingerprint.");
-    addTestArtifact(b, protocol_manifest_step, host_protocol_mod, proof_test_args);
-
-    const protocol_artifacts_exe = b.addExecutable(.{
-        .name = "boundary-protocol-artifacts",
-        .root_module = protocol_artifacts_mod,
-    });
-
-    const update_public_surface_step = b.step("update-boundary-public-surface", "Update Boundary v0 public-surface snapshot.");
-    update_public_surface_step.dependOn(&addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{"update-public-surface"}).step);
-
-    const public_surface_step = b.step("check-boundary-public-surface", "Check Boundary v0 public-surface snapshot for drift.");
-    public_surface_step.dependOn(&addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{"check-public-surface"}).step);
-
-    const update_corpus_step = b.step("update-boundary-conformance-corpus", "Update Boundary v0 conformance corpus artifacts.");
-    update_corpus_step.dependOn(&addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{"update-corpus"}).step);
-
-    const corpus_step = b.step("check-boundary-conformance-corpus", "Check Boundary v0 conformance corpus artifacts.");
-    corpus_step.dependOn(&addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{"check-corpus"}).step);
-
-    const agent_profile_step = b.step("check-boundary-agent-profile", "Check Boundary Agent Profile v0 schema and fingerprint surface.");
-    const agent_profile_mod = b.createModule(.{
-        .root_source_file = b.path("src/agent.zig"),
+    const one_effect_module = b.createModule(.{
+        .root_source_file = b.path("examples/one_effect.zig"),
         .target = target,
         .optimize = optimize,
     });
-    addTestArtifact(b, agent_profile_step, agent_profile_mod, test_args);
-    const receipt_agent_profile_step = b.step("check-boundary-agent-profile-receipt-host", "Check Boundary Agent Profile v0 proof receipts on the host target.");
-    const receipt_agent_profile_mod = b.createModule(.{
-        .root_source_file = b.path("src/agent.zig"),
+    one_effect_module.addImport("boundary", boundary);
+    const one_effect_example = b.addExecutable(.{
+        .name = "boundary-one-effect",
+        .root_module = one_effect_module,
+    });
+    const examples_step = b.step(
+        "check-boundary-examples",
+        "Compile the Boundary Machine examples.",
+    );
+    examples_step.dependOn(&one_effect_example.step);
+
+    const test_step = b.step("test", "Run the Boundary Machine test suite.");
+    addTestArtifactWithArgs(b, test_step, boundary, test_args);
+    addTestArtifactWithArgs(b, test_step, core.agent_profile, test_args);
+    addTestArtifactWithArgs(b, test_step, core.control_ir, test_args);
+    addTestArtifactWithArgs(b, test_step, core.effect_v2, test_args);
+    addTestArtifactWithArgs(b, test_step, core.machine, test_args);
+    addTestArtifactWithArgs(b, test_step, core.portable_value, test_args);
+    addTestArtifactWithArgs(b, test_step, core.rnf, test_args);
+
+    const program_operations = programTestModule(
+        b,
+        host_core,
+        "test/program_operations.zig",
+        b.graph.host,
+        optimize,
+        false,
+        true,
+    );
+    const integer_boolean_operations = programTestModule(
+        b,
+        host_core,
+        "test/program_integer_boolean_operations.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    const algebraic_collection_operations = programTestModule(
+        b,
+        host_core,
+        "test/program_algebraic_collection_operations.zig",
+        b.graph.host,
+        optimize,
+        false,
+        true,
+    );
+    const research_digest = programTestModule(
+        b,
+        host_core,
+        "test/research_digest_v2.zig",
+        b.graph.host,
+        optimize,
+        false,
+        true,
+    );
+    const program_compile = programTestModule(
+        b,
+        host_core,
+        "test/program_compile.zig",
+        b.graph.host,
+        optimize,
+        true,
+        true,
+    );
+    const program_dynamic_fuel = programTestModule(
+        b,
+        host_core,
+        "test/program_dynamic_fuel.zig",
+        b.graph.host,
+        optimize,
+        false,
+        true,
+    );
+    const program_residual_effects = programTestModule(
+        b,
+        host_core,
+        "test/program_residual_effects.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    program_residual_effects.addImport("machine", host_core.machine);
+    const program_effect_morphism = programTestModule(
+        b,
+        host_core,
+        "test/program_effect_morphism.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    program_effect_morphism.addImport("effect_v2", host_core.effect_v2);
+    program_effect_morphism.addImport("machine", host_core.machine);
+    const program_effect_handler = programTestModule(
+        b,
+        host_core,
+        "test/program_effect_handler.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    program_effect_handler.addImport("effect_v2", host_core.effect_v2);
+    program_effect_handler.addImport("machine", host_core.machine);
+    const program_dead_control = programTestModule(
+        b,
+        host_core,
+        "test/program_dead_control.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    program_dead_control.addImport("compiler", host_core.compiler);
+    program_dead_control.addImport("machine", host_core.machine);
+    const constructor_invariants = programTestModule(
+        b,
+        host_core,
+        "test/program_constructor_invariants.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    constructor_invariants.addImport(
+        "portable_value",
+        host_core.portable_value,
+    );
+    const recursion = programTestModule(
+        b,
+        host_core,
+        "test/machine_recursion.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    const after = programTestModule(
+        b,
+        host_core,
+        "test/machine_after.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    const machine_yield = programTestModule(
+        b,
+        host_core,
+        "test/machine_yield.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    const agent_loop = programTestModule(
+        b,
+        host_core,
+        "test/agent_loop.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    agent_loop.addImport("agent_profile", host_core.agent_profile);
+
+    const performance_core = addCoreModules(
+        b,
+        b.graph.host,
+        .ReleaseFast,
+    );
+    const performance_module = programTestModule(
+        b,
+        performance_core,
+        "test/machine_performance.zig",
+        b.graph.host,
+        .ReleaseFast,
+        false,
+        true,
+    );
+    const performance_tests = b.addTest(.{
+        .root_module = performance_module,
+    });
+
+    const rnf_step = b.step(
+        "check-boundary-rnf",
+        "Check private Resumption Normal Form synthesis.",
+    );
+    addTestArtifact(b, rnf_step, core.rnf);
+
+    const control_step = b.step(
+        "check-boundary-rnf-control",
+        "Check typed Control IR, exact liveness, and local invariants.",
+    );
+    addTestArtifact(b, control_step, core.control_ir);
+    addTestArtifact(b, control_step, core.rnf);
+    addTestArtifact(b, control_step, constructor_invariants);
+    addTestArtifact(b, control_step, machine_yield);
+    addTestArtifact(b, control_step, program_dead_control);
+    addTestArtifact(b, control_step, program_effect_handler);
+    addTestArtifact(b, control_step, program_effect_morphism);
+    addTestArtifact(b, control_step, research_digest);
+
+    const values_step = b.step(
+        "check-boundary-rnf-values",
+        "Check canonical fixed-width and bounded portable values.",
+    );
+    addTestArtifact(b, values_step, core.portable_value);
+    addTestArtifact(b, values_step, program_operations);
+    addTestArtifact(b, values_step, integer_boolean_operations);
+    addTestArtifact(b, values_step, algebraic_collection_operations);
+    addTestArtifact(b, values_step, program_dynamic_fuel);
+
+    const research_step = b.step(
+        "check-boundary-research-digest-v2",
+        "Check Machine-owned Research Digest v2 transformation.",
+    );
+    addTestArtifact(b, research_step, research_digest);
+
+    const machine_step = b.step(
+        "check-boundary-machine",
+        "Check the generated direct Boundary Machine ABI v2 reducer.",
+    );
+    addTestArtifact(b, machine_step, core.machine);
+    addTestArtifact(b, machine_step, constructor_invariants);
+    addTestArtifact(b, machine_step, program_compile);
+    addTestArtifact(b, machine_step, program_dynamic_fuel);
+    addTestArtifact(b, machine_step, program_residual_effects);
+    addTestArtifact(b, machine_step, program_dead_control);
+    addTestArtifact(b, machine_step, program_effect_handler);
+    addTestArtifact(b, machine_step, program_effect_morphism);
+    addTestArtifact(b, machine_step, machine_yield);
+
+    const state_step = b.step(
+        "check-boundary-machine-state",
+        "Check canonical ABL_RNF2 Machine state round trips.",
+    );
+    addTestArtifact(b, state_step, core.machine);
+
+    const malformed_step = b.step(
+        "check-boundary-machine-malformed",
+        "Check fail-closed malformed ABL_RNF2 state rejection.",
+    );
+    addTestArtifact(b, malformed_step, core.machine);
+    addTestArtifact(b, malformed_step, core.portable_value);
+    addTestArtifact(b, malformed_step, program_compile);
+    addTestArtifact(b, malformed_step, constructor_invariants);
+    addTestArtifact(b, malformed_step, research_digest);
+
+    const recursion_step = b.step(
+        "check-boundary-rnf-recursion",
+        "Check compiled bounded recursive frames and transactional overflow.",
+    );
+    addTestArtifact(b, recursion_step, recursion);
+
+    const after_step = b.step(
+        "check-boundary-rnf-after",
+        "Check compiler-local after lowering with no exposed after sites.",
+    );
+    addTestArtifact(b, after_step, after);
+
+    const agent_step = b.step(
+        "check-boundary-agent-loop",
+        "Check the typed model/tool agent loop across fresh instances.",
+    );
+    addTestArtifact(b, agent_step, agent_loop);
+
+    const parity_native_witness = programTestModule(
+        b,
+        host_core,
+        "test/machine_native_wasm.zig",
+        b.graph.host,
+        .ReleaseSafe,
+        false,
+        true,
+    );
+    const parity_native_runner = b.createModule(.{
+        .root_source_file = b.path("test/run_machine_native.zig"),
         .target = b.graph.host,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
     });
-    addTestArtifact(b, receipt_agent_profile_step, receipt_agent_profile_mod, proof_test_args);
+    parity_native_runner.addImport("parity_witness", parity_native_witness);
+    const parity_native = b.addExecutable(.{
+        .name = "boundary-machine-native-parity",
+        .root_module = parity_native_runner,
+    });
+    const native_output = b.addRunArtifact(parity_native).captureStdOut(.{
+        .basename = "boundary-machine-native-parity.bin",
+    });
 
-    const agent_artifacts_mod = b.createModule(.{
-        .root_source_file = b.path("src/agent_artifacts.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    addTestArtifact(b, test_step, agent_artifacts_mod, test_args);
-    const host_agent_artifacts_mod = b.createModule(.{
-        .root_source_file = b.path("src/agent_artifacts.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    const agent_artifacts_exe = b.addExecutable(.{
-        .name = "boundary-agent-artifacts",
-        .root_module = host_agent_artifacts_mod,
-    });
-    const update_agent_corpus_step = b.step("update-boundary-agent-conformance-corpus", "Update Boundary Agent Profile v0 conformance corpus artifacts.");
-    update_agent_corpus_step.dependOn(&addRunArtifactWithArgs(b, agent_artifacts_exe, &.{"update-corpus"}).step);
-
-    const agent_modules_step = b.step("check-boundary-agent-modules", "Check agent-shaped Certified Boundary Module transfer surface.");
-    const agent_modules_mod = b.createModule(.{
-        .root_source_file = b.path("examples/boundary_module_agent_transfer.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    agent_modules_mod.addImport("boundary", boundary);
-    addTestArtifact(b, agent_modules_step, agent_modules_mod, test_args);
-    const agent_module_manifest_mod = b.createModule(.{
-        .root_source_file = b.path("examples/agent_module_manifest.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    agent_module_manifest_mod.addImport("boundary", boundary);
-    addTestArtifact(b, agent_modules_step, agent_module_manifest_mod, test_args);
-    const receipt_agent_modules_step = b.step("check-boundary-agent-modules-receipt-host", "Check agent-shaped Certified Boundary Module proof receipts on the host target.");
-    const receipt_agent_modules_mod = b.createModule(.{
-        .root_source_file = b.path("examples/boundary_module_agent_transfer.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    receipt_agent_modules_mod.addImport("boundary", host_boundary);
-    addTestArtifact(b, receipt_agent_modules_step, receipt_agent_modules_mod, proof_test_args);
-    const receipt_agent_manifest_mod = b.createModule(.{
-        .root_source_file = b.path("examples/agent_module_manifest.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    receipt_agent_manifest_mod.addImport("boundary", host_boundary);
-    addTestArtifact(b, receipt_agent_modules_step, receipt_agent_manifest_mod, proof_test_args);
-
-    const agent_conformance_corpus_step = b.step("check-boundary-agent-conformance-corpus", "Check Boundary Agent Closure v0 conformance foundations.");
-    agent_conformance_corpus_step.dependOn(agent_profile_step);
-    agent_conformance_corpus_step.dependOn(agent_modules_step);
-    agent_conformance_corpus_step.dependOn(&addRunArtifactWithArgs(b, agent_artifacts_exe, &.{"check-corpus"}).step);
-    const agent_conformance_mod = b.createModule(.{
-        .root_source_file = b.path("examples/agent_profile_conformance.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    agent_conformance_mod.addImport("boundary", boundary);
-    addTestArtifact(b, agent_conformance_corpus_step, agent_conformance_mod, test_args);
-    const receipt_agent_corpus_step = b.step("check-boundary-agent-conformance-corpus-receipt-host", "Check Boundary Agent Closure v0 conformance proof receipts on the host target.");
-    receipt_agent_corpus_step.dependOn(receipt_agent_profile_step);
-    receipt_agent_corpus_step.dependOn(receipt_agent_modules_step);
-    receipt_agent_corpus_step.dependOn(&addRunArtifactWithArgs(b, agent_artifacts_exe, &.{"check-corpus"}).step);
-    const receipt_agent_conformance_mod = b.createModule(.{
-        .root_source_file = b.path("examples/agent_profile_conformance.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    receipt_agent_conformance_mod.addImport("boundary", host_boundary);
-    addTestArtifact(b, receipt_agent_corpus_step, receipt_agent_conformance_mod, proof_test_args);
-
-    const format_drift_step = b.step("check-boundary-format-drift", "Check Boundary v0 format and public-surface drift.");
-    format_drift_step.dependOn(&addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{"check-format-drift"}).step);
-
-    const adversarial_codecs_step = b.step("check-boundary-adversarial-codecs", "Check Boundary v0 adversarial codec guardrails.");
-    adversarial_codecs_step.dependOn(&addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{"check-adversarial-codecs"}).step);
-
-    const budgets_step = b.step("check-boundary-v0-budgets", "Check Boundary v0 structural budgets.");
-    budgets_step.dependOn(&addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{"check-budgets"}).step);
-
-    const proof_receipts_step = b.step("emit-boundary-proof-receipts", "Emit Boundary v0 proof receipts.");
-    proof_receipts_step.dependOn(protocol_manifest_step);
-    proof_receipts_step.dependOn(public_surface_step);
-    proof_receipts_step.dependOn(format_drift_step);
-    proof_receipts_step.dependOn(corpus_step);
-    proof_receipts_step.dependOn(receipt_agent_profile_step);
-    proof_receipts_step.dependOn(receipt_agent_modules_step);
-    proof_receipts_step.dependOn(receipt_agent_corpus_step);
-    proof_receipts_step.dependOn(adversarial_codecs_step);
-    proof_receipts_step.dependOn(budgets_step);
-    const proof_receipts_run = addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{
-        "emit-proof-receipts",
-        "--out-dir",
-        b.getInstallPath(.prefix, "protocol/boundary/proof-receipts"),
-    });
-    proof_receipts_run.step.dependOn(protocol_manifest_step);
-    proof_receipts_run.step.dependOn(public_surface_step);
-    proof_receipts_run.step.dependOn(format_drift_step);
-    proof_receipts_run.step.dependOn(corpus_step);
-    proof_receipts_run.step.dependOn(receipt_agent_profile_step);
-    proof_receipts_run.step.dependOn(receipt_agent_modules_step);
-    proof_receipts_run.step.dependOn(receipt_agent_corpus_step);
-    proof_receipts_run.step.dependOn(adversarial_codecs_step);
-    proof_receipts_run.step.dependOn(budgets_step);
-    proof_receipts_step.dependOn(&proof_receipts_run.step);
-
-    const dist_boundary_protocol_step = b.step("dist-boundary-protocol", "Build the Boundary v0 protocol distribution.");
-    const dist_boundary_protocol_run = addRunArtifactWithArgs(b, protocol_artifacts_exe, &.{
-        "dist",
-        "--out-dir",
-        b.getInstallPath(.prefix, "dist/boundary-v" ++ package.version ++ "-protocol"),
-    });
-    dist_boundary_protocol_run.step.dependOn(proof_receipts_step);
-    dist_boundary_protocol_step.dependOn(&dist_boundary_protocol_run.step);
-
-    const executable_module_step = b.step("check-boundary-executable-module", "Check executable Certified Boundary Module v2 image foundations.");
-    const executable_module_args = TestArgs{
-        .filters = &.{"executable plan image"},
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, executable_module_step, boundary, executable_module_args);
-    addTestArtifact(b, executable_module_step, boundary_shared, executable_module_args);
-
-    const executable_plan_step = b.step("check-boundary-executable-plan-validation", "Check executable-plan image payload and full-module validation.");
-    addTestArtifact(b, executable_plan_step, boundary, executable_module_args);
-    addTestArtifact(b, executable_plan_step, boundary_shared, executable_module_args);
-    const executable_plan_args = TestArgs{
-        .filters = &.{"certified boundary module reference full image and loaded module projections validate"},
-        .passthrough = &.{},
-    };
-    const executable_plan_validation_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    executable_plan_validation_mod.addImport("boundary", boundary);
-    const executable_plan_tests = b.addTest(.{ .root_module = executable_plan_validation_mod, .filters = executable_plan_args.filters });
-    executable_plan_step.dependOn(&addRunArtifactWithArgs(b, executable_plan_tests, executable_plan_args.passthrough).step);
-
-    const loaded_value_step = b.step("check-boundary-loaded-value", "Check portable loaded value image encoding and validation.");
-    const loaded_value_args = TestArgs{
-        .filters = &.{"loaded value image"},
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_value_step, core.loaded_execution, loaded_value_args);
-    addTestArtifact(b, loaded_value_step, boundary_shared, loaded_value_args);
-
-    const loaded_session_step = b.step("check-boundary-loaded-session", "Check loaded module session surface and profile compatibility.");
-    const loaded_session_args = TestArgs{
-        .filters = &.{"loaded"},
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_session_step, core.loaded_execution, loaded_session_args);
-    addTestArtifact(b, loaded_session_step, boundary_shared, loaded_session_args);
-    const loaded_evidence_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_evidence_mod.addImport("boundary", boundary);
-    const loaded_evidence_tests = b.addTest(.{ .root_module = loaded_evidence_mod, .filters = loaded_session_args.filters });
-    loaded_session_step.dependOn(&addRunArtifactWithArgs(b, loaded_evidence_tests, loaded_session_args.passthrough).step);
-
-    const loaded_v2_step = b.step("check-boundary-loaded-v2", "Check Boundary portable_v2 loaded execution profile gates.");
-    const loaded_v2_args = TestArgs{
-        .filters = &.{"portable v2"},
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_v2_step, core.loaded_execution, loaded_v2_args);
-    const loaded_v2_core_evidence_mod = b.createModule(.{
-        .root_source_file = b.path("src/program/evidence.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(loaded_v2_core_evidence_mod, core);
-    const loaded_v2_core_evidence_tests = b.addTest(.{ .root_module = loaded_v2_core_evidence_mod, .filters = loaded_v2_args.filters });
-    loaded_v2_step.dependOn(&addRunArtifactWithArgs(b, loaded_v2_core_evidence_tests, loaded_v2_args.passthrough).step);
-    const loaded_v2_evidence_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_v2_evidence_mod.addImport("boundary", boundary);
-    const loaded_v2_evidence_tests = b.addTest(.{ .root_module = loaded_v2_evidence_mod, .filters = loaded_v2_args.filters });
-    loaded_v2_step.dependOn(&addRunArtifactWithArgs(b, loaded_v2_evidence_tests, loaded_v2_args.passthrough).step);
-
-    const loaded_profile_codecs_step = b.step("check-boundary-loaded-profile-codecs", "Check loaded profile instruction and value codec gates.");
-    const profile_codec_core_args = TestArgs{
-        .filters = &.{
-            "loaded execution profile",
-            "loaded value image",
-        },
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_profile_codecs_step, core.loaded_execution, profile_codec_core_args);
-    const loaded_profile_codecs_args = TestArgs{
-        .filters = &.{
-            "certified boundary module reference full image and loaded module projections validate",
-            "loaded executable portable v2 gates reachable arithmetic before session construction",
-            "loaded executable portable v2 uses portable word semantics",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_profile_codecs_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_profile_codecs_mod.addImport("boundary", boundary);
-    const loaded_profile_codecs_tests = b.addTest(.{ .root_module = loaded_profile_codecs_mod, .filters = loaded_profile_codecs_args.filters });
-    loaded_profile_codecs_step.dependOn(&addRunArtifactWithArgs(b, loaded_profile_codecs_tests, loaded_profile_codecs_args.passthrough).step);
-
-    const loaded_reachability_step = b.step("check-boundary-loaded-reachability", "Check reachability-scoped loaded execution compatibility gates.");
-    const loaded_reachability_core_args = TestArgs{
-        .filters = &.{
-            "loaded reachability ignores unsupported dead helper semantics and codecs",
-            "loaded portable v2 rejects unsupported helper parking shape before mutable session construction",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_reachability_core_mod = b.createModule(.{
-        .root_source_file = b.path("src/program/evidence.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(loaded_reachability_core_mod, core);
-    const loaded_reachability_core_tests = b.addTest(.{ .root_module = loaded_reachability_core_mod, .filters = loaded_reachability_core_args.filters });
-    loaded_reachability_step.dependOn(&addRunArtifactWithArgs(b, loaded_reachability_core_tests, loaded_reachability_core_args.passthrough).step);
-    const loaded_reachability_args = TestArgs{
-        .filters = &.{
-            "certified boundary module reference full image and loaded module projections validate",
-            "loaded executable portable v2 gates reachable arithmetic before session construction",
-            "loaded executable ignores dead helper call sites for residual imports",
-            "loaded executable rejects choice operation mode",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_reachability_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_reachability_mod.addImport("boundary", boundary);
-    const loaded_reachability_tests = b.addTest(.{ .root_module = loaded_reachability_mod, .filters = loaded_reachability_args.filters });
-    loaded_reachability_step.dependOn(&addRunArtifactWithArgs(b, loaded_reachability_tests, loaded_reachability_args.passthrough).step);
-
-    const loaded_continuation_step = b.step("check-boundary-loaded-continuation", "Check portable loaded session continuation images.");
-    const loaded_continuation_args = TestArgs{
-        .filters = &.{"loaded session image"},
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_continuation_step, core.loaded_execution, loaded_continuation_args);
-    addTestArtifact(b, loaded_continuation_step, boundary_shared, loaded_continuation_args);
-
-    const loaded_session_image_step = b.step("check-boundary-loaded-session-image", "Check loaded session image validation regressions.");
-    const loaded_session_image_args = TestArgs{
-        .filters = &.{
-            "loaded session image roundtrips failure state and rejects trailing bytes",
-            "loaded session image binds declared failure ref to diagnostic summary",
-            "loaded session image rejects status-inconsistent fuel ledger",
-            "loaded session image v2 rejects present continuation with zero frames",
-            "loaded session image binds fingerprinted identity fields",
-        },
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_session_image_step, core.loaded_execution, loaded_session_image_args);
-
-    const loaded_forged_session_step = b.step("check-boundary-loaded-forged-session-image", "Check forged loaded session image rejection regressions.");
-    const loaded_forged_session_args = TestArgs{
-        .filters = &.{
-            "loaded session image rejects forged session fingerprint",
-            "loaded session image rejects forged result fingerprint",
-            "loaded session image v2 binds pending continuation fingerprint to continuation image",
-            "loaded session image rejects malformed embedded value images",
-            "loaded session image rejects embedded value ref mismatch",
-        },
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_forged_session_step, core.loaded_execution, loaded_forged_session_args);
-    const forged_session_evidence_args = TestArgs{
-        .filters = &.{
-            "loaded executable portable v2 restores helper frame parked on residual request",
-            "loaded malformed rejects forged v2 continuation frame topology",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_forged_session_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_forged_session_mod.addImport("boundary", boundary);
-    const loaded_forged_session_tests = b.addTest(.{ .root_module = loaded_forged_session_mod, .filters = forged_session_evidence_args.filters });
-    loaded_forged_session_step.dependOn(&addRunArtifactWithArgs(b, loaded_forged_session_tests, forged_session_evidence_args.passthrough).step);
-
-    const loaded_resource_ledger_step = b.step("check-boundary-loaded-resource-ledger", "Check loaded session fuel and allocation ledger regressions.");
-    const loaded_resource_ledger_args = TestArgs{
-        .filters = &.{
-            "loaded session image rejects status-inconsistent fuel ledger",
-            "loaded session image rejects oversized owned value byte lengths before allocation",
-            "loaded session allocation ledger uses checked arithmetic",
-            "loaded session image rejects v2-only state hidden inside v1 image",
-        },
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_resource_ledger_step, core.loaded_execution, loaded_resource_ledger_args);
-    const ledger_evidence_args = TestArgs{
-        .filters = &.{
-            "loaded executable portable v2 gates reachable arithmetic before session construction",
-            "loaded executable portable v2 accepts canonical entry arguments",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_resource_ledger_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_resource_ledger_mod.addImport("boundary", boundary);
-    const loaded_resource_ledger_tests = b.addTest(.{ .root_module = loaded_resource_ledger_mod, .filters = ledger_evidence_args.filters });
-    loaded_resource_ledger_step.dependOn(&addRunArtifactWithArgs(b, loaded_resource_ledger_tests, ledger_evidence_args.passthrough).step);
-
-    const loaded_frame_stack_step = b.step("check-boundary-loaded-frame-stack", "Check portable loaded helper frame stack parking and restoration.");
-    const loaded_frame_stack_args = TestArgs{
-        .filters = &.{
-            "frame stack",
-            "nested helper parking restores canonical result",
-            "continuation frame topology",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_frame_stack_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_frame_stack_mod.addImport("boundary", boundary);
-    const loaded_frame_stack_tests = b.addTest(.{ .root_module = loaded_frame_stack_mod, .filters = loaded_frame_stack_args.filters });
-    loaded_frame_stack_step.dependOn(&addRunArtifactWithArgs(b, loaded_frame_stack_tests, loaded_frame_stack_args.passthrough).step);
-
-    const loaded_parity_step = b.step("check-boundary-generated-loaded-parity", "Check generated Program.Session and LoadedModule.Session canonical parity.");
-    const loaded_parity_required_step = b.step("check-boundary-loaded-parity", "Check generated Program.Session and LoadedModule.Session canonical parity.");
-    const agent_parity_step = b.step("check-boundary-agent-generated-loaded-parity", "Check Agent Profile v0 generated and loaded execution foundations.");
-    const loaded_parity_args = TestArgs{
-        .filters = &.{"generated-loaded parity"},
-        .passthrough = &.{},
-    };
-    const loaded_parity_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_parity_mod.addImport("boundary", boundary);
-    const loaded_parity_tests = b.addTest(.{ .root_module = loaded_parity_mod, .filters = loaded_parity_args.filters });
-    const loaded_parity_run = addRunArtifactWithArgs(b, loaded_parity_tests, loaded_parity_args.passthrough);
-    loaded_parity_step.dependOn(&loaded_parity_run.step);
-    loaded_parity_required_step.dependOn(&loaded_parity_run.step);
-    agent_parity_step.dependOn(agent_profile_step);
-    agent_parity_step.dependOn(agent_modules_step);
-    agent_parity_step.dependOn(loaded_parity_step);
-
-    const receipt_loaded_v2_step = b.step("check-boundary-loaded-v2-receipt-host", "Check Boundary portable_v2 proof receipts on the host target.");
-    addTestArtifact(b, receipt_loaded_v2_step, host_core.loaded_execution, loaded_v2_args);
-    const receipt_v2_core_evidence_mod = b.createModule(.{
-        .root_source_file = b.path("src/program/evidence.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    wireBoundaryImports(receipt_v2_core_evidence_mod, host_core);
-    const receipt_v2_core_evidence_tests = b.addTest(.{ .root_module = receipt_v2_core_evidence_mod, .filters = loaded_v2_args.filters });
-    receipt_loaded_v2_step.dependOn(&addRunArtifactWithArgs(b, receipt_v2_core_evidence_tests, loaded_v2_args.passthrough).step);
-    const receipt_loaded_v2_evidence_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    receipt_loaded_v2_evidence_mod.addImport("boundary", host_boundary);
-    const receipt_v2_evidence_tests = b.addTest(.{ .root_module = receipt_loaded_v2_evidence_mod, .filters = loaded_v2_args.filters });
-    receipt_loaded_v2_step.dependOn(&addRunArtifactWithArgs(b, receipt_v2_evidence_tests, loaded_v2_args.passthrough).step);
-
-    const receipt_loaded_session_step = b.step("check-boundary-loaded-session-receipt-host", "Check loaded-session proof receipts on the host target.");
-    addTestArtifact(b, receipt_loaded_session_step, host_core.loaded_execution, loaded_session_args);
-    addTestArtifact(b, receipt_loaded_session_step, host_boundary_shared, loaded_session_args);
-    const receipt_loaded_evidence_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    receipt_loaded_evidence_mod.addImport("boundary", host_boundary);
-    const receipt_loaded_evidence_tests = b.addTest(.{ .root_module = receipt_loaded_evidence_mod, .filters = loaded_session_args.filters });
-    receipt_loaded_session_step.dependOn(&addRunArtifactWithArgs(b, receipt_loaded_evidence_tests, loaded_session_args.passthrough).step);
-
-    const receipt_loaded_parity_step = b.step("check-boundary-loaded-parity-receipt-host", "Check generated-loaded parity proof receipts on the host target.");
-    const receipt_loaded_parity_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    receipt_loaded_parity_mod.addImport("boundary", host_boundary);
-    const receipt_loaded_parity_tests = b.addTest(.{ .root_module = receipt_loaded_parity_mod, .filters = loaded_parity_args.filters });
-    receipt_loaded_parity_step.dependOn(&addRunArtifactWithArgs(b, receipt_loaded_parity_tests, loaded_parity_args.passthrough).step);
-    const receipt_agent_parity_step = b.step("check-boundary-agent-generated-loaded-parity-receipt-host", "Check Agent Profile v0 generated and loaded execution proof receipts on the host target.");
-    receipt_agent_parity_step.dependOn(receipt_agent_profile_step);
-    receipt_agent_parity_step.dependOn(receipt_agent_modules_step);
-    receipt_agent_parity_step.dependOn(receipt_loaded_parity_step);
-
-    proof_receipts_step.dependOn(receipt_loaded_v2_step);
-    proof_receipts_step.dependOn(receipt_loaded_session_step);
-    proof_receipts_step.dependOn(receipt_loaded_parity_step);
-    proof_receipts_step.dependOn(receipt_agent_parity_step);
-    proof_receipts_run.step.dependOn(receipt_loaded_v2_step);
-    proof_receipts_run.step.dependOn(receipt_loaded_session_step);
-    proof_receipts_run.step.dependOn(receipt_loaded_parity_step);
-    proof_receipts_run.step.dependOn(receipt_agent_parity_step);
-
-    const loaded_import_bindings_step = b.step("check-boundary-loaded-import-bindings", "Check exact loaded residual import/site binding regressions.");
-    const loaded_import_bindings_args = TestArgs{
-        .filters = &.{
-            "loaded executable binds residual imports by site index",
-            "loaded executable ignores dead helper call sites for residual imports",
-            "loaded executable portable v2 executes two sequential residual requests",
-            "generated-loaded parity canonical request bytes and i32 result",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_import_bindings_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_import_bindings_mod.addImport("boundary", boundary);
-    const loaded_import_bindings_tests = b.addTest(.{ .root_module = loaded_import_bindings_mod, .filters = loaded_import_bindings_args.filters });
-    loaded_import_bindings_step.dependOn(&addRunArtifactWithArgs(b, loaded_import_bindings_tests, loaded_import_bindings_args.passthrough).step);
-
-    const loaded_response_safety_step = b.step("check-boundary-loaded-response-safety", "Check loaded response rejection preserves parked session state.");
-    const loaded_response_safety_args = TestArgs{
-        .filters = &.{
-            "loaded executable portable v2 executes two sequential residual requests",
-            "loaded executable portable v2 restores helper frame parked on residual request",
-            "generated-loaded parity structured sum response extracts product result",
-        },
-        .passthrough = &.{},
-    };
-    const loaded_response_safety_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_response_safety_mod.addImport("boundary", boundary);
-    const loaded_response_safety_tests = b.addTest(.{ .root_module = loaded_response_safety_mod, .filters = loaded_response_safety_args.filters });
-    loaded_response_safety_step.dependOn(&addRunArtifactWithArgs(b, loaded_response_safety_tests, loaded_response_safety_args.passthrough).step);
-
-    const loaded_malformed_step = b.step("check-boundary-loaded-malformed", "Check malformed loaded module/value/session/response rejection.");
-    const loaded_malformed_args = TestArgs{
-        .filters = &.{
-            "loaded value image rejects",
-            "loaded session image rejects",
-            "loaded session image v2 rejects",
-            "loaded session image roundtrips failure state and rejects trailing bytes",
-            "loaded malformed",
-        },
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_malformed_step, core.loaded_execution, loaded_malformed_args);
-    const loaded_malformed_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_malformed_mod.addImport("boundary", boundary);
-    const loaded_malformed_tests = b.addTest(.{ .root_module = loaded_malformed_mod, .filters = loaded_malformed_args.filters });
-    loaded_malformed_step.dependOn(&addRunArtifactWithArgs(b, loaded_malformed_tests, loaded_malformed_args.passthrough).step);
-
-    const loaded_payload_result_step = b.step("check-boundary-loaded-payload-result-images", "Check loaded payload and result image binding regressions.");
-    const loaded_payload_result_args = TestArgs{
-        .filters = &.{
-            "loaded session image rejects forged result fingerprint",
-            "certified boundary module reference full image and loaded module projections validate",
-            "loaded executable session parks unit payload residual request",
-        },
-        .passthrough = &.{},
-    };
-    addTestArtifact(b, loaded_payload_result_step, core.loaded_execution, loaded_payload_result_args);
-    const loaded_payload_result_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_payload_result_mod.addImport("boundary", boundary);
-    const loaded_payload_result_tests = b.addTest(.{ .root_module = loaded_payload_result_mod, .filters = loaded_payload_result_args.filters });
-    loaded_payload_result_step.dependOn(&addRunArtifactWithArgs(b, loaded_payload_result_tests, loaded_payload_result_args.passthrough).step);
-
-    const loaded_fuzz_step = b.step("check-boundary-loaded-fuzz", "Check deterministic malformed loaded execution fuzz seeds.");
-    const loaded_fuzz_args = TestArgs{
-        .filters = &.{"loaded fuzz"},
-        .passthrough = &.{},
-    };
-    const loaded_fuzz_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    loaded_fuzz_mod.addImport("boundary", boundary);
-    const loaded_fuzz_tests = b.addTest(.{ .root_module = loaded_fuzz_mod, .filters = loaded_fuzz_args.filters });
-    loaded_fuzz_step.dependOn(&addRunArtifactWithArgs(b, loaded_fuzz_tests, loaded_fuzz_args.passthrough).step);
-
-    const ir_api_tests_mod = b.createModule(.{
-        .root_source_file = b.path("src/ir_api.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    ir_api_tests_mod.addImport("effect_ir", core.effect_ir);
-    ir_api_tests_mod.addImport("internal_kernel", core.internal_kernel);
-    ir_api_tests_mod.addImport("internal_program_plan", core.internal_program_plan);
-    addTestArtifact(b, test_step, ir_api_tests_mod, test_args);
-
-    const synthetic_root_tests_mod = b.createModule(.{
-        .root_source_file = b.path("src/internal/synthetic_boundary_root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    synthetic_root_tests_mod.addImport("boundary_shared", boundary_shared);
-    addTestArtifact(b, test_step, synthetic_root_tests_mod, test_args);
-
-    const agent_loop_tests_mod = b.createModule(.{
-        .root_source_file = b.path("examples/agent_loop.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    agent_loop_tests_mod.addImport("boundary", boundary);
-    addTestArtifact(b, test_step, agent_loop_tests_mod, test_args);
-    const agent_loop_parity_args = TestArgs{
-        .filters = &.{ "agent root", "agent toolbox" },
-        .passthrough = &.{},
-    };
-    const agent_loop_parity_tests = b.addTest(.{ .root_module = agent_loop_tests_mod, .filters = agent_loop_parity_args.filters });
-    agent_parity_step.dependOn(&addRunArtifactWithArgs(b, agent_loop_parity_tests, agent_loop_parity_args.passthrough).step);
-    const receipt_agent_loop_tests_mod = b.createModule(.{
-        .root_source_file = b.path("examples/agent_loop.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    receipt_agent_loop_tests_mod.addImport("boundary", host_boundary);
-    const receipt_loop_tests = b.addTest(.{ .root_module = receipt_agent_loop_tests_mod, .filters = agent_loop_parity_args.filters });
-    receipt_agent_parity_step.dependOn(&addRunArtifactWithArgs(b, receipt_loop_tests, agent_loop_parity_args.passthrough).step);
-
-    const program_api_tests_mod = b.createModule(.{
-        .root_source_file = b.path("test/program_api_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const plan_native_resource_mod = b.createModule(.{
-        .root_source_file = b.path("examples/plan_native_resource.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const custom_approval_mod = b.createModule(.{
-        .root_source_file = b.path("examples/custom_approval_workflow.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    custom_approval_mod.addImport("boundary", boundary);
-    plan_native_resource_mod.addImport("boundary", boundary);
-    program_api_tests_mod.addImport("boundary", boundary);
-    program_api_tests_mod.addImport("custom_approval_workflow", custom_approval_mod);
-    program_api_tests_mod.addImport("plan_native_resource", plan_native_resource_mod);
-    const program_api_tests = b.addTest(.{ .root_module = program_api_tests_mod, .filters = test_args.filters });
-    test_step.dependOn(&addRunArtifactWithArgs(b, program_api_tests, test_args.passthrough).step);
-
-    const static_machine_tests_mod = b.createModule(.{
-        .root_source_file = b.path("test/static_machine_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    static_machine_tests_mod.addImport("boundary", boundary);
-    const static_machine_tests = b.addTest(.{ .root_module = static_machine_tests_mod, .filters = test_args.filters });
-    const run_static_machine_tests = addRunArtifactWithArgs(b, static_machine_tests, test_args.passthrough);
-    test_step.dependOn(&run_static_machine_tests.step);
-    const static_machine_step = b.step("check-boundary-static-machine", "Check the Boundary StaticMachine API, state codec, and reducer.");
-    static_machine_step.dependOn(&run_static_machine_tests.step);
-    const static_machine_wasm_target = b.resolveTargetQuery(.{
+    const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .freestanding,
         .abi = .none,
     });
-    const static_machine_wasm_core = addCoreModules(b, static_machine_wasm_target, .ReleaseSmall);
-    const static_machine_wasm_shared = b.createModule(.{
-        .root_source_file = b.path("src/boundary_shared.zig"),
-        .target = static_machine_wasm_target,
-        .optimize = .ReleaseSmall,
-    });
-    wireBoundaryImports(static_machine_wasm_shared, static_machine_wasm_core);
-    const static_machine_wasm_boundary = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = static_machine_wasm_target,
-        .optimize = .ReleaseSmall,
-    });
-    static_machine_wasm_boundary.addImport("boundary_shared", static_machine_wasm_shared);
-    const static_machine_wasm_smoke_mod = b.createModule(.{
-        .root_source_file = b.path("test/static_machine_wasm32_compile.zig"),
-        .target = static_machine_wasm_target,
-        .optimize = .ReleaseSmall,
-        .imports = &.{.{ .name = "boundary", .module = static_machine_wasm_boundary }},
-    });
-    const static_machine_wasm_smoke = b.addExecutable(.{
-        .name = "boundary-static-machine-wasm32-smoke",
-        .root_module = static_machine_wasm_smoke_mod,
-    });
-    static_machine_wasm_smoke.entry = .disabled;
-    static_machine_wasm_smoke.rdynamic = true;
-    static_machine_wasm_smoke.export_memory = true;
-    const static_machine_wasm_step = b.step("check-boundary-static-machine-wasm32", "Compile a Boundary StaticMachine for wasm32-freestanding.");
-    static_machine_wasm_step.dependOn(&static_machine_wasm_smoke.step);
-    static_machine_step.dependOn(static_machine_wasm_step);
-    check_step.dependOn(static_machine_wasm_step);
-    const static_machine_parity_step = b.step("check-boundary-static-machine-parity", "Check Program.Session and StaticMachine semantic parity.");
-    if (test_args.filters.len == 0 and test_args.passthrough.len == 0) {
-        static_machine_parity_step.dependOn(&run_static_machine_tests.step);
-    } else {
-        const static_machine_parity_tests = b.addTest(.{ .root_module = static_machine_tests_mod });
-        static_machine_parity_step.dependOn(&addRunArtifactWithArgs(
-            b,
-            static_machine_parity_tests,
-            proof_test_args.passthrough,
-        ).step);
-    }
-    const static_agent_step = b.step("check-boundary-static-agent", "Check the StaticMachine agent fixture.");
-    const static_agent_tests = b.addTest(.{
-        .root_module = agent_loop_tests_mod,
-        .filters = &.{"agent StaticMachine root"},
-    });
-    static_agent_step.dependOn(&addRunArtifactWithArgs(b, static_agent_tests, test_args.passthrough).step);
-    const static_provider_step = b.step("check-boundary-static-provider", "Check StaticMachine helper and provider suspension.");
-    const static_provider_tests = b.addTest(.{
-        .root_module = agent_loop_tests_mod,
-        .filters = &.{"agent StaticMachine toolbox provider"},
-    });
-    static_provider_step.dependOn(&addRunArtifactWithArgs(b, static_provider_tests, test_args.passthrough).step);
-
-    const compile_fail_step = b.step("compile-fail", "Check expected public ProgramPlan compile diagnostics.");
-    const static_machine_compile_fail = b.step(
-        "compile-fail-static-machine",
-        "Check expected Boundary StaticMachine compile diagnostics.",
+    const performance_wasm_optimize: std.builtin.OptimizeMode =
+        .ReleaseSmall;
+    const performance_wasm_core = addCoreModules(
+        b,
+        wasm_target,
+        performance_wasm_optimize,
     );
-    test_step.dependOn(compile_fail_step);
-
-    const release_metadata_mod = b.createModule(.{
-        .root_source_file = b.path("conformance/static-machine-v1/release_metadata.zig"),
-        .target = target,
-        .optimize = optimize,
+    const performance_wasm_module = programTestModule(
+        b,
+        performance_wasm_core,
+        "test/machine_performance.zig",
+        wasm_target,
+        performance_wasm_optimize,
+        false,
+        true,
+    );
+    const performance_wasm_executable = b.addExecutable(.{
+        .name = "boundary-machine-performance-one-effect",
+        .root_module = performance_wasm_module,
     });
-    const release_archive_metadata_mod = b.createModule(.{
-        .root_source_file = b.path("conformance/static-machine-v1/release_metadata.zig"),
+    performance_wasm_executable.entry = .disabled;
+    performance_wasm_executable.rdynamic = true;
+
+    const wasm_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const parity_wasm = programTestModule(
+        b,
+        wasm_core,
+        "test/machine_native_wasm.zig",
+        wasm_target,
+        .ReleaseSmall,
+        false,
+        true,
+    );
+    const wasm_executable = b.addExecutable(.{
+        .name = "boundary-machine-wasm-parity",
+        .root_module = parity_wasm,
+    });
+    wasm_executable.entry = .disabled;
+    wasm_executable.rdynamic = true;
+    wasm_executable.export_memory = true;
+    const run_wasm = b.addSystemCommand(&.{"node"});
+    run_wasm.addFileArg(b.path("test/run_machine_wasm.mjs"));
+    run_wasm.addFileArg(wasm_executable.getEmittedBin());
+    const wasm_output = run_wasm.captureStdOut(.{
+        .basename = "boundary-machine-wasm-parity.bin",
+    });
+    const compare_parity = b.addSystemCommand(&.{ "cmp", "-s" });
+    compare_parity.addFileArg(native_output);
+    compare_parity.addFileArg(wasm_output);
+    const parity_step = b.step(
+        "check-boundary-machine-native-wasm",
+        "Check byte-identical native and wasm32 Machine observations.",
+    );
+    parity_step.dependOn(&compare_parity.step);
+
+    const no_interpreter_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\test ! -e src/interpreter.zig
+        \\test ! -e src/program/loaded_execution.zig
+        \\test ! -e src/lowered_machine.zig
+        \\test ! -e src/internal/program_plan.zig
+        \\! rg -n '@import\("(loaded_execution|lowered_machine|interpreter|internal_program_plan)"\)' src build.zig
+        \\! rg -n 'ProgramPlan|Program\.Session|runtime instruction table|last_condition|after_stack' src/compiler.zig src/machine.zig src/program_v2.zig src/rnf.zig src/root.zig
+    });
+    const no_interpreter_step = b.step(
+        "check-boundary-machine-no-interpreter",
+        "Prove the production Machine graph has no legacy interpreter path.",
+    );
+    no_interpreter_step.dependOn(&no_interpreter_command.step);
+
+    const deletion_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\for path in \
+        \\  src/boundary_shared.zig \
+        \\  src/interpreter.zig \
+        \\  src/lowered_machine.zig \
+        \\  src/program/loaded_execution.zig \
+        \\  src/program_api.zig \
+        \\  src/internal/program_plan.zig \
+        \\  src/internal_program_plan.zig \
+        \\  bench/abortive_effect_decompose_bench.zig \
+        \\  bench/algebraic_builder_decompose_bench.zig \
+        \\  bench/direct_first_suspend_bench.zig \
+        \\  bench/effect_family_matrix_bench.zig \
+        \\  bench/no_capture_bench.zig \
+        \\  bench/resource_effect_decompose_bench.zig \
+        \\  bench/state_effect_bench.zig \
+        \\  bench/writer_effect_decompose_bench.zig \
+        \\  bench/zprof_hotspots.zig \
+        \\  test/program_api_test.zig \
+        \\  test/static_machine_test.zig \
+        \\  test/static_machine_wasm32_compile.zig \
+        \\  conformance/static-machine-v1
+        \\do
+        \\  test ! -e "$path"
+        \\done
+        \\! rg -n 'pub const (Runtime|staticMachine|StaticMachineOptions)|Program\.Session|Loaded(Session|Module)|Certified Boundary Module' src/root.zig src
+        \\package_root=$(pwd -P)
+        \\git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+        \\if test -n "$git_root" && test "$(cd "$git_root" && pwd -P)" = "$package_root"; then
+        \\  source_paths=$(
+        \\    {
+        \\      git ls-files '*.zig'
+        \\      git ls-files --others --exclude-standard '*.zig'
+        \\    } |
+        \\      while IFS= read -r source; do
+        \\        test -f "$source" && printf '%s\n' "$source"
+        \\      done |
+        \\      sort -u
+        \\  )
+        \\  test "$source_paths" = "$(cat repo_zig_paths.txt)"
+        \\else
+        \\  source_paths=$(cat repo_zig_paths.txt)
+        \\fi
+        \\legacy_source_matches=$(
+        \\  for source in $source_paths; do
+        \\    test "$source" = build.zig && continue
+        \\    rg --with-filename -n \
+        \\      '@import\("(loaded_execution|lowered_machine|interpreter|internal_program_plan)"\)|boundary\.(Runtime|Prompt|frontend|algebraic)|boundary\.effect\.(exception|optional|reader|resource|state|writer)|Program\.Session|Loaded(Session|Module)' \
+        \\      "$source" || test "$?" -eq 1
+        \\  done
+        \\)
+        \\test -z "$legacy_source_matches"
+    });
+    deletion_command.setCwd(b.path("."));
+    const deletion_step = b.step(
+        "check-boundary-machine-deletion",
+        "Prove removed Boundary v0 execution surfaces cannot reappear.",
+    );
+    deletion_step.dependOn(&deletion_command.step);
+
+    const source_topology_proof = b.addWriteFiles();
+    const topology_receipt = source_topology_proof.add(
+        "boundary-core-module-topology.txt",
+        b.fmt(
+            "core_module_count={d}\n" ++
+                "source_module root support src/root.zig\n" ++
+                "source_module agent_profile {s} {s}\n" ++
+                "source_module compiler {s} {s}\n" ++
+                "source_module control_ir {s} {s}\n" ++
+                "source_module driver {s} {s}\n" ++
+                "source_module effect_v2 {s} {s}\n" ++
+                "source_module machine {s} {s}\n" ++
+                "source_module portable_value {s} {s}\n" ++
+                "source_module program_v2 {s} {s}\n" ++
+                "source_module rnf {s} {s}\n",
+            .{
+                std.meta.fields(CoreModules).len,
+                @tagName(coreModuleRole(.agent_profile)),
+                coreModulePath(.agent_profile),
+                @tagName(coreModuleRole(.compiler)),
+                coreModulePath(.compiler),
+                @tagName(coreModuleRole(.control_ir)),
+                coreModulePath(.control_ir),
+                @tagName(coreModuleRole(.driver)),
+                coreModulePath(.driver),
+                @tagName(coreModuleRole(.effect_v2)),
+                coreModulePath(.effect_v2),
+                @tagName(coreModuleRole(.machine)),
+                coreModulePath(.machine),
+                @tagName(coreModuleRole(.portable_value)),
+                coreModulePath(.portable_value),
+                @tagName(coreModuleRole(.program_v2)),
+                coreModulePath(.program_v2),
+                @tagName(coreModuleRole(.rnf)),
+                coreModulePath(.rnf),
+            },
+        ),
+    );
+
+    const single_reducer_module = b.createModule(.{
+        .root_source_file = b.path("test/single_reducer.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
-    const static_machine_release_mod = b.createModule(.{
-        .root_source_file = b.path("conformance/static-machine-v1/release_test.zig"),
-        .target = target,
-        .optimize = optimize,
+    single_reducer_module.addImport("boundary", host_boundary);
+    const single_reducer_executable = b.addExecutable(.{
+        .name = "boundary-machine-single-reducer-proof",
+        .root_module = single_reducer_module,
     });
-    const static_machine_release_sources = b.addOptions();
-    static_machine_release_sources.addOption(
-        []const u8,
-        "readme_bytes",
-        readBuildFile(b, "README.md"),
-    );
-    static_machine_release_sources.addOption(
-        []const u8,
-        "release_hardening_bytes",
-        readBuildFile(b, "docs/release_hardening.md"),
-    );
-    static_machine_release_sources.addOption(
-        []const u8,
-        "static_machine_bytes",
-        readBuildFile(b, "docs/static_machine.md"),
-    );
-    static_machine_release_sources.addOption(
-        []const u8,
-        "compatibility_bytes",
-        readBuildFile(b, "docs/static_machine_compatibility.md"),
-    );
-    static_machine_release_mod.addImport("boundary", boundary);
-    static_machine_release_mod.addImport(
-        "boundary_static_machine_release_metadata",
-        release_metadata_mod,
-    );
-    static_machine_release_mod.addOptions(
-        "boundary_static_machine_release_sources",
-        static_machine_release_sources,
-    );
-    const static_machine_release_tests = b.addTest(.{
-        .root_module = static_machine_release_mod,
-        .filters = proof_test_args.filters,
+    const single_reducer_run = b.addRunArtifact(single_reducer_executable);
+    const single_reducer_receipt = single_reducer_run.captureStdOut(.{
+        .basename = "boundary-machine-single-reducer.txt",
     });
-    const run_static_machine_release = addRunArtifactWithArgs(
-        b,
-        static_machine_release_tests,
-        proof_test_args.passthrough,
-    );
-    const static_machine_release_step = b.step(
-        "check-boundary-static-machine-release",
-        "Check the Boundary v0.7.0 identity, public StaticMachine ABI, and compatibility matrix.",
-    );
-    static_machine_release_step.dependOn(&run_static_machine_release.step);
-    static_machine_release_step.dependOn(static_machine_parity_step);
-    static_machine_release_step.dependOn(static_machine_wasm_step);
-    static_machine_release_step.dependOn(static_machine_compile_fail);
-    check_step.dependOn(static_machine_release_step);
 
-    const release_falsifier_tests = b.addTest(.{
-        .root_module = static_machine_release_mod,
-        .filters = &.{"release metadata falsifiers"},
-    });
-    const release_falsifiers_step = b.step(
-        "check-boundary-static-machine-release-falsifiers",
-        "Check deliberate Boundary v0.7.0 identity and compatibility-matrix falsifiers.",
+    const performance_command = b.addSystemCommand(&.{"sh"});
+    performance_command.setEnvironmentVariable(
+        "ZIG_GLOBAL_CACHE_DIR",
+        b.graph.global_cache_root.path orelse ".",
     );
-    release_falsifiers_step.dependOn(&addRunArtifactWithArgs(
-        b,
-        release_falsifier_tests,
-        proof_test_args.passthrough,
-    ).step);
+    performance_command.addFileArg(
+        b.path("conformance/rnf-v1/check_performance.sh"),
+    );
+    performance_command.addFileArg(performance_tests.getEmittedBin());
+    performance_command.addFileArg(
+        performance_wasm_executable.getEmittedBin(),
+    );
+    performance_command.addArg(b.graph.zig_exe);
+    performance_command.addArg(@tagName(performance_wasm_optimize));
+    performance_command.addFileArg(topology_receipt);
+    performance_command.addFileArg(single_reducer_receipt);
+    const performance_step = b.step(
+        "check-boundary-machine-performance",
+        "Compare RNF performance with the immutable Boundary v0.7.0 release.",
+    );
+    performance_step.dependOn(no_interpreter_step);
+    performance_step.dependOn(deletion_step);
+    performance_step.dependOn(&performance_command.step);
 
-    const release_archive_check_mod = b.createModule(.{
-        .root_source_file = b.path("conformance/static-machine-v1/release_archive_check.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
-    release_archive_check_mod.addImport(
-        "boundary_static_machine_release_metadata",
-        release_archive_metadata_mod,
+    const performance_falsifier_command = b.addSystemCommand(&.{"sh"});
+    performance_falsifier_command.addFileArg(
+        b.path("conformance/rnf-v1/check_performance.sh"),
     );
-    const release_archive_checker = b.addExecutable(.{
-        .name = "boundary-release-archive-check",
-        .root_module = release_archive_check_mod,
-    });
-    const run_release_archive_checker = b.addRunArtifact(release_archive_checker);
-    run_release_archive_checker.addArg(b.graph.zig_exe);
-    const release_global_cache_path = absoluteBuildDirectoryPath(
-        b,
-        b.graph.global_cache_root,
-        "Zig global cache root",
+    performance_falsifier_command.addArg("--self-test");
+    const performance_falsifier_step = b.step(
+        "check-boundary-machine-performance-falsifiers",
+        "Check that every RNF performance limit rejects its first regression.",
     );
-    const release_proof_root = absoluteBuildDirectoryPath(
-        b,
-        b.cache_root,
-        "Boundary release proof root",
-    );
-    const release_archive_path = b.option(
-        []const u8,
-        "boundary-release-archive",
-        "Path to the materialized Boundary v0.7.0 archive.",
-    );
-    if (release_archive_path) |archive_path| {
-        run_release_archive_checker.addArg(archive_path);
-        run_release_archive_checker.has_side_effects = true;
-    } else {
-        run_release_archive_checker.addArg("");
-    }
-    run_release_archive_checker.addArg(release_global_cache_path);
-    run_release_archive_checker.addArg(release_proof_root);
-    run_release_archive_checker.addArg("");
-    const release_archive_once_step = b.step(
-        "check-boundary-static-machine-release-archive-once",
-        "Run one current-byte Boundary v0.7.0 materialized archive identity check.",
-    );
-    release_archive_once_step.dependOn(&run_release_archive_checker.step);
-    const release_archive_step = b.step(
-        "check-boundary-static-machine-release-archive",
-        "Check a materialized Boundary v0.7.0 archive SHA-256 and Zig package hash.",
-    );
-    release_archive_step.dependOn(release_archive_once_step);
-    if (release_archive_path) |archive_path| {
-        const archive_cache_falsifier = b.addSystemCommand(&.{"sh"});
-        archive_cache_falsifier.addFileArg(
-            b.path("conformance/static-machine-v1/release_archive_cache_falsifier.sh"),
-        );
-        archive_cache_falsifier.addArg(b.graph.zig_exe);
-        archive_cache_falsifier.addDirectoryArg(b.path("."));
-        archive_cache_falsifier.addArg(archive_path);
-        archive_cache_falsifier.addArg(release_global_cache_path);
-        archive_cache_falsifier.has_side_effects = true;
-        release_archive_step.dependOn(&archive_cache_falsifier.step);
-    }
+    performance_falsifier_step.dependOn(&performance_falsifier_command.step);
 
-    const archive_falsifier_tests = b.addTest(.{
-        .root_module = release_archive_check_mod,
-        .filters = &.{"release archive"},
-    });
-    const release_process_group_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("conformance/static-machine-v1/release_process_group.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-    });
-    const archive_falsifiers_step = b.step(
-        "check-boundary-static-machine-release-archive-falsifiers",
-        "Check deliberate Boundary v0.7.0 materialized-archive identity falsifiers.",
+    const single_reducer_step = b.step(
+        "check-boundary-machine-single-reducer",
+        "Prove a compiled Program exposes exactly one normative reducer.",
     );
-    archive_falsifiers_step.dependOn(&addRunArtifactWithArgs(
-        b,
-        archive_falsifier_tests,
-        proof_test_args.passthrough,
-    ).step);
-    archive_falsifiers_step.dependOn(&addRunArtifactWithArgs(
-        b,
-        release_process_group_tests,
-        proof_test_args.passthrough,
-    ).step);
+    single_reducer_step.dependOn(&source_topology_proof.step);
+    single_reducer_step.dependOn(&single_reducer_run.step);
 
-    const evidence_kernel_tests_mod = b.createModule(.{
-        .root_source_file = b.path("test/evidence_kernel_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    evidence_kernel_tests_mod.addImport("boundary", boundary);
-    const evidence_kernel_tests = b.addTest(.{ .root_module = evidence_kernel_tests_mod, .filters = test_args.filters });
-    test_step.dependOn(&addRunArtifactWithArgs(b, evidence_kernel_tests, test_args.passthrough).step);
-
-    const contract_matrix_mod = b.createModule(.{
-        .root_source_file = b.path("test/plan_native_contract_matrix_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    contract_matrix_mod.addImport("boundary", boundary);
-    const contract_matrix_tests = b.addTest(.{ .root_module = contract_matrix_mod, .filters = test_args.filters });
-    test_step.dependOn(&addRunArtifactWithArgs(b, contract_matrix_tests, test_args.passthrough).step);
-
-    const public_optional_tests_mod = b.createModule(.{
-        .root_source_file = b.path("test/public_optional_bound_program_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    public_optional_tests_mod.addImport("boundary", boundary);
-    const public_optional_tests = b.addTest(.{ .root_module = public_optional_tests_mod, .filters = test_args.filters });
-    test_step.dependOn(&addRunArtifactWithArgs(b, public_optional_tests, test_args.passthrough).step);
-
-    const compile_fail_specs = [_]struct {
-        path: []const u8,
-        expected_error: []const u8,
-    }{
+    const compile_fail_step = b.step(
+        "compile-fail",
+        "Check fail-closed Boundary compiler admission.",
+    );
+    compile_fail_step.dependOn(deletion_step);
+    inline for (.{
         .{
-            .path = "test/compile_fail/missing_reachable_return_error_decl.zig",
-            .expected_error = "Body.compiled_plan reachable return_error is not declared in Body.Error: Rejected",
+            "test/compile_fail/portable_usize.zig",
+            "Boundary Machine integers must be explicit i8/i16/i32/i64 or u8/u16/u32/u64",
         },
         .{
-            .path = "test/compile_fail/invalid_result_cleanup_with_outputs.zig",
-            .expected_error = "Body.deinitResult with Body.Outputs must have type fn (std.mem.Allocator, value) void; release outputs separately with Body.deinitOutputs",
+            "test/compile_fail/portable_c_integer.zig",
+            "Boundary Machine integers must be explicit i8/i16/i32/i64 or u8/u16/u32/u64",
         },
         .{
-            .path = "test/compile_fail/static_machine_cleanup_unsupported.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support Program output collection or result/output cleanup hooks",
+            "test/compile_fail/portable_non_exhaustive_enum.zig",
+            "Boundary Machine enums must be exhaustive",
         },
         .{
-            .path = "test/compile_fail/static_machine_reserved_out_of_memory.zig",
-            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: OutOfMemory",
+            "test/compile_fail/vector_uninhabited_element.zig",
+            "Boundary Vector element type must have a canonical default value",
         },
         .{
-            .path = "test/compile_fail/static_machine_reserved_program_contract_violation.zig",
-            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: ProgramContractViolation",
+            "test/compile_fail/portable_sentinel_array.zig",
+            "Boundary Machine portable arrays cannot have sentinels",
         },
         .{
-            .path = "test/compile_fail/static_machine_reserved_execution_budget_exceeded.zig",
-            .expected_error = "Boundary StaticMachine Body.Error must not contain reserved operational error: ExecutionBudgetExceeded",
+            "test/compile_fail/forged_portable_container_marker.zig",
+            "unsupported Boundary Machine portable value: *u8",
         },
         .{
-            .path = "test/compile_fail/static_machine_oversized_usize_constant.zig",
-            .expected_error = "Boundary StaticMachine v1 requires const_usize values to fit the canonical u32 domain",
+            "test/compile_fail/generated_container_product_access.zig",
+            "generated bounded values are semantic atoms, not generic products",
         },
         .{
-            .path = "test/compile_fail/static_machine_maximum_state_bytes_u32.zig",
-            .expected_error = "Boundary StaticMachine maximum_state_bytes must fit the canonical u32 domain",
+            "test/compile_fail/dead_control_malformed_constant.zig",
+            "constant instruction value is not canonical",
         },
         .{
-            .path = "test/compile_fail/static_machine_control_validation_work_limit.zig",
-            .expected_error = "Boundary StaticMachine v1 control-validation work exceeds the v1 limit",
+            "test/compile_fail/effect_resume_type_mismatch.zig",
+            "effect resume type does not match its site",
         },
         .{
-            .path = "test/compile_fail/static_machine_cross_local_predicate_copy.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+            "test/compile_fail/driver_response_type_mismatch.zig",
+            "Boundary Machine response type must match the selected effect site Resume type",
         },
         .{
-            .path = "test/compile_fail/static_machine_product_extract_predicate_copy.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+            "test/compile_fail/driver_semantic_site_mismatch.zig",
+            "Boundary Driver handler does not admit effect site semantic contract",
         },
         .{
-            .path = "test/compile_fail/static_machine_add_i32_predicate_copy.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable exact copies between condition-predicate locals",
+            "test/compile_fail/driver_semantic_contract_mismatch.zig",
+            "Boundary Driver handler does not admit effect site semantic contract",
         },
         .{
-            .path = "test/compile_fail/static_machine_interleaved_predicate_family.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
+            "test/compile_fail/effect_handler_type_mismatch.zig",
+            "effect handler function input must match source Payload",
         },
         .{
-            .path = "test/compile_fail/static_machine_multiple_condition_predicates.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support an unchanged condition predicate revisited after a distinct predicate",
+            "test/compile_fail/effect_morphism_type_mismatch.zig",
+            "effect morphisms must preserve Payload and Resume types",
         },
         .{
-            .path = "test/compile_fail/static_machine_helper_predicate_alias.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support helper result correlations between condition-predicate locals",
+            "test/compile_fail/effect_site_ordinal_mismatch.zig",
+            "effect site ids must be dense from zero",
         },
         .{
-            .path = "test/compile_fail/static_machine_nonzero_predicate_correlation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+            "test/compile_fail/generated_reducer_limit.zig",
+            "Boundary compiler blocked program: GeneratedReducerLimitExceeded",
         },
         .{
-            .path = "test/compile_fail/static_machine_add_i32_predicate_correlation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+            "test/compile_fail/dead_control_schema_reference.zig",
+            "Control IR value type schema index is out of bounds",
         },
         .{
-            .path = "test/compile_fail/static_machine_duplicate_add_i32_predicate_derivation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support repeated add_i32 derivations between condition-predicate locals",
+            "test/compile_fail/missing_arithmetic_failure.zig",
+            "Body.Failure must declare arithmetic_overflow",
         },
         .{
-            .path = "test/compile_fail/static_machine_sub_one_predicate_correlation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+            "test/compile_fail/non_enum_failure_tagged_union.zig",
+            "Body.Failure must be an exhaustive enum",
         },
         .{
-            .path = "test/compile_fail/static_machine_duplicate_sub_one_predicate_derivation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support repeated sub_one derivations between condition-predicate locals",
+            "test/compile_fail/non_enum_failure_void.zig",
+            "Body.Failure must be an exhaustive enum",
         },
         .{
-            .path = "test/compile_fail/static_machine_in_place_add_const_predicate.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+            "test/compile_fail/oversized_machine_state.zig",
+            "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
         },
         .{
-            .path = "test/compile_fail/static_machine_in_place_add_i32_predicate.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+            "test/compile_fail/undersized_machine_state.zig",
+            "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
         },
         .{
-            .path = "test/compile_fail/static_machine_shared_source_predicate_correlation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable scalar correlations between condition-predicate locals",
+            "test/compile_fail/machine_state_below_entry_environment.zig",
+            "Boundary Machine maximum_state_bytes must admit the initial RNF environment",
         },
-        .{
-            .path = "test/compile_fail/static_machine_boolean_predicate_correlation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support boolean-result correlations between condition-predicate locals",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_known_predicate_source.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support a suspension site that is unreachable under predicate authority",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_helper_predicate_parameter_alias.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support aliased helper predicate parameters",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_repeated_helper_predicate_derivation.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support repeated helper result derivations between condition-predicate locals",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_after_predicate_overlap.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_in_place_after_predicate_overlap.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support a live after continuation across distinct condition predicates",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_final_after_output_mismatch.zig",
-            .expected_error = "Boundary StaticMachine v1 requires every potentially final afterDispatch output to match its function result",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_after_chain_mismatch.zig",
-            .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_after_chain_prefixed_mismatch.zig",
-            .expected_error = "Boundary StaticMachine v1 requires every reachable inner after output to match its enclosing afterDispatch input",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_in_place_after_chain_mismatch.zig",
-            .expected_error = "Boundary StaticMachine v1 requires every potentially innermost afterDispatch input to match its function value",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_mutable_string_list_schema.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support mutable string-list carriers inside product or sum schemas",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_noreturn_schema.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support noreturn schema carriers",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_comptime_product_field.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support comptime fields inside product schemas",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_non_exhaustive_enum.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support non-exhaustive enum carriers",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_mutable_helper_parameter.zig",
-            .expected_error = "Boundary StaticMachine v1 does not support reachable helper functions that write parameter locals",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_recursive_frame_graph.zig",
-            .expected_error = "Boundary StaticMachine v1 rejects recursive helper and nested-provider frame graphs",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_effect_row_coverage_omitted.zig",
-            .expected_error = "Program.Interpreter coverage omitted reachable operation site",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_effect_row_after_coverage_omitted.zig",
-            .expected_error = "Program.Interpreter coverage omitted reachable after site",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_effect_row_forged_legacy_site.zig",
-            .expected_error = "Program.Interpreter coverage descriptor belongs to another program",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_effect_row_forged_operation_descriptor.zig",
-            .expected_error = "Program.protocol coverage descriptor belongs to another program",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_effect_row_forged_after_descriptor.zig",
-            .expected_error = "Program.protocol coverage descriptor belongs to another program",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_invalid_after_handler_shape.zig",
-            .expected_error = "Boundary StaticMachine v1 requires afterDispatch to have a receiver, one value parameter, and a return value",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_innermost_after_input_mismatch.zig",
-            .expected_error = "Boundary StaticMachine v1 requires every potentially innermost afterDispatch input to match its function value",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_forged_program.zig",
-            .expected_error = "boundary.staticMachine expects a type returned by boundary.program",
-        },
-        .{
-            .path = "test/compile_fail/static_machine_cross_machine_state.zig",
-            .expected_error = "parameter type declared here",
-        },
-        .{
-            .path = "test/compile_fail/value_schema_variant_mismatch.zig",
-            .expected_error = "Body.value_schema_types does not match Body.compiled_plan.value_variants[1]",
-        },
-        .{
-            .path = "test/compile_fail/invalid_sum_extract_destination.zig",
-            .expected_error = "Body.compiled_plan failed ProgramPlan.validate: InvalidSumPayloadDestination",
-        },
-        .{
-            .path = "test/compile_fail/encode_args_tuple_field_mismatch.zig",
-            .expected_error = "expected i32, found bool",
-        },
-        .{
-            .path = "test/compile_fail/missing_output_collector.zig",
-            .expected_error = "Body.Outputs requires Body.collectOutputs",
-        },
-        .{
-            .path = "test/compile_fail/invalid_output_cleanup_hook.zig",
-            .expected_error = "Body.deinitOutputs must have type fn (std.mem.Allocator, outputs) void",
-        },
-        .{
-            .path = "test/compile_fail/missing_nested_with_target.zig",
-            .expected_error = "UnsupportedNestedWith",
-        },
-        .{
-            .path = "test/compile_fail/nested_with_wrong_function_index.zig",
-            .expected_error = "UnsupportedNestedWith",
-        },
-        .{
-            .path = "test/compile_fail/nested_with_result_codec_mismatch.zig",
-            .expected_error = "UnsupportedResultCodec",
-        },
-        .{
-            .path = "test/compile_fail/schema_lower_binding_product_ref.zig",
-            .expected_error = "schema.LowerBinding requires a schema ref for product/sum resume type 'schema_lower_binding_product_ref.ProductPayload'",
-        },
-        .{
-            .path = "test/compile_fail/schema_refs_scalar_entry.zig",
-            .expected_error = "is scalar and must not carry a schema index",
-        },
-        .{
-            .path = "test/compile_fail/schema_refs_duplicate_type.zig",
-            .expected_error = "schema.SchemaRefs has duplicate entry for type 'schema_refs_duplicate_type.ProductPayload'",
-        },
-        .{
-            .path = "test/compile_fail/schema_refs_unsupported_type.zig",
-            .expected_error = "schema.SchemaRefs unsupported type '*const i32': UnsupportedCodecType",
-        },
-        .{
-            .path = "test/compile_fail/schema_registry_duplicate_structured_type.zig",
-            .expected_error = "schema.Registry has duplicate structured type 'schema_registry_duplicate_structured_type.ProductPayload'",
-        },
-        .{
-            .path = "test/compile_fail/schema_registry_missing_nested_ref.zig",
-            .expected_error = "schema.Registry missing nested structured type 'schema_registry_missing_nested_ref.InnerPayload' referenced by 'schema_registry_missing_nested_ref.OuterPayload'",
-        },
-        .{
-            .path = "test/compile_fail/schema_registry_unsupported_type.zig",
-            .expected_error = "schema.Registry unsupported type '*const i32': UnsupportedCodecType",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_empty_label.zig",
-            .expected_error = "schema.Protocol requires a non-empty label",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_duplicate_op_name.zig",
-            .expected_error = "schema.Protocol has duplicate op name 'exists'",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_empty_op_name.zig",
-            .expected_error = "schema.Protocol op name must be non-empty",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_missing_product_ref.zig",
-            .expected_error = "schema.LowerBinding requires a schema ref for product/sum payload type 'schema_protocol_missing_product_ref.ProductPayload'",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_missing_sum_ref.zig",
-            .expected_error = "schema.LowerBinding requires a schema ref for product/sum resume type 'schema_protocol_missing_sum_ref.Decision'",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_operation_missing_product_ref.zig",
-            .expected_error = "schema.Protocol operation requires a schema ref for product/sum payload type 'schema_protocol_operation_missing_product_ref.ProductPayload'",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_operation_missing_sum_result_ref.zig",
-            .expected_error = "schema.Protocol operation requires a schema ref for product/sum result type 'schema_protocol_operation_missing_sum_result_ref.Decision'",
-        },
-        .{
-            .path = "test/compile_fail/schema_protocol_transform_result.zig",
-            .expected_error = "schema.Protocol transform operation does not accept Result",
-        },
-        .{
-            .path = "test/compile_fail/semantic_protocol_payload_mismatch.zig",
-            .expected_error = "semantic builder protocol call payload type mismatch",
-        },
-        .{
-            .path = "test/compile_fail/semantic_protocol_resume_mismatch.zig",
-            .expected_error = "semantic builder protocol call destination/resume type mismatch",
-        },
-        .{
-            .path = "test/compile_fail/semantic_invalid_branch_target.zig",
-            .expected_error = "semantic builder block not found: missing",
-        },
-        .{
-            .path = "test/compile_fail/semantic_local_type_mismatch.zig",
-            .expected_error = "semantic builder constString destination must be string",
-        },
-        .{
-            .path = "test/compile_fail/semantic_empty_site_label.zig",
-            .expected_error = "semantic builder protocol call label must be non-empty",
-        },
-        .{
-            .path = "test/compile_fail/semantic_schema_registry_duplicate_tables.zig",
-            .expected_error = "semantic builder derives value_schemas from schemas; omit the explicit table",
-        },
-        .{
-            .path = "test/compile_fail/custom_protocol_coverage_omitted_operation.zig",
-            .expected_error = "Program.protocol coverage omitted reachable operation site",
-        },
-        .{
-            .path = "test/compile_fail/protocol_coverage_omitted_operation.zig",
-            .expected_error = "Program.protocol coverage omitted reachable operation site",
-        },
-        .{
-            .path = "test/compile_fail/protocol_coverage_omitted_after.zig",
-            .expected_error = "Program.protocol coverage omitted reachable after site",
-        },
-        .{
-            .path = "test/compile_fail/protocol_coverage_duplicate_site.zig",
-            .expected_error = "Program.protocol coverage listed duplicate operation site",
-        },
-        .{
-            .path = "test/compile_fail/protocol_coverage_foreign_site.zig",
-            .expected_error = "Program.protocol coverage descriptor belongs to another program",
-        },
-        .{
-            .path = "test/compile_fail/provider_harness_duplicate_handler.zig",
-            .expected_error = "Program.Exchange.ProviderHarness listed duplicate operation handler",
-        },
-        .{
-            .path = "test/compile_fail/provider_harness_forged_semantic_body.zig",
-            .expected_error = "Program.Exchange.ProviderHarness function-backed entries must declare host_intrinsic semantic body",
-        },
-        .{
-            .path = "test/compile_fail/provider_harness_forged_program_mapping.zig",
-            .expected_error = "Program.Exchange.ProviderHarness program-backed entries must be declared with ProviderHandler.program",
-        },
-        .{
-            .path = "test/compile_fail/provider_program_payload_arg_mismatch.zig",
-            .expected_error = "provider Program payload_to_args argument schema does not match request payload/current-value schema",
-        },
-        .{
-            .path = "test/compile_fail/provider_program_mapper_fingerprint_reserved.zig",
-            .expected_error = "provider Program mapper_fingerprint is reserved until provider-program custom mapper execution is implemented",
-        },
-        .{
-            .path = "test/compile_fail/provider_program_structured_schema_mismatch.zig",
-            .expected_error = "provider Program payload_to_args argument schema does not match request payload/current-value schema",
-        },
-        .{
-            .path = "test/compile_fail/provider_program_transform_return_now.zig",
-            .expected_error = "provider Program result_to_return_now requires a return-now operation offer",
-        },
-        .{
-            .path = "test/compile_fail/provider_program_metadata_mapping_reserved.zig",
-            .expected_error = "provider Program payload_and_metadata_to_args is reserved until provider-program metadata argument execution is implemented",
-        },
-        .{
-            .path = "test/compile_fail/provider_program_outcome_union_reserved.zig",
-            .expected_error = "provider Program result_to_outcome_union is reserved until provider-program outcome-union execution is implemented",
-        },
-        .{
-            .path = "test/compile_fail/protocol_request_foreign_site.zig",
-            .expected_error = "Program.protocol descriptor belongs to another program",
-        },
-        .{
-            .path = "test/compile_fail/protocol_target_response_abort_resume.zig",
-            .expected_error = "Program.Handler.TargetResponse abort rejects resume",
-        },
-        .{
-            .path = "test/compile_fail/protocol_target_response_transform_return_now.zig",
-            .expected_error = "Program.Handler.TargetResponse transform rejects return_now",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_invalid_transform_return_now.zig",
-            .expected_error = "Program.Handler.returnNow is invalid for this operation site",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_duplicate_handler.zig",
-            .expected_error = "Program.Interpreter listed duplicate handler for site",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_duplicate_protocol_operation_handler.zig",
-            .expected_error = "Program.Interpreter listed duplicate protocol operation handler",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_elimination_missing_protocol_operation.zig",
-            .expected_error = "Program.Interpreter elimination omitted emitted protocol operation",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_effect_row_foreign_program.zig",
-            .expected_error = "Program.Interpreter effectRow expected owning Program type",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_plain_operation_reinterpret.zig",
-            .expected_error = "plain operation handlers cannot return reinterpret outcomes",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_protocol_handler_nested_mutable_payload.zig",
-            .expected_error = "Program.Handler protocol request payload contains mutable string-list storage",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_protocol_handler_mutable_payload.zig",
-            .expected_error = "cannot assign to constant",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_reinterpreted_mutable_payload.zig",
-            .expected_error = "cannot assign to constant",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_foreign_site.zig",
-            .expected_error = "Program.Handler site descriptor belongs to another program",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_forged_semantic_body.zig",
-            .expected_error = "Program.Interpreter function-backed entries must declare host_intrinsic semantic body",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_coverage_omitted_operation.zig",
-            .expected_error = "Program.Interpreter coverage omitted reachable operation site",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_coverage_omitted_after.zig",
-            .expected_error = "Program.Interpreter coverage omitted reachable after site",
-        },
-        .{
-            .path = "test/compile_fail/interpreter_coverage_fake_interpreter.zig",
-            .expected_error = "Program.protocol expected a Program.Interpreter type",
-        },
-        .{
-            .path = "test/compile_fail/reinterpret_mapper_invalid_source_outcome.zig",
-            .expected_error = "Program.Handler.reinterpret mapper resume must return Program.Handler.SourceOutcome(SourceSite)",
-        },
-        .{
-            .path = "test/compile_fail/reinterpret_mapper_invalid_resume_param.zig",
-            .expected_error = "Program.Handler.reinterpret mapper resume parameter must match target protocol operation type",
-        },
-        .{
-            .path = "test/compile_fail/reinterpret_mapper_invalid_return_param.zig",
-            .expected_error = "Program.Handler.reinterpret mapper returnNow parameter must match target protocol operation type",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_schema_mismatch.zig",
-            .expected_error = "Boundary Target world-port schema mismatch",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_direct_world_port_schema_witness.zig",
-            .expected_error = "Boundary Target world-port source-map entry is missing schema witness",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_operation_identity_mismatch.zig",
-            .expected_error = "Boundary Target world-port schema mismatch",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_world_port_absent_coordinate.zig",
-            .expected_error = "BoundaryClosure.Elaboration world port shape coordinates do not match a residual Program site",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_world_port_coordinate_mismatch.zig",
-            .expected_error = "BoundaryClosure.Elaboration world port shape coordinates do not match a residual Program site",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_missing_residual_program.zig",
-            .expected_error = "Boundary Target requires .residual_program or .root; no residual target generation path is implemented",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_residual_program_mismatch.zig",
-            .expected_error = "Boundary Target residual Program does not match elaborated body certificate",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_body_policy_mismatch.zig",
-            .expected_error = "Boundary Target body policy does not match target policy",
-        },
-        .{
-            .path = "test/compile_fail/boundary_target_program_backed_requirement.zig",
-            .expected_error = "BoundaryClosure.Elaboration input rejected residual Program: BoundaryElaborationBlocked",
-        },
-    };
-    inline for (compile_fail_specs) |spec| {
-        const compile_fail_mod = b.createModule(.{
-            .root_source_file = b.path(spec.path),
-            .target = target,
-            .optimize = optimize,
-        });
-        compile_fail_mod.addImport("boundary", boundary);
-        const compile_fail_test = addCompileFailArtifact(
+    }) |case| {
+        addExpectedCompileFailure(
             b,
             compile_fail_step,
-            compile_fail_mod,
-            spec.expected_error,
+            host_core,
+            case[0],
+            case[1],
         );
-        if (std.mem.startsWith(u8, spec.path, "test/compile_fail/static_machine_")) {
-            static_machine_compile_fail.dependOn(&compile_fail_test.step);
-        }
     }
 
-    const examples = [_]struct {
-        name: []const u8,
-        path: []const u8,
-        step: []const u8,
-        desc: []const u8,
-    }{
-        .{ .name = "boundary-state-basic", .path = "examples/state_basic.zig", .step = "run-state-basic", .desc = "Run the state effect example." },
-        .{ .name = "boundary-typed-program-plan", .path = "examples/typed_program_plan.zig", .step = "run-typed-program-plan", .desc = "Run the typed ProgramPlan example." },
-        .{ .name = "boundary-plan-native-optional", .path = "examples/plan_native_optional.zig", .step = "run-plan-native-optional", .desc = "Run the plan-native optional example." },
-        .{ .name = "boundary-plan-native-state-reader", .path = "examples/plan_native_state_reader.zig", .step = "run-plan-native-state-reader", .desc = "Run the plan-native state/reader example." },
-        .{ .name = "boundary-plan-native-writer", .path = "examples/plan_native_writer.zig", .step = "run-plan-native-writer", .desc = "Run the plan-native writer example." },
-        .{ .name = "boundary-plan-native-exception", .path = "examples/plan_native_exception.zig", .step = "run-plan-native-exception", .desc = "Run the plan-native exception example." },
-        .{ .name = "boundary-plan-native-resource", .path = "examples/plan_native_resource.zig", .step = "run-plan-native-resource", .desc = "Run the plan-native resource example." },
-        .{ .name = "boundary-custom-approval-workflow", .path = "examples/custom_approval_workflow.zig", .step = "run-custom-approval-workflow", .desc = "Run the custom approval workflow example." },
-        .{ .name = "boundary-agent-loop", .path = "examples/agent_loop.zig", .step = "run-agent-loop", .desc = "Run the host-driven Program.Session agent loop example." },
-        .{ .name = "boundary-agent-module-manifest", .path = "examples/agent_module_manifest.zig", .step = "run-agent-module-manifest", .desc = "Run the Agent Profile module byte provenance example." },
-        .{ .name = "boundary-agent-profile-conformance", .path = "examples/agent_profile_conformance.zig", .step = "run-agent-profile-conformance", .desc = "Run the Agent Profile v0 conformance scenario summary." },
-        .{ .name = "boundary-continuation-branching", .path = "examples/continuation_branching.zig", .step = "run-continuation-branching", .desc = "Run the Program.Session continuation capsule branching example." },
-        .{ .name = "boundary-interpreter-branching", .path = "examples/interpreter_branching.zig", .step = "run-interpreter-branching", .desc = "Run the continuation-aware Program.Interpreter branching example." },
-        .{ .name = "boundary-protocol-reinterpretation", .path = "examples/protocol_reinterpretation.zig", .step = "run-protocol-reinterpretation", .desc = "Run the protocol morphism reinterpretation example." },
-        .{ .name = "boundary-residualized-approval-policy", .path = "examples/residualized_approval_policy.zig", .step = "run-residualized-approval-policy", .desc = "Run the residualized approval policy example." },
-        .{ .name = "boundary-effect-pipeline", .path = "examples/effect_pipeline.zig", .step = "run-effect-pipeline", .desc = "Run the proof-carrying effect pipeline example." },
-        .{ .name = "boundary-effect-capability-routing", .path = "examples/effect_capability_routing.zig", .step = "run-effect-capability-routing", .desc = "Run the capability-routed Effect Exchange example." },
-        .{ .name = "boundary-effect-capability-attenuation", .path = "examples/effect_capability_attenuation.zig", .step = "run-effect-capability-attenuation", .desc = "Run the Effect Exchange capability attenuation example." },
-        .{ .name = "boundary-effect-treaty-direct", .path = "examples/effect_treaty_direct.zig", .step = "run-effect-treaty-direct", .desc = "Run the direct Effect Treaty negotiation example." },
-        .{ .name = "boundary-effect-treaty-morphism", .path = "examples/effect_treaty_morphism.zig", .step = "run-effect-treaty-morphism", .desc = "Run the morphism-adapted Effect Treaty negotiation example." },
-        .{ .name = "boundary-effect-treaty-replayable", .path = "examples/effect_treaty_replayable.zig", .step = "run-effect-treaty-replayable", .desc = "Run the replay-policy Effect Treaty example." },
-        .{ .name = "boundary-provider-harness-direct", .path = "examples/provider_harness_direct.zig", .step = "run-provider-harness-direct", .desc = "Run the direct ProviderHarness treaty execution example." },
-        .{ .name = "boundary-provider-harness-morphism", .path = "examples/provider_harness_morphism.zig", .step = "run-provider-harness-morphism", .desc = "Run the morphism ProviderHarness treaty execution example." },
-        .{ .name = "boundary-provider-harness-replayable", .path = "examples/provider_harness_replayable.zig", .step = "run-provider-harness-replayable", .desc = "Run the replayable ProviderHarness treaty execution example." },
-        .{ .name = "boundary-defunctionalization-boundary", .path = "examples/defunctionalization_boundary.zig", .step = "run-defunctionalization-boundary", .desc = "Run the defunctionalization boundary audit example." },
-        .{ .name = "boundary-host-intrinsic-allowlist", .path = "examples/host_intrinsic_allowlist.zig", .step = "run-host-intrinsic-allowlist", .desc = "Run the host intrinsic allowlist example." },
-        .{ .name = "boundary-closure-strict", .path = "examples/boundary_closure_strict.zig", .step = "run-boundary-closure-strict", .desc = "Run the strict Boundary Closure Certificate example." },
-        .{ .name = "boundary-closure-nested", .path = "examples/boundary_closure_nested.zig", .step = "run-boundary-closure-nested", .desc = "Run the nested Boundary Closure Certificate example." },
-        .{ .name = "boundary-closure-world-port", .path = "examples/boundary_closure_world_port.zig", .step = "run-boundary-closure-world-port", .desc = "Run the world-port Boundary Closure Certificate example." },
-        .{ .name = "boundary-elaboration-strict", .path = "examples/boundary_elaboration_strict.zig", .step = "run-boundary-elaboration-strict", .desc = "Run the strict Boundary Closure Elaboration example." },
-        .{ .name = "boundary-elaboration-nested", .path = "examples/boundary_elaboration_nested.zig", .step = "run-boundary-elaboration-nested", .desc = "Run the nested Boundary Closure Elaboration example." },
-        .{ .name = "boundary-elaboration-world-port", .path = "examples/boundary_elaboration_world_port.zig", .step = "run-boundary-elaboration-world-port", .desc = "Run the world-port Boundary Closure Elaboration example." },
-        .{ .name = "boundary-world-surface-strict", .path = "examples/world_surface_strict.zig", .step = "run-world-surface-strict", .desc = "Run the strict Certified Boundary Target WorldSurface example." },
-        .{ .name = "boundary-world-surface-nested", .path = "examples/world_surface_nested.zig", .step = "run-world-surface-nested", .desc = "Run the scoped root-copy Certified Boundary Target WorldSurface example." },
-        .{ .name = "boundary-world-surface-ports", .path = "examples/world_surface_ports.zig", .step = "run-world-surface-ports", .desc = "Run the world-port Certified Boundary Target WorldSurface example." },
-        .{ .name = "boundary-module-reference", .path = "examples/boundary_module_reference.zig", .step = "run-boundary-module-reference", .desc = "Run the Certified Boundary Module reference transfer example." },
-        .{ .name = "boundary-module-roundtrip", .path = "examples/boundary_module_roundtrip.zig", .step = "run-boundary-module-roundtrip", .desc = "Run the Certified Boundary Module full-image roundtrip example." },
-        .{ .name = "boundary-module-loaded-run", .path = "examples/boundary_module_loaded_run.zig", .step = "run-boundary-module-loaded-run", .desc = "Run the LoadedModule fail-closed execution surface example." },
-        .{ .name = "boundary-module-agent-transfer", .path = "examples/boundary_module_agent_transfer.zig", .step = "run-boundary-module-agent-transfer", .desc = "Run the agent-shaped Certified Boundary Module transfer example." },
-        .{ .name = "boundary-module-inspect", .path = "examples/boundary_module_inspect.zig", .step = "run-boundary-module-inspect", .desc = "Run the LoadedModule inspection helper example." },
-        .{ .name = "boundary-module-imports", .path = "examples/boundary_module_imports.zig", .step = "run-boundary-module-imports", .desc = "Run the ImportSurface projection and binding report example." },
-        .{ .name = "boundary-module-diagnostics", .path = "examples/boundary_module_diagnostics.zig", .step = "run-boundary-module-diagnostics", .desc = "Run the structured module validation diagnostic example." },
-        .{ .name = "boundary-module-compatibility", .path = "examples/boundary_module_compatibility.zig", .step = "run-boundary-module-compatibility", .desc = "Run the module compatibility report example." },
-        .{ .name = "boundary-normalization-provider", .path = "examples/boundary_normalization_provider.zig", .step = "run-boundary-normalization-provider", .desc = "Run the provider Boundary Normalization Calculus example." },
-        .{ .name = "boundary-normalization-nested", .path = "examples/boundary_normalization_nested.zig", .step = "run-boundary-normalization-nested", .desc = "Run the nested Boundary Normalization Calculus example." },
-        .{ .name = "boundary-normalization-ports", .path = "examples/boundary_normalization_ports.zig", .step = "run-boundary-normalization-ports", .desc = "Run the WorldPort Boundary Normalization Calculus example." },
-        .{ .name = "boundary-program-provider-direct", .path = "examples/program_provider_direct.zig", .step = "run-program-provider-direct", .desc = "Run the direct program-backed ProviderHarness example." },
-        .{ .name = "boundary-program-provider-nested", .path = "examples/program_provider_nested.zig", .step = "run-program-provider-nested", .desc = "Run the nested program-backed ProviderHarness example." },
-        .{ .name = "boundary-program-provider-resume", .path = "examples/program_provider_resume.zig", .step = "run-program-provider-resume", .desc = "Run the parked and resumed program-backed ProviderHarness example." },
-        .{ .name = "boundary-effect-exchange-mailbox", .path = "examples/effect_exchange_mailbox.zig", .step = "run-effect-exchange-mailbox", .desc = "Run the transport-neutral Effect Exchange mailbox example." },
-        .{ .name = "boundary-effect-exchange-restart", .path = "examples/effect_exchange_restart.zig", .step = "run-effect-exchange-restart", .desc = "Run the Effect Exchange capsule restart example." },
-        .{ .name = "boundary-linear-effect-sessions", .path = "examples/linear_effect_sessions.zig", .step = "run-linear-effect-sessions", .desc = "Run the Linear Effect Sessions obligation example." },
-        .{ .name = "boundary-linear-branch-safety", .path = "examples/linear_branch_safety.zig", .step = "run-linear-branch-safety", .desc = "Run the Linear Effect Sessions branch safety example." },
-        .{ .name = "boundary-durable-capsule-replay", .path = "examples/durable_capsule_replay.zig", .step = "run-durable-capsule-replay", .desc = "Run the durable Program.Session capsule image replay example." },
-        .{ .name = "boundary-journal-replay", .path = "examples/journal_replay.zig", .step = "run-journal-replay", .desc = "Run the Program.Session interaction journal replay example." },
-    };
-    inline for (examples) |example| {
-        const exe_mod = b.createModule(.{
-            .root_source_file = b.path(example.path),
-            .target = target,
-            .optimize = optimize,
-        });
-        exe_mod.addImport("boundary", boundary);
-        const exe = b.addExecutable(.{ .name = example.name, .root_module = exe_mod });
-        const run_step = b.step(example.step, example.desc);
-        if (target.query.isNative()) {
-            run_step.dependOn(&addRunArtifactWithArgs(b, exe, if (b.args) |args| args else &.{}).step);
-        } else {
-            run_step.dependOn(&exe.step);
-        }
-    }
-
-    const runtime_dist_dir = b.getInstallPath(.prefix, "dist/boundary-v" ++ package.version ++ "-agent-runtime");
-    const boundary_agent_runtime_mod = b.createModule(.{
-        .root_source_file = b.path("examples/agent_loop.zig"),
+    const public_surface_compile_fail_sources = b.addWriteFiles();
+    const vector_borrowed_slice_source = public_surface_compile_fail_sources.add("vector_borrowed_slice.zig",
+        \\const portable_value = @import("portable_value");
+        \\
+        \\comptime {
+        \\    const value = portable_value.Vector(u32, 1).empty();
+        \\    _ = value.slice();
+        \\}
+        \\
+        \\pub fn main() void {}
+    );
+    const vector_borrowed_slice_module = b.createModule(.{
+        .root_source_file = vector_borrowed_slice_source,
         .target = b.graph.host,
-        .optimize = optimize,
+        .optimize = .Debug,
     });
-    boundary_agent_runtime_mod.addImport("boundary", host_boundary);
-    const boundary_agent_runtime_exe = b.addExecutable(.{
-        .name = "boundary-agent-runtime-artifacts",
-        .root_module = boundary_agent_runtime_mod,
+    vector_borrowed_slice_module.addImport("portable_value", host_core.portable_value);
+    const vector_borrowed_slice_compilation = b.addTest(.{
+        .root_module = vector_borrowed_slice_module,
     });
-    const emit_boundary_agent_runtime = b.addRunArtifact(boundary_agent_runtime_exe);
-    emit_boundary_agent_runtime.addArgs(&.{ "export-agent-runtime", runtime_dist_dir });
-    emit_boundary_agent_runtime.step.dependOn(receipt_agent_modules_step);
-    emit_boundary_agent_runtime.step.dependOn(receipt_agent_parity_step);
-    const emit_runtime_step = b.step("emit-boundary-agent-runtime-artifacts", "Emit Boundary Agent Runtime pack-ready module artifacts.");
-    emit_runtime_step.dependOn(&emit_boundary_agent_runtime.step);
-    const check_runtime_step = b.step("check-boundary-agent-runtime-artifacts", "Check Boundary Agent Runtime pack-ready artifacts.");
-    const check_agent_root = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/agent-root.full-module", .{runtime_dist_dir}) });
-    check_agent_root.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_agent_root.step);
-    const check_toolbox = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/toolbox-provider.full-module", .{runtime_dist_dir}) });
-    check_toolbox.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_toolbox.step);
-    const check_protocol = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/boundary-protocol-manifest.bin", .{runtime_dist_dir}) });
-    check_protocol.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_protocol.step);
-    const check_profile = b.addSystemCommand(&.{ "test", "-s", b.fmt("{s}/agent-profile.json", .{runtime_dist_dir}) });
-    check_profile.step.dependOn(&emit_boundary_agent_runtime.step);
-    check_runtime_step.dependOn(&check_profile.step);
-    check_step.dependOn(check_runtime_step);
-
-    const bench_check_step = b.step("bench-check", "Compile retained benchmark programs.");
-    test_step.dependOn(bench_check_step);
-
-    const boundary_bench = b.createModule(.{
-        .root_source_file = b.path("src/bench_support.zig"),
-        .target = target,
-        .optimize = bench_optimize,
-    });
-    wireBoundaryImports(boundary_bench, core);
-
-    const bench_specs = [_]struct {
-        name: []const u8,
-        path: []const u8,
-        step: []const u8,
-        desc: []const u8,
-    }{
-        .{ .name = "boundary-abortive-effect-decompose-bench", .path = "bench/abortive_effect_decompose_bench.zig", .step = "bench-abortive-effect-decompose", .desc = "Run the abortive effect decomposition benchmark." },
-        .{ .name = "boundary-algebraic-builder-decompose-bench", .path = "bench/algebraic_builder_decompose_bench.zig", .step = "bench-algebraic-builder-decompose", .desc = "Run the algebraic builder decomposition benchmark." },
-        .{ .name = "boundary-direct-first-suspend-bench", .path = "bench/direct_first_suspend_bench.zig", .step = "bench-first-suspend", .desc = "Run the direct-style first-suspend benchmark." },
-        .{ .name = "boundary-effect-family-matrix-bench", .path = "bench/effect_family_matrix_bench.zig", .step = "bench-family-matrix", .desc = "Compare every retained effect family against its comparator lane." },
-        .{ .name = "boundary-direct-no-capture-bench", .path = "bench/no_capture_bench.zig", .step = "bench", .desc = "Run the direct-style no-capture benchmark." },
-        .{ .name = "boundary-resource-effect-decompose-bench", .path = "bench/resource_effect_decompose_bench.zig", .step = "bench-resource-effect-decompose", .desc = "Run the resource effect decomposition benchmark." },
-        .{ .name = "boundary-state-effect-bench", .path = "bench/state_effect_bench.zig", .step = "bench-state-effect", .desc = "Compare the additive state effect against the raw prompt baseline." },
-        .{ .name = "boundary-writer-effect-decompose-bench", .path = "bench/writer_effect_decompose_bench.zig", .step = "bench-writer-effect-decompose", .desc = "Run the writer effect decomposition benchmark." },
+    vector_borrowed_slice_compilation.expect_errors = .{
+        .contains = "no field or member function named 'slice' in 'portable_value.Vector(u32,1)'",
     };
-    inline for (bench_specs) |bench| {
-        const bench_mod = b.createModule(.{
-            .root_source_file = b.path(bench.path),
-            .target = target,
-            .optimize = bench_optimize,
-        });
-        bench_mod.addImport("boundary", boundary_bench);
-        bench_mod.addImport("lowered_machine", core.lowered_machine);
-        const bench_exe = b.addExecutable(.{ .name = bench.name, .root_module = bench_mod });
-        bench_check_step.dependOn(&bench_exe.step);
-        const bench_run_step = b.step(bench.step, bench.desc);
-        if (target.query.isNative()) {
-            bench_run_step.dependOn(&b.addRunArtifact(bench_exe).step);
-        } else {
-            bench_run_step.dependOn(&bench_exe.step);
-        }
-    }
+    compile_fail_step.dependOn(&vector_borrowed_slice_compilation.step);
 
-    const zprof_hotspots_step = b.step("zprof-hotspots", "Profile writer/resource allocator hotspots with zprof.");
-    if (b.lazyDependency("zprof", .{
-        .target = target,
-        .optimize = bench_optimize,
-    })) |zprof_dep| {
-        const zprof_hotspots_mod = b.createModule(.{
-            .root_source_file = b.path("bench/zprof_hotspots.zig"),
-            .target = target,
-            .optimize = bench_optimize,
-        });
-        zprof_hotspots_mod.addImport("boundary", boundary_bench);
-        zprof_hotspots_mod.addImport("zprof", zprof_dep.module("zprof"));
-        const zprof_hotspots_exe = b.addExecutable(.{ .name = "boundary-zprof-hotspots", .root_module = zprof_hotspots_mod });
-        zprof_hotspots_step.dependOn(&b.addRunArtifact(zprof_hotspots_exe).step);
-    }
+    const vector_source_authority_source = public_surface_compile_fail_sources.add("vector_source_authority.zig",
+        \\const std = @import("std");
+        \\const portable_value = @import("portable_value");
+        \\
+        \\test "language-visible Vector fields remain untrusted source values" {
+        \\    const Item = portable_value.Text(4);
+        \\    const Values = portable_value.Vector(Item, 1);
+        \\
+        \\    var values = Values.empty();
+        \\    values.storage[0].storage[0] = 0xff;
+        \\    values.storage[0].logical_length = 1;
+        \\    values.logical_length = 1;
+        \\
+        \\    try std.testing.expectError(error.InvalidUtf8, values.get(0));
+        \\    try std.testing.expectError(
+        \\        error.InvalidUtf8,
+        \\        portable_value.encodedSize(Values, values),
+        \\    );
+        \\}
+    );
+    const vector_source_authority_module = b.createModule(.{
+        .root_source_file = vector_source_authority_source,
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    vector_source_authority_module.addImport("portable_value", host_core.portable_value);
+    const vector_source_authority_compilation = b.addTest(.{
+        .root_module = vector_source_authority_module,
+    });
+    const vector_source_authority_run = b.addRunArtifact(vector_source_authority_compilation);
+    values_step.dependOn(&vector_source_authority_run.step);
 
-    const lint_step = b.step("lint", "Lint source code.");
+    inline for (.{
+        program_operations,
+        integer_boolean_operations,
+        algebraic_collection_operations,
+        research_digest,
+        program_compile,
+        program_dynamic_fuel,
+        program_residual_effects,
+        program_effect_morphism,
+        program_effect_handler,
+        program_dead_control,
+        constructor_invariants,
+        recursion,
+        after,
+        machine_yield,
+        agent_loop,
+    }) |integration_module| {
+        addTestArtifactWithArgs(b, test_step, integration_module, test_args);
+    }
+    test_step.dependOn(compile_fail_step);
+    test_step.dependOn(parity_step);
+
+    const format_command = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "fmt",
+        "--check",
+        "build.zig",
+        "src",
+        "test",
+        "examples",
+    });
+    const lint_step = b.step("lint", "Lint Boundary Zig source.");
+    lint_step.dependOn(&format_command.step);
     addZigPathCoverageGuard(b, lint_step);
-    var builder = zlinter.builder(b, .{});
-    builder.addPaths(.{
+    var lint_builder = zlinter.builder(b, .{});
+    lint_builder.addPaths(.{
         .include = &.{
             b.path("build.zig"),
             b.path("src"),
             b.path("examples"),
             b.path("test"),
-            b.path("bench"),
             b.path("conformance"),
         },
         .exclude = &.{},
     });
-    inline for (@typeInfo(zlinter.BuiltinLintRule).@"enum".fields) |field| {
-        const rule: zlinter.BuiltinLintRule = @enumFromInt(field.value);
-        builder.addRule(.{ .builtin = rule }, .{});
+    inline for ([_]zlinter.BuiltinLintRule{
+        .file_naming,
+        .import_ordering,
+        .no_comment_out_code,
+        .no_deprecated,
+        .no_hidden_allocations,
+        .no_literal_only_bool_expression,
+        .no_panic,
+        .no_todo,
+        .require_errdefer_dealloc,
+        .require_exhaustive_enum_switch,
+    }) |rule| {
+        lint_builder.addRule(.{ .builtin = rule }, .{});
     }
     const saved_global_cache_path = b.graph.global_cache_root.path;
     if (saved_global_cache_path) |path| {
@@ -1986,43 +1230,80 @@ pub fn build(b: *std.Build) void {
         }
     }
     defer b.graph.global_cache_root.path = saved_global_cache_path;
-    lint_step.dependOn(builder.build());
+    lint_step.dependOn(lint_builder.build());
 
-    for (&[_]*std.Build.Step{
-        protocol_manifest_step,
-        public_surface_step,
-        corpus_step,
-        agent_profile_step,
-        agent_modules_step,
-        agent_conformance_corpus_step,
-        agent_parity_step,
-        format_drift_step,
-        adversarial_codecs_step,
-        budgets_step,
-        proof_receipts_step,
-        executable_module_step,
-        executable_plan_step,
-        loaded_value_step,
-        loaded_session_step,
-        loaded_v2_step,
-        loaded_profile_codecs_step,
-        loaded_reachability_step,
-        loaded_continuation_step,
-        loaded_session_image_step,
-        loaded_forged_session_step,
-        loaded_resource_ledger_step,
-        loaded_frame_stack_step,
-        loaded_parity_required_step,
-        receipt_loaded_v2_step,
-        receipt_loaded_session_step,
-        receipt_loaded_parity_step,
-        loaded_import_bindings_step,
-        loaded_response_safety_step,
-        loaded_malformed_step,
-        loaded_payload_result_step,
-        loaded_fuzz_step,
+    const receipt_falsifier_step = b.step(
+        "check-boundary-machine-receipt-falsifiers",
+        "Prove completion receipt reachability from the live build graph.",
+    );
+
+    const release_proof_step = b.step(
+        "check-boundary-machine-release-proof",
+        "Run the complete Boundary Machine release-proof DAG.",
+    );
+    inline for (.{
+        test_step,
+        rnf_step,
+        control_step,
+        values_step,
+        research_step,
+        machine_step,
+        state_step,
+        malformed_step,
+        recursion_step,
+        after_step,
+        agent_step,
+        parity_step,
+        no_interpreter_step,
+        deletion_step,
+        compile_fail_step,
+        examples_step,
         lint_step,
-    }) |validation_step| {
-        check_step.dependOn(validation_step);
+        performance_step,
+        performance_falsifier_step,
+        single_reducer_step,
+        receipt_falsifier_step,
+    }) |dependency| {
+        release_proof_step.dependOn(dependency);
     }
+
+    const receipt_output_command =
+        "printf '%s\\n' " ++
+        "'boundary_machine_abi=2' " ++
+        "'boundary_rnf=true' " ++
+        "'single_boundary_reducer=true' " ++
+        "'program_session_public=false' " ++
+        "'boundary_runtime_public=false' " ++
+        "'static_machine_public=false' " ++
+        "'loaded_execution_present=false' " ++
+        "'runtime_program_plan_decode=false' " ++
+        "'generic_instruction_dispatch=false' " ++
+        "'canonical_state_format=ABL_RNF2' " ++
+        "'fixed_width_u32=true' " ++
+        "'bounded_vector_of_products=true' " ++
+        "'bounded_text_construction=true' " ++
+        "'product_construction=true' " ++
+        "'correlated_predicate_witness=true' " ++
+        "'bounded_recursive_helper=true' " ++
+        "'after_sites_exposed_to_world=0'";
+    const receipt_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        receipt_output_command,
+    });
+    receipt_command.step.dependOn(release_proof_step);
+    const receipt_step = b.step(
+        "check-boundary-machine-receipt",
+        "Emit the Boundary-owned completion receipt after the release proof.",
+    );
+    receipt_step.dependOn(&receipt_command.step);
+
+    const check_step = b.step("check", "Run the full Boundary Machine proof.");
+    check_step.dependOn(release_proof_step);
+    check_step.dependOn(receipt_step);
+
+    requireDirectDependency(&receipt_command.step, release_proof_step);
+    requireDirectDependency(receipt_step, &receipt_command.step);
+    requireDirectDependency(check_step, release_proof_step);
+    requireDirectDependency(check_step, receipt_step);
 }
