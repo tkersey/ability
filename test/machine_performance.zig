@@ -105,7 +105,8 @@ pub export fn boundaryMachinePerformanceOneEffect(response: i32) i32 {
     ) catch return 0;
     defer PerformanceMachine.deinitState(restored_state);
     const restored_request =
-        PerformanceMachine.current(restored_state) catch return 0;
+        (PerformanceMachine.current(restored_state) catch return 0) orelse
+        return 0;
     const restored_payload_length = switch (restored_request.value) {
         .s0 => |value| value.len() catch return 0,
     };
@@ -162,7 +163,7 @@ fn decodeLifecycle(encoded: []const u8) !u64 {
         encoded,
     );
     defer PerformanceMachine.deinitState(state);
-    const request = try PerformanceMachine.current(state);
+    const request = (try PerformanceMachine.current(state)).?;
     const payload = switch (request.value) {
         .s0 => |value| value,
     };

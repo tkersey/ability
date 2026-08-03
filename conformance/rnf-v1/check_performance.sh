@@ -68,7 +68,7 @@ require_complete_current_topology() {
             sort
     )
     actual_sources=$(
-        find "$source_root/src" -maxdepth 1 -type f -name '*.zig' |
+        find "$source_root/src" -type f -name '*.zig' |
             sed "s#^$source_root/##" |
             sort
     )
@@ -289,6 +289,16 @@ self_test() {
         echo "extra source metric in reducer receipt was accepted" >&2
         exit 1
     fi
+    mkdir "$topology_test_root/src/nested"
+    touch "$topology_test_root/src/nested/module.zig"
+    if require_complete_current_topology \
+        "$topology_test_root" "$topology_test_receipt"
+    then
+        echo "unclassified nested source was accepted" >&2
+        exit 1
+    fi
+    rm "$topology_test_root/src/nested/module.zig"
+    rmdir "$topology_test_root/src/nested"
     touch "$topology_test_root/src/alternate_reducer.zig"
     printf '%s\n' \
         'core_module_count=4' \

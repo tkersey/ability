@@ -64,6 +64,9 @@ pub fn main() !void {
     defer driver.deinit();
 
     var handlers = struct {
+        last_identity: ?Machine.RequestIdentity = null,
+        last_response: u32 = 0,
+
         pub const lookup_semantic_contract = [32]u8{
             0x97, 0xb4, 0x70, 0xfb, 0xf7, 0x3b, 0xf7, 0x5f,
             0xa3, 0x6b, 0x36, 0xe6, 0x06, 0xb3, 0x81, 0xc9,
@@ -75,12 +78,23 @@ pub fn main() !void {
         };
 
         pub fn handle(
-            _: *@This(),
+            self: *@This(),
             comptime Site: type,
             payload: Site.Payload,
-            _: Machine.RequestIdentity,
+            identity: Machine.RequestIdentity,
         ) !Site.Resume {
-            return payload * 2;
+            if (self.last_identity) |last_identity| {
+                if (!std.mem.eql(
+                    u8,
+                    &last_identity.digest,
+                    &identity.digest,
+                )) return error.UnexpectedRequestIdentity;
+                return self.last_response;
+            }
+            const response = payload * 2;
+            self.last_identity = identity;
+            self.last_response = response;
+            return response;
         }
     }{};
     var caller_fuel: u64 = 8;

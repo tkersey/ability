@@ -252,10 +252,10 @@ pub fn Text(comptime maximum_bytes: usize) type {
             start: u32,
             end: u32,
         ) Error!Text(result_capacity) {
-            if (self.logical_length > maximum_bytes) return error.Malformed;
+            const source = try self.slice();
             if (start > end or end > self.logical_length) return error.CapacityExceeded;
             return Text(result_capacity).fromSlice(
-                self.storage[@intCast(start)..@intCast(end)],
+                source[@intCast(start)..@intCast(end)],
             );
         }
 
@@ -311,10 +311,10 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
             return canonicalValue(Element, item);
         }
 
-        fn canonicalElementAt(self: *const Self, index: u32) ?Element {
-            if (self.logical_length > maximum_items or
-                index >= self.logical_length) return null;
-            return canonicalElement(self.storage[@intCast(index)]) catch null;
+        fn canonicalElementAt(self: *const Self, index: u32) Error!?Element {
+            if (self.logical_length > maximum_items) return error.Malformed;
+            if (index >= self.logical_length) return null;
+            return try canonicalElement(self.storage[@intCast(index)]);
         }
 
         /// Copy a logical element slice.
@@ -341,7 +341,7 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         }
 
         /// Return one element by value, never by portable pointer identity.
-        pub fn get(self: *const Self, index: u32) ?Element {
+        pub fn get(self: *const Self, index: u32) Error!?Element {
             return self.canonicalElementAt(index);
         }
 
@@ -364,11 +364,12 @@ pub fn Vector(comptime Element: type, comptime maximum_items: usize) type {
         }
 
         /// Remove and return the final logical element.
-        pub fn pop(self: *Self) ?Element {
-            if (self.logical_length > maximum_items) return null;
+        pub fn pop(self: *Self) Error!?Element {
+            if (self.logical_length > maximum_items) return error.Malformed;
             if (self.logical_length == 0) return null;
             const next_length = self.logical_length - 1;
-            const item = self.canonicalElementAt(next_length) orelse return null;
+            const item = (try self.canonicalElementAt(next_length)) orelse
+                unreachable;
             self.logical_length = next_length;
             const index: usize = @intCast(next_length);
             self.storage[index] = canonicalDefaultValue(Element);
@@ -1418,8 +1419,8 @@ test "Vector by-value egress rejects malformed nested elements" {
     malformed.logical_length = 1;
     const before = malformed;
 
-    try std.testing.expectEqual(@as(?Item, null), malformed.get(0));
-    try std.testing.expectEqual(@as(?Item, null), malformed.pop());
+    try std.testing.expectError(error.InvalidUtf8, malformed.get(0));
+    try std.testing.expectError(error.InvalidUtf8, malformed.pop());
     try std.testing.expectEqualDeep(before, malformed);
 
     var dirty = Items.empty();
@@ -1427,11 +1428,11 @@ test "Vector by-value egress rejects malformed nested elements" {
     dirty.storage[0].storage[1] = 0xee;
     dirty.logical_length = 1;
 
-    const observed = dirty.get(0).?;
+    const observed = (try dirty.get(0)).?;
     try std.testing.expectEqualStrings("x", try observed.slice());
     try std.testing.expectEqual(@as(u8, 0), observed.storage[1]);
 
-    const removed = dirty.pop().?;
+    const removed = (try dirty.pop()).?;
     try std.testing.expectEqualStrings("x", try removed.slice());
     try std.testing.expectEqual(@as(u8, 0), removed.storage[1]);
     try std.testing.expectEqualDeep(Items.empty(), dirty);
@@ -1508,7 +1509,7 @@ test "vector shrinking resets every vacated product slot" {
         .{ .secret = 22, .present = true },
         .{ .secret = 33, .present = true },
     });
-    const popped = items.pop().?;
+    const popped = (try items.pop()).?;
     try std.testing.expectEqual(@as(u32, 33), popped.secret);
     try std.testing.expectEqual(@as(u32, 0), items.storage[2].secret);
     try std.testing.expect(!items.storage[2].present);
@@ -1562,7 +1563,7 @@ test "bounded defaults initialize all storage and malformed lengths stay total" 
     malformed_items.logical_length = 3;
     try std.testing.expectError(error.Malformed, malformed_items.len());
     try std.testing.expectEqual(@as(usize, 0), malformed_items.logicalSlice().len);
-    try std.testing.expectEqual(@as(?Item, null), malformed_items.get(0));
+    try std.testing.expectError(error.Malformed, malformed_items.get(0));
     try std.testing.expectError(
         error.Malformed,
         malformed_items.push(.{ .title = text, .count = 1 }),
@@ -1580,6 +1581,18 @@ test "Text append rejects an invalid current prefix before mutation" {
     try std.testing.expectError(error.InvalidUtf8, value.append("a"));
     try std.testing.expectEqualDeep(before, value);
     try std.testing.expect(!eqlValue(Value, value, value));
+}
+
+test "Text copyRange validates the complete source before selecting" {
+    const Value = Text(2);
+    var malformed = Value.empty();
+    malformed.storage = .{ 0xff, 'a' };
+    malformed.logical_length = 2;
+
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        malformed.copyRange(1, 1, 2),
+    );
 }
 
 test "Bytes and Text append preserve overlapping suffixes in both directions" {

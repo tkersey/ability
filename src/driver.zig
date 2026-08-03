@@ -65,11 +65,7 @@ pub fn Driver(comptime Machine: type) type {
             handlers: anytype,
             caller_fuel: *u64,
         ) anyerror!Outcome {
-            var pending_request: ?Machine.Request =
-                Machine.current(self.state) catch |err| switch (err) {
-                    error.ProgramContractViolation => null,
-                    else => return err,
-                };
+            var pending_request = try Machine.current(self.state);
             while (true) {
                 if (pending_request) |request| {
                     if (comptime Machine.RequestValue == void) {

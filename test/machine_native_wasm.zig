@@ -117,7 +117,8 @@ pub export fn boundaryMachineParityRun() u32 {
         encoded,
     ) catch return 0;
     defer ParityMachine.deinitState(restored_state);
-    const current = ParityMachine.current(restored_state) catch return 0;
+    const current = (ParityMachine.current(restored_state) catch return 0) orelse
+        return 0;
     const current_payload = switch (current.value) {
         .s0 => |payload| payload,
     };

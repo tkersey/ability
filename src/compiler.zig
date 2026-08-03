@@ -2738,8 +2738,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 return null;
             }
             const vector = @field(environment, vector_name);
-            const element = vector.get(@field(environment, index_name)) orelse
-                return null;
+            const element = (vector.get(
+                @field(environment, index_name),
+            ) catch unreachable) orelse return null;
             return encodedBytes(@TypeOf(element), element);
         }
 
@@ -2803,9 +2804,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         break :blk null;
                     }
                     const vector = @field(environment, vector_name);
-                    const element = vector.get(
+                    const element = (vector.get(
                         @field(environment, index_name),
-                    ) orelse break :blk null;
+                    ) catch unreachable) orelse break :blk null;
                     break :blk encodedBytes(
                         field.type,
                         @field(element, field.name),
@@ -3289,13 +3290,15 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         ).len() catch unreachable;
                     },
                     .vector_get => {
-                        @field(store, result_name) = @field(
+                        const observed = @field(
                             store,
                             valueName(instruction.operands[0]),
                         ).get(@field(
                             store,
                             valueName(instruction.operands[1]),
-                        )) orelse return failureNamed(Body, "invalid_index");
+                        )) catch unreachable;
+                        @field(store, result_name) = observed orelse
+                            return failureNamed(Body, "invalid_index");
                     },
                     .vector_set => {
                         var vector = @field(
@@ -3330,7 +3333,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             store,
                             valueName(instruction.operands[0]),
                         );
-                        const popped = vector.pop();
+                        const popped = vector.pop() catch unreachable;
                         const Product = @FieldType(ValueCatalog, result_name);
                         const fields = std.meta.fields(Product);
                         var product: Product = undefined;

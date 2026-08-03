@@ -154,7 +154,7 @@ test "compiled pure operations construct products vectors and text" {
 
     const result = done.value();
     try std.testing.expectEqual(@as(u32, 1), try result.items.len());
-    const item = result.items.get(0).?;
+    const item = (try result.items.get(0)).?;
     try std.testing.expectEqualStrings("alpha", try item.title.slice());
     try std.testing.expectEqual(@as(u32, 7), item.score);
     try std.testing.expectEqualStrings("alpha", try result.digest.slice());

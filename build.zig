@@ -1145,7 +1145,7 @@ pub fn build(b: *std.Build) void {
         \\    values.storage[0].logical_length = 1;
         \\    values.logical_length = 1;
         \\
-        \\    try std.testing.expect(values.get(0) == null);
+        \\    try std.testing.expectError(error.InvalidUtf8, values.get(0));
         \\    try std.testing.expectError(
         \\        error.InvalidUtf8,
         \\        portable_value.encodedSize(Values, values),

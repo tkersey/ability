@@ -395,7 +395,7 @@ test "Program.compile generates direct exact-live RNF Machine" {
         error.ProgramContractViolation,
         CompiledMachine.prepareResume(state, forged),
     );
-    const unchanged = try CompiledMachine.current(state);
+    const unchanged = (try CompiledMachine.current(state)).?;
     try std.testing.expectEqualSlices(
         u8,
         &request.identity.digest,
@@ -611,7 +611,7 @@ test "Driver returns the exact pending request and retries handler errors" {
     switch (handler_error.request.value) {
         .s0 => |payload| try std.testing.expectEqual(@as(u32, 9), payload),
     }
-    const parked = try CompiledMachine.current(local.state);
+    const parked = (try CompiledMachine.current(local.state)).?;
     try std.testing.expectEqual(
         parked.sequence,
         handler_error.request.sequence,
@@ -686,7 +686,7 @@ test "Driver allocates a multi-frame resume before invoking its handler" {
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(u8, 0), handler.attempts);
     failing.fail_index = std.math.maxInt(usize);
-    const parked = try HelperEffectMachine.current(local.state);
+    const parked = (try HelperEffectMachine.current(local.state)).?;
     try std.testing.expectEqualSlices(
         u8,
         &request.identity.digest,
@@ -736,9 +736,9 @@ test "Machine preflights the complete response state before request authority" {
     );
     try std.testing.expectEqual(@as(u8, 0), handler.attempts);
     try std.testing.expectEqual(@as(u64, 8), fuel);
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        LargeResponseMachine.current(local.state),
+    try std.testing.expectEqual(
+        @as(?LargeResponseMachine.Request, null),
+        try LargeResponseMachine.current(local.state),
     );
     const after = try LargeResponseMachine.encodeState(
         std.testing.allocator,
@@ -868,7 +868,7 @@ test "resume validates a future-dead response before consuming the request" {
             error.ProgramContractViolation,
             IgnoredResponseMachine.@"resume"(prepared_resume, malformed),
         );
-        const unchanged = try IgnoredResponseMachine.current(state);
+        const unchanged = (try IgnoredResponseMachine.current(state)).?;
         try std.testing.expectEqualSlices(
             u8,
             &request.identity.digest,

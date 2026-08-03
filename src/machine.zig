@@ -1392,10 +1392,9 @@ pub fn Machine(
         }
 
         /// Borrow the current parked request without advancing.
-        pub fn current(state: State) Error!Request {
+        pub fn current(state: State) Error!?Request {
             try validate(storedConst(state));
-            return (try currentFrom(storedConst(state))) orelse
-                error.ProgramContractViolation;
+            return try currentFrom(storedConst(state));
         }
 
         fn validatePendingRequest(
@@ -2500,7 +2499,7 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
     defer TestMachine.deinitState(resumed_state);
     try std.testing.expect(TestDefinition.requestEql(
         first.value,
-        (try TestMachine.current(resumed_state)).value,
+        (try TestMachine.current(resumed_state)).?.value,
     ));
 
     var stale = first;
@@ -2521,7 +2520,7 @@ test "direct Machine reducer resumes from canonical fresh-instance state" {
         );
         try std.testing.expect(TestDefinition.requestEql(
             first.value,
-            (try TestMachine.current(resumed_state)).value,
+            (try TestMachine.current(resumed_state)).?.value,
         ));
         try TestMachine.@"resume"(first_prepared_resume, @as(u32, 4));
         try std.testing.expectError(
@@ -2620,9 +2619,9 @@ test "Machine rejects an unresumable request before exposing authority" {
         RequestMachine.step(state, &caller_fuel),
     );
     try std.testing.expectEqual(@as(u64, 1), caller_fuel);
-    try std.testing.expectError(
-        error.ProgramContractViolation,
-        RequestMachine.current(state),
+    try std.testing.expectEqual(
+        @as(?RequestMachine.Request, null),
+        try RequestMachine.current(state),
     );
     const after = try RequestMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
@@ -2672,7 +2671,7 @@ test "request identity binds the complete canonical continuation" {
         second_bytes,
     );
     defer TestMachine.deinitState(second_state);
-    const second_request = try TestMachine.current(second_state);
+    const second_request = (try TestMachine.current(second_state)).?;
 
     try std.testing.expect(TestDefinition.requestEql(
         first_request.value,
@@ -2749,9 +2748,39 @@ test "cloned Machine state owns an independent logical frame stack" {
     const after = try TestMachine.encodeState(std.testing.allocator, original);
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectEqual(
+        @as(?TestMachine.Request, null),
+        try TestMachine.current(original),
+    );
+}
+
+test "Machine current distinguishes valid absence from malformed state" {
+    const TestMachine = Machine(TestDefinition, .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    const state = try TestMachine.initialState(std.testing.allocator, 7);
+    defer TestMachine.deinitState(state);
+
+    try std.testing.expectEqual(
+        @as(?TestMachine.Request, null),
+        try TestMachine.current(state),
+    );
+
+    const sequence_offset = std.mem.Alignment.of(u64).forward(
+        @sizeOf(std.mem.Allocator),
+    );
+    const state_bytes: [*]u8 = @ptrCast(state);
+    const sequence: *u64 = @ptrCast(@alignCast(
+        state_bytes + sequence_offset,
+    ));
+    sequence.* = 1;
+    defer sequence.* = 0;
+
     try std.testing.expectError(
         error.ProgramContractViolation,
-        TestMachine.current(original),
+        TestMachine.current(state),
     );
 }
 
@@ -2777,7 +2806,7 @@ test "Machine validates untrusted request payloads before equality" {
         error.ProgramContractViolation,
         RequestMachine.prepareResume(state, forged),
     );
-    const current = try RequestMachine.current(state);
+    const current = (try RequestMachine.current(state)).?;
     try std.testing.expect(MalformedRequestDefinition.requestEql(
         current.value,
         .{ .lookup = MalformedRequestDefinition.lookup },
@@ -2810,7 +2839,7 @@ test "Machine request identity hashing does not allocate" {
     const after = try TestMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
     try std.testing.expect(!std.mem.eql(u8, before, after));
-    const current = try TestMachine.current(state);
+    const current = (try TestMachine.current(state)).?;
     try std.testing.expect(TestDefinition.requestEql(
         request.value,
         current.value,
@@ -2851,7 +2880,7 @@ test "Machine prepared resume allocation failure preserves pending state" {
     const after = try TestMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
-    const current = try TestMachine.current(state);
+    const current = (try TestMachine.current(state)).?;
     try std.testing.expectEqualSlices(
         u8,
         &request.identity.digest,
