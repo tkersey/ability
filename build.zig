@@ -1108,8 +1108,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const public_surface_compile_fail_sources = b.addWriteFiles();
-    const vector_borrowed_slice_source = public_surface_compile_fail_sources.add(
-        "vector_borrowed_slice.zig",
+    const vector_borrowed_slice_source = public_surface_compile_fail_sources.add("vector_borrowed_slice.zig",
         \\const portable_value = @import("portable_value");
         \\
         \\comptime {
@@ -1132,6 +1131,38 @@ pub fn build(b: *std.Build) void {
         .contains = "no field or member function named 'slice' in 'portable_value.Vector(u32,1)'",
     };
     compile_fail_step.dependOn(&vector_borrowed_slice_compilation.step);
+
+    const vector_source_authority_source = public_surface_compile_fail_sources.add("vector_source_authority.zig",
+        \\const std = @import("std");
+        \\const portable_value = @import("portable_value");
+        \\
+        \\test "language-visible Vector fields remain untrusted source values" {
+        \\    const Item = portable_value.Text(4);
+        \\    const Values = portable_value.Vector(Item, 1);
+        \\
+        \\    var values = Values.empty();
+        \\    values.storage[0].storage[0] = 0xff;
+        \\    values.storage[0].logical_length = 1;
+        \\    values.logical_length = 1;
+        \\
+        \\    try std.testing.expect(values.get(0) == null);
+        \\    try std.testing.expectError(
+        \\        error.InvalidUtf8,
+        \\        portable_value.encodedSize(Values, values),
+        \\    );
+        \\}
+    );
+    const vector_source_authority_module = b.createModule(.{
+        .root_source_file = vector_source_authority_source,
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    vector_source_authority_module.addImport("portable_value", host_core.portable_value);
+    const vector_source_authority_compilation = b.addTest(.{
+        .root_module = vector_source_authority_module,
+    });
+    const vector_source_authority_run = b.addRunArtifact(vector_source_authority_compilation);
+    values_step.dependOn(&vector_source_authority_run.step);
 
     inline for (.{
         program_operations,

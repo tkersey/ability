@@ -25,10 +25,21 @@ Capacity is compile-time and contract-bearing. Canonical encoding stores only
 logical length and live contents; spare storage and allocator identity are not
 observable. Machine initialization and effect resumption recursively rebuild
 typed values into that same canonical representation before the values enter
-authoritative RNF state. Vector pop, truncate, and clear reset every vacated element to its
-canonical default before returning. Bytes truncate and clear likewise zero every
-vacated byte, including malformed-length repair, so logically removed data does
-not remain observable through public storage. Capacity overflow and invalid
+authoritative RNF state.
+
+Zig makes the fields of inline by-value structs visible across modules. Those
+fields are caller-owned source representation, not canonical Machine authority
+or a supported semantic egress API. Callers can use them to construct malformed
+test inputs, but portable observation, encoding, Machine initialization, and
+effect resumption validate and canonicalize owned copies before accepting them.
+Pointer addresses and spare capacity never participate in canonical equality,
+encoding, state, or Machine identity. Vector exposes elements through canonical
+by-value `get` and `pop`; it does not provide a borrowed arbitrary-element slice.
+
+Vector pop, truncate, and clear reset every vacated element to its canonical
+default before returning. Bytes truncate and clear likewise zero every vacated
+byte, including malformed-length repair, so logically removed data does not
+remain observable through supported operations. Capacity overflow and invalid
 UTF-8 fail before mutation. Zero-width Vector elements are a canonical quotient:
 truncate, clear, encoding, and equality do not iterate over their logical length.
 
