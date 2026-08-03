@@ -430,7 +430,7 @@ test "Machine canonicalizes typed initial and response ingress" {
     };
     switch (request.value) {
         .s0 => |payload| {
-            try std.testing.expectEqualStrings("in", payload.slice());
+            try std.testing.expectEqualStrings("in", try payload.slice());
             try std.testing.expectEqual(@as(u8, 0), payload.storage[3]);
         },
     }
@@ -451,7 +451,7 @@ test "Machine canonicalizes typed initial and response ingress" {
         else => return error.TestUnexpectedResult,
     };
     defer done.deinit();
-    try std.testing.expectEqualStrings("ok", done.value().slice());
+    try std.testing.expectEqualStrings("ok", try done.value().slice());
     try std.testing.expectEqual(@as(u8, 0), done.value().storage[3]);
 }
 

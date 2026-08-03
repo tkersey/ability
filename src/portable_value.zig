@@ -186,10 +186,17 @@ pub fn Text(comptime maximum_bytes: usize) type {
             return self.logical_length;
         }
 
-        /// Borrow only initialized logical UTF-8 bytes.
-        pub fn slice(self: *const Self) []const u8 {
+        fn logicalSlice(self: *const Self) []const u8 {
             if (self.logical_length > maximum_bytes) return &.{};
             return self.storage[0..@intCast(self.logical_length)];
+        }
+
+        /// Borrow validated logical UTF-8 bytes.
+        pub fn slice(self: *const Self) Error![]const u8 {
+            if (self.logical_length > maximum_bytes) return error.Malformed;
+            const value = self.logicalSlice();
+            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+            return value;
         }
 
         /// Append valid UTF-8 atomically.
@@ -199,9 +206,7 @@ pub fn Text(comptime maximum_bytes: usize) type {
             const end = std.math.add(usize, start, suffix.len) catch
                 return error.CapacityExceeded;
             if (end > maximum_bytes) return error.CapacityExceeded;
-            if (!std.unicode.utf8ValidateSlice(self.slice())) {
-                return error.InvalidUtf8;
-            }
+            _ = try self.slice();
             if (!std.unicode.utf8ValidateSlice(suffix)) return error.InvalidUtf8;
             copyPossiblyOverlapping(self.storage[start..end], suffix);
             self.logical_length = @intCast(end);
@@ -249,9 +254,9 @@ pub fn Text(comptime maximum_bytes: usize) type {
         pub fn eql(self: *const Self, other: *const Self) bool {
             if (self.logical_length > maximum_bytes or
                 other.logical_length > maximum_bytes) return false;
-            if (!std.unicode.utf8ValidateSlice(self.slice()) or
-                !std.unicode.utf8ValidateSlice(other.slice())) return false;
-            return std.mem.eql(u8, self.slice(), other.slice());
+            const self_slice = self.slice() catch return false;
+            const other_slice = other.slice() catch return false;
+            return std.mem.eql(u8, self_slice, other_slice);
         }
 
         /// Lexicographically compare UTF-8 bytes without locale semantics.
@@ -261,12 +266,7 @@ pub fn Text(comptime maximum_bytes: usize) type {
             {
                 return error.Malformed;
             }
-            if (!std.unicode.utf8ValidateSlice(self.slice()) or
-                !std.unicode.utf8ValidateSlice(other.slice()))
-            {
-                return error.InvalidUtf8;
-            }
-            return std.mem.order(u8, self.slice(), other.slice());
+            return std.mem.order(u8, try self.slice(), try other.slice());
         }
     };
 }
@@ -831,7 +831,7 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
     }
     if (comptime isText(T)) {
         if (value.logical_length > T.maximum_length) return error.Malformed;
-        if (!std.unicode.utf8ValidateSlice(value.slice())) return error.InvalidUtf8;
+        _ = try value.slice();
         return checkedAdd(4, @intCast(value.logical_length));
     }
     if (comptime isVector(T)) {
@@ -1027,9 +1027,14 @@ fn enumToU32(value: anytype) Error!u32 {
 
 fn encodeInto(comptime T: type, value: T, writer: anytype) Error!void {
     if (comptime maximumEncodedSize(T) == 0) return;
-    if (comptime isBytes(T) or isText(T)) {
+    if (comptime isBytes(T)) {
         writer.writeInt(u32, value.logical_length);
         writer.write(value.slice());
+        return;
+    }
+    if (comptime isText(T)) {
+        writer.writeInt(u32, value.logical_length);
+        writer.write(try value.slice());
         return;
     }
     if (comptime isVector(T)) {
@@ -1342,7 +1347,10 @@ test "canonicalValue recursively removes bounded spare storage" {
     items.storage[1].label.storage[0] = 0xee;
 
     const canonical = try canonicalValue(Items, items);
-    try std.testing.expectEqualStrings("ok", canonical.storage[0].label.slice());
+    try std.testing.expectEqualStrings(
+        "ok",
+        try canonical.storage[0].label.slice(),
+    );
     try std.testing.expectEqual(@as(u8, 0), canonical.storage[0].label.storage[3]);
     try std.testing.expectEqual(@as(u8, 0), canonical.storage[1].label.storage[0]);
 }
@@ -1410,11 +1418,11 @@ test "Vector by-value egress rejects malformed nested elements" {
     dirty.logical_length = 1;
 
     const observed = dirty.get(0).?;
-    try std.testing.expectEqualStrings("x", observed.slice());
+    try std.testing.expectEqualStrings("x", try observed.slice());
     try std.testing.expectEqual(@as(u8, 0), observed.storage[1]);
 
     const removed = dirty.pop().?;
-    try std.testing.expectEqualStrings("x", removed.slice());
+    try std.testing.expectEqualStrings("x", try removed.slice());
     try std.testing.expectEqual(@as(u8, 0), removed.storage[1]);
     try std.testing.expectEqualDeep(Items.empty(), dirty);
 }
@@ -1528,7 +1536,7 @@ test "bounded defaults initialize all storage and malformed lengths stay total" 
 
     var malformed_text = text;
     malformed_text.logical_length = 5;
-    try std.testing.expectEqual(@as(usize, 0), malformed_text.slice().len);
+    try std.testing.expectError(error.Malformed, malformed_text.slice());
     try std.testing.expectError(error.Malformed, malformed_text.append("x"));
 
     var malformed_items = items;
@@ -1548,6 +1556,7 @@ test "Text append rejects an invalid current prefix before mutation" {
     value.logical_length = 1;
     const before = value;
 
+    try std.testing.expectError(error.InvalidUtf8, value.slice());
     try std.testing.expectError(error.InvalidUtf8, value.append("a"));
     try std.testing.expectEqualDeep(before, value);
     try std.testing.expect(!eqlValue(Value, value, value));
@@ -1573,13 +1582,13 @@ test "Bytes and Text append preserve overlapping suffixes in both directions" {
     @memcpy(backward_text.storage[0..6], "abcdef");
     backward_text.logical_length = 2;
     try backward_text.append(backward_text.storage[0..4]);
-    try std.testing.expectEqualStrings("ababcd", backward_text.slice());
+    try std.testing.expectEqualStrings("ababcd", try backward_text.slice());
 
     var forward_text = TestText.empty();
     @memcpy(forward_text.storage[0..6], "abcdef");
     forward_text.logical_length = 2;
     try forward_text.append(forward_text.storage[3..6]);
-    try std.testing.expectEqualStrings("abdef", forward_text.slice());
+    try std.testing.expectEqualStrings("abdef", try forward_text.slice());
 }
 
 test "bounded byte and text ordering rejects malformed operands" {
@@ -1714,7 +1723,7 @@ test "all required scalar and algebraic forms round-trip canonically" {
     const decoded = try decodeExact(Value, bytes[0..length]);
     try std.testing.expect(eqlValue(Value, value, decoded));
     try std.testing.expectEqual(@as(u16, 513), @intFromEnum(decoded.enumeration));
-    try std.testing.expectEqualStrings("sum", decoded.sum.text.slice());
+    try std.testing.expectEqualStrings("sum", try decoded.sum.text.slice());
 }
 
 test "Text mutation is UTF-8 checked and transactional on capacity overflow" {
@@ -1727,17 +1736,17 @@ test "Text mutation is UTF-8 checked and transactional on capacity overflow" {
 
     var value = try Value.fromSlice("ab");
     try std.testing.expectError(error.CapacityExceeded, value.append("€"));
-    try std.testing.expectEqualStrings("ab", value.slice());
+    try std.testing.expectEqualStrings("ab", try value.slice());
     const append_oversized_invalid = [_]u8{0xff} ** 3;
     try std.testing.expectError(
         error.CapacityExceeded,
         value.append(&append_oversized_invalid),
     );
-    try std.testing.expectEqualStrings("ab", value.slice());
+    try std.testing.expectEqualStrings("ab", try value.slice());
     try std.testing.expectError(error.InvalidUtf8, value.append("\xff"));
-    try std.testing.expectEqualStrings("ab", value.slice());
+    try std.testing.expectEqualStrings("ab", try value.slice());
     try value.appendScalar('¢');
-    try std.testing.expectEqualStrings("ab¢", value.slice());
+    try std.testing.expectEqualStrings("ab¢", try value.slice());
 }
 
 test "vector of products and tagged sums round-trip canonically" {
@@ -1781,7 +1790,7 @@ test "vector of products and tagged sums round-trip canonically" {
     try std.testing.expect(decoded.items.eql(&items));
     try std.testing.expectEqualStrings(
         "ready",
-        decoded.choice.note.slice(),
+        try decoded.choice.note.slice(),
     );
 }
 

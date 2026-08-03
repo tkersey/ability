@@ -155,9 +155,9 @@ test "compiled pure operations construct products vectors and text" {
     const result = done.value();
     try std.testing.expectEqual(@as(u32, 1), result.items.len());
     const item = result.items.get(0).?;
-    try std.testing.expectEqualStrings("alpha", item.title.slice());
+    try std.testing.expectEqualStrings("alpha", try item.title.slice());
     try std.testing.expectEqual(@as(u32, 7), item.score);
-    try std.testing.expectEqualStrings("alpha", result.digest.slice());
+    try std.testing.expectEqualStrings("alpha", try result.digest.slice());
     try std.testing.expectEqual(@as(u32, 8), result.total);
 }
 
@@ -240,12 +240,12 @@ test "compiler constants materialize canonical portable representations" {
     defer done.deinit();
 
     const result = done.value();
-    try std.testing.expectEqualStrings("root", result.title.slice());
+    try std.testing.expectEqualStrings("root", try result.title.slice());
     try std.testing.expectEqual(@as(u8, 0), result.title.storage[15]);
     try std.testing.expectEqual(@as(u32, 1), result.titles.len());
     try std.testing.expectEqualStrings(
         "item",
-        result.titles.storage[0].slice(),
+        try result.titles.storage[0].slice(),
     );
     try std.testing.expectEqual(
         @as(u8, 0),

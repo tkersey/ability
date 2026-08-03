@@ -94,7 +94,7 @@ fn requiredFuel(input: Text, expected: []const u8) !u64 {
                 try std.testing.expectEqual(@as(u64, 0), fuel);
                 try std.testing.expectEqualStrings(
                     expected,
-                    result.value().slice(),
+                    try result.value().slice(),
                 );
                 return supplied;
             },

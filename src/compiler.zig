@@ -3376,7 +3376,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             store,
                             valueName(instruction.operands[1]),
                         );
-                        text.append(suffix.slice()) catch
+                        text.append(suffix.slice() catch unreachable) catch
                             return failureNamed(Body, "capacity_exceeded");
                         @field(store, result_name) = text;
                     },
@@ -3474,8 +3474,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                         );
                         @field(store, result_name) = switch (std.mem.order(
                             u8,
-                            left.slice(),
-                            right.slice(),
+                            left.slice() catch unreachable,
+                            right.slice() catch unreachable,
                         )) {
                             .lt => -1,
                             .eq => 0,
@@ -3495,9 +3495,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             store,
                             valueName(instruction.operands[2]),
                         );
-                        text.append(separator.slice()) catch
+                        text.append(separator.slice() catch unreachable) catch
                             return failureNamed(Body, "capacity_exceeded");
-                        text.append(right.slice()) catch
+                        text.append(right.slice() catch unreachable) catch
                             return failureNamed(Body, "capacity_exceeded");
                         @field(store, result_name) = text;
                     },

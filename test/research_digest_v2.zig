@@ -373,7 +373,7 @@ test "Research Digest v2 formats capability data inside the Machine" {
         .s0 => |*payload| {
             try std.testing.expectEqualStrings(
                 "portable resumptions",
-                payload.query.slice(),
+                try payload.query.slice(),
             );
             try std.testing.expectEqual(@as(u32, 8), payload.maximum_items);
             payload.query.storage[511] = 239;
@@ -442,6 +442,6 @@ test "Research Digest v2 formats capability data inside the Machine" {
     try std.testing.expectEqual(@as(u32, 2), done.value().item_count);
     try std.testing.expectEqualStrings(
         "Alpha\nFirst\nBeta\nSecond\n",
-        done.value().digest.slice(),
+        try done.value().digest.slice(),
     );
 }

@@ -259,10 +259,10 @@ test "compiled products sums optionals vectors text and bytes are first order" {
     try std.testing.expectEqual(@as(u32, 8), result.popped.value.?);
     try std.testing.expectEqual(@as(u32, 0), result.truncated.len());
     try std.testing.expectEqual(@as(u32, 0), result.cleared.len());
-    try std.testing.expectEqualStrings("alpha!42-7", result.formatted.slice());
-    try std.testing.expectEqualStrings("al", result.copied_text.slice());
+    try std.testing.expectEqualStrings("alpha!42-7", try result.formatted.slice());
+    try std.testing.expectEqualStrings("al", try result.copied_text.slice());
     try std.testing.expectEqual(@as(i8, -1), result.text_comparison);
-    try std.testing.expectEqualStrings("alpha-beta", result.joined.slice());
+    try std.testing.expectEqualStrings("alpha-beta", try result.joined.slice());
     try std.testing.expectEqual(@as(u32, 10), result.text_length);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, result.bytes.slice());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, result.copied_bytes.slice());
