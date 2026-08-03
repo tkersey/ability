@@ -98,9 +98,8 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
             start: u32,
             end: u32,
         ) Error!Bytes(result_capacity) {
-            if (self.logical_length > maximum_bytes or
-                start > end or end > self.logical_length)
-            {
+            _ = try self.len();
+            if (start > end or end > self.logical_length) {
                 return error.CapacityExceeded;
             }
             return Bytes(result_capacity).fromSlice(
@@ -116,9 +115,9 @@ pub fn Bytes(comptime maximum_bytes: usize) type {
         }
 
         /// Return one logical byte.
-        pub fn get(self: *const Self, index: u32) ?u8 {
-            if (self.logical_length > maximum_bytes or
-                index >= self.logical_length) return null;
+        pub fn get(self: *const Self, index: u32) Error!?u8 {
+            _ = try self.len();
+            if (index >= self.logical_length) return null;
             return self.storage[@intCast(index)];
         }
 
@@ -1552,6 +1551,18 @@ test "bounded defaults initialize all storage and malformed lengths stay total" 
     malformed_bytes.logical_length = 5;
     try std.testing.expectError(error.Malformed, malformed_bytes.len());
     try std.testing.expectError(error.Malformed, malformed_bytes.slice());
+    try std.testing.expectError(error.Malformed, malformed_bytes.get(0));
+    try std.testing.expectError(
+        error.Malformed,
+        malformed_bytes.copyRange(1, 0, 1),
+    );
+
+    const valid_bytes = try Bytes(4).fromSlice("ab");
+    try std.testing.expectEqual(@as(?u8, null), try valid_bytes.get(2));
+    try std.testing.expectError(
+        error.CapacityExceeded,
+        valid_bytes.copyRange(1, 0, 3),
+    );
 
     var malformed_text = text;
     malformed_text.logical_length = 5;

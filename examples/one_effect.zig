@@ -56,55 +56,69 @@ const Machine = Program.compile(.{
     .maximum_machine_fuel = 32,
 });
 
-pub fn main() !void {
+const LookupHandlers = struct {
+    last_identity: ?Machine.RequestIdentity = null,
+    last_response: u32 = 0,
+    external_calls: u32 = 0,
+
+    pub const lookup_semantic_contract = [32]u8{
+        0x97, 0xb4, 0x70, 0xfb, 0xf7, 0x3b, 0xf7, 0x5f,
+        0xa3, 0x6b, 0x36, 0xe6, 0x06, 0xb3, 0x81, 0xc9,
+        0x7e, 0x3d, 0x6e, 0xc7, 0x47, 0xcd, 0xc4, 0x45,
+        0x6d, 0x95, 0xeb, 0x38, 0xf0, 0x48, 0x50, 0xb7,
+    };
+    pub const semantic_site_contract_digests = .{
+        lookup_semantic_contract,
+    };
+
+    pub fn handle(
+        self: *@This(),
+        comptime Site: type,
+        payload: Site.Payload,
+        identity: Machine.RequestIdentity,
+    ) !Site.Resume {
+        if (self.last_identity) |last_identity| {
+            if (std.mem.eql(
+                u8,
+                &last_identity.digest,
+                &identity.digest,
+            )) return self.last_response;
+        }
+        const response = payload * 2;
+        self.last_identity = identity;
+        self.last_response = response;
+        self.external_calls += 1;
+        return response;
+    }
+};
+
+fn runOnce(handlers: *LookupHandlers, argument: u32) !u32 {
     var driver = try boundary.Driver(Machine).init(
         std.heap.page_allocator,
-        21,
+        argument,
     );
     defer driver.deinit();
 
-    var handlers = struct {
-        last_identity: ?Machine.RequestIdentity = null,
-        last_response: u32 = 0,
-
-        pub const lookup_semantic_contract = [32]u8{
-            0x97, 0xb4, 0x70, 0xfb, 0xf7, 0x3b, 0xf7, 0x5f,
-            0xa3, 0x6b, 0x36, 0xe6, 0x06, 0xb3, 0x81, 0xc9,
-            0x7e, 0x3d, 0x6e, 0xc7, 0x47, 0xcd, 0xc4, 0x45,
-            0x6d, 0x95, 0xeb, 0x38, 0xf0, 0x48, 0x50, 0xb7,
-        };
-        pub const semantic_site_contract_digests = .{
-            lookup_semantic_contract,
-        };
-
-        pub fn handle(
-            self: *@This(),
-            comptime Site: type,
-            payload: Site.Payload,
-            identity: Machine.RequestIdentity,
-        ) !Site.Resume {
-            if (self.last_identity) |last_identity| {
-                if (!std.mem.eql(
-                    u8,
-                    &last_identity.digest,
-                    &identity.digest,
-                )) return error.UnexpectedRequestIdentity;
-                return self.last_response;
-            }
-            const response = payload * 2;
-            self.last_identity = identity;
-            self.last_response = response;
-            return response;
-        }
-    }{};
     var caller_fuel: u64 = 8;
-    const result = switch (try driver.run(&handlers, &caller_fuel)) {
+    const result = switch (try driver.run(handlers, &caller_fuel)) {
         .done => |value| value,
         .yielded => return error.UnexpectedYield,
         .failed => return error.UnexpectedMachineFailure,
         .handler_error => |failure| return failure.err,
     };
     defer result.deinit();
+    return result.value().*;
+}
 
-    if (result.value().* != 42) return error.UnexpectedResult;
+pub fn main() !void {
+    var handlers: LookupHandlers = .{};
+
+    if (try runOnce(&handlers, 21) != 42) return error.UnexpectedResult;
+    if (handlers.external_calls != 1) return error.UnexpectedExternalCallCount;
+
+    if (try runOnce(&handlers, 22) != 44) return error.UnexpectedResult;
+    if (handlers.external_calls != 2) return error.UnexpectedExternalCallCount;
+
+    if (try runOnce(&handlers, 22) != 44) return error.UnexpectedResult;
+    if (handlers.external_calls != 2) return error.UnexpectedExternalCallCount;
 }
