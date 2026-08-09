@@ -351,6 +351,14 @@ fn largeValueBody(comptime value_count: usize) type {
         pub const Failure = enum { rejected };
         pub const effect_sites = .{};
         pub const schema_types = .{};
+        pub const compiler_limits: cir.CompilerLimits = .{
+            .maximum_values = value_count,
+            .maximum_blocks = 1,
+            .maximum_constructors = 4,
+            .maximum_environment_fields = 1,
+            .maximum_invariant_terms = 1,
+            .maximum_generated_operations = 256,
+        };
         pub const control_ir: cir.Program = .{
             .label = "large-value-control-ir",
             .value_types = &value_types,
@@ -465,7 +473,7 @@ test "Program.compile generates direct exact-live RNF Machine" {
 }
 
 test "Program.compile admits a bounded Control IR above 64 values" {
-    try std.testing.expectEqual(@as(usize, 256), LargeValueProgram.compiler_limits.maximum_values);
+    try std.testing.expectEqual(@as(usize, 96), LargeValueProgram.compiler_limits.maximum_values);
     try std.testing.expectEqual(@as(usize, 96), LargeValueProgram.control_ir.value_types.len);
 
     const state = try LargeValueMachine.initialState(std.testing.allocator, @as(u32, 37));

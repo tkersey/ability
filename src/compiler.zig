@@ -4,8 +4,15 @@ const portable_value = @import("portable_value");
 const rnf = @import("rnf");
 const std = @import("std");
 
-const implementation_limits: control_ir.CompilerLimits = .{};
-const compiler_evaluation_branch_quota = 10_000_000;
+const implementation_limits: control_ir.CompilerLimits = .{
+    .maximum_values = 256,
+    .maximum_blocks = 128,
+    .maximum_constructors = 256,
+    .maximum_environment_fields = 128,
+    .maximum_invariant_terms = 64,
+    .maximum_generated_operations = 32_768,
+};
+const compiler_evaluation_branch_quota = 50_000_000;
 const dynamic_fuel_quantum_bytes: u64 = 16;
 // Advance this domain whenever deterministic segment charging changes.
 const segment_fuel_semantic_domain =
