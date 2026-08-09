@@ -3650,7 +3650,7 @@ pub fn NormalForm(
                             &saw_predecessor,
                         );
                     },
-                    .return_value, .return_to_caller, .fail => {},
+                    .return_value, .return_to_caller, .fail, .fail_value => {},
                 }
             }
             return if (saw_predecessor) next else null;
@@ -3976,7 +3976,7 @@ pub fn NormalForm(
                             );
                         }
                     },
-                    .return_value, .return_to_caller, .fail => {},
+                    .return_value, .return_to_caller, .fail, .fail_value => {},
                 }
             }
             return result;

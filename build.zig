@@ -1132,6 +1132,61 @@ pub fn build(b: *std.Build) void {
     };
     compile_fail_step.dependOn(&vector_borrowed_slice_compilation.step);
 
+    const failure_value_type_mismatch_source = public_surface_compile_fail_sources.add("failure_value_type_mismatch.zig",
+        \\const cir = @import("control_ir");
+        \\const program_v2 = @import("program_v2");
+        \\
+        \\const blocks = [_]cir.Block{
+        \\    .{
+        \\        .id = 0,
+        \\        .parameters = &.{0},
+        \\        .terminator = .{ .fail_value = 0 },
+        \\    },
+        \\};
+        \\
+        \\const Body = struct {
+        \\    pub const InitialArgs = u32;
+        \\    pub const Result = void;
+        \\    pub const Failure = enum { rejected };
+        \\    pub const effect_sites = .{};
+        \\    pub const schema_types = .{};
+        \\    pub const control_ir: cir.Program = .{
+        \\        .label = "failure-value-type-mismatch",
+        \\        .value_types = &.{.{ .scalar = .u32 }},
+        \\        .blocks = &blocks,
+        \\        .entry = 0,
+        \\        .result_type = .{ .scalar = .unit },
+        \\    };
+        \\};
+        \\
+        \\const Machine = program_v2.program(
+        \\    "failure-value-type-mismatch",
+        \\    Body,
+        \\).compile(.{
+        \\    .maximum_frames = 2,
+        \\    .maximum_state_bytes = 1024,
+        \\    .maximum_machine_fuel = 8,
+        \\});
+        \\
+        \\comptime {
+        \\    _ = Machine.abi_version;
+        \\}
+    );
+    const failure_value_type_mismatch_module = b.createModule(.{
+        .root_source_file = failure_value_type_mismatch_source,
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    failure_value_type_mismatch_module.addImport("control_ir", host_core.control_ir);
+    failure_value_type_mismatch_module.addImport("program_v2", host_core.program_v2);
+    const failure_value_type_mismatch_compilation = b.addTest(.{
+        .root_module = failure_value_type_mismatch_module,
+    });
+    failure_value_type_mismatch_compilation.expect_errors = .{
+        .contains = "Control IR fail_value must reference Body.Failure",
+    };
+    compile_fail_step.dependOn(&failure_value_type_mismatch_compilation.step);
+
     const vector_source_authority_source = public_surface_compile_fail_sources.add("vector_source_authority.zig",
         \\const std = @import("std");
         \\const portable_value = @import("portable_value");

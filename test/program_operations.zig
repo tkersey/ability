@@ -390,3 +390,123 @@ test "non-dense failure tags retain name-bound runtime and identity semantics" {
         &FailureMachineB.Manifest.machine_contract_digest,
     ));
 }
+
+const DynamicFailure = enum {
+    rejected,
+    cancelled,
+};
+const DynamicFailureArgs = struct {
+    first: DynamicFailure,
+    second: DynamicFailure,
+};
+const dynamic_failure_value_types = [_]cir.ValueType{
+    .{ .schema = 0 },
+    .{ .schema = 1 },
+    .{ .schema = 1 },
+};
+const dynamic_failure_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .{ .product_extract = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{0},
+        .operation = .{ .product_extract = 1 },
+    },
+};
+
+fn DynamicFailureBody(comptime selected_value: cir.ValueId) type {
+    return struct {
+        const dynamic_failure_blocks = [_]cir.Block{
+            .{
+                .id = 0,
+                .parameters = &.{0},
+                .instructions = &dynamic_failure_instructions,
+                .terminator = .{ .fail_value = selected_value },
+            },
+        };
+
+        pub const InitialArgs = DynamicFailureArgs;
+        pub const Result = void;
+        pub const Failure = DynamicFailure;
+        pub const effect_sites = .{};
+        pub const schema_types = .{ DynamicFailureArgs, DynamicFailure };
+        pub const control_ir: cir.Program = .{
+            .label = "value-driven-failure",
+            .value_types = &dynamic_failure_value_types,
+            .blocks = &dynamic_failure_blocks,
+            .entry = 0,
+            .result_type = .{ .scalar = .unit },
+        };
+    };
+}
+
+const FirstFailureMachine = program_v2.program(
+    "value-driven-failure",
+    DynamicFailureBody(1),
+).compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 16,
+});
+const SecondFailureMachine = program_v2.program(
+    "value-driven-failure",
+    DynamicFailureBody(2),
+).compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 16,
+});
+
+test "value-driven failure preserves runtime value and semantic identity" {
+    const args: DynamicFailureArgs = .{
+        .first = .rejected,
+        .second = .cancelled,
+    };
+
+    const first_state = try FirstFailureMachine.initialState(
+        std.testing.allocator,
+        args,
+    );
+    defer FirstFailureMachine.deinitState(first_state);
+    var first_fuel: u64 = 16;
+    switch (try FirstFailureMachine.step(first_state, &first_fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |authored| try std.testing.expectEqual(
+                DynamicFailure.rejected,
+                authored,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const second_state = try SecondFailureMachine.initialState(
+        std.testing.allocator,
+        args,
+    );
+    defer SecondFailureMachine.deinitState(second_state);
+    var second_fuel: u64 = 16;
+    switch (try SecondFailureMachine.step(second_state, &second_fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |authored| try std.testing.expectEqual(
+                DynamicFailure.cancelled,
+                authored,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &FirstFailureMachine.Manifest.machine_contract_digest,
+        &SecondFailureMachine.Manifest.machine_contract_digest,
+    ));
+    try std.testing.expectEqual(@as(u32, 2), FirstFailureMachine.abi_version);
+    try std.testing.expectEqual(@as(u32, 2), SecondFailureMachine.abi_version);
+}
