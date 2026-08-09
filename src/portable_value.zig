@@ -438,7 +438,7 @@ fn hasDeclSafe(comptime T: type, comptime name: []const u8) bool {
 }
 
 fn isBytes(comptime T: type) bool {
-    if (!hasDeclSafe(T, "portable_value_kind") or
+    if (comptime !hasDeclSafe(T, "portable_value_kind") or
         !hasDeclSafe(T, "portable_value_authenticity") or
         !hasDeclSafe(T, "maximum_length")) return false;
     if (@TypeOf(T.portable_value_kind) != PortableKind or
@@ -450,7 +450,7 @@ fn isBytes(comptime T: type) bool {
 }
 
 fn isText(comptime T: type) bool {
-    if (!hasDeclSafe(T, "portable_value_kind") or
+    if (comptime !hasDeclSafe(T, "portable_value_kind") or
         !hasDeclSafe(T, "portable_value_authenticity") or
         !hasDeclSafe(T, "maximum_length")) return false;
     if (@TypeOf(T.portable_value_kind) != PortableKind or
@@ -462,7 +462,7 @@ fn isText(comptime T: type) bool {
 }
 
 fn isVector(comptime T: type) bool {
-    if (!hasDeclSafe(T, "portable_value_kind") or
+    if (comptime !hasDeclSafe(T, "portable_value_kind") or
         !hasDeclSafe(T, "portable_value_authenticity") or
         !hasDeclSafe(T, "ElementType") or
         !hasDeclSafe(T, "maximum_length")) return false;
@@ -1405,6 +1405,26 @@ test "Vector canonicalizes nested elements at every ingress" {
     try std.testing.expectEqual(
         @as(u8, 0),
         pushed.storage[0].tags.storage[0].storage[1],
+    );
+}
+
+test "Vector truncate canonicalizes removed tagged-union integer payloads" {
+    const Element = union(enum) {
+        count: u32,
+        flag: bool,
+    };
+    const Items = Vector(Element, 2);
+
+    var items = try Items.fromSlice(&.{
+        Element{ .count = 42 },
+        Element{ .flag = true },
+    });
+    items.truncate(1);
+
+    try std.testing.expectEqual(@as(u32, 1), try items.len());
+    try std.testing.expectEqualDeep(
+        canonicalDefaultValue(Element),
+        items.storage[1],
     );
 }
 
