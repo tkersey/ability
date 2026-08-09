@@ -5,7 +5,7 @@ const rnf = @import("rnf");
 const std = @import("std");
 
 const implementation_limits: control_ir.CompilerLimits = .{};
-const compiler_evaluation_branch_quota = 1_000_000;
+const compiler_evaluation_branch_quota = 10_000_000;
 const dynamic_fuel_quantum_bytes: u64 = 16;
 // Advance this domain whenever deterministic segment charging changes.
 const segment_fuel_semantic_domain =

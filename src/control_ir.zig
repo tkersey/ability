@@ -268,7 +268,7 @@ pub const Program = struct {
 /// admission policy, not executable Machine semantics, and therefore do not
 /// enter the Machine contract digest when the generated RNF is unchanged.
 pub const CompilerLimits = struct {
-    maximum_values: usize = 64,
+    maximum_values: usize = 256,
     maximum_blocks: usize = 64,
     maximum_constructors: usize = 128,
     maximum_environment_fields: usize = 64,

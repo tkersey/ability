@@ -321,6 +321,56 @@ fn limitedIdentityBody(comptime constant_value: u32) type {
     };
 }
 
+fn largeValueBody(comptime value_count: usize) type {
+    comptime if (value_count < 65) {
+        @compileError("large Control IR fixture must cross the former 64-value ceiling");
+    };
+    return struct {
+        const value_types = [_]cir.ValueType{u32_type} ** value_count;
+        const instructions = blk: {
+            var result: [value_count - 1]cir.Instruction = undefined;
+            for (1..value_count) |index| {
+                result[index - 1] = .{
+                    .kind = .copy,
+                    .result = @intCast(index),
+                    .operands = &.{@as(cir.ValueId, @intCast(index - 1))},
+                    .operation = .copy,
+                };
+            }
+            break :blk result;
+        };
+        const large_blocks = [_]cir.Block{.{
+            .id = 0,
+            .parameters = &.{0},
+            .instructions = &instructions,
+            .terminator = .{ .return_value = value_count - 1 },
+        }};
+
+        pub const InitialArgs = u32;
+        pub const Result = u32;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "large-value-control-ir",
+            .value_types = &value_types,
+            .blocks = &large_blocks,
+            .entry = 0,
+            .result_type = u32_type,
+        };
+    };
+}
+
+const LargeValueProgram = program_v2.program(
+    "large-value-control-ir",
+    largeValueBody(96),
+);
+const LargeValueMachine = LargeValueProgram.compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 256,
+});
+
 test "Program.compile generates direct exact-live RNF Machine" {
     try std.testing.expectEqual(@as(usize, 3), Program.rnf.constructor_count);
     try std.testing.expect(
@@ -412,6 +462,21 @@ test "Program.compile generates direct exact-live RNF Machine" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 42), done.value().*);
+}
+
+test "Program.compile admits a bounded Control IR above 64 values" {
+    try std.testing.expectEqual(@as(usize, 256), LargeValueProgram.compiler_limits.maximum_values);
+    try std.testing.expectEqual(@as(usize, 96), LargeValueProgram.control_ir.value_types.len);
+
+    const state = try LargeValueMachine.initialState(std.testing.allocator, @as(u32, 37));
+    defer LargeValueMachine.deinitState(state);
+    var fuel: u64 = 192;
+    const done = switch (try LargeValueMachine.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 37), done.value().*);
 }
 
 test "Machine canonicalizes typed initial and response ingress" {
