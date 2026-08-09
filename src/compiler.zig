@@ -329,6 +329,9 @@ fn segmentStoreType(
             included[@intCast(value)] = true;
         },
         .fail => {},
+        .fail_value => |value| {
+            included[@intCast(value)] = true;
+        },
     }
 
     var fields: [canonical.value_count]rnf.EnvironmentField = undefined;
@@ -1519,6 +1522,13 @@ fn validateBody(
                     @compileError("Control IR failure tag is outside Body.Failure");
                 }
             },
+            .fail_value => |value| {
+                if (typeForValue(Body, program.value_types[value]) != Body.Failure) {
+                    @compileError(
+                        "Control IR fail_value must reference Body.Failure",
+                    );
+                }
+            },
             else => {},
         }
     }
@@ -1736,6 +1746,10 @@ fn semanticHashTerminator(
             canonical.valueId(value),
         ),
         .fail => |failure| semanticHashU16(hasher, failure),
+        .fail_value => |value| semanticHashU16(
+            hasher,
+            canonical.valueId(value),
+        ),
     }
 }
 
@@ -3863,6 +3877,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 ) },
                 .fail => |failure| .{
                     .failed = failureFromTag(Body, failure),
+                },
+                .fail_value => |value| .{
+                    .failed = @field(store, valueName(value)),
                 },
             };
             return .{ .cost = accepted_cost, .transition = transition };

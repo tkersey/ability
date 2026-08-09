@@ -197,6 +197,7 @@ pub const Terminator = union(enum) {
     return_value: ?ValueId,
     return_to_caller: ValueId,
     fail: u16,
+    fail_value: ValueId,
 };
 
 /// Compiler classification for persisted block entries.
@@ -420,7 +421,7 @@ pub fn Reachability(comptime maximum_blocks: usize) type {
                             suspension.continuation,
                         );
                     },
-                    .return_value, .return_to_caller, .fail => {},
+                    .return_value, .return_to_caller, .fail, .fail_value => {},
                 }
             }
             return result;
@@ -543,7 +544,7 @@ fn isIntraFunctionSuccessor(block: Block, target: BlockId) bool {
         .branch => |branch| branch.then_edge.target == target or
             branch.else_edge.target == target,
         .@"suspend" => |suspension| suspension.continuation.target == target,
-        .return_value, .return_to_caller, .fail => false,
+        .return_value, .return_to_caller, .fail, .fail_value => false,
     };
 }
 
@@ -900,6 +901,7 @@ pub fn validate(
                 }
             },
             .fail => {},
+            .fail_value => |value| try validateValue(program, value),
         }
     }
 
@@ -1104,6 +1106,15 @@ pub fn validate(
                 value,
             ),
             .fail => {},
+            .fail_value => |value| try validateUse(
+                maximum_values,
+                maximum_blocks,
+                definitions,
+                dominators,
+                block,
+                block.instructions.len,
+                value,
+            ),
         }
     }
 }
@@ -1151,7 +1162,7 @@ pub fn Liveness(
                 .@"suspend" => |suspension| {
                     self.transferEdge(program, suspension.continuation, &result);
                 },
-                .return_value, .return_to_caller, .fail => {},
+                .return_value, .return_to_caller, .fail, .fail_value => {},
             }
             return result;
         }
@@ -1187,6 +1198,7 @@ pub fn Liveness(
                     if (maybe_value) |value| _ = set.insert(value);
                 },
                 .return_to_caller => |value| _ = set.insert(value),
+                .fail_value => |value| _ = set.insert(value),
                 .jump, .fail => {},
             }
         }

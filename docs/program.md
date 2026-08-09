@@ -32,6 +32,12 @@ bytecode. Its blocks define typed values, explicit edges, effects, helper calls,
 returns, and failures. Compilation validates the definition before RNF
 synthesis.
 
+Failures have two source forms. `.fail = tag` retains the compile-time failure
+tag used by existing programs. `.fail_value = value_id` returns the exact
+runtime value at that id and is admitted only when its type is exactly
+`Body.Failure`. Both lower through the same Machine ABI v2 `Outcome.failed`
+transition.
+
 `compiler_limits` has type `boundary.ir.CompilerLimits`. It can lower the
 implementation ceilings for values, blocks, constructors, constructor
 environments, invariants, and generated reducer work. These admission ceilings
