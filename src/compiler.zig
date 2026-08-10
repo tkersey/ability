@@ -2967,7 +2967,10 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
-        fn executeInstructions(
+        // Keep each typed Control IR block as one direct code-generation unit.
+        // Inlining every block into the constructor dispatcher makes LLVM
+        // reconstruct one pathological monolithic reducer.
+        noinline fn executeInstructions(
             comptime block: control_ir.Block,
             store: anytype,
         ) ?Failure {
@@ -3754,7 +3757,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             return fuel_cost;
         }
 
-        fn planConstructor(
+        // RNF constructors are the stable direct-reducer specialization seam.
+        noinline fn planConstructor(
             comptime constructor_id: usize,
             environment: anytype,
             accepted_cost: u64,

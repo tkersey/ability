@@ -505,6 +505,7 @@ fn hasCanonicalDefaultValue(comptime T: type) bool {
 
 /// Reject values without explicit first-order portable semantics.
 pub fn assertPortable(comptime T: type) void {
+    @setEvalBranchQuota(1_000_000);
     if (isBytes(T) or isText(T)) return;
     if (isVector(T)) {
         assertPortable(T.ElementType);
@@ -547,6 +548,38 @@ pub fn assertPortable(comptime T: type) void {
         },
         else => @compileError("unsupported Boundary Machine portable value: " ++ @typeName(T)),
     }
+}
+
+test "portable admission owns the comptime quota for deep closed values" {
+    const Payload = struct {
+        path: Text(256),
+        digest: Text(64),
+        contents: Text(32 * 1024),
+        rationale: Text(4096),
+        stdout: Text(32 * 1024),
+        stderr: Text(32 * 1024),
+        count: u32,
+        passed: bool,
+    };
+    const Observation = union(enum) {
+        one: Payload,
+        two: Payload,
+        three: Payload,
+        four: Payload,
+        five: Payload,
+        six: Payload,
+        seven: Payload,
+        eight: Payload,
+    };
+    const State = struct {
+        history: Vector(Observation, 12),
+        candidate: Observation,
+        prior: ?Observation,
+    };
+
+    comptime assertPortable(State);
+    const maximum = comptime maximumEncodedSize(State);
+    try std.testing.expect(maximum > 0);
 }
 
 fn canonicalDefaultValue(comptime T: type) T {
