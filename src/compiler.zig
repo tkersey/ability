@@ -5,14 +5,14 @@ const rnf = @import("rnf");
 const std = @import("std");
 
 const implementation_limits: control_ir.CompilerLimits = .{
-    .maximum_values = 256,
+    .maximum_values = 1024,
     .maximum_blocks = 128,
     .maximum_constructors = 256,
     .maximum_environment_fields = 128,
     .maximum_invariant_terms = 64,
     .maximum_generated_operations = 32_768,
 };
-const compiler_evaluation_branch_quota = 50_000_000;
+const compiler_evaluation_branch_quota = 500_000_000;
 const dynamic_fuel_quantum_bytes: u64 = 16;
 // Advance this domain whenever deterministic segment charging changes.
 const segment_fuel_semantic_domain =
@@ -263,6 +263,7 @@ fn valueCatalogType(
     comptime program: control_ir.Program,
     comptime canonical: anytype,
 ) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
     var fields: [canonical.value_count]rnf.EnvironmentField = undefined;
     inline for (0..canonical.value_count) |dense_index| {
         const source_value = canonical.value_dense_to_source[dense_index];
@@ -295,6 +296,7 @@ fn segmentStoreType(
     comptime constructor: anytype,
     comptime canonical: anytype,
 ) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
     var included = [_]bool{false} ** program.value_types.len;
     inline for (constructor.environmentFields()) |field| {
         included[@intCast(field.value)] = true;
@@ -674,6 +676,17 @@ fn NormalizedProgram(
             break :blk result;
         };
 
+        const instruction_definitions = blk: {
+            var result = [_]?control_ir.Instruction{null} **
+                source.value_types.len;
+            for (blocks) |block| {
+                for (block.instructions) |instruction| {
+                    result[@intCast(instruction.result)] = instruction;
+                }
+            }
+            break :blk result;
+        };
+
         pub const value: control_ir.Program = .{
             .label = source.label,
             .value_types = source.value_types,
@@ -681,6 +694,7 @@ fn NormalizedProgram(
             .entry = source.entry,
             .result_type = source.result_type,
             .functions = source.functions,
+            .instruction_definitions = &instruction_definitions,
         };
     };
 }
@@ -884,6 +898,14 @@ fn validateInstruction(
                 );
             }
             _ = failureNamed(Body, "arithmetic_overflow");
+        },
+        .enum_to_u32 => {
+            requireOperandCount(instruction, 1);
+            const Operand = operandType(Body, program, instruction, 0);
+            if (@typeInfo(Operand) != .@"enum" or Result != u32) {
+                @compileError("enum_to_u32 requires exhaustive enum -> u32");
+            }
+            portable_value.assertPortable(Operand);
         },
         .boolean_not => {
             requireOperandCount(instruction, 1);
@@ -2953,6 +2975,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                 .integer_bit_or,
                 .integer_bit_xor,
                 .integer_convert,
+                .enum_to_u32,
                 .boolean_not,
                 .boolean_and,
                 .boolean_or,
@@ -3170,6 +3193,12 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                             Body,
                             "arithmetic_overflow",
                         );
+                    },
+                    .enum_to_u32 => {
+                        @field(store, result_name) = @intCast(@intFromEnum(@field(
+                            store,
+                            valueName(instruction.operands[0]),
+                        )));
                     },
                     .boolean_not => {
                         @field(store, result_name) = !@field(

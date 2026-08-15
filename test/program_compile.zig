@@ -357,7 +357,7 @@ fn largeValueBody(comptime value_count: usize) type {
             .maximum_constructors = 4,
             .maximum_environment_fields = 1,
             .maximum_invariant_terms = 1,
-            .maximum_generated_operations = 256,
+            .maximum_generated_operations = 512,
         };
         pub const control_ir: cir.Program = .{
             .label = "large-value-control-ir",
@@ -371,12 +371,12 @@ fn largeValueBody(comptime value_count: usize) type {
 
 const LargeValueProgram = program_v2.program(
     "large-value-control-ir",
-    largeValueBody(96),
+    largeValueBody(384),
 );
 const LargeValueMachine = LargeValueProgram.compile(.{
     .maximum_frames = 2,
     .maximum_state_bytes = 1024,
-    .maximum_machine_fuel = 256,
+    .maximum_machine_fuel = 512,
 });
 
 test "Program.compile generates direct exact-live RNF Machine" {
@@ -473,12 +473,12 @@ test "Program.compile generates direct exact-live RNF Machine" {
 }
 
 test "Program.compile admits a bounded Control IR above 64 values" {
-    try std.testing.expectEqual(@as(usize, 96), LargeValueProgram.compiler_limits.maximum_values);
-    try std.testing.expectEqual(@as(usize, 96), LargeValueProgram.control_ir.value_types.len);
+    try std.testing.expectEqual(@as(usize, 384), LargeValueProgram.compiler_limits.maximum_values);
+    try std.testing.expectEqual(@as(usize, 384), LargeValueProgram.control_ir.value_types.len);
 
     const state = try LargeValueMachine.initialState(std.testing.allocator, @as(u32, 37));
     defer LargeValueMachine.deinitState(state);
-    var fuel: u64 = 192;
+    var fuel: u64 = 512;
     const done = switch (try LargeValueMachine.step(state, &fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,

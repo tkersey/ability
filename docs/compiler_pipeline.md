@@ -28,7 +28,10 @@ source -> portable types -> Control IR -> algebraic lowering
    parameters live at invocation. The latter form immutable activation context
    and are the sole persisted authority at immediate call entry. A progressed
    loop may additionally retain a semantically distinct current value.
-7. Path facts become bounded constructor-local invariants.
+7. Path facts become bounded constructor-local invariants. Synthesis uses a
+   deterministic successor worklist so only facts downstream of a changed
+   predecessor are recomputed; the fixed point and canonical output are
+   unchanged.
 8. RNF canonicalization hash-conses exact equivalent futures, then assigns
    dense constructor ids and static reducer entries. Equivalence requires the
    same reducer class, source/target, ordered future environment, activation

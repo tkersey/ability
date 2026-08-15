@@ -32,6 +32,11 @@ bytecode. Its blocks define typed values, explicit edges, effects, helper calls,
 returns, and failures. Compilation validates the definition before RNF
 synthesis.
 
+The portable instruction set includes `enum_to_u32`, which projects an
+exhaustive enum value to its canonical unsigned tag without relying on the
+enum's backing integer type. This is the boundary-owned lowering for persisted
+or wire-visible enum discriminants; consumers do not need a parallel tag table.
+
 Failures have two source forms. `.fail = tag` retains the compile-time failure
 tag used by existing programs. `.fail_value = value_id` returns the exact
 runtime value at that id and is admitted only when its type is exactly
