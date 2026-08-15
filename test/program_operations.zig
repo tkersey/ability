@@ -510,3 +510,70 @@ test "value-driven failure preserves runtime value and semantic identity" {
     try std.testing.expectEqual(@as(u32, 2), FirstFailureMachine.abi_version);
     try std.testing.expectEqual(@as(u32, 2), SecondFailureMachine.abi_version);
 }
+
+const NonDenseMethod = enum(u16) {
+    get = 2,
+    m_search = 47,
+};
+
+const enum_to_u32_value_types = [_]cir.ValueType{
+    .{ .schema = 0 },
+    .{ .scalar = .u32 },
+};
+const enum_to_u32_instructions = [_]cir.Instruction{.{
+    .kind = .pure,
+    .result = 1,
+    .operands = &.{0},
+    .operation = .enum_to_u32,
+}};
+const enum_to_u32_blocks = [_]cir.Block{.{
+    .id = 0,
+    .parameters = &.{0},
+    .instructions = &enum_to_u32_instructions,
+    .terminator = .{ .return_value = 1 },
+}};
+
+const EnumToU32Body = struct {
+    pub const InitialArgs = NonDenseMethod;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{};
+    pub const schema_types = .{NonDenseMethod};
+    pub const control_ir: cir.Program = .{
+        .label = "enum-to-u32",
+        .value_types = &enum_to_u32_value_types,
+        .blocks = &enum_to_u32_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+    };
+};
+
+const EnumToU32Machine = program_v2.program(
+    "enum-to-u32",
+    EnumToU32Body,
+).compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 16,
+});
+
+test "enum_to_u32 projects the canonical portable enum tag" {
+    inline for (.{ NonDenseMethod.get, NonDenseMethod.m_search }) |input| {
+        const state = try EnumToU32Machine.initialState(
+            std.testing.allocator,
+            input,
+        );
+        defer EnumToU32Machine.deinitState(state);
+        var fuel: u64 = 16;
+        const done = switch (try EnumToU32Machine.step(state, &fuel)) {
+            .done => |result| result,
+            else => return error.TestUnexpectedResult,
+        };
+        defer done.deinit();
+        try std.testing.expectEqual(
+            @as(u32, @intCast(@intFromEnum(input))),
+            done.value().*,
+        );
+    }
+    try std.testing.expectEqual(@as(u32, 2), EnumToU32Machine.abi_version);
+}

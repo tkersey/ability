@@ -141,6 +141,8 @@ pub const InstructionOperation = union(enum) {
     bytes_length,
     bytes_append_scalar,
     bytes_join,
+    /// Project an exhaustive portable enum to its canonical u32 tag.
+    enum_to_u32,
 };
 
 /// One explicit typed Control IR value definition.
@@ -235,6 +237,9 @@ pub const Program = struct {
     result_type: ValueType,
     /// Empty means one implicit root function for source compatibility.
     functions: []const Function = &.{},
+    /// Compiler-owned dense definition index. Source programs leave this
+    /// empty; normalization derives it from validated blocks.
+    instruction_definitions: []const ?Instruction = &.{},
 
     /// Resolve one dense typed value without exposing unchecked table access.
     pub fn valueType(self: Program, value: ValueId) ValidationError!ValueType {
@@ -712,6 +717,7 @@ pub fn validate(
                 .integer_negate,
                 .integer_bit_not,
                 .integer_convert,
+                .enum_to_u32,
                 .boolean_not,
                 .product_extract,
                 .sum_tag_is,

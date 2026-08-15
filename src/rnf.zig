@@ -1040,6 +1040,9 @@ fn definingInstruction(
     program: control_ir.Program,
     value: control_ir.ValueId,
 ) ?control_ir.Instruction {
+    if (program.instruction_definitions.len == program.value_types.len) {
+        return program.instruction_definitions[@intCast(value)];
+    }
     for (program.blocks) |block| {
         for (block.instructions) |instruction| {
             if (instruction.result == value) return instruction;
@@ -3665,17 +3668,57 @@ pub fn NormalForm(
             var result = [_]FactSet{.{}} ** maximum_blocks;
             var initialized = [_]bool{false} ** maximum_blocks;
             initialized[@intCast(program.entry)] = true;
-            const maximum_iterations =
-                program.blocks.len * (maximum_invariant_terms + 2) + 1;
-            var iteration: usize = 0;
-            while (iteration < maximum_iterations) : (iteration += 1) {
-                var changed = false;
-                var next = result;
-                var next_initialized = initialized;
-                for (program.blocks) |block| {
-                    if (!reachability.contains(block.id) or
-                        block.id == program.entry)
-                    {
+            var queue: [maximum_blocks]control_ir.BlockId = undefined;
+            var queued = [_]bool{false} ** maximum_blocks;
+            var head: usize = 0;
+            var length: usize = 1;
+            queue[0] = program.entry;
+            queued[@intCast(program.entry)] = true;
+
+            const maximum_visits = program.blocks.len *
+                (maximum_invariant_terms + 2) + 1;
+            var visits: usize = 0;
+            while (length != 0) {
+                if (visits == maximum_visits) {
+                    return error.PathFactsDidNotConverge;
+                }
+                visits += 1;
+                const source_id = queue[head];
+                head = (head + 1) % maximum_blocks;
+                length -= 1;
+                queued[@intCast(source_id)] = false;
+
+                const source = program.blocks[@intCast(source_id)];
+                var successors: [3]control_ir.BlockId = undefined;
+                var successor_count: usize = 0;
+                switch (source.terminator) {
+                    .jump => |edge| {
+                        successors[0] = edge.target;
+                        successor_count = 1;
+                    },
+                    .branch => |branch| {
+                        successors[0] = branch.then_edge.target;
+                        successor_count = 1;
+                        if (branch.else_edge.target != successors[0]) {
+                            successors[1] = branch.else_edge.target;
+                            successor_count = 2;
+                        }
+                    },
+                    .@"suspend" => |suspension| {
+                        successors[0] = suspension.continuation.target;
+                        successor_count = 1;
+                        if (suspension.callee) |callee| {
+                            if (callee.target != successors[0]) {
+                                successors[1] = callee.target;
+                                successor_count = 2;
+                            }
+                        }
+                    },
+                    .return_value, .return_to_caller, .fail, .fail_value => {},
+                }
+
+                for (successors[0..successor_count]) |target| {
+                    if (!reachability.contains(target) or target == program.entry) {
                         continue;
                     }
                     const facts = try incomingFacts(
@@ -3685,30 +3728,33 @@ pub fn NormalForm(
                         liveness,
                         result,
                         initialized,
-                        block.id,
+                        target,
                     ) orelse continue;
-                    if (!next_initialized[@intCast(block.id)] or
-                        !next[@intCast(block.id)].eql(facts))
+                    const target_index: usize = @intCast(target);
+                    if (initialized[target_index] and
+                        result[target_index].eql(facts))
                     {
-                        next[@intCast(block.id)] = facts;
-                        next_initialized[@intCast(block.id)] = true;
-                        changed = true;
+                        continue;
                     }
-                }
-                result = next;
-                initialized = next_initialized;
-                if (!changed) {
-                    for (program.blocks) |block| {
-                        if (reachability.contains(block.id) and
-                            !initialized[@intCast(block.id)])
-                        {
-                            return error.PathFactsDidNotConverge;
-                        }
+                    result[target_index] = facts;
+                    initialized[target_index] = true;
+                    if (!queued[target_index]) {
+                        const tail = (head + length) % maximum_blocks;
+                        queue[tail] = target;
+                        length += 1;
+                        queued[target_index] = true;
                     }
-                    return result;
                 }
             }
-            return error.PathFactsDidNotConverge;
+
+            for (program.blocks) |block| {
+                if (reachability.contains(block.id) and
+                    !initialized[@intCast(block.id)])
+                {
+                    return error.PathFactsDidNotConverge;
+                }
+            }
+            return result;
         }
 
         fn appendIncomingConstructor(
