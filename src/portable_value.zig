@@ -864,8 +864,7 @@ fn validateEnumTag(comptime T: type, value: T) Error!void {
     return error.InvalidTag;
 }
 
-/// Compute the exact canonical encoded size of one validated value.
-pub fn encodedSize(comptime T: type, value: T) Error!usize {
+fn encodedSizePtr(comptime T: type, value: *const T) Error!usize {
     comptime assertPortable(T);
     if (comptime maximumEncodedSize(T) == 0) return 0;
     if (comptime isBytes(T)) {
@@ -881,8 +880,8 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
         if (value.logical_length > T.maximum_length) return error.Malformed;
         if (comptime maximumEncodedSize(T.ElementType) == 0) return 4;
         var total: usize = 4;
-        for (value.logicalSlice()) |item| {
-            total = try checkedAdd(total, try encodedSize(T.ElementType, item));
+        for (value.logicalSlice()) |*item| {
+            total = try checkedAdd(total, try encodedSizePtr(T.ElementType, item));
         }
         return total;
     }
@@ -892,18 +891,18 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
         .int => |info| @divExact(info.bits, 8),
         .array => |info| blk: {
             var total: usize = 0;
-            for (value) |item| total = try checkedAdd(
+            for (value) |*item| total = try checkedAdd(
                 total,
-                try encodedSize(info.child, item),
+                try encodedSizePtr(info.child, item),
             );
             break :blk total;
         },
-        .optional => |info| if (value) |payload|
-            checkedAdd(1, try encodedSize(info.child, payload))
+        .optional => |info| if (value.*) |*payload|
+            checkedAdd(1, try encodedSizePtr(info.child, payload))
         else
             1,
         .@"enum" => blk: {
-            try validateEnumTag(T, value);
+            try validateEnumTag(T, value.*);
             break :blk 4;
         },
         .@"struct" => |info| blk: {
@@ -911,19 +910,19 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
             inline for (info.fields) |field| {
                 total = try checkedAdd(
                     total,
-                    try encodedSize(field.type, @field(value, field.name)),
+                    try encodedSizePtr(field.type, &@field(value.*, field.name)),
                 );
             }
             break :blk total;
         },
         .@"union" => |info| blk: {
             const Tag = info.tag_type.?;
-            const active = std.meta.activeTag(value);
+            const active = std.meta.activeTag(value.*);
             inline for (info.fields) |field| {
                 if (active == @field(Tag, field.name)) {
                     break :blk try checkedAdd(
                         4,
-                        try encodedSize(field.type, @field(value, field.name)),
+                        try encodedSizePtr(field.type, &@field(value.*, field.name)),
                     );
                 }
             }
@@ -931,6 +930,11 @@ pub fn encodedSize(comptime T: type, value: T) Error!usize {
         },
         else => unreachable,
     };
+}
+
+/// Compute the exact canonical encoded size of one validated value.
+pub fn encodedSize(comptime T: type, value: T) Error!usize {
+    return encodedSizePtr(T, &value);
 }
 
 fn addMaximum(comptime left: usize, comptime right: usize) usize {
@@ -1068,7 +1072,7 @@ fn enumToU32(value: anytype) Error!u32 {
     return std.math.cast(u32, @intFromEnum(value)) orelse error.InvalidTag;
 }
 
-fn encodeInto(comptime T: type, value: T, writer: anytype) Error!void {
+fn encodeInto(comptime T: type, value: *const T, writer: anytype) Error!void {
     if (comptime maximumEncodedSize(T) == 0) return;
     if (comptime isBytes(T)) {
         writer.writeInt(u32, value.logical_length);
@@ -1083,35 +1087,35 @@ fn encodeInto(comptime T: type, value: T, writer: anytype) Error!void {
     if (comptime isVector(T)) {
         writer.writeInt(u32, value.logical_length);
         if (comptime maximumEncodedSize(T.ElementType) == 0) return;
-        for (value.logicalSlice()) |item| {
+        for (value.logicalSlice()) |*item| {
             try encodeInto(T.ElementType, item, writer);
         }
         return;
     }
     switch (@typeInfo(T)) {
         .void => {},
-        .bool => writer.write(&.{@intFromBool(value)}),
-        .int => writer.writeInt(T, value),
-        .array => |info| for (value) |item| try encodeInto(info.child, item, writer),
+        .bool => writer.write(&.{@intFromBool(value.*)}),
+        .int => writer.writeInt(T, value.*),
+        .array => |info| for (value) |*item| try encodeInto(info.child, item, writer),
         .optional => |info| {
-            if (value) |payload| {
+            if (value.*) |*payload| {
                 writer.write(&.{1});
                 try encodeInto(info.child, payload, writer);
             } else {
                 writer.write(&.{0});
             }
         },
-        .@"enum" => writer.writeInt(u32, try enumToU32(value)),
+        .@"enum" => writer.writeInt(u32, try enumToU32(value.*)),
         .@"struct" => |info| inline for (info.fields) |field| {
-            try encodeInto(field.type, @field(value, field.name), writer);
+            try encodeInto(field.type, &@field(value.*, field.name), writer);
         },
         .@"union" => |info| {
             const Tag = info.tag_type.?;
-            const active = std.meta.activeTag(value);
+            const active = std.meta.activeTag(value.*);
             writer.writeInt(u32, try enumToU32(active));
             inline for (info.fields) |field| {
                 if (active == @field(Tag, field.name)) {
-                    try encodeInto(field.type, @field(value, field.name), writer);
+                    try encodeInto(field.type, &@field(value.*, field.name), writer);
                     return;
                 }
             }
@@ -1126,7 +1130,7 @@ pub fn encode(comptime T: type, value: T, output: []u8) Error!usize {
     const required = try encodedSize(T, value);
     if (required > output.len) return error.CapacityExceeded;
     var writer: Writer = .{ .bytes = output[0..required] };
-    try encodeInto(T, value, &writer);
+    try encodeInto(T, &value, &writer);
     return writer.index;
 }
 
@@ -1138,7 +1142,7 @@ pub fn updateCanonicalHash(
 ) Error!void {
     _ = try encodedSize(T, value);
     var writer: HashWriter = .{ .hasher = hasher };
-    try encodeInto(T, value, &writer);
+    try encodeInto(T, &value, &writer);
 }
 
 const Reader = struct {
@@ -1256,7 +1260,7 @@ pub fn unionPayloadEncodedSize(comptime T: type, value: T) Error!usize {
     const active = std.meta.activeTag(value);
     inline for (info.@"union".fields) |field| {
         if (active == @field(Tag, field.name)) {
-            return encodedSize(field.type, @field(value, field.name));
+            return encodedSizePtr(field.type, &@field(value, field.name));
         }
     }
     return error.InvalidTag;
@@ -1313,7 +1317,7 @@ pub fn encodeUnionPayload(
     var writer: Writer = .{ .bytes = output[0..required] };
     inline for (info.fields) |field| {
         if (active == @field(Tag, field.name)) {
-            try encodeInto(field.type, @field(value, field.name), &writer);
+            try encodeInto(field.type, &@field(value, field.name), &writer);
             return writer.index;
         }
     }
@@ -2068,6 +2072,53 @@ test "nested zero-width portable values use one canonical constant-time quotient
     );
     const decoded = try decodeExact(Values, &bytes);
     try std.testing.expect(eqlValue(Values, value, decoded));
+}
+
+test "canonical hashing preserves large bounded aggregate bytes without recursive copies" {
+    const Snapshot = struct {
+        slot: u8,
+        path: Text(256),
+        digest: Text(64),
+        contents: Text(16 * 1024),
+    };
+    const WorkingSet = struct {
+        documents: Vector(Snapshot, 9),
+        latest: ?Snapshot,
+        baseline_failed: bool,
+        mutation_count: u32,
+    };
+
+    var value: WorkingSet = .{
+        .documents = Vector(Snapshot, 9).empty(),
+        .latest = null,
+        .baseline_failed = true,
+        .mutation_count = 4,
+    };
+    try value.documents.push(.{
+        .slot = 2,
+        .path = try Text(256).fromSlice("src/methods.mjs"),
+        .digest = try Text(64).fromSlice(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+        .contents = try Text(16 * 1024).fromSlice("export const ready = true;\n"),
+    });
+    value.latest = (try value.documents.get(0)).?;
+
+    const encoded_length = try encodedSize(WorkingSet, value);
+    const encoded = try std.testing.allocator.alloc(u8, encoded_length);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqual(encoded_length, try encode(WorkingSet, value, encoded));
+
+    var expected_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    expected_hasher.update(encoded);
+    var expected: [32]u8 = undefined;
+    expected_hasher.final(&expected);
+
+    var actual_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    try updateCanonicalHash(WorkingSet, value, &actual_hasher);
+    var actual: [32]u8 = undefined;
+    actual_hasher.final(&actual);
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
 test "Research Digest bounds are representable without target-width values" {
