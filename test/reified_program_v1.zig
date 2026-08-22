@@ -48,6 +48,11 @@ const ProgramEffects = image_emit_v1.ProgramEffects(Direct, ProgramSchemas);
 const ProgramConstants = image_emit_v1.ProgramConstants(Reified, ProgramSchemas);
 const ProgramValues = image_emit_v1.ProgramValues(Reified, ProgramSchemas);
 const ProgramFunctions = image_emit_v1.ProgramFunctions(Reified, ProgramSchemas);
+const ProgramSegments = image_emit_v1.ProgramSegments(
+    Reified,
+    ProgramSchemas,
+    ProgramConstants,
+);
 
 test "direct specialization consumes the exact Reified Program" {
     try std.testing.expect(Direct.reified_program == Reified);
@@ -84,6 +89,12 @@ test "direct specialization consumes the exact Reified Program" {
     try std.testing.expectEqual(@as(usize, 4), ProgramConstants.bytes.len);
     try std.testing.expectEqual(@as(usize, 8), ProgramValues.bytes.len);
     try std.testing.expectEqual(@as(usize, 12), ProgramFunctions.bytes.len);
+    try std.testing.expectEqual(@as(usize, 42), ProgramSegments.bytes.len);
+    try std.testing.expectEqual(
+        @as(u32, 38),
+        std.mem.readInt(u32, ProgramSegments.bytes[4..8], .little),
+    );
+    try std.testing.expectEqual(@as(u8, 3), ProgramSegments.bytes[34]);
 }
 
 test "Reified Program preserves direct canonical State bytes" {

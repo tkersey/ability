@@ -1,6 +1,7 @@
 const dynamic_value_v1 = @import("dynamic_value_v1");
 const image_v1 = @import("image_v1");
 const portable_value = @import("portable_value");
+const reducer_semantics_v1 = @import("reducer_semantics_v1");
 const std = @import("std");
 
 const maximum_nodes = 1024;
@@ -290,6 +291,17 @@ pub fn ProgramSchemaSet(comptime Reified: type, comptime Definition: type) type 
         pub const effect_root_start: usize = 3;
         pub const value_root_start: usize = effect_root_start + effect_count * 2;
         pub const function_root_start: usize = value_root_start + value_count;
+
+        pub fn schemaIdForValueType(comptime value_type: anytype) u32 {
+            for (0..value_count) |dense_value| {
+                const source_value = Reified.semantic_canonicalization
+                    .value_dense_to_source[dense_value];
+                if (Reified.control.value_types[source_value].eql(value_type)) {
+                    return root_ids[value_root_start + dense_value];
+                }
+            }
+            @compileError("BEI1 schema roots omit a reachable value type");
+        }
     };
 }
 
@@ -570,6 +582,306 @@ pub fn ProgramFunctions(comptime Reified: type, comptime Schemas: type) type {
     return struct {
         pub const bytes = encoded;
     };
+}
+
+pub fn ProgramSegments(
+    comptime Reified: type,
+    comptime Schemas: type,
+    comptime Constants: type,
+) type {
+    const built = comptime blk: {
+        var bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes;
+        var cursor: usize = 4;
+        writeAt(
+            u32,
+            &bytes,
+            0,
+            Reified.semantic_canonicalization.block_count,
+        );
+        for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
+            const source_block_id = Reified.semantic_canonicalization
+                .block_dense_to_source[dense_block];
+            const block = Reified.control.blocks[source_block_id];
+            const record_start = cursor;
+            appendInt(u32, &bytes, &cursor, 0);
+            appendInt(u16, &bytes, &cursor, dense_block);
+            appendInt(
+                u16,
+                &bytes,
+                &cursor,
+                Reified.semantic_canonicalization.functionId(block.function_id),
+            );
+            appendInt(u8, &bytes, &cursor, blockRoleTag(block.role));
+            appendInt(u8, &bytes, &cursor, 0);
+            appendInt(u16, &bytes, &cursor, block.parameters.len);
+            appendInt(u32, &bytes, &cursor, block.instructions.len);
+            appendInt(
+                u64,
+                &bytes,
+                &cursor,
+                Reified.effective_block_costs[source_block_id],
+            );
+            for (block.parameters) |parameter| {
+                appendInt(
+                    u16,
+                    &bytes,
+                    &cursor,
+                    Reified.semantic_canonicalization.valueId(parameter),
+                );
+            }
+            for (block.instructions) |instruction| {
+                const instruction_start = cursor;
+                appendInt(u32, &bytes, &cursor, 0);
+                appendInt(
+                    u8,
+                    &bytes,
+                    &cursor,
+                    instructionKindTag(instruction.operation),
+                );
+                appendInt(u8, &bytes, &cursor, 0);
+                appendInt(
+                    u16,
+                    &bytes,
+                    &cursor,
+                    reducer_semantics_v1.wireTag(instruction.operation),
+                );
+                appendInt(
+                    u16,
+                    &bytes,
+                    &cursor,
+                    Reified.semantic_canonicalization.valueId(instruction.result),
+                );
+                appendInt(u16, &bytes, &cursor, instruction.operands.len);
+                appendInt(
+                    u32,
+                    &bytes,
+                    &cursor,
+                    instructionImmediate(instruction.operation, Constants),
+                );
+                for (instruction.operands) |operand| {
+                    appendInt(
+                        u16,
+                        &bytes,
+                        &cursor,
+                        Reified.semantic_canonicalization.valueId(operand),
+                    );
+                }
+                writeAt(
+                    u32,
+                    &bytes,
+                    instruction_start,
+                    cursor - instruction_start,
+                );
+            }
+            appendTerminator(
+                Reified,
+                Schemas,
+                block.terminator,
+                &bytes,
+                &cursor,
+            );
+            writeAt(u32, &bytes, record_start, cursor - record_start);
+        }
+        break :blk .{ .bytes = bytes, .length = cursor };
+    };
+    const exact = built.bytes[0..built.length].*;
+    return struct {
+        pub const bytes = exact;
+    };
+}
+
+fn appendTerminator(
+    comptime Reified: type,
+    comptime Schemas: type,
+    comptime terminator: anytype,
+    bytes: *[maximum_bytes]u8,
+    cursor: *usize,
+) void {
+    const start = cursor.*;
+    appendInt(u32, bytes, cursor, 0);
+    appendInt(
+        u8,
+        bytes,
+        cursor,
+        @intFromEnum(reducer_semantics_v1.wireTerminator(terminator)),
+    );
+    appendInt(u8, bytes, cursor, 0);
+    appendInt(u16, bytes, cursor, 0);
+    switch (terminator) {
+        .jump => |edge| appendEdge(Reified, edge, bytes, cursor),
+        .branch => |branch| {
+            appendInt(
+                u16,
+                bytes,
+                cursor,
+                Reified.semantic_canonicalization.valueId(branch.condition),
+            );
+            appendInt(u16, bytes, cursor, 0);
+            appendEdge(Reified, branch.then_edge, bytes, cursor);
+            appendEdge(Reified, branch.else_edge, bytes, cursor);
+        },
+        .@"suspend" => |suspension| {
+            appendInt(
+                u8,
+                bytes,
+                cursor,
+                @intFromEnum(reducer_semantics_v1.wireSuspension(
+                    suspension.kind,
+                )),
+            );
+            appendInt(u8, bytes, cursor, 0);
+            appendInt(u16, bytes, cursor, 0);
+            appendInt(
+                u32,
+                bytes,
+                cursor,
+                if (suspension.site_id) |site|
+                    Reified.residual_effects.source_to_residual[site] orelse
+                        std.math.maxInt(u32)
+                else
+                    std.math.maxInt(u32),
+            );
+            appendInt(
+                u16,
+                bytes,
+                cursor,
+                if (suspension.callee_function) |function|
+                    Reified.semantic_canonicalization.functionId(function)
+                else
+                    std.math.maxInt(u16),
+            );
+            appendInt(u16, bytes, cursor, suspension.request_values.len);
+            for (suspension.request_values) |value| {
+                appendInt(
+                    u16,
+                    bytes,
+                    cursor,
+                    Reified.semantic_canonicalization.valueId(value),
+                );
+            }
+            appendInt(u8, bytes, cursor, @intFromBool(suspension.callee != null));
+            appendInt(u8, bytes, cursor, 0);
+            appendInt(u16, bytes, cursor, 0);
+            if (suspension.callee) |edge| {
+                appendEdge(Reified, edge, bytes, cursor);
+            }
+            appendEdge(Reified, suspension.continuation, bytes, cursor);
+            appendInt(
+                u32,
+                bytes,
+                cursor,
+                if (suspension.resume_type) |resume_type|
+                    Schemas.schemaIdForValueType(resume_type)
+                else
+                    std.math.maxInt(u32),
+            );
+        },
+        .return_value => |value| {
+            appendInt(u8, bytes, cursor, @intFromBool(value != null));
+            appendInt(u8, bytes, cursor, 0);
+            appendInt(
+                u16,
+                bytes,
+                cursor,
+                if (value) |id|
+                    Reified.semantic_canonicalization.valueId(id)
+                else
+                    std.math.maxInt(u16),
+            );
+        },
+        .return_to_caller, .fail_value => |value| {
+            appendInt(
+                u16,
+                bytes,
+                cursor,
+                Reified.semantic_canonicalization.valueId(value),
+            );
+            appendInt(u16, bytes, cursor, 0);
+        },
+        .fail => |failure| appendInt(u32, bytes, cursor, failure),
+    }
+    writeAt(u32, bytes, start, cursor.* - start);
+}
+
+fn appendEdge(
+    comptime Reified: type,
+    comptime edge: anytype,
+    bytes: *[maximum_bytes]u8,
+    cursor: *usize,
+) void {
+    appendInt(
+        u16,
+        bytes,
+        cursor,
+        Reified.semantic_canonicalization.blockId(edge.target),
+    );
+    appendInt(u16, bytes, cursor, edge.arguments.len);
+    for (edge.arguments) |argument| {
+        switch (argument) {
+            .value => |value| {
+                appendInt(u8, bytes, cursor, 0);
+                appendInt(u8, bytes, cursor, 0);
+                appendInt(
+                    u16,
+                    bytes,
+                    cursor,
+                    Reified.semantic_canonicalization.valueId(value),
+                );
+            },
+            .@"resume" => {
+                appendInt(u8, bytes, cursor, 1);
+                appendInt(u8, bytes, cursor, 0);
+                appendInt(u16, bytes, cursor, std.math.maxInt(u16));
+            },
+        }
+    }
+}
+
+fn instructionKindTag(comptime operation: anytype) u8 {
+    return switch (reducer_semantics_v1.canonicalInstructionKind(operation)) {
+        .constant => 0,
+        .copy => 1,
+        .compare_eq_zero => 2,
+        .pure => 3,
+        .call => 4,
+    };
+}
+
+fn instructionImmediate(comptime operation: anytype, comptime Constants: type) u32 {
+    return switch (operation) {
+        .constant => |source| Constants.source_to_canonical[source] orelse
+            unreachable,
+        .product_extract,
+        .product_replace,
+        .sum_construct,
+        .sum_tag_is,
+        .sum_extract,
+        => |index| index,
+        else => 0,
+    };
+}
+
+fn blockRoleTag(comptime role: anytype) u8 {
+    return switch (role) {
+        .segment => 0,
+        .loop_header => 1,
+        .call_return => 2,
+        .after_handler => 3,
+        .terminal_handoff => 4,
+    };
+}
+
+fn appendInt(
+    comptime T: type,
+    bytes: *[maximum_bytes]u8,
+    cursor: *usize,
+    value: anytype,
+) void {
+    if (cursor.* > bytes.len - @sizeOf(T)) {
+        @compileError("BEI1 section exceeds implementation limit");
+    }
+    writeAt(T, bytes, cursor.*, value);
+    cursor.* += @sizeOf(T);
 }
 
 fn integerKind(comptime T: type) dynamic_value_v1.Kind {
