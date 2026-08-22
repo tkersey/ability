@@ -11,6 +11,7 @@ const CoreModules = struct {
     effect_v2: *std.Build.Module,
     image_v1: *std.Build.Module,
     image_emit_v1: *std.Build.Module,
+    kernel_v1: *std.Build.Module,
     machine: *std.Build.Module,
     portable_value: *std.Build.Module,
     program_v2: *std.Build.Module,
@@ -28,6 +29,7 @@ const CoreModuleId = enum {
     effect_v2,
     image_v1,
     image_emit_v1,
+    kernel_v1,
     machine,
     portable_value,
     program_v2,
@@ -52,6 +54,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .effect_v2 => "src/effect_v2.zig",
         .image_v1 => "src/image_v1.zig",
         .image_emit_v1 => "src/image_emit_v1.zig",
+        .kernel_v1 => "src/kernel_v1.zig",
         .machine => "src/machine.zig",
         .portable_value => "src/portable_value.zig",
         .program_v2 => "src/program_v2.zig",
@@ -64,7 +67,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
         .compiler, .machine, .reducer_semantics_v1 => .direct_runtime_semantics,
-        .dynamic_value_v1, .image_v1 => .image_runtime_semantics,
+        .dynamic_value_v1, .image_v1, .kernel_v1 => .image_runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
@@ -384,6 +387,13 @@ fn addCoreModules(
         .optimize = optimize,
     });
     image_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    const kernel_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.kernel_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    kernel_v1.addImport("image_v1", image_v1);
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
         .target = target,
@@ -458,6 +468,7 @@ fn addCoreModules(
         .effect_v2 = effect_v2,
         .image_v1 = image_v1,
         .image_emit_v1 = image_emit_v1,
+        .kernel_v1 = kernel_v1,
         .machine = machine,
         .portable_value = portable_value,
         .program_v2 = program_v2,
@@ -473,6 +484,7 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("driver", core.driver);
     module.addImport("effect_v2", core.effect_v2);
     module.addImport("image_v1", core.image_v1);
+    module.addImport("kernel_v1", core.kernel_v1);
     module.addImport("machine", core.machine);
     module.addImport("portable_value", core.portable_value);
     module.addImport("program_v2", core.program_v2);
@@ -751,6 +763,7 @@ pub fn build(b: *std.Build) void {
     reified_program_test.addImport("compiler", host_core.compiler);
     reified_program_test.addImport("image_emit_v1", host_core.image_emit_v1);
     reified_program_test.addImport("image_v1", host_core.image_v1);
+    reified_program_test.addImport("kernel_v1", host_core.kernel_v1);
     reified_program_test.addImport("machine", host_core.machine);
     const reducer_semantics_test = b.createModule(.{
         .root_source_file = b.path("test/reducer_semantics_v1.zig"),
@@ -1120,6 +1133,7 @@ pub fn build(b: *std.Build) void {
                 "source_module effect_v2 {s} {s}\n" ++
                 "source_module image_v1 {s} {s}\n" ++
                 "source_module image_emit_v1 {s} {s}\n" ++
+                "source_module kernel_v1 {s} {s}\n" ++
                 "source_module machine {s} {s}\n" ++
                 "source_module portable_value {s} {s}\n" ++
                 "source_module program_v2 {s} {s}\n" ++
@@ -1144,6 +1158,8 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.image_v1),
                 @tagName(coreModuleRole(.image_emit_v1)),
                 coreModulePath(.image_emit_v1),
+                @tagName(coreModuleRole(.kernel_v1)),
+                coreModulePath(.kernel_v1),
                 @tagName(coreModuleRole(.machine)),
                 coreModulePath(.machine),
                 @tagName(coreModuleRole(.portable_value)),

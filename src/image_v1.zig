@@ -120,6 +120,8 @@ pub const Catalogs = struct {
     initial_constructor_id: u32,
     values_section: []const u8,
     functions_section: []const u8,
+    entry_parameter_count: u16,
+    entry_parameter_value_id: u16,
 };
 
 pub const ValidatedImage = struct {
@@ -275,6 +277,8 @@ pub fn validateCatalogs(
         .initial_constructor_id = roots.initial_constructor_id,
         .values_section = envelope.section(.values),
         .functions_section = envelope.section(.functions),
+        .entry_parameter_count = roots.entry_parameter_count,
+        .entry_parameter_value_id = roots.entry_parameter_value_id,
     };
 }
 

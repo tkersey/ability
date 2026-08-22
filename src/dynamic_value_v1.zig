@@ -157,6 +157,22 @@ pub fn validateValue(
     bytes: []const u8,
     task_storage: []ValueTask,
 ) Error!void {
+    const consumed = try validateValuePrefix(
+        table,
+        schema_id,
+        bytes,
+        task_storage,
+    );
+    if (consumed != bytes.len) return error.TrailingBytes;
+}
+
+/// Validate one canonical value prefix and return its exact consumed length.
+pub fn validateValuePrefix(
+    table: Table,
+    schema_id: u32,
+    bytes: []const u8,
+    task_storage: []ValueTask,
+) Error!usize {
     if (schema_id >= table.nodes.len) return error.InvalidSchema;
     if (task_storage.len == 0) return error.LimitExceeded;
     var task_count: usize = 1;
@@ -267,7 +283,7 @@ pub fn validateValue(
             },
         }
     }
-    if (cursor != bytes.len) return error.TrailingBytes;
+    return cursor;
 }
 
 /// Reconstruct the exact `boundary-portable-schema-v2` digest without Zig

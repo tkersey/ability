@@ -154,6 +154,26 @@ test "Reified Program preserves direct canonical State bytes" {
     );
     defer std.testing.allocator.free(compiled_bytes);
     try std.testing.expectEqualSlices(u8, direct_bytes, compiled_bytes);
+
+    const image_v1 = @import("image_v1");
+    const kernel_v1 = @import("kernel_v1");
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const validated = try image_v1.validateImage(&Image.bytes, &workspace);
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 29, .little);
+    var kernel_state: [4096]u8 = undefined;
+    const kernel_length = try kernel_v1.initial(
+        validated,
+        &initial_args,
+        &kernel_state,
+        &workspace,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        compiled_bytes,
+        kernel_state[0..kernel_length],
+    );
+    try kernel_v1.validateState(validated, compiled_bytes, &workspace);
 }
 
 test "BEI1 catalog validation fails closed on forged roots" {
