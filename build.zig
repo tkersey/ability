@@ -1064,6 +1064,18 @@ pub fn build(b: *std.Build) void {
     kernel_wasm_executable.rdynamic = true;
     kernel_wasm_executable.export_memory = true;
     kernel_wasm_executable.max_memory = 128 << 20;
+    const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const kernel_wasm_reproducible = b.addExecutable(.{
+        .name = "boundary-kernel-v1-reproducible",
+        .root_module = wasm_repro_core.kernel_wasm_v1,
+    });
+    kernel_wasm_reproducible.entry = .disabled;
+    kernel_wasm_reproducible.rdynamic = true;
+    kernel_wasm_reproducible.export_memory = true;
+    kernel_wasm_reproducible.max_memory = 128 << 20;
+    const compare_kernel_wasm = b.addSystemCommand(&.{ "cmp", "-s" });
+    compare_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
+    compare_kernel_wasm.addFileArg(kernel_wasm_reproducible.getEmittedBin());
     const kernel_vector_module = b.createModule(.{
         .root_source_file = b.path("test/kernel_wasm_vector.zig"),
         .target = b.graph.host,
@@ -1091,6 +1103,7 @@ pub fn build(b: *std.Build) void {
         "Check fixed import-free Boundary Kernel WASM ABI and profile.",
     );
     kernel_wasm_step.dependOn(&run_kernel_wasm.step);
+    kernel_wasm_step.dependOn(&compare_kernel_wasm.step);
     const parity_wasm = programTestModule(
         b,
         wasm_core,

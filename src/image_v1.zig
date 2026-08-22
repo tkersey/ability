@@ -256,6 +256,11 @@ pub fn validateCatalogs(
         &workspace.schema_hash_tasks,
     );
     const values = try validateValues(envelope.section(.values), schemas);
+    if (envelope.header.maximum_kernel_scratch_bytes !=
+        try deriveKernelScratch(schemas, values))
+    {
+        return error.ScratchRequirementMismatch;
+    }
     if (roots.entry_parameter_count == 1) {
         if (roots.entry_parameter_value_id >= values.count or
             values.schemaId(roots.entry_parameter_value_id) !=
@@ -608,6 +613,43 @@ fn validateValues(
             return error.InvalidValue;
     }
     return .{ .bytes = bytes, .count = count };
+}
+
+fn deriveKernelScratch(
+    schemas: dynamic_value_v1.Table,
+    values: Values,
+) Error!u64 {
+    var value_bytes: u64 = 0;
+    for (0..values.count) |value| {
+        const schema_id = values.schemaId(@intCast(value));
+        const node = schemas.node(schema_id) catch return error.InvalidSchema;
+        value_bytes = std.math.add(
+            u64,
+            value_bytes,
+            node.maximum_encoded_size,
+        ) catch return error.LengthOverflow;
+    }
+    const value_metadata = std.math.mul(u64, values.count, 16) catch
+        return error.LengthOverflow;
+    const schema_stack = std.math.mul(u64, schemas.count(), 16) catch
+        return error.LengthOverflow;
+    var maximum_single: u64 = 0;
+    for (schemas.nodes) |node| {
+        maximum_single = @max(maximum_single, node.maximum_encoded_size);
+    }
+    const framing = std.math.add(
+        u64,
+        std.math.mul(u64, maximum_single, 3) catch
+            return error.LengthOverflow,
+        176,
+    ) catch return error.LengthOverflow;
+    return std.math.add(
+        u64,
+        std.math.add(u64, value_bytes, value_metadata) catch
+            return error.LengthOverflow,
+        std.math.add(u64, schema_stack, framing) catch
+            return error.LengthOverflow,
+    ) catch error.LengthOverflow;
 }
 
 fn validateFunctions(

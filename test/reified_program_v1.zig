@@ -175,6 +175,18 @@ test "Reified Program preserves direct canonical State bytes" {
         compiled_bytes,
         kernel_typed_bytes,
     );
+    const direct_from_kernel = try ProgramMachine.decodeState(
+        std.testing.allocator,
+        kernel_typed_bytes,
+    );
+    defer ProgramMachine.deinitState(direct_from_kernel);
+    try ProgramMachine.validateState(direct_from_kernel);
+    const kernel_from_direct = try KernelMachine.decodeState(
+        std.testing.allocator,
+        compiled_bytes,
+    );
+    defer KernelMachine.deinitState(kernel_from_direct);
+    try KernelMachine.validateState(kernel_from_direct);
     var typed_kernel_fuel: u64 = 8;
     const typed_kernel_done = switch (try KernelMachine.step(
         kernel_typed,
@@ -291,6 +303,17 @@ test "BEI1 validation recomputes the Program semantic digest" {
     var workspace: image_v1.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.ProgramSemanticDigestMismatch,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
+test "BEI1 validation recomputes kernel scratch requirements" {
+    const image_v1 = @import("image_v1");
+    var malformed = Image.bytes;
+    malformed[120] ^= 0x01;
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.ScratchRequirementMismatch,
         image_v1.validateImage(&malformed, &workspace),
     );
 }
