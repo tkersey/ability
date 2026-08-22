@@ -1,5 +1,6 @@
 const cir = @import("control_ir");
 const compiler = @import("compiler");
+const image_emit_v1 = @import("image_emit_v1");
 const machine = @import("machine");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -40,6 +41,8 @@ const options: machine.Options = .{
 };
 const DirectMachine = machine.Machine(Direct, options);
 const ProgramMachine = Program.compile(options);
+const ProgramSchemas = image_emit_v1.ProgramSchemaSet(Reified, Direct);
+const ProgramRoots = image_emit_v1.ProgramRoots(Reified, ProgramSchemas);
 
 test "direct specialization consumes the exact Reified Program" {
     try std.testing.expect(Direct.reified_program == Reified);
@@ -60,6 +63,16 @@ test "direct specialization consumes the exact Reified Program" {
         Program.rnf.constructor_count,
     );
     try std.testing.expectEqual(@as(u32, 0), Reified.initial_constructor_id);
+    try std.testing.expectEqual(@as(u32, 2), ProgramSchemas.node_count);
+    try std.testing.expectEqual(
+        ProgramSchemas.root_ids[0],
+        ProgramSchemas.root_ids[1],
+    );
+    try std.testing.expectEqual(@as(usize, 28), ProgramRoots.bytes.len);
+    try std.testing.expectEqual(
+        Reified.initial_constructor_id,
+        std.mem.readInt(u32, ProgramRoots.bytes[16..20], .little),
+    );
 }
 
 test "Reified Program preserves direct canonical State bytes" {

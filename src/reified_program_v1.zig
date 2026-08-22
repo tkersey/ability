@@ -30,6 +30,24 @@ pub fn Program(
             generated_operation_count_value;
         pub const semantic_digest = semantic_digest_value;
         pub const contract_bytes = semantic_digest[0..];
+
+        pub fn portableType(comptime value_type: anytype) type {
+            return switch (value_type) {
+                .scalar => |scalar| switch (scalar) {
+                    .unit => void,
+                    .boolean => bool,
+                    .i8 => i8,
+                    .i16 => i16,
+                    .i32 => i32,
+                    .i64 => i64,
+                    .u8 => u8,
+                    .u16 => u16,
+                    .u32 => u32,
+                    .u64 => u64,
+                },
+                .schema => |index| Body.schema_types[index],
+            };
+        }
     };
 }
 
@@ -50,6 +68,7 @@ pub fn require(comptime Reified: type) void {
         "generated_reducer_operation_count",
         "semantic_digest",
         "contract_bytes",
+        "portableType",
     }) |name| {
         if (!@hasDecl(Reified, name)) {
             @compileError("Boundary Reified Program is missing " ++ name);

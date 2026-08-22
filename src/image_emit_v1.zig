@@ -236,6 +236,113 @@ pub fn SchemaSet(comptime RootTypes: anytype) type {
     };
 }
 
+/// Emit all schemas in the normative BEI1 root traversal order for one
+/// Reified Program and its shared direct definition contract.
+pub fn ProgramSchemaSet(comptime Reified: type, comptime Definition: type) type {
+    const effect_count = Definition.EffectRow.operation_site_count;
+    const value_count = Reified.semantic_canonicalization.value_count;
+    const function_count = Reified.semantic_canonicalization.function_count;
+    const root_count = 3 + effect_count * 2 + value_count + function_count;
+    const roots = comptime blk: {
+        var result: [root_count]type = undefined;
+        var index: usize = 0;
+        result[index] = Reified.Body.InitialArgs;
+        index += 1;
+        result[index] = Reified.Body.Result;
+        index += 1;
+        result[index] = Reified.Body.Failure;
+        index += 1;
+        for (0..effect_count) |ordinal| {
+            const Site = Definition.EffectRow.site(ordinal);
+            result[index] = Site.Payload;
+            index += 1;
+            result[index] = Site.Resume;
+            index += 1;
+        }
+        for (0..value_count) |dense_value| {
+            const source_value = Reified.semantic_canonicalization
+                .value_dense_to_source[dense_value];
+            result[index] = Reified.portableType(
+                Reified.control.value_types[source_value],
+            );
+            index += 1;
+        }
+        for (0..function_count) |dense_function| {
+            const source_function = Reified.semantic_canonicalization
+                .function_dense_to_source[dense_function];
+            const result_type = if (Reified.control.functions.len == 0)
+                Reified.control.result_type
+            else
+                Reified.control.functions[source_function].result_type;
+            result[index] = Reified.portableType(result_type);
+            index += 1;
+        }
+        break :blk result;
+    };
+    const Set = SchemaSet(roots);
+    return struct {
+        pub const bytes = Set.bytes;
+        pub const root_ids = Set.root_ids;
+        pub const node_count = Set.node_count;
+        pub const initial_args_root_index: usize = 0;
+        pub const result_root_index: usize = 1;
+        pub const failure_root_index: usize = 2;
+        pub const effect_root_start: usize = 3;
+        pub const value_root_start: usize = effect_root_start + effect_count * 2;
+        pub const function_root_start: usize = value_root_start + value_count;
+    };
+}
+
+/// Emit the exact BEI1 roots section for one Reified Program.
+pub fn ProgramRoots(comptime Reified: type, comptime Schemas: type) type {
+    const entry = Reified.control.blocks[Reified.control.entry];
+    const encoded = comptime blk: {
+        var bytes: [28]u8 = [_]u8{0} ** 28;
+        writeAt(
+            u32,
+            &bytes,
+            0,
+            Schemas.root_ids[Schemas.initial_args_root_index],
+        );
+        writeAt(
+            u32,
+            &bytes,
+            4,
+            Schemas.root_ids[Schemas.result_root_index],
+        );
+        writeAt(
+            u32,
+            &bytes,
+            8,
+            Schemas.root_ids[Schemas.failure_root_index],
+        );
+        writeAt(
+            u16,
+            &bytes,
+            12,
+            Reified.semantic_canonicalization.blockId(Reified.control.entry),
+        );
+        writeAt(u16, &bytes, 14, entry.parameters.len);
+        writeAt(u32, &bytes, 16, Reified.initial_constructor_id);
+        writeAt(u16, &bytes, 20, 0);
+        writeAt(u16, &bytes, 22, 0);
+        writeAt(
+            u16,
+            &bytes,
+            24,
+            if (entry.parameters.len == 0)
+                std.math.maxInt(u16)
+            else
+                Reified.semantic_canonicalization.valueId(entry.parameters[0]),
+        );
+        writeAt(u16, &bytes, 26, 0);
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
+    };
+}
+
 fn integerKind(comptime T: type) dynamic_value_v1.Kind {
     return if (T == i8)
         .i8

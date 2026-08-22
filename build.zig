@@ -745,6 +745,7 @@ pub fn build(b: *std.Build) void {
         false,
     );
     reified_program_test.addImport("compiler", host_core.compiler);
+    reified_program_test.addImport("image_emit_v1", host_core.image_emit_v1);
     reified_program_test.addImport("machine", host_core.machine);
     const reducer_semantics_test = b.createModule(.{
         .root_source_file = b.path("test/reducer_semantics_v1.zig"),
