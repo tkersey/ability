@@ -2253,6 +2253,17 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         program,
         normal_form,
     );
+    const effective_block_costs = comptime blk: {
+        var costs: [program.blocks.len]u64 = undefined;
+        for (program.blocks, 0..) |_, block_id| {
+            costs[block_id] = minimumSourceBlockCost(
+                Body,
+                program,
+                @intCast(block_id),
+            );
+        }
+        break :blk costs;
+    };
     const generated_semantic_digest = comptime compilerSemanticDigest(
         Body,
         program,
@@ -2272,6 +2283,7 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         invariant_constants,
         normal_form,
         initial_constructor_id,
+        effective_block_costs,
         generated_operation_count,
         generated_semantic_digest,
     );
@@ -3037,11 +3049,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
         fn baseCostForConstructor(comptime constructor_id: usize) u64 {
             const constructor = comptime normal_form.constructors[constructor_id];
             if (constructor.kind == .await_effect) return 1;
-            return minimumSourceBlockCost(
-                Body,
-                program,
-                constructor.source_block,
-            );
+            return Reified.effective_block_costs[constructor.source_block];
         }
 
         fn preflightCostConstructor(

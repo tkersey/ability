@@ -425,12 +425,17 @@ pub fn ProgramEffects(
 }
 
 pub fn ProgramConstants(comptime Reified: type, comptime Schemas: type) type {
+    const source_constant_count = if (@hasDecl(Reified.Body, "constants"))
+        Reified.Body.constants.len
+    else
+        0;
     const built = comptime blk: {
         var bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes;
         var offsets: [Reified.compiler_limits.maximum_values]u32 = undefined;
         var lengths: [Reified.compiler_limits.maximum_values]u32 = undefined;
         var schemas: [Reified.compiler_limits.maximum_values]u32 = undefined;
         var count: usize = 0;
+        var source_to_canonical = [_]?u32{null} ** source_constant_count;
         var cursor: usize = 4;
         for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
             const source_block = Reified.semantic_canonicalization
@@ -460,7 +465,7 @@ pub fn ProgramConstants(comptime Reified: type, comptime Schemas: type) type {
                     &canonical,
                 ) catch unreachable;
                 std.debug.assert(encoded_length == value_length);
-                var duplicate = false;
+                var canonical_id: ?u32 = null;
                 for (0..count) |existing| {
                     if (schemas[existing] != schema_id or
                         lengths[existing] != value_length)
@@ -473,11 +478,14 @@ pub fn ProgramConstants(comptime Reified: type, comptime Schemas: type) type {
                         bytes[offset .. offset + value_length],
                         canonical[0..value_length],
                     )) {
-                        duplicate = true;
+                        canonical_id = @intCast(existing);
                         break;
                     }
                 }
-                if (duplicate) continue;
+                if (canonical_id) |id| {
+                    source_to_canonical[constant_index] = id;
+                    continue;
+                }
                 if (cursor + 8 + value_length > bytes.len) {
                     @compileError("BEI1 constants exceed implementation limit");
                 }
@@ -488,18 +496,25 @@ pub fn ProgramConstants(comptime Reified: type, comptime Schemas: type) type {
                 offsets[count] = @intCast(cursor);
                 lengths[count] = @intCast(value_length);
                 schemas[count] = schema_id;
+                source_to_canonical[constant_index] = @intCast(count);
                 @memcpy(bytes[cursor..][0..value_length], canonical[0..value_length]);
                 cursor += value_length;
                 count += 1;
             }
         }
         writeAt(u32, &bytes, 0, count);
-        break :blk .{ .bytes = bytes, .length = cursor, .count = count };
+        break :blk .{
+            .bytes = bytes,
+            .length = cursor,
+            .count = count,
+            .source_to_canonical = source_to_canonical,
+        };
     };
     const exact = built.bytes[0..built.length].*;
     return struct {
         pub const bytes = exact;
         pub const constant_count: u32 = @intCast(built.count);
+        pub const source_to_canonical = built.source_to_canonical;
     };
 }
 

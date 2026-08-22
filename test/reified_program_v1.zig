@@ -68,6 +68,7 @@ test "direct specialization consumes the exact Reified Program" {
         Program.rnf.constructor_count,
     );
     try std.testing.expectEqual(@as(u32, 0), Reified.initial_constructor_id);
+    try std.testing.expectEqual(@as(u64, 1), Reified.effective_block_costs[0]);
     try std.testing.expectEqual(@as(u32, 2), ProgramSchemas.node_count);
     try std.testing.expectEqual(
         ProgramSchemas.root_ids[0],
