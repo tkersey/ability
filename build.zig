@@ -778,6 +778,11 @@ pub fn build(b: *std.Build) void {
         "portable_value",
         host_core.portable_value,
     );
+    constructor_invariants.addImport("compiler", host_core.compiler);
+    constructor_invariants.addImport(
+        "image_emit_v1",
+        host_core.image_emit_v1,
+    );
     const recursion = programTestModule(
         b,
         host_core,

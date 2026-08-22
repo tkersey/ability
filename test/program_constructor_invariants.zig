@@ -1,4 +1,6 @@
 const cir = @import("control_ir");
+const compiler = @import("compiler");
+const image_emit_v1 = @import("image_emit_v1");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -6,6 +8,34 @@ const std = @import("std");
 const state_header_length: usize = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
 const frame_header_length: usize = 4 + 4;
 const first_environment_offset = state_header_length + frame_header_length;
+
+test "BEI1 emits the admitted constructor invariant families" {
+    inline for (.{
+        SumBody,
+        OptionalBody,
+        DerivedBody,
+        ClosedExpressionBody,
+        ConstantAlgebraicBody,
+        ConstantOptionalBody,
+        WideProductBody,
+        AggregateBranchBody,
+        LiveThroughBody,
+        ProductExtractBody,
+        SumExtractBody,
+        VectorLengthBody,
+        BooleanConstantBody,
+        LocalTextBody,
+    }) |Body| {
+        const Reified = compiler.ReifiedFor(Body.control_ir.label, Body);
+        const Direct = compiler.DirectDefinitionFor(Reified);
+        const Schemas = image_emit_v1.ProgramSchemaSet(Reified, Direct);
+        const Constructors = image_emit_v1.ProgramConstructors(
+            Reified,
+            Schemas,
+        );
+        try std.testing.expect(Constructors.bytes.len > 4);
+    }
+}
 
 const Choice = union(enum) {
     left: u32,

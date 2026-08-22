@@ -690,6 +690,378 @@ pub fn ProgramSegments(
     };
 }
 
+pub fn ProgramEntryTransitions(comptime Reified: type) type {
+    const count = Reified.rnf_value.entry_transition_count;
+    const Record = struct {
+        source: u16,
+        edge: u8,
+        target: u16,
+        constructor: u32,
+    };
+    const records = comptime blk: {
+        var result: [count]Record = undefined;
+        for (Reified.rnf_value.entryTransitionSlice(), 0..) |transition, index| {
+            result[index] = .{
+                .source = Reified.semantic_canonicalization.blockId(
+                    transition.source_block,
+                ),
+                .edge = @intFromEnum(reducer_semantics_v1.wireIncomingEdge(
+                    transition.edge_kind,
+                )),
+                .target = Reified.semantic_canonicalization.blockId(
+                    transition.target_block,
+                ),
+                .constructor = transition.constructor_id,
+            };
+        }
+        if (count > 1) {
+            for (1..count) |index| {
+                var position = index;
+                while (position > 0 and transitionLess(
+                    result[position],
+                    result[position - 1],
+                )) : (position -= 1) {
+                    const previous = result[position - 1];
+                    result[position - 1] = result[position];
+                    result[position] = previous;
+                }
+            }
+        }
+        break :blk result;
+    };
+    const encoded = comptime blk: {
+        var bytes: [4 + count * 12]u8 = [_]u8{0} ** (4 + count * 12);
+        writeAt(u32, &bytes, 0, count);
+        for (records, 0..) |record, index| {
+            const offset = 4 + index * 12;
+            writeAt(u16, &bytes, offset, record.source);
+            writeAt(u8, &bytes, offset + 2, record.edge);
+            writeAt(u16, &bytes, offset + 4, record.target);
+            writeAt(u32, &bytes, offset + 8, record.constructor);
+        }
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
+    };
+}
+
+pub fn ProgramConstructors(comptime Reified: type, comptime Schemas: type) type {
+    const built = comptime blk: {
+        var bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes;
+        var cursor: usize = 4;
+        writeAt(u32, &bytes, 0, Reified.rnf_value.constructor_count);
+        for (Reified.rnf_value.constructorSlice()) |constructor| {
+            const start = cursor;
+            appendInt(u32, &bytes, &cursor, 0);
+            appendInt(u32, &bytes, &cursor, constructor.id);
+            appendInt(
+                u8,
+                &bytes,
+                &cursor,
+                @intFromEnum(reducer_semantics_v1.wireConstructorKind(
+                    constructor.kind,
+                )),
+            );
+            appendInt(
+                u8,
+                &bytes,
+                &cursor,
+                @intFromEnum(reducer_semantics_v1.wireConstructorOrigin(
+                    constructor.origin,
+                )),
+            );
+            appendInt(
+                u16,
+                &bytes,
+                &cursor,
+                @intFromBool(constructor.has_activation_context),
+            );
+            appendInt(
+                u16,
+                &bytes,
+                &cursor,
+                Reified.semantic_canonicalization.blockId(
+                    constructor.source_block,
+                ),
+            );
+            appendInt(
+                u16,
+                &bytes,
+                &cursor,
+                if (constructor.resume_target) |target|
+                    Reified.semantic_canonicalization.blockId(target)
+                else
+                    std.math.maxInt(u16),
+            );
+            appendInt(u16, &bytes, &cursor, constructor.activation_len);
+            appendInt(u16, &bytes, &cursor, constructor.environment_len);
+            appendInt(u16, &bytes, &cursor, constructor.invariant_len);
+            appendInt(u16, &bytes, &cursor, 0);
+            for (constructor.activationFields()) |field| {
+                appendEnvironmentField(Reified, Schemas, field, &bytes, &cursor);
+            }
+            for (constructor.environmentFields()) |field| {
+                appendEnvironmentField(Reified, Schemas, field, &bytes, &cursor);
+            }
+            for (constructor.invariantTerms()) |invariant| {
+                appendInvariant(Reified, invariant, &bytes, &cursor);
+            }
+            writeAt(u32, &bytes, start, cursor - start);
+        }
+        break :blk .{ .bytes = bytes, .length = cursor };
+    };
+    const exact = built.bytes[0..built.length].*;
+    return struct {
+        pub const bytes = exact;
+    };
+}
+
+fn appendEnvironmentField(
+    comptime Reified: type,
+    comptime Schemas: type,
+    comptime field: anytype,
+    bytes: *[maximum_bytes]u8,
+    cursor: *usize,
+) void {
+    const dense_value = Reified.semantic_canonicalization.valueId(field.value);
+    appendInt(u16, bytes, cursor, dense_value);
+    appendInt(u16, bytes, cursor, 0);
+    appendInt(
+        u32,
+        bytes,
+        cursor,
+        Schemas.root_ids[Schemas.value_root_start + dense_value],
+    );
+}
+
+fn appendInvariant(
+    comptime Reified: type,
+    comptime invariant: anytype,
+    bytes: *[maximum_bytes]u8,
+    cursor: *usize,
+) void {
+    const start = cursor.*;
+    appendInt(u32, bytes, cursor, 0);
+    appendInt(
+        u8,
+        bytes,
+        cursor,
+        @intFromEnum(reducer_semantics_v1.wireInvariant(invariant)),
+    );
+    appendInt(u8, bytes, cursor, 0);
+    appendInt(u16, bytes, cursor, 0);
+    switch (invariant) {
+        .boolean => |term| {
+            appendValueId(Reified, term.value, bytes, cursor);
+            appendInt(u8, bytes, cursor, @intFromBool(term.expected));
+            appendInt(u8, bytes, cursor, 0);
+        },
+        .boolean_copy => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.source, bytes, cursor);
+        },
+        .value_copy => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.source, bytes, cursor);
+        },
+        .boolean_not => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.operand, bytes, cursor);
+        },
+        .boolean_binary => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.left, bytes, cursor);
+            appendValueId(Reified, term.right, bytes, cursor);
+            appendInt(u8, bytes, cursor, booleanBinaryTag(term.operation));
+            appendInt(u8, bytes, cursor, 0);
+        },
+        .boolean_select, .value_select => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.condition, bytes, cursor);
+            appendValueId(Reified, term.then_value, bytes, cursor);
+            appendValueId(Reified, term.else_value, bytes, cursor);
+        },
+        .value_constant => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendInt(u16, bytes, cursor, 0);
+            appendInvariantValue(term.contents, bytes, cursor);
+        },
+        .instruction_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.definition, bytes, cursor);
+            appendInt(u16, bytes, cursor, term.operand_count);
+            appendInt(u16, bytes, cursor, 0);
+            for (term.operands[0..term.operand_count]) |operand| {
+                appendValueId(Reified, operand, bytes, cursor);
+            }
+        },
+        .product_extract_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.product, bytes, cursor);
+            appendInt(u16, bytes, cursor, term.field_index);
+            appendInt(u16, bytes, cursor, 0);
+        },
+        .sum_extract_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.sum, bytes, cursor);
+            appendInt(u16, bytes, cursor, term.case_index);
+            appendInt(u16, bytes, cursor, 0);
+        },
+        .bounded_length_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.bounded, bytes, cursor);
+        },
+        .integer_unary_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.operand, bytes, cursor);
+            appendInt(u8, bytes, cursor, integerUnaryTag(term.operation));
+            appendInt(u8, bytes, cursor, scalarSchemaTag(term.scalar_type));
+            appendInt(u16, bytes, cursor, 0);
+        },
+        .integer_binary_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.left, bytes, cursor);
+            appendValueId(Reified, term.right, bytes, cursor);
+            appendInt(u8, bytes, cursor, integerBinaryTag(term.operation));
+            appendInt(u8, bytes, cursor, scalarSchemaTag(term.scalar_type));
+        },
+        .integer_convert_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.operand, bytes, cursor);
+            appendInt(u8, bytes, cursor, scalarSchemaTag(term.scalar_type));
+            appendInt(u8, bytes, cursor, 0);
+            appendInt(u16, bytes, cursor, 0);
+        },
+        .integer_zero => |term| {
+            appendValueId(Reified, term.value, bytes, cursor);
+            appendInt(u8, bytes, cursor, @intFromBool(term.equal));
+            appendInt(u8, bytes, cursor, 0);
+        },
+        .integer_zero_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.value, bytes, cursor);
+        },
+        .integer_relation => |term| {
+            appendValueId(Reified, term.left, bytes, cursor);
+            appendValueId(Reified, term.right, bytes, cursor);
+            appendInt(u8, bytes, cursor, integerRelationTag(term.relation));
+            appendInt(u8, bytes, cursor, @intFromBool(term.expected));
+            appendInt(u16, bytes, cursor, 0);
+        },
+        .integer_relation_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.left, bytes, cursor);
+            appendValueId(Reified, term.right, bytes, cursor);
+            appendInt(u8, bytes, cursor, integerRelationTag(term.relation));
+            appendInt(u8, bytes, cursor, 0);
+        },
+        .sum_case => |term| {
+            appendValueId(Reified, term.value, bytes, cursor);
+            appendInt(u16, bytes, cursor, term.case_index);
+            appendInt(u8, bytes, cursor, @intFromBool(term.equal));
+            appendInt(u8, bytes, cursor, 0);
+            appendInt(u16, bytes, cursor, 0);
+        },
+        .sum_case_result => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.value, bytes, cursor);
+            appendInt(u16, bytes, cursor, term.case_index);
+            appendInt(u16, bytes, cursor, 0);
+        },
+    }
+    writeAt(u32, bytes, start, cursor.* - start);
+}
+
+fn appendValueId(
+    comptime Reified: type,
+    value: u16,
+    bytes: *[maximum_bytes]u8,
+    cursor: *usize,
+) void {
+    appendInt(
+        u16,
+        bytes,
+        cursor,
+        Reified.semantic_canonicalization.valueId(value),
+    );
+}
+
+fn appendInvariantValue(
+    comptime value: anytype,
+    bytes: *[maximum_bytes]u8,
+    cursor: *usize,
+) void {
+    const payload: u64 = switch (value) {
+        .boolean => |item| @intFromBool(item),
+        .signed => |item| @bitCast(item),
+        .unsigned => |item| item,
+        .sum_case => |item| item,
+    };
+    appendInt(u8, bytes, cursor, @intFromEnum(std.meta.activeTag(value)));
+    for (0..7) |_| appendInt(u8, bytes, cursor, 0);
+    appendInt(u64, bytes, cursor, payload);
+}
+
+fn booleanBinaryTag(comptime operation: anytype) u8 {
+    return switch (operation) {
+        .@"and" => 0,
+        .@"or" => 1,
+    };
+}
+
+fn integerUnaryTag(comptime operation: anytype) u8 {
+    return switch (operation) {
+        .negate => 0,
+        .bit_not => 1,
+    };
+}
+
+fn integerBinaryTag(comptime operation: anytype) u8 {
+    return switch (operation) {
+        .add => 0,
+        .subtract => 1,
+        .multiply => 2,
+        .divide => 3,
+        .remainder => 4,
+        .bit_and => 5,
+        .bit_or => 6,
+        .bit_xor => 7,
+    };
+}
+
+fn integerRelationTag(comptime relation: anytype) u8 {
+    return switch (relation) {
+        .equal => 0,
+        .not_equal => 1,
+        .less_than => 2,
+        .less_equal => 3,
+        .greater_than => 4,
+        .greater_equal => 5,
+    };
+}
+
+fn scalarSchemaTag(comptime scalar: anytype) u8 {
+    return switch (scalar) {
+        .i8 => 2,
+        .i16 => 3,
+        .i32 => 4,
+        .i64 => 5,
+        .u8 => 6,
+        .u16 => 7,
+        .u32 => 8,
+        .u64 => 9,
+        .unit, .boolean => unreachable,
+    };
+}
+
+fn transitionLess(left: anytype, right: @TypeOf(left)) bool {
+    if (left.source != right.source) return left.source < right.source;
+    if (left.edge != right.edge) return left.edge < right.edge;
+    if (left.target != right.target) return left.target < right.target;
+    return left.constructor < right.constructor;
+}
+
 fn appendTerminator(
     comptime Reified: type,
     comptime Schemas: type,
