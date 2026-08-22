@@ -1,13 +1,17 @@
 # Boundary
 
 Boundary is a Zig compiler for portable, defunctionalized algebraic effects.
-It compiles a typed source program into one program-specific Boundary Machine:
+It compiles a typed source program into one canonical meaning with two engines:
 
 ```text
-typed source -> Control IR -> RNF -> direct reducer -> Machine ABI v2
+typed source -> Control IR -> Reified Program -> direct reducer
+                                            \-> BEI1 -> fixed kernel
 ```
 
-The Machine is the sole executable meaning of a Boundary program. Its canonical
+The direct reducer remains the default specialized engine. `Program.image`
+emits the same meaning as a canonical Boundary Executable Image, and
+`Program.kernelMachine` exposes the fixed kernel through Machine ABI v2.
+Its canonical
 `ABL_RNF2` state contains a bounded stack of program-specific continuation
 constructors and their exact future-live environments. It contains no generic
 instruction cursor, local-slot table, condition history, runtime module, or
@@ -19,6 +23,8 @@ native callback.
 - `boundary.schema` exposes canonical portable-value codecs.
 - `boundary.ir` exposes advanced typed source/control authoring.
 - `boundary.program` declares a source program.
+- `boundary.image` validates canonical BEI1 bytes.
+- `boundary.kernel` executes validated images without callbacks or authority.
 - `boundary.Driver` drives the compiled Machine locally.
 - `boundary.Agent` is an optional profile over the same compiler.
 - `boundary.Bytes`, `boundary.Text`, and `boundary.Vector` are bounded portable
@@ -29,13 +35,17 @@ The primary construction is:
 ```zig
 const Program = boundary.program("research-agent", Body);
 
-const Machine = Program.compile(.{
+const machine_options: boundary.MachineOptions = .{
     .state_encoding = .rnf_v1,
     .maximum_frames = 64,
     .maximum_state_bytes = 1 << 20,
     .maximum_machine_fuel = 1_000_000,
     .debug_metadata = false,
-});
+};
+
+const Machine = Program.compile(machine_options);
+const Image = Program.image(machine_options);
+const KernelMachine = Program.kernelMachine(machine_options);
 ```
 
 `Machine` exposes ABI version 2, typed arguments/results/effects, deterministic
@@ -64,6 +74,11 @@ authority crosses the Machine boundary.
 - [Portable values](docs/portable_values.md)
 - [Effects](docs/effects.md)
 - [World integration](docs/world_integration.md)
+- [Boundary Reification](docs/reification.md)
+- [Boundary Executable Image v1](docs/boundary_executable_image_v1.md)
+- [Boundary Kernel v1](docs/boundary_kernel_v1.md)
+- [Specialization equivalence](docs/specialization_equivalence.md)
+- [Migration to Boundary 1.6](docs/migration_to_1_6.md)
 - [Migration from Boundary 0.7](docs/migration_from_0_7.md)
 
 ## Proof

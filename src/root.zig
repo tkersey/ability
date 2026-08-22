@@ -8,6 +8,9 @@ const machine = @import("machine");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 
+/// Published Boundary package identity.
+pub const package_version = "1.6.0";
+
 /// Public typed residual-effect authoring namespace.
 pub const effect = effect_v2;
 /// Canonical Boundary Executable Image v1 wire format and validation.
