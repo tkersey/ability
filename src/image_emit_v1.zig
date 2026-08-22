@@ -424,6 +424,85 @@ pub fn ProgramEffects(
     };
 }
 
+pub fn ProgramConstants(comptime Reified: type, comptime Schemas: type) type {
+    const built = comptime blk: {
+        var bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes;
+        var offsets: [Reified.compiler_limits.maximum_values]u32 = undefined;
+        var lengths: [Reified.compiler_limits.maximum_values]u32 = undefined;
+        var schemas: [Reified.compiler_limits.maximum_values]u32 = undefined;
+        var count: usize = 0;
+        var cursor: usize = 4;
+        for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
+            const source_block = Reified.semantic_canonicalization
+                .block_dense_to_source[dense_block];
+            for (Reified.control.blocks[source_block].instructions) |instruction| {
+                const constant_index = switch (instruction.operation) {
+                    .constant => |index| index,
+                    else => continue,
+                };
+                const value = Reified.Body.constants[constant_index];
+                const Value = @TypeOf(value);
+                const value_length = portable_value.encodedSize(
+                    Value,
+                    value,
+                ) catch unreachable;
+                const dense_value = Reified.semantic_canonicalization.valueId(
+                    instruction.result,
+                );
+                const schema_id = Schemas.root_ids[
+                    Schemas.value_root_start + dense_value
+                ];
+                var canonical: [portable_value.maximumEncodedSize(Value)]u8 =
+                    undefined;
+                const encoded_length = portable_value.encode(
+                    Value,
+                    value,
+                    &canonical,
+                ) catch unreachable;
+                std.debug.assert(encoded_length == value_length);
+                var duplicate = false;
+                for (0..count) |existing| {
+                    if (schemas[existing] != schema_id or
+                        lengths[existing] != value_length)
+                    {
+                        continue;
+                    }
+                    const offset: usize = offsets[existing];
+                    if (std.mem.eql(
+                        u8,
+                        bytes[offset .. offset + value_length],
+                        canonical[0..value_length],
+                    )) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
+                if (cursor + 8 + value_length > bytes.len) {
+                    @compileError("BEI1 constants exceed implementation limit");
+                }
+                writeAt(u32, &bytes, cursor, schema_id);
+                cursor += 4;
+                writeAt(u32, &bytes, cursor, value_length);
+                cursor += 4;
+                offsets[count] = @intCast(cursor);
+                lengths[count] = @intCast(value_length);
+                schemas[count] = schema_id;
+                @memcpy(bytes[cursor..][0..value_length], canonical[0..value_length]);
+                cursor += value_length;
+                count += 1;
+            }
+        }
+        writeAt(u32, &bytes, 0, count);
+        break :blk .{ .bytes = bytes, .length = cursor, .count = count };
+    };
+    const exact = built.bytes[0..built.length].*;
+    return struct {
+        pub const bytes = exact;
+        pub const constant_count: u32 = @intCast(built.count);
+    };
+}
+
 pub fn ProgramValues(comptime Reified: type, comptime Schemas: type) type {
     const count = Reified.semantic_canonicalization.value_count;
     const encoded = comptime blk: {

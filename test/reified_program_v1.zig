@@ -45,6 +45,7 @@ const ProgramSchemas = image_emit_v1.ProgramSchemaSet(Reified, Direct);
 const ProgramRoots = image_emit_v1.ProgramRoots(Reified, ProgramSchemas);
 const ProgramFailures = image_emit_v1.ProgramFailures(Reified);
 const ProgramEffects = image_emit_v1.ProgramEffects(Direct, ProgramSchemas);
+const ProgramConstants = image_emit_v1.ProgramConstants(Reified, ProgramSchemas);
 const ProgramValues = image_emit_v1.ProgramValues(Reified, ProgramSchemas);
 const ProgramFunctions = image_emit_v1.ProgramFunctions(Reified, ProgramSchemas);
 
@@ -79,6 +80,7 @@ test "direct specialization consumes the exact Reified Program" {
     );
     try std.testing.expectEqual(@as(usize, 20), ProgramFailures.bytes.len);
     try std.testing.expectEqual(@as(usize, 4), ProgramEffects.bytes.len);
+    try std.testing.expectEqual(@as(usize, 4), ProgramConstants.bytes.len);
     try std.testing.expectEqual(@as(usize, 8), ProgramValues.bytes.len);
     try std.testing.expectEqual(@as(usize, 12), ProgramFunctions.bytes.len);
 }
@@ -100,4 +102,51 @@ test "Reified Program preserves direct canonical State bytes" {
     );
     defer std.testing.allocator.free(compiled_bytes);
     try std.testing.expectEqualSlices(u8, direct_bytes, compiled_bytes);
+}
+
+test "Reified constants emit in canonical first-use order" {
+    const constant_instructions = [_]cir.Instruction{.{
+        .kind = .constant,
+        .result = 0,
+        .operation = .{ .constant = 0 },
+    }};
+    const constant_blocks = [_]cir.Block{.{
+        .id = 0,
+        .instructions = &constant_instructions,
+        .terminator = .{ .return_value = 0 },
+    }};
+    const ConstantBody = struct {
+        pub const InitialArgs = void;
+        pub const Result = u32;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const constants = .{@as(u32, 42)};
+        pub const control_ir: cir.Program = .{
+            .label = "constant-image-proof",
+            .value_types = &.{u32_type},
+            .blocks = &constant_blocks,
+            .entry = 0,
+            .result_type = u32_type,
+        };
+    };
+    const ConstantReified = compiler.ReifiedFor(
+        "constant-image-proof",
+        ConstantBody,
+    );
+    const ConstantDirect = compiler.DirectDefinitionFor(ConstantReified);
+    const Schemas = image_emit_v1.ProgramSchemaSet(
+        ConstantReified,
+        ConstantDirect,
+    );
+    const Constants = image_emit_v1.ProgramConstants(
+        ConstantReified,
+        Schemas,
+    );
+    try std.testing.expectEqual(@as(u32, 1), Constants.constant_count);
+    try std.testing.expectEqual(@as(usize, 16), Constants.bytes.len);
+    try std.testing.expectEqual(
+        @as(u32, 42),
+        std.mem.readInt(u32, Constants.bytes[12..16], .little),
+    );
 }
