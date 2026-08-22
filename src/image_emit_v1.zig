@@ -705,7 +705,14 @@ pub fn ProgramSegments(
                 &cursor,
                 Reified.semantic_canonicalization.functionId(block.function_id),
             );
-            appendInt(u8, &bytes, &cursor, blockRoleTag(block.role));
+            appendInt(
+                u8,
+                &bytes,
+                &cursor,
+                if (dense_block == Reified.semantic_canonicalization.blockId(
+                    Reified.control.entry,
+                )) 0 else blockRoleTag(block.role),
+            );
             appendInt(u8, &bytes, &cursor, 0);
             appendInt(u16, &bytes, &cursor, block.parameters.len);
             appendInt(u32, &bytes, &cursor, block.instructions.len);

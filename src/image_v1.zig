@@ -689,6 +689,9 @@ fn validateSegments(catalogs: Catalogs) Error!u32 {
         {
             return error.InvalidSegment;
         }
+        if (segment_id == catalogs.entry_segment_id and bytes[cursor + 8] != 0) {
+            return error.InvalidSegment;
+        }
         const parameter_count = readInt(u16, bytes, cursor + 10);
         const instruction_count = readInt(u32, bytes, cursor + 12);
         cursor += 24;
@@ -920,6 +923,14 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
         {
             return error.InvalidConstructor;
         }
+        if (bytes[cursor + 8] != try expectedConstructorKind(
+            catalogs,
+            @intCast(constructor_id),
+            bytes[cursor + 9],
+            readInt(u16, bytes, cursor + 12),
+        )) {
+            return error.InvalidConstructor;
+        }
         const resume_target = readInt(u16, bytes, cursor + 14);
         if (resume_target != std.math.maxInt(u16) and
             resume_target >= segment_count)
@@ -949,6 +960,66 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
     }
     if (cursor != bytes.len) return error.InvalidConstructor;
     return count;
+}
+
+fn expectedConstructorKind(
+    catalogs: Catalogs,
+    constructor_id: u32,
+    origin: u8,
+    source_segment: u16,
+) Error!u8 {
+    if (constructor_id == catalogs.initial_constructor_id) return 0;
+    if (origin == 0 or origin == 1) {
+        const segment = try imageSegmentRecord(catalogs, source_segment);
+        return switch (segment[8]) {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            3 => 5,
+            4 => 7,
+            else => error.InvalidConstructor,
+        };
+    }
+    if (origin != 2) return error.InvalidConstructor;
+    var suspension_source = source_segment;
+    const transitions = catalogs.envelope.section(.entry_transitions);
+    for (0..readInt(u32, transitions, 0)) |index| {
+        const offset = 4 + index * 12;
+        if (transitions[offset + 2] == 4 and
+            readInt(u32, transitions, offset + 8) == constructor_id)
+        {
+            suspension_source = readInt(u16, transitions, offset);
+            break;
+        }
+    }
+    const segment = try imageSegmentRecord(catalogs, suspension_source);
+    const terminator = imageSegmentTerminator(segment);
+    if (segment[terminator + 4] != 2) return error.InvalidConstructor;
+    return switch (segment[terminator + 8]) {
+        0 => 3,
+        1 => 4,
+        2, 3 => 6,
+        else => error.InvalidConstructor,
+    };
+}
+
+fn imageSegmentRecord(catalogs: Catalogs, target: u16) Error![]const u8 {
+    const bytes = catalogs.envelope.section(.segments);
+    var cursor: usize = 4;
+    for (0..readInt(u32, bytes, 0)) |id| {
+        const end = try recordEnd(bytes, cursor, 24);
+        if (id == target) return bytes[cursor..end];
+        cursor = end;
+    }
+    return error.InvalidConstructor;
+}
+
+fn imageSegmentTerminator(segment: []const u8) usize {
+    var cursor: usize = 24 + @as(usize, readInt(u16, segment, 10)) * 2;
+    for (0..readInt(u32, segment, 12)) |_| {
+        cursor += readInt(u32, segment, cursor);
+    }
+    return cursor;
 }
 
 fn validateInvariant(

@@ -318,10 +318,10 @@ test "BEI1 validation recomputes kernel scratch requirements" {
     );
 }
 
-test "BEI1 deterministic mutations fail closed without trap" {
+test "BEI1 rejects 1000 deterministic mutations without trap" {
     const image_v1 = @import("image_v1");
     var malformed: [Image.bytes.len]u8 = undefined;
-    for (0..128) |index| {
+    for (0..1000) |index| {
         @memcpy(&malformed, &Image.bytes);
         const offset = (index * 104729) % malformed.len;
         malformed[offset] ^= @as(u8, 1) << @intCast(index % 8);

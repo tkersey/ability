@@ -1620,6 +1620,75 @@ pub fn build(b: *std.Build) void {
     defer b.graph.global_cache_root.path = saved_global_cache_path;
     lint_step.dependOn(lint_builder.build());
 
+    const image_canonical_step = b.step(
+        "check-boundary-image-canonical",
+        "Check canonical BEI1 emission, validation, and exact re-encoding.",
+    );
+    image_canonical_step.dependOn(image_step);
+    image_canonical_step.dependOn(reified_core_step);
+    const image_malformed_step = b.step(
+        "check-boundary-image-malformed",
+        "Reject deterministic malformed BEI1 and ABL_RNF2 corpora.",
+    );
+    image_malformed_step.dependOn(reified_core_step);
+    image_malformed_step.dependOn(malformed_step);
+    const image_digest_step = b.step(
+        "check-boundary-image-digest",
+        "Reconstruct Program, Machine, schema, and effect digests from BEI1.",
+    );
+    image_digest_step.dependOn(reified_core_step);
+    const kernel_native_step = b.step(
+        "check-boundary-kernel-native",
+        "Check fixed native kernel execution across the admitted algebra.",
+    );
+    kernel_native_step.dependOn(reified_core_step);
+    kernel_native_step.dependOn(values_step);
+    kernel_native_step.dependOn(recursion_step);
+    const kernel_machine_step = b.step(
+        "check-boundary-kernel-machine",
+        "Check typed KernelMachine ABI and ownership parity.",
+    );
+    kernel_machine_step.dependOn(reified_core_step);
+    kernel_machine_step.dependOn(single_reducer_step);
+    const specialization_equivalence_step = b.step(
+        "check-boundary-specialization-equivalence",
+        "Check direct and fixed-kernel transition equivalence.",
+    );
+    specialization_equivalence_step.dependOn(kernel_native_step);
+    specialization_equivalence_step.dependOn(kernel_machine_step);
+    specialization_equivalence_step.dependOn(parity_step);
+    const engine_switch_step = b.step(
+        "check-boundary-engine-switch",
+        "Exchange canonical States between direct and kernel engines.",
+    );
+    engine_switch_step.dependOn(reified_core_step);
+    engine_switch_step.dependOn(recursion_step);
+    const reification_deletion_step = b.step(
+        "check-boundary-reification-deletion",
+        "Check declared engine independence and removed runtime surfaces.",
+    );
+    reification_deletion_step.dependOn(deletion_step);
+    reification_deletion_step.dependOn(single_reducer_step);
+    const reification_measure_step = b.step(
+        "check-boundary-reification-measure",
+        "Measure direct and fixed-kernel artifacts under retained hard gates.",
+    );
+    reification_measure_step.dependOn(performance_step);
+    reification_measure_step.dependOn(kernel_wasm_step);
+    const reification_receipt_step = b.step(
+        "check-boundary-reification-receipt",
+        "Run the executable Boundary Reification v1 receipt surface.",
+    );
+    inline for (.{
+        image_canonical_step,
+        image_malformed_step,
+        image_digest_step,
+        specialization_equivalence_step,
+        engine_switch_step,
+        reification_deletion_step,
+        reification_measure_step,
+    }) |dependency| reification_receipt_step.dependOn(dependency);
+
     const receipt_falsifier_step = b.step(
         "check-boundary-machine-receipt-falsifiers",
         "Prove completion receipt reachability from the live build graph.",
@@ -1646,6 +1715,7 @@ pub fn build(b: *std.Build) void {
         agent_step,
         parity_step,
         kernel_wasm_step,
+        reification_receipt_step,
         no_interpreter_step,
         deletion_step,
         compile_fail_step,
