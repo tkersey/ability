@@ -1,4 +1,7 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
+const machine = @import("machine");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
@@ -53,21 +56,20 @@ const ExplicitProgram = program_v2.program(
     "explicit-yield",
     YieldBody(.explicit_yield),
 );
-const ExplicitMachine = ExplicitProgram.compile(.{
+const options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
-});
+};
+const ExplicitMachine = ExplicitProgram.compile(options);
+const ExplicitImage = ExplicitProgram.image(options);
 
 const CheckpointProgram = program_v2.program(
     "caller-fuel-checkpoint",
     YieldBody(.caller_fuel),
 );
-const CheckpointMachine = CheckpointProgram.compile(.{
-    .maximum_frames = 4,
-    .maximum_state_bytes = 4096,
-    .maximum_machine_fuel = 32,
-});
+const CheckpointMachine = CheckpointProgram.compile(options);
+const CheckpointImage = CheckpointProgram.image(options);
 
 test "explicit yield persists the continuation before returning to the caller" {
     try std.testing.expectEqual(
@@ -157,4 +159,64 @@ test "caller-fuel checkpoint yields only when the next segment is unfunded" {
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 23), done.value().*);
     try std.testing.expectEqual(@as(u64, 0), two_segments);
+}
+
+test "fixed kernel preserves explicit and caller-fuel checkpoints" {
+    inline for (.{
+        .{ ExplicitImage, @as(u32, 11), @as(u64, 4), true },
+        .{ CheckpointImage, @as(u32, 19), @as(u64, 1), false },
+    }) |fixture| {
+        const Image = fixture[0];
+        const input = fixture[1];
+        var workspace: image_v1.ValidationWorkspace = .{};
+        const image = try image_v1.validateImage(&Image.bytes, &workspace);
+        var args: [4]u8 = undefined;
+        std.mem.writeInt(u32, &args, input, .little);
+        var state: [4096]u8 = undefined;
+        const state_length = try kernel_v1.initial(
+            image,
+            &args,
+            &state,
+            &workspace,
+        );
+        var fuel = fixture[2];
+        var next_state: [4096]u8 = undefined;
+        var output: [4]u8 = undefined;
+        var scratch: [12 * 1024]u8 = undefined;
+        const yielded = switch (try kernel_v1.step(
+            image,
+            state[0..state_length],
+            &fuel,
+            &next_state,
+            &output,
+            &scratch,
+            &workspace,
+        )) {
+            .yielded => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(
+            if (fixture[3]) @as(u64, 3) else 0,
+            fuel,
+        );
+        var resume_fuel: u64 = 1;
+        var terminal_state: [4096]u8 = undefined;
+        const done = switch (try kernel_v1.step(
+            image,
+            yielded,
+            &resume_fuel,
+            &terminal_state,
+            &output,
+            &scratch,
+            &workspace,
+        )) {
+            .done => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(
+            input,
+            std.mem.readInt(u32, done[0..4], .little),
+        );
+        try std.testing.expectEqual(@as(u64, 0), resume_fuel);
+    }
 }

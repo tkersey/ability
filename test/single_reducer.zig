@@ -76,6 +76,10 @@ fn functionDeclarationCount(comptime Owner: type) comptime_int {
     return result;
 }
 
+fn freeBytes(allocator: std.mem.Allocator, bytes: []u8) void {
+    allocator.free(bytes);
+}
+
 comptime {
     if (!@hasDecl(Machine, "step")) {
         @compileError("compiled Boundary Machine has no public step reducer");
@@ -104,8 +108,12 @@ comptime {
 }
 
 pub fn main(init: std.process.Init) !void {
+    const allocator = std.heap.page_allocator;
     var image_workspace: boundary.image.ValidationWorkspace = .{};
-    _ = try boundary.image.validateImage(&Image.bytes, &image_workspace);
+    const image = try boundary.image.validateImage(
+        &Image.bytes,
+        &image_workspace,
+    );
     var malformed_image = Image.bytes;
     const envelope = try boundary.image.validateEnvelope(&malformed_image);
     const effects_offset: usize = envelope.sections[4].offset;
@@ -126,11 +134,125 @@ pub fn main(init: std.process.Init) !void {
     } else |err| if (err != error.DigestMismatch) {
         return err;
     }
-    const state = try Machine.initialState(std.heap.page_allocator, 21);
+    var kernel_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &kernel_args, 21, .little);
+    var kernel_initial: [4096]u8 = undefined;
+    const kernel_initial_length = try boundary.kernel.initial(
+        image,
+        &kernel_args,
+        &kernel_initial,
+        &image_workspace,
+    );
+    var kernel_fuel: u64 = 8;
+    var kernel_state: [4096]u8 = undefined;
+    var kernel_payload: [4]u8 = undefined;
+    var kernel_scratch: [12 * 1024]u8 = undefined;
+    const kernel_request = switch (try boundary.kernel.step(
+        image,
+        kernel_initial[0..kernel_initial_length],
+        &kernel_fuel,
+        &kernel_state,
+        &kernel_payload,
+        &kernel_scratch,
+        &image_workspace,
+    )) {
+        .requested => |request| request,
+        else => return error.ExpectedEffectRequest,
+    };
+    const state = try Machine.initialState(allocator, 21);
     defer Machine.deinitState(state);
     var caller_fuel: u64 = 8;
     switch (try Machine.step(state, &caller_fuel)) {
-        .request => {},
+        .request => |request| {
+            const direct_state = try Machine.encodeState(
+                allocator,
+                state,
+            );
+            defer freeBytes(allocator, direct_state);
+            try std.testing.expectEqualSlices(
+                u8,
+                direct_state,
+                kernel_request.state,
+            );
+            try std.testing.expectEqual(
+                request.identity.digest,
+                kernel_request.identity.digest,
+            );
+            try std.testing.expectEqual(
+                request.identity.continuation_digest,
+                kernel_request.identity.continuation_digest,
+            );
+            try std.testing.expectEqual(
+                @as(u32, 21),
+                std.mem.readInt(u32, kernel_request.payload[0..4], .little),
+            );
+            try std.testing.expectEqual(caller_fuel, kernel_fuel);
+            const prepared = try Machine.prepareResume(state, request);
+            try Machine.@"resume"(prepared, @as(u32, 42));
+            Machine.deinitPreparedResume(prepared);
+            const direct_resumed = try Machine.encodeState(
+                allocator,
+                state,
+            );
+            defer freeBytes(allocator, direct_resumed);
+            var response: [4]u8 = undefined;
+            std.mem.writeInt(u32, &response, 42, .little);
+            var kernel_resumed: [4096]u8 = undefined;
+            @memset(&kernel_resumed, 0xa5);
+            var stale_identity = kernel_request.identity;
+            stale_identity.sequence += 1;
+            try std.testing.expectError(
+                error.InvalidState,
+                boundary.kernel.@"resume"(
+                    image,
+                    kernel_request.state,
+                    stale_identity,
+                    &response,
+                    &kernel_resumed,
+                    &image_workspace,
+                ),
+            );
+            try std.testing.expectEqual(@as(u8, 0xa5), kernel_resumed[0]);
+            const kernel_resumed_length = try boundary.kernel.@"resume"(
+                image,
+                kernel_request.state,
+                kernel_request.identity,
+                &response,
+                &kernel_resumed,
+                &image_workspace,
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                direct_resumed,
+                kernel_resumed[0..kernel_resumed_length],
+            );
+            const direct_done = switch (try Machine.step(
+                state,
+                &caller_fuel,
+            )) {
+                .done => |value| value,
+                else => return error.ExpectedEffectRequest,
+            };
+            defer direct_done.deinit();
+            var kernel_terminal_state: [4096]u8 = undefined;
+            const kernel_done = switch (try boundary.kernel.step(
+                image,
+                kernel_resumed[0..kernel_resumed_length],
+                &kernel_fuel,
+                &kernel_terminal_state,
+                &kernel_payload,
+                &kernel_scratch,
+                &image_workspace,
+            )) {
+                .done => |value| value,
+                else => return error.ExpectedEffectRequest,
+            };
+            try std.testing.expectEqual(caller_fuel, kernel_fuel);
+            try std.testing.expectEqual(
+                direct_done.value().*,
+                std.mem.readInt(u32, kernel_done[0..4], .little),
+            );
+        },
         else => return error.ExpectedEffectRequest,
     }
 

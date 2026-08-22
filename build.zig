@@ -837,6 +837,9 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    machine_yield.addImport("image_v1", host_core.image_v1);
+    machine_yield.addImport("kernel_v1", host_core.kernel_v1);
+    machine_yield.addImport("machine", host_core.machine);
     const agent_loop = programTestModule(
         b,
         host_core,
