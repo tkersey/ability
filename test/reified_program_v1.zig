@@ -59,6 +59,7 @@ test "direct specialization consumes the exact Reified Program" {
         Reified.rnf_value.constructor_count,
         Program.rnf.constructor_count,
     );
+    try std.testing.expectEqual(@as(u32, 0), Reified.initial_constructor_id);
 }
 
 test "Reified Program preserves direct canonical State bytes" {

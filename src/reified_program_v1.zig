@@ -10,6 +10,7 @@ pub fn Program(
     comptime residual_effects_value: anytype,
     comptime invariant_constants_value: anytype,
     comptime normal_form_value: anytype,
+    comptime initial_constructor_id_value: u32,
     comptime generated_operation_count_value: usize,
     comptime semantic_digest_value: [32]u8,
 ) type {
@@ -24,6 +25,7 @@ pub fn Program(
         pub const residual_effects = residual_effects_value;
         pub const invariant_constants = invariant_constants_value;
         pub const rnf_value = normal_form_value;
+        pub const initial_constructor_id = initial_constructor_id_value;
         pub const generated_reducer_operation_count =
             generated_operation_count_value;
         pub const semantic_digest = semantic_digest_value;
@@ -44,6 +46,7 @@ pub fn require(comptime Reified: type) void {
         "residual_effects",
         "invariant_constants",
         "rnf_value",
+        "initial_constructor_id",
         "generated_reducer_operation_count",
         "semantic_digest",
         "contract_bytes",

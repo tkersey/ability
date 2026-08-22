@@ -2174,6 +2174,26 @@ fn generatedReducerOperationCount(
     return total;
 }
 
+fn initialConstructorId(
+    comptime program: control_ir.Program,
+    comptime normal_form: anytype,
+) u32 {
+    for (0..normal_form.constructor_count) |index| {
+        const constructor = normal_form.constructors[index];
+        if (constructor.source_block == program.entry and
+            constructor.resume_target == program.entry and
+            constructor.origin == .block_entry and
+            constructor.kind != .await_effect and
+            constructor.kind != .caller_fuel_yield)
+        {
+            return @intCast(index);
+        }
+    }
+    @compileError(
+        "RNF is missing a direct constructor for the Control IR entry block",
+    );
+}
+
 /// Analyze one source Body into the canonical post-normalization program.
 pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
     @setEvalBranchQuota(compiler_evaluation_branch_quota);
@@ -2229,6 +2249,10 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
     ) catch |err| @compileError(
         "Boundary compiler blocked program: " ++ @errorName(err),
     );
+    const initial_constructor_id = comptime initialConstructorId(
+        program,
+        normal_form,
+    );
     const generated_semantic_digest = comptime compilerSemanticDigest(
         Body,
         program,
@@ -2247,6 +2271,7 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         residual_effects,
         invariant_constants,
         normal_form,
+        initial_constructor_id,
         generated_operation_count,
         generated_semantic_digest,
     );
@@ -2267,22 +2292,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
         Reified.generated_reducer_operation_count;
     const generated_semantic_digest = Reified.semantic_digest;
     const FrameType = frameType(Body, program, normal_form);
-    const initial_constructor_index = comptime blk: {
-        for (0..normal_form.constructor_count) |index| {
-            const constructor = normal_form.constructors[index];
-            if (constructor.source_block == program.entry and
-                constructor.resume_target == program.entry and
-                constructor.origin == .block_entry and
-                constructor.kind != .await_effect and
-                constructor.kind != .caller_fuel_yield)
-            {
-                break :blk index;
-            }
-        }
-        @compileError(
-            "RNF is missing a direct constructor for the Control IR entry block",
-        );
-    };
+    const initial_constructor_index = Reified.initial_constructor_id;
     const InitialEnvironment = @FieldType(
         FrameType,
         constructorName(initial_constructor_index),
