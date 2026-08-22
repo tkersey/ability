@@ -114,8 +114,14 @@ test "direct specialization consumes the exact Reified Program" {
         &ProgramMachine.Manifest.machine_contract_digest,
         &Image.machine_contract_digest,
     );
-    const envelope = try @import("image_v1").validateEnvelope(&Image.bytes);
-    try std.testing.expectEqual(Image.byte_length, envelope.header.total_length);
+    const image_v1 = @import("image_v1");
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const catalogs = try image_v1.validateCatalogs(&Image.bytes, &workspace);
+    try std.testing.expectEqual(
+        Image.byte_length,
+        catalogs.envelope.header.total_length,
+    );
+    try std.testing.expectEqual(@as(u32, 1), catalogs.value_count);
 }
 
 test "Reified Program preserves direct canonical State bytes" {
@@ -135,6 +141,19 @@ test "Reified Program preserves direct canonical State bytes" {
     );
     defer std.testing.allocator.free(compiled_bytes);
     try std.testing.expectEqualSlices(u8, direct_bytes, compiled_bytes);
+}
+
+test "BEI1 catalog validation fails closed on forged roots" {
+    const image_v1 = @import("image_v1");
+    var malformed = Image.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const root_offset: usize = envelope.sections[0].offset;
+    std.mem.writeInt(u32, malformed[root_offset..][0..4], 0xffff_ffff, .little);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidRoot,
+        image_v1.validateCatalogs(&malformed, &workspace),
+    );
 }
 
 test "Reified constants emit in canonical first-use order" {

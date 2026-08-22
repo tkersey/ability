@@ -383,6 +383,7 @@ fn addCoreModules(
         .target = target,
         .optimize = optimize,
     });
+    image_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
         .target = target,
