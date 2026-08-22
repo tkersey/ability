@@ -164,6 +164,10 @@ const Direct = program_v2.program(
     DirectBody(),
 ).compile(options);
 
+pub const ReificationBaselineBody = HandledBody();
+pub const ReificationBaselineProgram = HandledProgram;
+pub const ReificationBaselineMachine = Handled;
+
 test "built-in effect handler normalizes to one canonical direct call" {
     try std.testing.expectEqual(@as(usize, 0), Handled.EffectRow.operation_site_count);
     try std.testing.expectEqualSlices(

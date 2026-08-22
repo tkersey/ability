@@ -195,6 +195,14 @@ const Body = struct {
 
 const Program = program_v2.program("bounded-recursive-helper", Body);
 
+pub const ReificationBaselineBody = Body;
+pub const ReificationBaselineProgram = Program;
+pub const ReificationBaselineMachine = Program.compile(.{
+    .maximum_frames = 8,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 64,
+});
+
 const staged_second_call_arguments = [_]cir.EdgeArgument{
     .{ .value = 16 },
     .{ .value = 17 },

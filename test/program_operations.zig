@@ -126,6 +126,10 @@ const PureMachine = Program.compile(.{
     .maximum_machine_fuel = 128,
 });
 
+pub const ReificationBaselineBody = Body;
+pub const ReificationBaselineProgram = Program;
+pub const ReificationBaselineMachine = PureMachine;
+
 test "compiled pure operations construct products vectors and text" {
     const state = try PureMachine.initialState(std.testing.allocator, {});
     defer PureMachine.deinitState(state);

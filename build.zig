@@ -476,6 +476,95 @@ pub fn build(b: *std.Build) void {
         .name = "boundary-one-effect",
         .root_module = one_effect_module,
     });
+    const reification_operations_fixture = programTestModule(
+        b,
+        host_core,
+        "test/program_operations.zig",
+        b.graph.host,
+        optimize,
+        false,
+        true,
+    );
+    const reification_handler_fixture = programTestModule(
+        b,
+        host_core,
+        "test/program_effect_handler.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reification_handler_fixture.addImport("effect_v2", host_core.effect_v2);
+    reification_handler_fixture.addImport("machine", host_core.machine);
+    const reification_morphism_fixture = programTestModule(
+        b,
+        host_core,
+        "test/program_effect_morphism.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reification_morphism_fixture.addImport("effect_v2", host_core.effect_v2);
+    reification_morphism_fixture.addImport("machine", host_core.machine);
+    const reification_recursion_fixture = programTestModule(
+        b,
+        host_core,
+        "test/machine_recursion.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    const reification_baseline_module = b.createModule(.{
+        .root_source_file = b.path("test/reification_baseline.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    reification_baseline_module.addImport("boundary", host_boundary);
+    reification_baseline_module.addImport("compiler", host_core.compiler);
+    reification_baseline_module.addImport(
+        "operations_fixture",
+        reification_operations_fixture,
+    );
+    reification_baseline_module.addImport(
+        "handler_fixture",
+        reification_handler_fixture,
+    );
+    reification_baseline_module.addImport(
+        "morphism_fixture",
+        reification_morphism_fixture,
+    );
+    reification_baseline_module.addImport(
+        "recursion_fixture",
+        reification_recursion_fixture,
+    );
+    const reification_baseline_executable = b.addExecutable(.{
+        .name = "boundary-reification-baseline",
+        .root_module = reification_baseline_module,
+    });
+    const reification_baseline_run = b.addRunArtifact(
+        reification_baseline_executable,
+    );
+    const reification_baseline_emit_step = b.step(
+        "emit-boundary-reification-baseline",
+        "Emit the current Boundary reification baseline vectors.",
+    );
+    reification_baseline_emit_step.dependOn(&reification_baseline_run.step);
+    const reification_baseline_check = b.addSystemCommand(&.{"sh"});
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/check_baseline.sh"),
+    );
+    reification_baseline_check.addFileArg(
+        reification_baseline_executable.getEmittedBin(),
+    );
+    reification_baseline_check.addArg(b.graph.zig_exe);
+    reification_baseline_check.setCwd(b.path("."));
+    const reification_baseline_step = b.step(
+        "check-boundary-reification-baseline",
+        "Verify the immutable Boundary v1.5.0 reification baseline.",
+    );
+    reification_baseline_step.dependOn(&reification_baseline_check.step);
     const examples_step = b.step(
         "check-boundary-examples",
         "Compile the Boundary Machine examples.",
@@ -1298,6 +1387,7 @@ pub fn build(b: *std.Build) void {
     );
     inline for (.{
         test_step,
+        reification_baseline_step,
         rnf_step,
         control_step,
         values_step,
