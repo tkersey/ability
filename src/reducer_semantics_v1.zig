@@ -1,5 +1,6 @@
 const control_ir = @import("control_ir");
 const portable_value = @import("portable_value");
+const rnf = @import("rnf");
 const std = @import("std");
 
 pub const segment_fuel_semantic_domain =
@@ -15,6 +16,152 @@ pub const FailureRole = enum {
     invalid_index,
     invalid_variant,
 };
+
+pub const WireTerminator = enum(u8) {
+    jump = 0,
+    branch = 1,
+    @"suspend" = 2,
+    return_value = 3,
+    return_to_caller = 4,
+    fail = 5,
+    fail_value = 6,
+};
+
+pub const WireSuspension = enum(u8) {
+    effect = 0,
+    call = 1,
+    explicit_yield = 2,
+    caller_fuel = 3,
+};
+
+pub const WireInvariant = enum(u8) {
+    boolean = 0,
+    boolean_copy = 1,
+    boolean_not = 2,
+    boolean_binary = 3,
+    boolean_select = 4,
+    value_copy = 5,
+    value_constant = 6,
+    value_select = 7,
+    instruction_result = 8,
+    product_extract_result = 9,
+    sum_extract_result = 10,
+    bounded_length_result = 11,
+    integer_unary_result = 12,
+    integer_binary_result = 13,
+    integer_convert_result = 14,
+    integer_zero = 15,
+    integer_zero_result = 16,
+    integer_relation = 17,
+    integer_relation_result = 18,
+    sum_case = 19,
+    sum_case_result = 20,
+};
+
+pub const WireConstructorKind = enum(u8) {
+    entry = 0,
+    segment_entry = 1,
+    loop_header = 2,
+    await_effect = 3,
+    call_return = 4,
+    after_handler = 5,
+    caller_fuel_yield = 6,
+    terminal_handoff = 7,
+};
+
+pub const WireConstructorOrigin = enum(u8) {
+    block_entry = 0,
+    call_entry = 1,
+    suspension = 2,
+};
+
+pub const WireIncomingEdge = enum(u8) {
+    jump = 0,
+    branch_then = 1,
+    branch_else = 2,
+    call = 3,
+    suspension_continuation = 4,
+};
+
+pub fn wireTerminator(terminator: control_ir.Terminator) WireTerminator {
+    return switch (terminator) {
+        .jump => .jump,
+        .branch => .branch,
+        .@"suspend" => .@"suspend",
+        .return_value => .return_value,
+        .return_to_caller => .return_to_caller,
+        .fail => .fail,
+        .fail_value => .fail_value,
+    };
+}
+
+pub fn wireSuspension(kind: control_ir.SuspensionKind) WireSuspension {
+    return switch (kind) {
+        .effect => .effect,
+        .call => .call,
+        .explicit_yield => .explicit_yield,
+        .caller_fuel => .caller_fuel,
+    };
+}
+
+pub fn wireInvariant(invariant: rnf.InvariantTerm) WireInvariant {
+    return switch (invariant) {
+        .boolean => .boolean,
+        .boolean_copy => .boolean_copy,
+        .boolean_not => .boolean_not,
+        .boolean_binary => .boolean_binary,
+        .boolean_select => .boolean_select,
+        .value_copy => .value_copy,
+        .value_constant => .value_constant,
+        .value_select => .value_select,
+        .instruction_result => .instruction_result,
+        .product_extract_result => .product_extract_result,
+        .sum_extract_result => .sum_extract_result,
+        .bounded_length_result => .bounded_length_result,
+        .integer_unary_result => .integer_unary_result,
+        .integer_binary_result => .integer_binary_result,
+        .integer_convert_result => .integer_convert_result,
+        .integer_zero => .integer_zero,
+        .integer_zero_result => .integer_zero_result,
+        .integer_relation => .integer_relation,
+        .integer_relation_result => .integer_relation_result,
+        .sum_case => .sum_case,
+        .sum_case_result => .sum_case_result,
+    };
+}
+
+pub fn wireConstructorKind(kind: rnf.ConstructorKind) WireConstructorKind {
+    return switch (kind) {
+        .entry => .entry,
+        .segment_entry => .segment_entry,
+        .loop_header => .loop_header,
+        .await_effect => .await_effect,
+        .call_return => .call_return,
+        .after_handler => .after_handler,
+        .caller_fuel_yield => .caller_fuel_yield,
+        .terminal_handoff => .terminal_handoff,
+    };
+}
+
+pub fn wireConstructorOrigin(
+    origin: rnf.ConstructorOrigin,
+) WireConstructorOrigin {
+    return switch (origin) {
+        .block_entry => .block_entry,
+        .call_entry => .call_entry,
+        .suspension => .suspension,
+    };
+}
+
+pub fn wireIncomingEdge(kind: rnf.IncomingEdgeKind) WireIncomingEdge {
+    return switch (kind) {
+        .jump => .jump,
+        .branch_then => .branch_then,
+        .branch_else => .branch_else,
+        .call => .call,
+        .suspension_continuation => .suspension_continuation,
+    };
+}
 
 pub fn failureName(comptime role: FailureRole) []const u8 {
     return @tagName(role);

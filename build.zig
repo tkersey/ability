@@ -379,6 +379,7 @@ fn addCoreModules(
     });
     reducer_semantics_v1.addImport("control_ir", control_ir);
     reducer_semantics_v1.addImport("portable_value", portable_value);
+    reducer_semantics_v1.addImport("rnf", rnf);
     const compiler = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
@@ -717,6 +718,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     reducer_semantics_test.addImport("control_ir", host_core.control_ir);
+    reducer_semantics_test.addImport("rnf", host_core.rnf);
     reducer_semantics_test.addImport(
         "reducer_semantics_v1",
         host_core.reducer_semantics_v1,

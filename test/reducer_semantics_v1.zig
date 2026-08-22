@@ -1,5 +1,6 @@
 const control_ir = @import("control_ir");
 const reducer = @import("reducer_semantics_v1");
+const rnf = @import("rnf");
 const std = @import("std");
 
 const operations = [_]control_ir.InstructionOperation{
@@ -116,4 +117,36 @@ test "operation failure roles and dynamic fuel have one owner" {
     try std.testing.expectEqual(@as(u64, 0), reducer.dynamicBytesCost(true, 0));
     try std.testing.expectEqual(@as(u64, 1), reducer.dynamicBytesCost(true, 16));
     try std.testing.expectEqual(@as(u64, 2), reducer.dynamicBytesCost(true, 17));
+}
+
+test "BEI1 control and RNF wire tags are pinned" {
+    const jump = control_ir.Terminator{ .jump = .{ .target = 0 } };
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        @intFromEnum(reducer.wireTerminator(jump)),
+    );
+    try std.testing.expectEqual(
+        @as(u8, 3),
+        @intFromEnum(reducer.wireSuspension(.caller_fuel)),
+    );
+    const invariant = rnf.InvariantTerm{ .boolean = .{
+        .value = 0,
+        .expected = true,
+    } };
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        @intFromEnum(reducer.wireInvariant(invariant)),
+    );
+    try std.testing.expectEqual(
+        @as(u8, 7),
+        @intFromEnum(reducer.wireConstructorKind(.terminal_handoff)),
+    );
+    try std.testing.expectEqual(
+        @as(u8, 2),
+        @intFromEnum(reducer.wireConstructorOrigin(.suspension)),
+    );
+    try std.testing.expectEqual(
+        @as(u8, 4),
+        @intFromEnum(reducer.wireIncomingEdge(.suspension_continuation)),
+    );
 }
