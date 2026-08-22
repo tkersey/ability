@@ -1,4 +1,5 @@
 const control_ir = @import("control_ir");
+const portable_value = @import("portable_value");
 const std = @import("std");
 
 pub const segment_fuel_semantic_domain =
@@ -215,4 +216,641 @@ pub fn dynamicBytesCost(variable_size: bool, canonical_bytes: u64) u64 {
         canonical_bytes,
         dynamic_fuel_quantum_bytes,
     ) catch std.math.maxInt(u64);
+}
+
+pub noinline fn executeTypedInstructions(
+    comptime Body: type,
+    comptime ValueCatalog: type,
+    comptime Backend: type,
+    comptime block: control_ir.Block,
+    store: anytype,
+) ?Body.Failure {
+    inline for (block.instructions) |instruction| {
+        const result_name = comptime Backend.valueName(instruction.result);
+        switch (instruction.operation) {
+            .metadata => unreachable,
+            .constant => |constant_index| {
+                const Constant = @TypeOf(Body.constants[constant_index]);
+                const canonical = comptime portable_value.canonicalValue(
+                    Constant,
+                    Body.constants[constant_index],
+                ) catch unreachable;
+                @field(store, result_name) = canonical;
+            },
+            .copy => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+            },
+            .compare_eq_zero => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) == 0;
+            },
+            .integer_add => {
+                const ResultType = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = std.math.add(
+                    ResultType,
+                    @field(store, Backend.valueName(instruction.operands[0])),
+                    @field(store, Backend.valueName(instruction.operands[1])),
+                ) catch return Backend.failure(.arithmetic_overflow);
+            },
+            .integer_subtract => {
+                const ResultType = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = std.math.sub(
+                    ResultType,
+                    @field(store, Backend.valueName(instruction.operands[0])),
+                    @field(store, Backend.valueName(instruction.operands[1])),
+                ) catch return Backend.failure(.arithmetic_overflow);
+            },
+            .integer_multiply => {
+                const ResultType = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = std.math.mul(
+                    ResultType,
+                    @field(store, Backend.valueName(instruction.operands[0])),
+                    @field(store, Backend.valueName(instruction.operands[1])),
+                ) catch return Backend.failure(.arithmetic_overflow);
+            },
+            .integer_divide => {
+                const ResultType = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = std.math.divTrunc(
+                    ResultType,
+                    @field(store, Backend.valueName(instruction.operands[0])),
+                    @field(store, Backend.valueName(instruction.operands[1])),
+                ) catch |err| return switch (err) {
+                    error.DivisionByZero => Backend.failure(.division_by_zero),
+                    error.Overflow => Backend.failure(.arithmetic_overflow),
+                };
+            },
+            .integer_remainder => {
+                const ResultType = @FieldType(ValueCatalog, result_name);
+                const left = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const right = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                _ = std.math.divTrunc(
+                    ResultType,
+                    left,
+                    right,
+                ) catch |err| return switch (err) {
+                    error.DivisionByZero => Backend.failure(.division_by_zero),
+                    error.Overflow => Backend.failure(.arithmetic_overflow),
+                };
+                @field(store, result_name) = @rem(left, right);
+            },
+            .integer_negate => {
+                @field(store, result_name) = std.math.negate(@field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                )) catch return Backend.failure(.arithmetic_overflow);
+            },
+            .integer_equal => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) == @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_not_equal => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) != @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_less_than => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) < @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_less_equal => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) <= @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_greater_than => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) > @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_greater_equal => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) >= @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_bit_not => {
+                @field(store, result_name) = ~@field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+            },
+            .integer_bit_and => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) & @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_bit_or => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) | @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_bit_xor => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) ^ @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .integer_convert => {
+                const ResultType = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = std.math.cast(
+                    ResultType,
+                    @field(store, Backend.valueName(instruction.operands[0])),
+                ) orelse return Backend.failure(.arithmetic_overflow);
+            },
+            .enum_to_u32 => {
+                @field(store, result_name) = @intCast(@intFromEnum(@field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                )));
+            },
+            .boolean_not => {
+                @field(store, result_name) = !@field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+            },
+            .boolean_and => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) and @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .boolean_or => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) or @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+            },
+            .select => {
+                @field(store, result_name) = if (@field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ))
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[1]),
+                    )
+                else
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[2]),
+                    );
+            },
+            .product_construct => {
+                const Product = @FieldType(ValueCatalog, result_name);
+                var product: Product = undefined;
+                inline for (
+                    std.meta.fields(Product),
+                    instruction.operands,
+                ) |field, operand| {
+                    @field(product, field.name) = @field(
+                        store,
+                        Backend.valueName(operand),
+                    );
+                }
+                @field(store, result_name) = product;
+            },
+            .product_extract => |field_index| {
+                const Product = @FieldType(
+                    ValueCatalog,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const field = std.meta.fields(Product)[field_index];
+                @field(store, result_name) = @field(
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[0]),
+                    ),
+                    field.name,
+                );
+            },
+            .product_replace => |field_index| {
+                var product = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const Product = @TypeOf(product);
+                const field = std.meta.fields(Product)[field_index];
+                @field(product, field.name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                @field(store, result_name) = product;
+            },
+            .sum_construct => |variant_index| {
+                const Sum = @FieldType(ValueCatalog, result_name);
+                const field = std.meta.fields(Sum)[variant_index];
+                @field(store, result_name) = @unionInit(
+                    Sum,
+                    field.name,
+                    if (field.type == void) {} else @field(
+                        store,
+                        Backend.valueName(instruction.operands[0]),
+                    ),
+                );
+            },
+            .sum_tag_is => |variant_index| {
+                const Sum = @FieldType(
+                    ValueCatalog,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const Tag = @typeInfo(Sum).@"union".tag_type.?;
+                const field = std.meta.fields(Sum)[variant_index];
+                @field(store, result_name) = std.meta.activeTag(@field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                )) == @field(Tag, field.name);
+            },
+            .sum_extract => |variant_index| {
+                const sum = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const Sum = @TypeOf(sum);
+                const Tag = @typeInfo(Sum).@"union".tag_type.?;
+                const field = std.meta.fields(Sum)[variant_index];
+                if (std.meta.activeTag(sum) != @field(Tag, field.name)) {
+                    return Backend.failure(.invalid_variant);
+                }
+                @field(store, result_name) = @field(sum, field.name);
+            },
+            .optional_none => {
+                @field(store, result_name) = null;
+            },
+            .optional_some => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+            },
+            .optional_is_some => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ) != null;
+            },
+            .vector_empty => {
+                const Vector = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = Vector.empty();
+            },
+            .vector_length => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ).len() catch unreachable;
+            },
+            .vector_get => {
+                const observed = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ).get(@field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                )) catch unreachable;
+                @field(store, result_name) = observed orelse
+                    return Backend.failure(.invalid_index);
+            },
+            .vector_set => {
+                var vector = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                vector.set(
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[1]),
+                    ),
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[2]),
+                    ),
+                ) catch return Backend.failure(.invalid_index);
+                @field(store, result_name) = vector;
+            },
+            .vector_push => {
+                var vector = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                vector.push(@field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                )) catch return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = vector;
+            },
+            .vector_pop => {
+                var vector = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const popped = vector.pop() catch unreachable;
+                const Product = @FieldType(ValueCatalog, result_name);
+                const fields = std.meta.fields(Product);
+                var product: Product = undefined;
+                @field(product, fields[0].name) = vector;
+                @field(product, fields[1].name) = popped;
+                @field(store, result_name) = product;
+            },
+            .vector_truncate => {
+                var vector = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                vector.truncate(@field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                ));
+                @field(store, result_name) = vector;
+            },
+            .vector_clear => {
+                var vector = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                vector.clear();
+                @field(store, result_name) = vector;
+            },
+            .text_empty => {
+                const Text = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = Text.empty();
+            },
+            .text_length => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ).len() catch unreachable;
+            },
+            .text_append => {
+                var text = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const suffix = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                text.append(suffix.slice() catch unreachable) catch
+                    return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = text;
+            },
+            .text_append_scalar => {
+                var text = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const scalar = std.math.cast(
+                    u21,
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[1]),
+                    ),
+                ) orelse return Backend.failure(.invalid_utf8);
+                text.appendScalar(scalar) catch |err| return switch (err) {
+                    error.InvalidUtf8 => Backend.failure(.invalid_utf8),
+                    error.CapacityExceeded => Backend.failure(.capacity_exceeded),
+                    else => Backend.failure(.capacity_exceeded),
+                };
+                @field(store, result_name) = text;
+            },
+            .text_append_unsigned => {
+                var text = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                text.appendUnsigned(@intCast(@field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                ))) catch return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = text;
+            },
+            .text_append_signed => {
+                var text = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                text.appendSigned(@intCast(@field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                ))) catch return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = text;
+            },
+            .text_copy => {
+                const Source = @FieldType(
+                    ValueCatalog,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                _ = Source;
+                const ResultText = @FieldType(
+                    ValueCatalog,
+                    result_name,
+                );
+                const source = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                @field(store, result_name) = source.copyRange(
+                    ResultText.maximum_length,
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[1]),
+                    ),
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[2]),
+                    ),
+                ) catch |err| return switch (err) {
+                    error.InvalidUtf8 => Backend.failure(.invalid_utf8),
+                    error.CapacityExceeded => Backend.failure(.capacity_exceeded),
+                    else => Backend.failure(.capacity_exceeded),
+                };
+            },
+            .text_compare => {
+                const left = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const right = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                @field(store, result_name) = switch (std.mem.order(
+                    u8,
+                    left.slice() catch unreachable,
+                    right.slice() catch unreachable,
+                )) {
+                    .lt => -1,
+                    .eq => 0,
+                    .gt => 1,
+                };
+            },
+            .text_join => {
+                var text = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const separator = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                const right = @field(
+                    store,
+                    Backend.valueName(instruction.operands[2]),
+                );
+                text.append(separator.slice() catch unreachable) catch
+                    return Backend.failure(.capacity_exceeded);
+                text.append(right.slice() catch unreachable) catch
+                    return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = text;
+            },
+            .bytes_empty => {
+                const Bytes = @FieldType(ValueCatalog, result_name);
+                @field(store, result_name) = Bytes.empty();
+            },
+            .bytes_length => {
+                @field(store, result_name) = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                ).len() catch unreachable;
+            },
+            .bytes_append => {
+                var bytes = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const suffix = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                bytes.append(suffix.slice() catch unreachable) catch
+                    return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = bytes;
+            },
+            .bytes_append_scalar => {
+                var bytes = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const scalar = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                bytes.append(&.{scalar}) catch
+                    return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = bytes;
+            },
+            .bytes_copy => {
+                const ResultBytes = @FieldType(
+                    ValueCatalog,
+                    result_name,
+                );
+                const source = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                @field(store, result_name) = source.copyRange(
+                    ResultBytes.maximum_length,
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[1]),
+                    ),
+                    @field(
+                        store,
+                        Backend.valueName(instruction.operands[2]),
+                    ),
+                ) catch return Backend.failure(.capacity_exceeded);
+            },
+            .bytes_compare => {
+                const left = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const right = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                @field(store, result_name) = switch (std.mem.order(
+                    u8,
+                    left.slice() catch unreachable,
+                    right.slice() catch unreachable,
+                )) {
+                    .lt => -1,
+                    .eq => 0,
+                    .gt => 1,
+                };
+            },
+            .bytes_join => {
+                var bytes = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const separator = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                const right = @field(
+                    store,
+                    Backend.valueName(instruction.operands[2]),
+                );
+                bytes.append(separator.slice() catch unreachable) catch
+                    return Backend.failure(.capacity_exceeded);
+                bytes.append(right.slice() catch unreachable) catch
+                    return Backend.failure(.capacity_exceeded);
+                @field(store, result_name) = bytes;
+            },
+        }
+    }
+    return null;
 }

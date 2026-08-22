@@ -378,6 +378,7 @@ fn addCoreModules(
         .optimize = optimize,
     });
     reducer_semantics_v1.addImport("control_ir", control_ir);
+    reducer_semantics_v1.addImport("portable_value", portable_value);
     const compiler = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
