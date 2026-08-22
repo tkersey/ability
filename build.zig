@@ -7,6 +7,7 @@ const CoreModules = struct {
     compiler: *std.Build.Module,
     control_ir: *std.Build.Module,
     driver: *std.Build.Module,
+    dynamic_value_v1: *std.Build.Module,
     effect_v2: *std.Build.Module,
     image_v1: *std.Build.Module,
     machine: *std.Build.Module,
@@ -22,6 +23,7 @@ const CoreModuleId = enum {
     compiler,
     control_ir,
     driver,
+    dynamic_value_v1,
     effect_v2,
     image_v1,
     machine,
@@ -44,6 +46,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .compiler => "src/compiler.zig",
         .control_ir => "src/control_ir.zig",
         .driver => "src/driver.zig",
+        .dynamic_value_v1 => "src/dynamic_value_v1.zig",
         .effect_v2 => "src/effect_v2.zig",
         .image_v1 => "src/image_v1.zig",
         .machine => "src/machine.zig",
@@ -58,7 +61,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
         .compiler, .machine, .reducer_semantics_v1 => .direct_runtime_semantics,
-        .image_v1 => .image_runtime_semantics,
+        .dynamic_value_v1, .image_v1 => .image_runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
@@ -366,6 +369,11 @@ fn addCoreModules(
         .optimize = optimize,
     });
     machine.addImport("portable_value", portable_value);
+    const dynamic_value_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.dynamic_value_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
     const image_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_v1)),
         .target = target,
@@ -430,6 +438,7 @@ fn addCoreModules(
         .compiler = compiler,
         .control_ir = control_ir,
         .driver = driver,
+        .dynamic_value_v1 = dynamic_value_v1,
         .effect_v2 = effect_v2,
         .image_v1 = image_v1,
         .machine = machine,
@@ -828,6 +837,7 @@ pub fn build(b: *std.Build) void {
         "check-boundary-image",
         "Validate the canonical BEI1 envelope and section directory.",
     );
+    addTestArtifact(b, image_step, host_core.dynamic_value_v1);
     addTestArtifact(b, image_step, image_test);
 
     const control_step = b.step(
@@ -1080,6 +1090,7 @@ pub fn build(b: *std.Build) void {
                 "source_module compiler {s} {s}\n" ++
                 "source_module control_ir {s} {s}\n" ++
                 "source_module driver {s} {s}\n" ++
+                "source_module dynamic_value_v1 {s} {s}\n" ++
                 "source_module effect_v2 {s} {s}\n" ++
                 "source_module image_v1 {s} {s}\n" ++
                 "source_module machine {s} {s}\n" ++
@@ -1098,6 +1109,8 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.control_ir),
                 @tagName(coreModuleRole(.driver)),
                 coreModulePath(.driver),
+                @tagName(coreModuleRole(.dynamic_value_v1)),
+                coreModulePath(.dynamic_value_v1),
                 @tagName(coreModuleRole(.effect_v2)),
                 coreModulePath(.effect_v2),
                 @tagName(coreModuleRole(.image_v1)),

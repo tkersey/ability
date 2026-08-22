@@ -4,6 +4,7 @@ src/agent_profile.zig
 src/compiler.zig
 src/control_ir.zig
 src/driver.zig
+src/dynamic_value_v1.zig
 src/effect_v2.zig
 src/image_v1.zig
 src/machine.zig
