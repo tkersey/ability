@@ -41,6 +41,7 @@ const options: machine.Options = .{
 };
 const DirectMachine = machine.Machine(Direct, options);
 const ProgramMachine = Program.compile(options);
+const KernelMachine = Program.kernelMachine(options);
 const Image = Program.image(options);
 const ProgramSchemas = image_emit_v1.ProgramSchemaSet(Reified, Direct);
 const ProgramRoots = image_emit_v1.ProgramRoots(Reified, ProgramSchemas);
@@ -73,6 +74,11 @@ test "direct specialization consumes the exact Reified Program" {
         u8,
         &DirectMachine.Manifest.machine_contract_digest,
         &ProgramMachine.Manifest.machine_contract_digest,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &ProgramMachine.Manifest.machine_contract_digest,
+        &KernelMachine.Manifest.machine_contract_digest,
     );
     try std.testing.expectEqual(
         Reified.rnf_value.constructor_count,
@@ -142,6 +148,11 @@ test "Reified Program preserves direct canonical State bytes" {
     defer DirectMachine.deinitState(direct);
     const compiled = try ProgramMachine.initialState(std.testing.allocator, 29);
     defer ProgramMachine.deinitState(compiled);
+    const kernel_typed = try KernelMachine.initialState(
+        std.testing.allocator,
+        29,
+    );
+    defer KernelMachine.deinitState(kernel_typed);
 
     const direct_bytes = try DirectMachine.encodeState(
         std.testing.allocator,
@@ -154,6 +165,27 @@ test "Reified Program preserves direct canonical State bytes" {
     );
     defer std.testing.allocator.free(compiled_bytes);
     try std.testing.expectEqualSlices(u8, direct_bytes, compiled_bytes);
+    const kernel_typed_bytes = try KernelMachine.encodeState(
+        std.testing.allocator,
+        kernel_typed,
+    );
+    defer std.testing.allocator.free(kernel_typed_bytes);
+    try std.testing.expectEqualSlices(
+        u8,
+        compiled_bytes,
+        kernel_typed_bytes,
+    );
+    var typed_kernel_fuel: u64 = 8;
+    const typed_kernel_done = switch (try KernelMachine.step(
+        kernel_typed,
+        &typed_kernel_fuel,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer typed_kernel_done.deinit();
+    try std.testing.expectEqual(@as(u32, 29), typed_kernel_done.value().*);
+    try std.testing.expectEqual(@as(u64, 7), typed_kernel_fuel);
 
     const image_v1 = @import("image_v1");
     const kernel_v1 = @import("kernel_v1");

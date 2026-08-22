@@ -1,5 +1,6 @@
 const compiler = @import("compiler");
 const image_emit_v1 = @import("image_emit_v1");
+const kernel_machine_v1 = @import("kernel_machine_v1");
 const machine = @import("machine");
 
 /// Declare one typed Boundary source program with one Machine meaning.
@@ -57,6 +58,12 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 pub const machine_options = options;
                 pub const Manifest = Emitted.Manifest;
             };
+        }
+
+        /// Adapt the fixed byte kernel to the typed Machine ABI v2 surface.
+        pub fn kernelMachine(comptime options: machine.Options) type {
+            const Image = image(options);
+            return kernel_machine_v1.Machine(Definition, Image, options);
         }
     };
 }

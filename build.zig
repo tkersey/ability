@@ -12,6 +12,7 @@ const CoreModules = struct {
     image_v1: *std.Build.Module,
     image_emit_v1: *std.Build.Module,
     kernel_v1: *std.Build.Module,
+    kernel_machine_v1: *std.Build.Module,
     machine: *std.Build.Module,
     portable_value: *std.Build.Module,
     program_v2: *std.Build.Module,
@@ -30,6 +31,7 @@ const CoreModuleId = enum {
     image_v1,
     image_emit_v1,
     kernel_v1,
+    kernel_machine_v1,
     machine,
     portable_value,
     program_v2,
@@ -55,6 +57,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .image_v1 => "src/image_v1.zig",
         .image_emit_v1 => "src/image_emit_v1.zig",
         .kernel_v1 => "src/kernel_v1.zig",
+        .kernel_machine_v1 => "src/kernel_machine_v1.zig",
         .machine => "src/machine.zig",
         .portable_value => "src/portable_value.zig",
         .program_v2 => "src/program_v2.zig",
@@ -67,7 +70,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
         .compiler, .machine, .reducer_semantics_v1 => .direct_runtime_semantics,
-        .dynamic_value_v1, .image_v1, .kernel_v1 => .image_runtime_semantics,
+        .dynamic_value_v1, .image_v1, .kernel_v1, .kernel_machine_v1 => .image_runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
@@ -394,6 +397,15 @@ fn addCoreModules(
     });
     kernel_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     kernel_v1.addImport("image_v1", image_v1);
+    const kernel_machine_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.kernel_machine_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_machine_v1.addImport("image_v1", image_v1);
+    kernel_machine_v1.addImport("kernel_v1", kernel_v1);
+    kernel_machine_v1.addImport("machine", machine);
+    kernel_machine_v1.addImport("portable_value", portable_value);
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
         .target = target,
@@ -441,6 +453,7 @@ fn addCoreModules(
     });
     program_v2.addImport("compiler", compiler);
     program_v2.addImport("image_emit_v1", image_emit_v1);
+    program_v2.addImport("kernel_machine_v1", kernel_machine_v1);
     program_v2.addImport("machine", machine);
     const driver = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.driver)),
@@ -469,6 +482,7 @@ fn addCoreModules(
         .image_v1 = image_v1,
         .image_emit_v1 = image_emit_v1,
         .kernel_v1 = kernel_v1,
+        .kernel_machine_v1 = kernel_machine_v1,
         .machine = machine,
         .portable_value = portable_value,
         .program_v2 = program_v2,
@@ -1152,6 +1166,7 @@ pub fn build(b: *std.Build) void {
                 "source_module image_v1 {s} {s}\n" ++
                 "source_module image_emit_v1 {s} {s}\n" ++
                 "source_module kernel_v1 {s} {s}\n" ++
+                "source_module kernel_machine_v1 image_runtime_semantics src/kernel_machine_v1.zig\n" ++
                 "source_module machine {s} {s}\n" ++
                 "source_module portable_value {s} {s}\n" ++
                 "source_module program_v2 {s} {s}\n" ++

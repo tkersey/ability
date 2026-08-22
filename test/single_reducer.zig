@@ -54,6 +54,7 @@ const options: boundary.MachineOptions = .{
     .maximum_machine_fuel = 32,
 };
 const Machine = Program.compile(options);
+const KernelMachine = Program.kernelMachine(options);
 const Image = Program.image(options);
 const Reducer = fn (Machine.State, *u64) Machine.Error!Machine.Outcome;
 
@@ -92,12 +93,20 @@ comptime {
     }
     if (!@hasDecl(Program, "compile") or
         !@hasDecl(Program, "image") or
-        functionDeclarationCount(Program) != 2)
+        !@hasDecl(Program, "kernelMachine") or
+        functionDeclarationCount(Program) != 3)
     {
         @compileError("Boundary Program exposes a competing compilation route");
     }
     if (@hasDecl(Image, "step") or @hasDecl(Image, "resume")) {
         @compileError("Boundary image product exposes reducer authority");
+    }
+    if (!std.mem.eql(
+        u8,
+        &Machine.Manifest.machine_contract_digest,
+        &KernelMachine.Manifest.machine_contract_digest,
+    )) {
+        @compileError("kernel Machine changes Machine contract identity");
     }
     if (@hasDecl(boundary, "Runtime") or
         @hasDecl(boundary, "staticMachine") or
@@ -159,6 +168,35 @@ pub fn main(init: std.process.Init) !void {
         .requested => |request| request,
         else => return error.ExpectedEffectRequest,
     };
+    const typed_kernel_state = try KernelMachine.initialState(allocator, 21);
+    defer KernelMachine.deinitState(typed_kernel_state);
+    var typed_kernel_fuel: u64 = 8;
+    const typed_kernel_request = switch (try KernelMachine.step(
+        typed_kernel_state,
+        &typed_kernel_fuel,
+    )) {
+        .request => |request| request,
+        else => return error.ExpectedEffectRequest,
+    };
+    try std.testing.expectEqual(
+        kernel_request.identity.digest,
+        typed_kernel_request.identity.digest,
+    );
+    const typed_prepared = try KernelMachine.prepareResume(
+        typed_kernel_state,
+        typed_kernel_request,
+    );
+    try KernelMachine.@"resume"(typed_prepared, @as(u32, 42));
+    KernelMachine.deinitPreparedResume(typed_prepared);
+    const typed_kernel_done = switch (try KernelMachine.step(
+        typed_kernel_state,
+        &typed_kernel_fuel,
+    )) {
+        .done => |value| value,
+        else => return error.ExpectedEffectRequest,
+    };
+    defer typed_kernel_done.deinit();
+    try std.testing.expectEqual(@as(u32, 42), typed_kernel_done.value().*);
     const state = try Machine.initialState(allocator, 21);
     defer Machine.deinitState(state);
     var caller_fuel: u64 = 8;
