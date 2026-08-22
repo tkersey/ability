@@ -1095,6 +1095,130 @@ pub fn build(b: *std.Build) void {
     const kernel_vector_output = run_kernel_vector.captureStdOut(.{
         .basename = "boundary-kernel-wasm-vector.bin",
     });
+    const one_effect_image_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_one_effect_image.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    one_effect_image_module.addImport("boundary", host_boundary);
+    const one_effect_image_executable = b.addExecutable(.{
+        .name = "emit-one-effect-boundary-image",
+        .root_module = one_effect_image_module,
+    });
+    const run_one_effect_image = b.addRunArtifact(one_effect_image_executable);
+    const one_effect_image = run_one_effect_image.captureStdOut(.{
+        .basename = "one-effect.boundary-image",
+    });
+    const portable_values_image_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_portable_values_image.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    portable_values_image_module.addImport("boundary", host_boundary);
+    portable_values_image_module.addImport(
+        "operations_fixture",
+        reification_operations_fixture,
+    );
+    const portable_values_image_executable = b.addExecutable(.{
+        .name = "emit-portable-values-boundary-image",
+        .root_module = portable_values_image_module,
+    });
+    const run_portable_values_image = b.addRunArtifact(
+        portable_values_image_executable,
+    );
+    const portable_values_image = run_portable_values_image.captureStdOut(.{
+        .basename = "portable-values.boundary-image",
+    });
+    const kernel_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    kernel_sha_command.addFileArg(kernel_wasm_executable.getEmittedBin());
+    const kernel_sha = kernel_sha_command.captureStdOut(.{
+        .basename = "boundary-kernel-v1.wasm.sha256",
+    });
+    const one_effect_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    one_effect_sha_command.addFileArg(one_effect_image);
+    const one_effect_sha = one_effect_sha_command.captureStdOut(.{
+        .basename = "one-effect.boundary-image.sha256",
+    });
+    const portable_values_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    portable_values_sha_command.addFileArg(portable_values_image);
+    const portable_values_sha = portable_values_sha_command.captureStdOut(.{
+        .basename = "portable-values.boundary-image.sha256",
+    });
+    const reification_asset_receipt_command = b.addSystemCommand(&.{
+        "node",
+        "scripts/write_reification_receipt.mjs",
+    });
+    reification_asset_receipt_command.addFileArg(
+        kernel_wasm_executable.getEmittedBin(),
+    );
+    reification_asset_receipt_command.addFileArg(one_effect_image);
+    reification_asset_receipt_command.addFileArg(portable_values_image);
+    const reification_receipt_file = reification_asset_receipt_command.captureStdOut(.{
+        .basename = "boundary-reification-v1-receipt.json",
+    });
+    const install_kernel = b.addInstallFileWithDir(
+        kernel_wasm_executable.getEmittedBin(),
+        .prefix,
+        "boundary-kernel-v1.wasm",
+    );
+    const install_kernel_sha = b.addInstallFileWithDir(
+        kernel_sha,
+        .prefix,
+        "boundary-kernel-v1.wasm.sha256",
+    );
+    const install_one_effect = b.addInstallFileWithDir(
+        one_effect_image,
+        .prefix,
+        "one-effect.boundary-image",
+    );
+    const install_one_effect_sha = b.addInstallFileWithDir(
+        one_effect_sha,
+        .prefix,
+        "one-effect.boundary-image.sha256",
+    );
+    const install_portable_values = b.addInstallFileWithDir(
+        portable_values_image,
+        .prefix,
+        "portable-values.boundary-image",
+    );
+    const install_portable_values_sha = b.addInstallFileWithDir(
+        portable_values_sha,
+        .prefix,
+        "portable-values.boundary-image.sha256",
+    );
+    const install_reification_receipt = b.addInstallFileWithDir(
+        reification_receipt_file,
+        .prefix,
+        "boundary-reification-v1-receipt.json",
+    );
+    const emit_reification_assets_step = b.step(
+        "emit-boundary-reification-assets",
+        "Emit BEI1 examples, fixed kernel, checksums, and receipt.",
+    );
+    inline for (.{
+        install_kernel,
+        install_kernel_sha,
+        install_one_effect,
+        install_one_effect_sha,
+        install_portable_values,
+        install_portable_values_sha,
+        install_reification_receipt,
+    }) |installation| emit_reification_assets_step.dependOn(&installation.step);
     const run_kernel_wasm = b.addSystemCommand(&.{"node"});
     run_kernel_wasm.addFileArg(b.path("test/run_kernel_wasm.mjs"));
     run_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
