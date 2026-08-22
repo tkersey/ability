@@ -106,6 +106,26 @@ comptime {
 pub fn main(init: std.process.Init) !void {
     var image_workspace: boundary.image.ValidationWorkspace = .{};
     _ = try boundary.image.validateImage(&Image.bytes, &image_workspace);
+    var malformed_image = Image.bytes;
+    const envelope = try boundary.image.validateEnvelope(&malformed_image);
+    const effects_offset: usize = envelope.sections[4].offset;
+    const identity_length = std.mem.readInt(
+        u32,
+        malformed_image[effects_offset + 8 ..][0..4],
+        .little,
+    );
+    const semantic_digest_offset = effects_offset + 4 + 8 +
+        identity_length + 12;
+    malformed_image[semantic_digest_offset] ^= 0xff;
+    var malformed_workspace: boundary.image.ValidationWorkspace = .{};
+    if (boundary.image.validateImage(
+        &malformed_image,
+        &malformed_workspace,
+    )) |_| {
+        return error.ForgedEffectDigestAccepted;
+    } else |err| if (err != error.DigestMismatch) {
+        return err;
+    }
     const state = try Machine.initialState(std.heap.page_allocator, 21);
     defer Machine.deinitState(state);
     var caller_fuel: u64 = 8;

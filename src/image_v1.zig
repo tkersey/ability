@@ -49,6 +49,7 @@ pub const Error = error{
     UnreachableEntry,
     MachineContractDigestMismatch,
     ScratchRequirementMismatch,
+    DigestMismatch,
 };
 
 pub const SectionKind = enum(u16) {
@@ -100,6 +101,7 @@ pub const ValidatedEnvelope = struct {
 pub const ValidationWorkspace = struct {
     schema_nodes: [1024]dynamic_value_v1.NodeIndex = undefined,
     value_tasks: [2048]dynamic_value_v1.ValueTask = undefined,
+    schema_hash_tasks: [8192]dynamic_value_v1.SchemaHashTask = undefined,
 };
 
 pub const Catalogs = struct {
@@ -242,6 +244,7 @@ pub fn validateCatalogs(
     const effect_count = try validateEffects(
         envelope.section(.effects),
         schemas,
+        &workspace.schema_hash_tasks,
     );
     const values = try validateValues(envelope.section(.values), schemas);
     if (roots.entry_parameter_count == 1) {
@@ -437,6 +440,7 @@ fn validateConstants(
 fn validateEffects(
     bytes: []const u8,
     schemas: dynamic_value_v1.Table,
+    hash_tasks: []dynamic_value_v1.SchemaHashTask,
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidEffect;
     const count = readInt(u32, bytes, 0);
@@ -455,16 +459,42 @@ fn validateEffects(
         if (identity.len == 0 or !std.unicode.utf8ValidateSlice(identity)) {
             return error.InvalidUtf8;
         }
-        _ = schemas.node(readInt(u32, bytes, cursor)) catch
+        const payload_schema = readInt(u32, bytes, cursor);
+        _ = schemas.node(payload_schema) catch
             return error.InvalidEffect;
         cursor += 4;
-        _ = schemas.node(readInt(u32, bytes, cursor)) catch
+        const resume_schema = readInt(u32, bytes, cursor);
+        _ = schemas.node(resume_schema) catch
             return error.InvalidEffect;
         cursor += 4;
         if (bytes[cursor] != 0 or !allZero(bytes[cursor + 1 .. cursor + 4])) {
             return error.InvalidEffect;
         }
-        cursor += 4 + 64;
+        cursor += 4;
+        const semantic_digest = try effectDigest(
+            schemas,
+            hash_tasks,
+            null,
+            identity,
+            payload_schema,
+            resume_schema,
+        );
+        if (!std.mem.eql(u8, &semantic_digest, bytes[cursor..][0..32])) {
+            return error.DigestMismatch;
+        }
+        cursor += 32;
+        const ordinal_digest = try effectDigest(
+            schemas,
+            hash_tasks,
+            @intCast(ordinal),
+            identity,
+            payload_schema,
+            resume_schema,
+        );
+        if (!std.mem.eql(u8, &ordinal_digest, bytes[cursor..][0..32])) {
+            return error.DigestMismatch;
+        }
+        cursor += 32;
         var prior_cursor: usize = 4;
         for (0..ordinal) |_| {
             prior_cursor += 4;
@@ -483,6 +513,42 @@ fn validateEffects(
     }
     if (cursor != bytes.len) return error.InvalidEffect;
     return count;
+}
+
+fn effectDigest(
+    schemas: dynamic_value_v1.Table,
+    hash_tasks: []dynamic_value_v1.SchemaHashTask,
+    ordinal: ?u32,
+    identity: []const u8,
+    payload_schema: u32,
+    resume_schema: u32,
+) Error![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    semanticHashBytes(
+        &hasher,
+        if (ordinal == null)
+            "boundary-effect-site-semantic-contract-v1"
+        else
+            "boundary-effect-site-contract-v1",
+    );
+    if (ordinal) |value| semanticHashU32(&hasher, value);
+    semanticHashBytes(&hasher, identity);
+    const payload_digest = dynamic_value_v1.schemaDigest(
+        schemas,
+        payload_schema,
+        hash_tasks,
+    ) catch return error.InvalidSchema;
+    hasher.update(&payload_digest);
+    const resume_digest = dynamic_value_v1.schemaDigest(
+        schemas,
+        resume_schema,
+        hash_tasks,
+    ) catch return error.InvalidSchema;
+    hasher.update(&resume_digest);
+    semanticHashBytes(&hasher, "single-resume");
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
 }
 
 const Values = struct {
@@ -972,6 +1038,23 @@ fn computeMachineContractDigest(header: Header) Error![32]u8 {
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return digest;
+}
+
+fn semanticHashU32(hasher: anytype, value: u32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn semanticHashU64(hasher: anytype, value: u64) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn semanticHashBytes(hasher: anytype, value: []const u8) void {
+    semanticHashU64(hasher, value.len);
+    hasher.update(value);
 }
 
 fn readInt(
