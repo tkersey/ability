@@ -313,6 +313,18 @@ pub fn validateImage(
     };
 }
 
+/// Re-encode a fully validated canonical image into caller-owned storage.
+/// Structural validation has already rejected alternate encodings.
+pub fn reencodeValidated(
+    image: ValidatedImage,
+    output: []u8,
+) Error!usize {
+    const source = image.catalogs.envelope.image;
+    if (output.len < source.len) return error.LengthMismatch;
+    @memcpy(output[0..source.len], source);
+    return source.len;
+}
+
 const Roots = struct {
     initial_args_schema_id: u32,
     result_schema_id: u32,

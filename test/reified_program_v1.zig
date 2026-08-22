@@ -125,6 +125,16 @@ test "direct specialization consumes the exact Reified Program" {
     try std.testing.expectEqual(@as(u32, 1), catalogs.value_count);
     try std.testing.expectEqual(@as(u32, 1), validated.segment_count);
     try std.testing.expectEqual(@as(u32, 1), validated.constructor_count);
+    var reencoded: [Image.bytes.len]u8 = undefined;
+    const reencoded_length = try image_v1.reencodeValidated(
+        validated,
+        &reencoded,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &Image.bytes,
+        reencoded[0..reencoded_length],
+    );
 }
 
 test "Reified Program preserves direct canonical State bytes" {

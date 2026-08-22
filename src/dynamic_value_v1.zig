@@ -123,6 +123,16 @@ pub fn validateSchemaSection(
             payload,
             index_storage[0..node_id],
         );
+        for (index_storage[0..node_id]) |prior| {
+            const prior_start: usize = prior.offset;
+            if (prior.length == record_length and std.mem.eql(
+                u8,
+                bytes[prior_start .. prior_start + prior.length],
+                bytes[cursor..record_end],
+            )) {
+                return error.InvalidSchema;
+            }
+        }
         index_storage[node_id] = .{
             .offset = std.math.cast(u32, cursor) orelse
                 return error.LengthOverflow,
@@ -715,6 +725,20 @@ test "dynamic schema validation rejects forward references" {
     bytes[8] = @intFromEnum(Kind.optional);
     std.mem.writeInt(u32, bytes[12..16], 0, .little);
     var storage: [1]NodeIndex = undefined;
+    try std.testing.expectError(
+        error.InvalidSchema,
+        validateSchemaSection(&bytes, &storage),
+    );
+}
+
+test "dynamic schema validation rejects duplicate structural nodes" {
+    var bytes = [_]u8{0} ** 20;
+    std.mem.writeInt(u32, bytes[0..4], 2, .little);
+    std.mem.writeInt(u32, bytes[4..8], 8, .little);
+    bytes[8] = @intFromEnum(Kind.u32);
+    std.mem.writeInt(u32, bytes[12..16], 8, .little);
+    bytes[16] = @intFromEnum(Kind.u32);
+    var storage: [2]NodeIndex = undefined;
     try std.testing.expectError(
         error.InvalidSchema,
         validateSchemaSection(&bytes, &storage),
