@@ -593,6 +593,9 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    reification_recursion_fixture.addImport("image_v1", host_core.image_v1);
+    reification_recursion_fixture.addImport("kernel_v1", host_core.kernel_v1);
+    reification_recursion_fixture.addImport("machine", host_core.machine);
     const reification_baseline_module = b.createModule(.{
         .root_source_file = b.path("test/reification_baseline.zig"),
         .target = b.graph.host,
@@ -819,6 +822,9 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    recursion.addImport("image_v1", host_core.image_v1);
+    recursion.addImport("kernel_v1", host_core.kernel_v1);
+    recursion.addImport("machine", host_core.machine);
     const after = programTestModule(
         b,
         host_core,

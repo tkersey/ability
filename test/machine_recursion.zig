@@ -1,4 +1,7 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
+const machine = @import("machine");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
@@ -197,11 +200,12 @@ const Program = program_v2.program("bounded-recursive-helper", Body);
 
 pub const ReificationBaselineBody = Body;
 pub const ReificationBaselineProgram = Program;
-pub const ReificationBaselineMachine = Program.compile(.{
+const reification_options: machine.Options = .{
     .maximum_frames = 8,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 64,
-});
+};
+pub const ReificationBaselineMachine = Program.compile(reification_options);
 
 const staged_second_call_arguments = [_]cir.EdgeArgument{
     .{ .value = 16 },
@@ -1025,11 +1029,8 @@ test "compiled bounded recursive frames survive canonical round trip" {
     }
     try std.testing.expectEqual(@as(usize, 2), call_return_count);
 
-    const RecursiveMachine = Program.compile(.{
-        .maximum_frames = 8,
-        .maximum_state_bytes = 4096,
-        .maximum_machine_fuel = 64,
-    });
+    const RecursiveMachine = Program.compile(reification_options);
+    const Image = Program.image(reification_options);
     const state = try RecursiveMachine.initialState(std.testing.allocator, 3);
     defer RecursiveMachine.deinitState(state);
 
@@ -1056,6 +1057,55 @@ test "compiled bounded recursive frames survive canonical round trip" {
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 6), done.value().*);
     try std.testing.expectEqual(@as(u64, 7), completion_fuel);
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    var args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &args, 3, .little);
+    var kernel_initial: [4096]u8 = undefined;
+    const kernel_initial_length = try kernel_v1.initial(
+        image,
+        &args,
+        &kernel_initial,
+        &workspace,
+    );
+    var kernel_split_fuel: u64 = 3;
+    var kernel_state: [4096]u8 = undefined;
+    var kernel_output: [4]u8 = undefined;
+    var kernel_scratch: [16 * 1024]u8 = undefined;
+    const kernel_yielded = switch (try kernel_v1.step(
+        image,
+        kernel_initial[0..kernel_initial_length],
+        &kernel_split_fuel,
+        &kernel_state,
+        &kernel_output,
+        &kernel_scratch,
+        &workspace,
+    )) {
+        .yielded => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualSlices(u8, encoded, kernel_yielded);
+    try std.testing.expectEqual(@as(u64, 0), kernel_split_fuel);
+    var kernel_completion_fuel: u64 = 32;
+    var kernel_terminal_state: [4096]u8 = undefined;
+    const kernel_done = switch (try kernel_v1.step(
+        image,
+        kernel_yielded,
+        &kernel_completion_fuel,
+        &kernel_terminal_state,
+        &kernel_output,
+        &kernel_scratch,
+        &workspace,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        done.value().*,
+        std.mem.readInt(u32, kernel_done[0..4], .little),
+    );
+    try std.testing.expectEqual(completion_fuel, kernel_completion_fuel);
 }
 
 test "helper entry backedges rebind future state without overwriting activation context" {
