@@ -82,6 +82,13 @@ pub const ValueTask = union(enum) {
     },
 };
 
+pub const SchemaHashTask = union(enum) {
+    schema: u32,
+    bytes: []const u8,
+    u32_value: u32,
+    u64_value: u64,
+};
+
 /// Validate one complete BEI1 schema-section payload into caller-owned index
 /// storage. Children must precede parents, making the structural DAG finite.
 pub fn validateSchemaSection(
@@ -251,6 +258,177 @@ pub fn validateValue(
         }
     }
     if (cursor != bytes.len) return error.TrailingBytes;
+}
+
+/// Reconstruct the exact `boundary-portable-schema-v2` digest without Zig
+/// reflection or recursive descent.
+pub fn schemaDigest(
+    table: Table,
+    schema_id: u32,
+    task_storage: []SchemaHashTask,
+) Error![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashBytes(&hasher, "boundary-portable-schema-v2");
+    if (task_storage.len == 0) return error.LimitExceeded;
+    var count: usize = 1;
+    task_storage[0] = .{ .schema = schema_id };
+    while (count != 0) {
+        count -= 1;
+        switch (task_storage[count]) {
+            .bytes => |value| hashBytes(&hasher, value),
+            .u32_value => |value| hashU32(&hasher, value),
+            .u64_value => |value| hashU64(&hasher, value),
+            .schema => |id| try pushSchemaHashTasks(
+                table,
+                id,
+                task_storage,
+                &count,
+            ),
+        }
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn pushSchemaHashTasks(
+    table: Table,
+    schema_id: u32,
+    storage: []SchemaHashTask,
+    count: *usize,
+) Error!void {
+    const node = try table.node(schema_id);
+    switch (node.kind) {
+        .unit => try pushHashTask(storage, count, .{ .bytes = "unit" }),
+        .bool => try pushHashTask(storage, count, .{ .bytes = "bool" }),
+        .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => {
+            try pushHashTask(storage, count, .{
+                .bytes = if (@intFromEnum(node.kind) <= @intFromEnum(Kind.i64))
+                    "signed"
+                else
+                    "unsigned",
+            });
+            try pushHashTask(storage, count, .{
+                .u32_value = integerBits(node.kind),
+            });
+            try pushHashTask(storage, count, .{ .bytes = "int" });
+        },
+        .bytes, .text => {
+            try pushHashTask(storage, count, .{
+                .u64_value = readInt(u32, node.payload, 0),
+            });
+            try pushHashTask(storage, count, .{
+                .bytes = if (node.kind == .bytes) "bytes" else "text",
+            });
+        },
+        .array, .vector => {
+            try pushHashTask(storage, count, .{
+                .schema = readInt(u32, node.payload, 4),
+            });
+            try pushHashTask(storage, count, .{
+                .u64_value = readInt(u32, node.payload, 0),
+            });
+            try pushHashTask(storage, count, .{
+                .bytes = if (node.kind == .array) "array" else "vector",
+            });
+        },
+        .optional => {
+            try pushHashTask(storage, count, .{
+                .schema = readInt(u32, node.payload, 0),
+            });
+            try pushHashTask(storage, count, .{ .bytes = "optional" });
+        },
+        .@"enum" => {
+            const field_count = readInt(u32, node.payload, 0);
+            var index: usize = field_count;
+            while (index != 0) {
+                index -= 1;
+                try pushHashTask(storage, count, .{
+                    .u32_value = readInt(u32, node.payload, 4 + index * 4),
+                });
+            }
+            try pushHashTask(storage, count, .{ .u64_value = field_count });
+            try pushHashTask(storage, count, .{ .bytes = "enum" });
+        },
+        .product => {
+            const field_count = readInt(u32, node.payload, 0);
+            var index: usize = field_count;
+            while (index != 0) {
+                index -= 1;
+                try pushHashTask(storage, count, .{
+                    .schema = readInt(u32, node.payload, 4 + index * 4),
+                });
+            }
+            try pushHashTask(storage, count, .{ .u64_value = field_count });
+            try pushHashTask(storage, count, .{ .bytes = "product" });
+        },
+        .sum => {
+            const case_count = readInt(u32, node.payload, 4);
+            var index: usize = case_count;
+            while (index != 0) {
+                index -= 1;
+                const offset = 8 + index * 8;
+                try pushHashTask(storage, count, .{
+                    .schema = readInt(u32, node.payload, offset + 4),
+                });
+                try pushHashTask(storage, count, .{
+                    .u32_value = readInt(u32, node.payload, offset),
+                });
+            }
+            try pushHashTask(storage, count, .{ .u64_value = case_count });
+            try pushHashTask(storage, count, .{
+                .schema = readInt(u32, node.payload, 0),
+            });
+            try pushHashTask(storage, count, .{ .bytes = "sum" });
+        },
+    }
+}
+
+fn pushHashTask(
+    storage: []SchemaHashTask,
+    count: *usize,
+    task: SchemaHashTask,
+) Error!void {
+    if (count.* == storage.len) return error.LimitExceeded;
+    storage[count.*] = task;
+    count.* += 1;
+}
+
+fn integerBits(kind: Kind) u32 {
+    return switch (kind) {
+        .i8, .u8 => 8,
+        .i16, .u16 => 16,
+        .i32, .u32 => 32,
+        .i64, .u64 => 64,
+        .unit,
+        .bool,
+        .bytes,
+        .text,
+        .array,
+        .vector,
+        .optional,
+        .@"enum",
+        .product,
+        .sum,
+        => unreachable,
+    };
+}
+
+fn hashU32(hasher: anytype, value: u32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn hashU64(hasher: anytype, value: u64) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn hashBytes(hasher: anytype, value: []const u8) void {
+    hashU64(hasher, value.len);
+    hasher.update(value);
 }
 
 fn pushTask(

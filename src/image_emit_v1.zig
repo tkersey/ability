@@ -1439,6 +1439,15 @@ test "typed canonical encoding validates through emitted dynamic schemas" {
         @as(u64, maximum_size),
         root.maximum_encoded_size,
     );
+    var hash_tasks: [128]dynamic_value_v1.SchemaHashTask = undefined;
+    try std.testing.expectEqual(
+        portable_value.schemaDigest(Product),
+        try dynamic_value_v1.schemaDigest(
+            table,
+            Schemas.root_ids[0],
+            &hash_tasks,
+        ),
+    );
 }
 
 test "BEI1 envelope composition is exact and digest-bound" {
