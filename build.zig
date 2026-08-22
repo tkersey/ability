@@ -843,6 +843,7 @@ pub fn build(b: *std.Build) void {
         host_core.image_emit_v1,
     );
     constructor_invariants.addImport("image_v1", host_core.image_v1);
+    constructor_invariants.addImport("kernel_v1", host_core.kernel_v1);
     const recursion = programTestModule(
         b,
         host_core,

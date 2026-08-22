@@ -2,6 +2,7 @@ const cir = @import("control_ir");
 const compiler = @import("compiler");
 const image_emit_v1 = @import("image_emit_v1");
 const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -144,6 +145,11 @@ const SumProgram = program_v2.program(
     SumBody,
 );
 const SumMachine = SumProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+const SumImage = SumProgram.image(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
@@ -1688,6 +1694,12 @@ test "sum branches persist the source case and reject a forged local path" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         SumMachine.decodeState(std.testing.allocator, forged),
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    try std.testing.expectError(
+        error.InvalidState,
+        kernel_v1.validateState(image, forged, &workspace),
     );
 }
 

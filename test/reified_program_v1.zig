@@ -318,6 +318,67 @@ test "BEI1 validation recomputes kernel scratch requirements" {
     );
 }
 
+test "BEI1 deterministic mutations fail closed without trap" {
+    const image_v1 = @import("image_v1");
+    var malformed: [Image.bytes.len]u8 = undefined;
+    for (0..128) |index| {
+        @memcpy(&malformed, &Image.bytes);
+        const offset = (index * 104729) % malformed.len;
+        malformed[offset] ^= @as(u8, 1) << @intCast(index % 8);
+        var workspace: image_v1.ValidationWorkspace = .{};
+        if (image_v1.validateImage(&malformed, &workspace)) |_| {
+            return error.MalformedImageAccepted;
+        } else |_| {}
+    }
+}
+
+test "direct and kernel reject shared malformed State classes" {
+    const state = try ProgramMachine.initialState(std.testing.allocator, 29);
+    defer ProgramMachine.deinitState(state);
+    const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const image_v1 = @import("image_v1");
+    const kernel_v1 = @import("kernel_v1");
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    var malformed: [4096]u8 = undefined;
+    for (0..12) |case| {
+        @memcpy(malformed[0..encoded.len], encoded);
+        var length = encoded.len;
+        switch (case) {
+            0 => malformed[0] ^= 0xff,
+            1 => std.mem.writeInt(u16, malformed[8..10], 2, .little),
+            2 => std.mem.writeInt(u16, malformed[10..12], 3, .little),
+            3 => malformed[12] ^= 0xff,
+            4 => std.mem.writeInt(u64, malformed[44..52], 1, .little),
+            5 => std.mem.writeInt(
+                u64,
+                malformed[52..60],
+                options.maximum_machine_fuel + 1,
+                .little,
+            ),
+            6 => std.mem.writeInt(u32, malformed[60..64], 0, .little),
+            7 => std.mem.writeInt(u32, malformed[64..68], 1, .little),
+            8 => std.mem.writeInt(u32, malformed[68..72], 0xffff, .little),
+            9 => std.mem.writeInt(u32, malformed[72..76], 0, .little),
+            10 => length -= 1,
+            11 => {
+                malformed[length] = 0;
+                length += 1;
+            },
+            else => unreachable,
+        }
+        const bytes = malformed[0..length];
+        if (ProgramMachine.decodeState(std.testing.allocator, bytes)) |decoded| {
+            ProgramMachine.deinitState(decoded);
+            return error.MalformedDirectStateAccepted;
+        } else |_| {}
+        if (kernel_v1.validateState(image, bytes, &workspace)) {
+            return error.MalformedKernelStateAccepted;
+        } else |_| {}
+    }
+}
+
 test "Reified constants emit in canonical first-use order" {
     const constant_instructions = [_]cir.Instruction{.{
         .kind = .constant,

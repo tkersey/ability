@@ -2371,6 +2371,7 @@ fn validateEnvironment(
     const environment_count = readInt(u16, constructor, 18);
     var field_cursor: usize = 24;
     var value_cursor: usize = 0;
+    var slots = [_]Slot{.{}} ** 1024;
     if (flags & 1 != 0) {
         if (environment.len < 4) return error.InvalidState;
         const entry_constructor = readInt(u32, environment, 0);
@@ -2380,6 +2381,7 @@ fn validateEnvironment(
     }
     const field_count = @as(u32, activation_count) + environment_count;
     for (0..field_count) |_| {
+        const value = readInt(u16, constructor, field_cursor);
         const schema_id = readInt(u32, constructor, field_cursor + 4);
         const consumed = dynamic_value_v1.validateValuePrefix(
             image.catalogs.schemas,
@@ -2387,10 +2389,102 @@ fn validateEnvironment(
             environment[value_cursor..],
             &workspace.value_tasks,
         ) catch return error.InvalidState;
+        slots[value] = .{
+            .bytes = environment[value_cursor .. value_cursor + consumed],
+            .initialized = true,
+        };
         value_cursor += consumed;
         field_cursor += 8;
     }
     if (value_cursor != environment.len) return error.InvalidState;
+    try validatePathInvariants(image, constructor, &slots);
+}
+
+fn validatePathInvariants(
+    image: image_v1.ValidatedImage,
+    constructor: []const u8,
+    slots: *const [1024]Slot,
+) Error!void {
+    const activation_count = readInt(u16, constructor, 16);
+    const environment_count = readInt(u16, constructor, 18);
+    const invariant_count = readInt(u16, constructor, 20);
+    var cursor: usize = 24 +
+        (@as(usize, activation_count) + environment_count) * 8;
+    for (0..invariant_count) |_| {
+        const length = readInt(u32, constructor, cursor);
+        const tag = constructor[cursor + 4];
+        const payload = cursor + 8;
+        const accepted = switch (tag) {
+            0 => blk: {
+                const value = readInt(u16, constructor, payload);
+                break :blk slots[value].initialized and
+                    slots[value].bytes.len == 1 and
+                    (slots[value].bytes[0] == 1) ==
+                        (constructor[payload + 2] == 1);
+            },
+            15 => blk: {
+                const value = readInt(u16, constructor, payload);
+                if (!slots[value].initialized) break :blk false;
+                var zero = true;
+                for (slots[value].bytes) |byte| zero = zero and byte == 0;
+                break :blk zero == (constructor[payload + 2] == 1);
+            },
+            17 => blk: {
+                const left_id = readInt(u16, constructor, payload);
+                const right_id = readInt(u16, constructor, payload + 2);
+                if (!slots[left_id].initialized or !slots[right_id].initialized) {
+                    break :blk false;
+                }
+                const left = decodeInteger(
+                    try valueKind(image, left_id),
+                    slots[left_id].bytes,
+                ) catch break :blk false;
+                const right = decodeInteger(
+                    try valueKind(image, right_id),
+                    slots[right_id].bytes,
+                ) catch break :blk false;
+                const operation: u16 = 9 + constructor[payload + 4];
+                break :blk compareIntegers(left, right, operation) ==
+                    (constructor[payload + 5] == 1);
+            },
+            19 => blk: {
+                const value = readInt(u16, constructor, payload);
+                if (!slots[value].initialized) break :blk false;
+                const actual = algebraicCaseIndex(
+                    image,
+                    value,
+                    slots[value].bytes,
+                ) catch break :blk false;
+                break :blk (actual == readInt(u16, constructor, payload + 2)) ==
+                    (constructor[payload + 4] == 1);
+            },
+            else => true,
+        };
+        if (!accepted) return error.InvalidState;
+        cursor += length;
+    }
+}
+
+fn algebraicCaseIndex(
+    image: image_v1.ValidatedImage,
+    value: u16,
+    bytes: []const u8,
+) Error!u16 {
+    const node = try valueNode(image, value);
+    return switch (node.kind) {
+        .optional => if (bytes[0] == 0) 0 else 1,
+        .sum => blk: {
+            const tag = readInt(u32, bytes, 0);
+            const count = readInt(u32, node.payload, 4);
+            for (0..count) |index| {
+                if (readInt(u32, node.payload, 8 + index * 8) == tag) {
+                    break :blk @intCast(index);
+                }
+            }
+            return error.InvalidState;
+        },
+        else => error.InvalidState,
+    };
 }
 
 fn constructorRecord(
