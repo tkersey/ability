@@ -174,6 +174,39 @@ test "Reified Program preserves direct canonical State bytes" {
         kernel_state[0..kernel_length],
     );
     try kernel_v1.validateState(validated, compiled_bytes, &workspace);
+
+    const terminal_state = try ProgramMachine.initialState(
+        std.testing.allocator,
+        29,
+    );
+    defer ProgramMachine.deinitState(terminal_state);
+    var direct_fuel: u64 = 8;
+    const direct_done = switch (try ProgramMachine.step(
+        terminal_state,
+        &direct_fuel,
+    )) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer direct_done.deinit();
+    var kernel_fuel: u64 = 8;
+    var kernel_result: [4]u8 = undefined;
+    const kernel_done = try kernel_v1.step(
+        validated,
+        kernel_state[0..kernel_length],
+        &kernel_fuel,
+        &kernel_result,
+        &workspace,
+    );
+    const kernel_value = switch (kernel_done) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(direct_fuel, kernel_fuel);
+    try std.testing.expectEqual(
+        direct_done.value().*,
+        std.mem.readInt(u32, kernel_value[0..4], .little),
+    );
 }
 
 test "BEI1 catalog validation fails closed on forged roots" {
@@ -270,5 +303,41 @@ test "Reified constants emit in canonical first-use order" {
     try std.testing.expectEqual(
         @as(u32, 42),
         std.mem.readInt(u32, Constants.bytes[12..16], .little),
+    );
+    const ConstantProgram = program_v2.program(
+        "constant-image-proof",
+        ConstantBody,
+    );
+    const ConstantImage = ConstantProgram.image(options);
+    const image_v1 = @import("image_v1");
+    const kernel_v1 = @import("kernel_v1");
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const validated = try image_v1.validateImage(
+        &ConstantImage.bytes,
+        &workspace,
+    );
+    var state: [4096]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        validated,
+        &.{},
+        &state,
+        &workspace,
+    );
+    var fuel: u64 = 8;
+    var output: [4]u8 = undefined;
+    const outcome = try kernel_v1.step(
+        validated,
+        state[0..state_length],
+        &fuel,
+        &output,
+        &workspace,
+    );
+    const value = switch (outcome) {
+        .done => |bytes| bytes,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        @as(u32, 42),
+        std.mem.readInt(u32, value[0..4], .little),
     );
 }
