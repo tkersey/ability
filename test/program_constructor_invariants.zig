@@ -1,6 +1,7 @@
 const cir = @import("control_ir");
 const compiler = @import("compiler");
 const image_emit_v1 = @import("image_emit_v1");
+const image_v1 = @import("image_v1");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -34,6 +35,10 @@ test "BEI1 emits the admitted constructor invariant families" {
             Schemas,
         );
         try std.testing.expect(Constructors.bytes.len > 4);
+        const Program = program_v2.program(Body.control_ir.label, Body);
+        const Image = Program.image(.{});
+        var workspace: image_v1.ValidationWorkspace = .{};
+        _ = try image_v1.validateImage(&Image.bytes, &workspace);
     }
 }
 

@@ -71,6 +71,12 @@ test "BEI1 operation tags are exhaustive and independent of current enum tags" {
             @as(u16, @intCast(expected_tag)),
             reducer.wireTag(operation),
         );
+        try std.testing.expectEqual(
+            reducer.currentSemanticTag(operation),
+            reducer.currentSemanticTagForWire(
+                reducer.wireOperation(operation),
+            ),
+        );
     }
     try std.testing.expectEqual(
         control_ir.InstructionKind.constant,

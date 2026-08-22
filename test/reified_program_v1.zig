@@ -183,6 +183,19 @@ test "BEI1 validation recomputes the Machine contract digest" {
     );
 }
 
+test "BEI1 validation recomputes the Program semantic digest" {
+    const image_v1 = @import("image_v1");
+    var malformed = Image.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segment_offset: usize = envelope.sections[7].offset;
+    malformed[segment_offset + 21] ^= 0x01;
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.ProgramSemanticDigestMismatch,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
 test "Reified constants emit in canonical first-use order" {
     const constant_instructions = [_]cir.Instruction{.{
         .kind = .constant,

@@ -306,6 +306,11 @@ pub fn currentSemanticTag(
     return @intCast(@intFromEnum(std.meta.activeTag(operation)));
 }
 
+/// Map a BEI1 operation tag back to the frozen current-v4 semantic tag.
+pub fn currentSemanticTagForWire(operation: WireOperation) u8 {
+    return @intCast(@intFromEnum(operation) + 1);
+}
+
 pub fn canonicalInstructionKind(
     comptime operation: control_ir.InstructionOperation,
 ) control_ir.InstructionKind {

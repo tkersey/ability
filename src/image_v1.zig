@@ -1,4 +1,5 @@
 const dynamic_value_v1 = @import("dynamic_value_v1");
+const reducer_semantics_v1 = @import("reducer_semantics_v1");
 const std = @import("std");
 
 pub const magic = "ABL_BEI1".*;
@@ -50,6 +51,7 @@ pub const Error = error{
     MachineContractDigestMismatch,
     ScratchRequirementMismatch,
     DigestMismatch,
+    ProgramSemanticDigestMismatch,
 };
 
 pub const SectionKind = enum(u16) {
@@ -292,6 +294,17 @@ pub fn validateImage(
         catalogs.initial_constructor_id >= constructor_count)
     {
         return error.UnreachableEntry;
+    }
+    const program_digest = try computeProgramSemanticDigest(
+        catalogs,
+        &workspace.schema_hash_tasks,
+    );
+    if (!std.mem.eql(
+        u8,
+        &program_digest,
+        &catalogs.envelope.header.program_semantic_digest,
+    )) {
+        return error.ProgramSemanticDigestMismatch;
     }
     return .{
         .catalogs = catalogs,
@@ -1011,6 +1024,550 @@ fn maximumSingleValueBytes(schemas: dynamic_value_v1.Table) u32 {
     return std.math.cast(u32, maximum) orelse std.math.maxInt(u32);
 }
 
+const SemanticHasher = std.crypto.hash.sha2.Sha256;
+
+fn computeProgramSemanticDigest(
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+) Error![32]u8 {
+    var hasher = SemanticHasher.init(.{});
+    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
+    semanticHashBytes(
+        &hasher,
+        reducer_semantics_v1.segment_fuel_semantic_domain,
+    );
+    semanticHashU64(
+        &hasher,
+        reducer_semantics_v1.dynamic_fuel_quantum_bytes,
+    );
+    try semanticHashSchema(
+        &hasher,
+        catalogs,
+        catalogs.initial_args_schema_id,
+        schema_tasks,
+    );
+    try semanticHashSchema(
+        &hasher,
+        catalogs,
+        catalogs.result_schema_id,
+        schema_tasks,
+    );
+    try semanticHashSchema(
+        &hasher,
+        catalogs,
+        catalogs.failure_schema_id,
+        schema_tasks,
+    );
+    try hashFailures(&hasher, catalogs.envelope.section(.failures));
+    semanticHashU32(&hasher, catalogs.effect_count);
+    try hashEffectContracts(&hasher, catalogs.envelope.section(.effects));
+    semanticHashU32(&hasher, catalogs.value_count);
+    for (0..catalogs.value_count) |value| {
+        try semanticHashSchema(
+            &hasher,
+            catalogs,
+            valueSchema(catalogs, @intCast(value)),
+            schema_tasks,
+        );
+    }
+    semanticHashU16(&hasher, catalogs.entry_segment_id);
+    try semanticHashSchema(
+        &hasher,
+        catalogs,
+        catalogs.result_schema_id,
+        schema_tasks,
+    );
+    semanticHashU32(&hasher, catalogs.function_count);
+    for (0..catalogs.function_count) |function| {
+        const offset = 4 + function * 8;
+        semanticHashU16(
+            &hasher,
+            readInt(u16, catalogs.functions_section, offset),
+        );
+        semanticHashU16(
+            &hasher,
+            readInt(u16, catalogs.functions_section, offset + 2),
+        );
+        try semanticHashSchema(
+            &hasher,
+            catalogs,
+            readInt(u32, catalogs.functions_section, offset + 4),
+            schema_tasks,
+        );
+    }
+    try hashSegments(&hasher, catalogs, schema_tasks);
+    semanticHashBytes(&hasher, "await-effect-cost");
+    semanticHashU64(&hasher, reducer_semantics_v1.await_effect_cost);
+    try hashConstructors(&hasher, catalogs, schema_tasks);
+    hashTransitions(&hasher, catalogs.envelope.section(.entry_transitions));
+    semanticHashU32(&hasher, 0);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn semanticHashSchema(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_id: u32,
+    tasks: []dynamic_value_v1.SchemaHashTask,
+) Error!void {
+    const digest = dynamic_value_v1.schemaDigest(
+        catalogs.schemas,
+        schema_id,
+        tasks,
+    ) catch return error.InvalidSchema;
+    hasher.update(&digest);
+}
+
+fn hashFailures(hasher: *SemanticHasher, bytes: []const u8) Error!void {
+    semanticHashBytes(hasher, "failure-name-tag-map-v1");
+    const count = readInt(u32, bytes, 0);
+    semanticHashU32(hasher, count);
+    var cursor: usize = 4;
+    for (0..count) |_| {
+        const tag = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const length = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const name = try takeCatalogSlice(bytes, &cursor, length);
+        semanticHashBytes(hasher, name);
+        semanticHashU32(hasher, tag);
+    }
+}
+
+fn hashEffectContracts(hasher: *SemanticHasher, bytes: []const u8) Error!void {
+    const count = readInt(u32, bytes, 0);
+    var cursor: usize = 4;
+    for (0..count) |_| {
+        cursor += 4;
+        const length = readInt(u32, bytes, cursor);
+        cursor += 4 + length + 8 + 4 + 32;
+        hasher.update(bytes[cursor..][0..32]);
+        cursor += 32;
+    }
+}
+
+fn hashSegments(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+) Error!void {
+    const bytes = catalogs.envelope.section(.segments);
+    const count = readInt(u32, bytes, 0);
+    semanticHashU32(hasher, count);
+    var cursor: usize = 4;
+    for (0..count) |_| {
+        const segment_start = cursor;
+        const end = try recordEnd(bytes, cursor, 24);
+        semanticHashU16(hasher, readInt(u16, bytes, cursor + 4));
+        semanticHashU16(hasher, readInt(u16, bytes, cursor + 6));
+        const parameter_count = readInt(u16, bytes, cursor + 10);
+        const instruction_count = readInt(u32, bytes, cursor + 12);
+        semanticHashU32(hasher, parameter_count);
+        cursor += 24;
+        for (0..parameter_count) |_| {
+            semanticHashU16(hasher, readInt(u16, bytes, cursor));
+            cursor += 2;
+        }
+        semanticHashU32(hasher, instruction_count);
+        for (0..instruction_count) |_| {
+            cursor = try hashInstruction(
+                hasher,
+                catalogs,
+                schema_tasks,
+                bytes,
+                cursor,
+            );
+        }
+        cursor = try hashTerminator(
+            hasher,
+            catalogs,
+            schema_tasks,
+            bytes,
+            cursor,
+        );
+        semanticHashU64(hasher, readInt(u64, bytes, segment_start + 16));
+        if (cursor != end) return error.InvalidSegment;
+    }
+}
+
+fn hashInstruction(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+    bytes: []const u8,
+    start: usize,
+) Error!usize {
+    const end = try recordEnd(bytes, start, 16);
+    semanticHashU8(hasher, bytes[start + 4]);
+    semanticHashU16(hasher, readInt(u16, bytes, start + 8));
+    const operand_count = readInt(u16, bytes, start + 10);
+    semanticHashU32(hasher, operand_count);
+    var cursor = start + 16;
+    for (0..operand_count) |_| {
+        semanticHashU16(hasher, readInt(u16, bytes, cursor));
+        cursor += 2;
+    }
+    const wire: reducer_semantics_v1.WireOperation = @enumFromInt(
+        readInt(u16, bytes, start + 6),
+    );
+    semanticHashU8(
+        hasher,
+        reducer_semantics_v1.currentSemanticTagForWire(wire),
+    );
+    const immediate = readInt(u32, bytes, start + 12);
+    switch (wire) {
+        .constant => try hashConstant(
+            hasher,
+            catalogs,
+            schema_tasks,
+            immediate,
+        ),
+        .product_extract,
+        .product_replace,
+        .sum_construct,
+        .sum_tag_is,
+        .sum_extract,
+        => semanticHashU16(hasher, @intCast(immediate)),
+        else => {},
+    }
+    return end;
+}
+
+fn hashConstant(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+    target: u32,
+) Error!void {
+    const bytes = catalogs.envelope.section(.constants);
+    var cursor: usize = 4;
+    for (0..catalogs.constant_count) |index| {
+        const schema_id = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const length = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const value = try takeCatalogSlice(bytes, &cursor, length);
+        if (index != target) continue;
+        try semanticHashSchema(hasher, catalogs, schema_id, schema_tasks);
+        semanticHashBytes(hasher, value);
+        return;
+    }
+    return error.InvalidConstant;
+}
+
+fn hashTerminator(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+    bytes: []const u8,
+    start: usize,
+) Error!usize {
+    const end = try recordEnd(bytes, start, 8);
+    const kind = bytes[start + 4];
+    semanticHashU8(hasher, kind);
+    var cursor = start + 8;
+    switch (kind) {
+        0 => try hashEdge(hasher, bytes, &cursor),
+        1 => {
+            semanticHashU16(hasher, readInt(u16, bytes, cursor));
+            cursor += 4;
+            try hashEdge(hasher, bytes, &cursor);
+            try hashEdge(hasher, bytes, &cursor);
+        },
+        2 => try hashSuspension(
+            hasher,
+            catalogs,
+            schema_tasks,
+            bytes,
+            &cursor,
+        ),
+        3 => {
+            const present = bytes[cursor] == 1;
+            semanticHashBool(hasher, present);
+            if (present) {
+                semanticHashU16(hasher, readInt(u16, bytes, cursor + 2));
+            }
+            cursor += 4;
+        },
+        4, 6 => {
+            semanticHashU16(hasher, readInt(u16, bytes, cursor));
+            cursor += 4;
+        },
+        5 => {
+            semanticHashU16(
+                hasher,
+                @intCast(readInt(u32, bytes, cursor)),
+            );
+            cursor += 4;
+        },
+        else => return error.InvalidTerminator,
+    }
+    if (cursor != end) return error.InvalidTerminator;
+    return end;
+}
+
+fn hashSuspension(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+    bytes: []const u8,
+    cursor: *usize,
+) Error!void {
+    const kind = bytes[cursor.*];
+    const site = readInt(u32, bytes, cursor.* + 4);
+    const callee_function = readInt(u16, bytes, cursor.* + 8);
+    const request_count = readInt(u16, bytes, cursor.* + 10);
+    const requests_start = cursor.* + 12;
+    var edge_cursor = requests_start + @as(usize, request_count) * 2;
+    const callee_present = bytes[edge_cursor] == 1;
+    edge_cursor += 4;
+
+    semanticHashU8(hasher, kind);
+    semanticHashBool(hasher, site != std.math.maxInt(u32));
+    if (site != std.math.maxInt(u32)) semanticHashU32(hasher, site);
+    semanticHashBool(hasher, callee_function != std.math.maxInt(u16));
+    if (callee_function != std.math.maxInt(u16)) {
+        semanticHashU16(hasher, callee_function);
+    }
+    semanticHashBool(hasher, callee_present);
+    if (callee_present) try hashEdge(hasher, bytes, &edge_cursor);
+    semanticHashU32(hasher, request_count);
+    var request_cursor = requests_start;
+    for (0..request_count) |_| {
+        semanticHashU16(hasher, readInt(u16, bytes, request_cursor));
+        request_cursor += 2;
+    }
+    try hashEdge(hasher, bytes, &edge_cursor);
+    const resume_schema = readInt(u32, bytes, edge_cursor);
+    semanticHashBool(hasher, resume_schema != std.math.maxInt(u32));
+    if (resume_schema != std.math.maxInt(u32)) {
+        try semanticHashSchema(
+            hasher,
+            catalogs,
+            resume_schema,
+            schema_tasks,
+        );
+    }
+    cursor.* = edge_cursor + 4;
+}
+
+fn hashEdge(
+    hasher: *SemanticHasher,
+    bytes: []const u8,
+    cursor: *usize,
+) Error!void {
+    semanticHashU16(hasher, readInt(u16, bytes, cursor.*));
+    const count = readInt(u16, bytes, cursor.* + 2);
+    semanticHashU32(hasher, count);
+    cursor.* += 4;
+    for (0..count) |_| {
+        const kind = bytes[cursor.*];
+        semanticHashU8(hasher, kind);
+        if (kind == 0) {
+            semanticHashU16(hasher, readInt(u16, bytes, cursor.* + 2));
+        } else if (kind != 1) {
+            return error.InvalidTerminator;
+        }
+        cursor.* += 4;
+    }
+}
+
+fn hashConstructors(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+) Error!void {
+    const bytes = catalogs.envelope.section(.constructors);
+    const count = readInt(u32, bytes, 0);
+    semanticHashU32(hasher, count);
+    var cursor: usize = 4;
+    for (0..count) |_| {
+        const end = try recordEnd(bytes, cursor, 24);
+        semanticHashU32(hasher, readInt(u32, bytes, cursor + 4));
+        semanticHashU8(hasher, bytes[cursor + 9]);
+        semanticHashU16(hasher, readInt(u16, bytes, cursor + 12));
+        const resume_target = readInt(u16, bytes, cursor + 14);
+        semanticHashBool(hasher, resume_target != std.math.maxInt(u16));
+        if (resume_target != std.math.maxInt(u16)) {
+            semanticHashU16(hasher, resume_target);
+        }
+        semanticHashBool(
+            hasher,
+            readInt(u16, bytes, cursor + 10) & 1 == 1,
+        );
+        const activation_count = readInt(u16, bytes, cursor + 16);
+        const environment_count = readInt(u16, bytes, cursor + 18);
+        const invariant_count = readInt(u16, bytes, cursor + 20);
+        semanticHashU32(hasher, activation_count);
+        cursor += 24;
+        for (0..activation_count) |_| {
+            try hashEnvironmentField(
+                hasher,
+                catalogs,
+                schema_tasks,
+                bytes,
+                &cursor,
+            );
+        }
+        semanticHashU32(hasher, environment_count);
+        for (0..environment_count) |_| {
+            try hashEnvironmentField(
+                hasher,
+                catalogs,
+                schema_tasks,
+                bytes,
+                &cursor,
+            );
+        }
+        semanticHashU32(hasher, invariant_count);
+        for (0..invariant_count) |_| {
+            cursor = try hashInvariant(hasher, bytes, cursor);
+        }
+        if (cursor != end) return error.InvalidConstructor;
+    }
+}
+
+fn hashEnvironmentField(
+    hasher: *SemanticHasher,
+    catalogs: Catalogs,
+    schema_tasks: []dynamic_value_v1.SchemaHashTask,
+    bytes: []const u8,
+    cursor: *usize,
+) Error!void {
+    semanticHashU16(hasher, readInt(u16, bytes, cursor.*));
+    try semanticHashSchema(
+        hasher,
+        catalogs,
+        readInt(u32, bytes, cursor.* + 4),
+        schema_tasks,
+    );
+    cursor.* += 8;
+}
+
+fn hashInvariant(
+    hasher: *SemanticHasher,
+    bytes: []const u8,
+    start: usize,
+) Error!usize {
+    const end = try recordEnd(bytes, start, 8);
+    const tag = bytes[start + 4];
+    const payload = start + 8;
+    semanticHashU8(hasher, tag);
+    switch (tag) {
+        0 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashBool(hasher, bytes[payload + 2] == 1);
+        },
+        1, 2, 5, 11, 16 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+        },
+        3 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 4));
+            semanticHashU8(hasher, bytes[payload + 6]);
+        },
+        4, 7 => {
+            for (0..4) |index| {
+                semanticHashU16(
+                    hasher,
+                    readInt(u16, bytes, payload + index * 2),
+                );
+            }
+        },
+        6 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            const value_kind = bytes[payload + 4];
+            semanticHashU8(hasher, value_kind);
+            const value = readInt(u64, bytes, payload + 12);
+            switch (value_kind) {
+                0 => semanticHashBool(hasher, value == 1),
+                1, 2 => semanticHashU64(hasher, value),
+                3 => semanticHashU16(hasher, @truncate(value)),
+                else => return error.InvalidInvariant,
+            }
+        },
+        8 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            const operand_count = readInt(u16, bytes, payload + 4);
+            semanticHashU16(hasher, operand_count);
+            for (0..operand_count) |index| {
+                semanticHashU16(
+                    hasher,
+                    readInt(u16, bytes, payload + 8 + index * 2),
+                );
+            }
+        },
+        9, 10 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 4));
+        },
+        12 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU8(hasher, bytes[payload + 4]);
+            semanticHashU8(hasher, bytes[payload + 5]);
+        },
+        13 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 4));
+            semanticHashU8(hasher, bytes[payload + 6]);
+            semanticHashU8(hasher, bytes[payload + 7]);
+        },
+        14 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU8(hasher, bytes[payload + 4]);
+        },
+        15 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashBool(hasher, bytes[payload + 2] == 1);
+        },
+        17 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU8(hasher, bytes[payload + 4]);
+            semanticHashBool(hasher, bytes[payload + 5] == 1);
+        },
+        18 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 4));
+            semanticHashU8(hasher, bytes[payload + 6]);
+        },
+        19 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashBool(hasher, bytes[payload + 4] == 1);
+        },
+        20 => {
+            semanticHashU16(hasher, readInt(u16, bytes, payload));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 2));
+            semanticHashU16(hasher, readInt(u16, bytes, payload + 4));
+        },
+        else => return error.InvalidInvariant,
+    }
+    return end;
+}
+
+fn hashTransitions(hasher: *SemanticHasher, bytes: []const u8) void {
+    const count = readInt(u32, bytes, 0);
+    semanticHashU32(hasher, count);
+    for (0..count) |index| {
+        const offset = 4 + index * 12;
+        semanticHashU16(hasher, readInt(u16, bytes, offset));
+        semanticHashU8(hasher, bytes[offset + 2]);
+        semanticHashU16(hasher, readInt(u16, bytes, offset + 4));
+        semanticHashU32(hasher, readInt(u32, bytes, offset + 8));
+    }
+}
+
 fn computeMachineContractDigest(header: Header) Error![32]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(&header.program_semantic_digest);
@@ -1044,6 +1601,20 @@ fn semanticHashU32(hasher: anytype, value: u32) void {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .little);
     hasher.update(&bytes);
+}
+
+fn semanticHashU8(hasher: anytype, value: u8) void {
+    hasher.update(&.{value});
+}
+
+fn semanticHashU16(hasher: anytype, value: u16) void {
+    var bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn semanticHashBool(hasher: anytype, value: bool) void {
+    semanticHashU8(hasher, @intFromBool(value));
 }
 
 fn semanticHashU64(hasher: anytype, value: u64) void {

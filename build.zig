@@ -411,6 +411,7 @@ fn addCoreModules(
     reducer_semantics_v1.addImport("control_ir", control_ir);
     reducer_semantics_v1.addImport("portable_value", portable_value);
     reducer_semantics_v1.addImport("rnf", rnf);
+    image_v1.addImport("reducer_semantics_v1", reducer_semantics_v1);
     image_emit_v1.addImport("reducer_semantics_v1", reducer_semantics_v1);
     const compiler = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.compiler)),
@@ -786,6 +787,7 @@ pub fn build(b: *std.Build) void {
         "image_emit_v1",
         host_core.image_emit_v1,
     );
+    constructor_invariants.addImport("image_v1", host_core.image_v1);
     const recursion = programTestModule(
         b,
         host_core,
