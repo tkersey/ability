@@ -11,6 +11,7 @@ const CoreModules = struct {
     machine: *std.Build.Module,
     portable_value: *std.Build.Module,
     program_v2: *std.Build.Module,
+    reified_program_v1: *std.Build.Module,
     rnf: *std.Build.Module,
 };
 
@@ -23,6 +24,7 @@ const CoreModuleId = enum {
     machine,
     portable_value,
     program_v2,
+    reified_program_v1,
     rnf,
 };
 
@@ -41,6 +43,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .machine => "src/machine.zig",
         .portable_value => "src/portable_value.zig",
         .program_v2 => "src/program_v2.zig",
+        .reified_program_v1 => "src/reified_program_v1.zig",
         .rnf => "src/rnf.zig",
     };
 }
@@ -54,6 +57,7 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .effect_v2,
         .portable_value,
         .program_v2,
+        .reified_program_v1,
         .rnf,
         => .support,
     };
@@ -360,6 +364,11 @@ fn addCoreModules(
         .optimize = optimize,
     });
     rnf.addImport("control_ir", control_ir);
+    const reified_program_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.reified_program_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
     const compiler = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
@@ -368,6 +377,7 @@ fn addCoreModules(
     compiler.addImport("control_ir", control_ir);
     compiler.addImport("machine", machine);
     compiler.addImport("portable_value", portable_value);
+    compiler.addImport("reified_program_v1", reified_program_v1);
     compiler.addImport("rnf", rnf);
     const program_v2 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.program_v2)),
@@ -402,6 +412,7 @@ fn addCoreModules(
         .machine = machine,
         .portable_value = portable_value,
         .program_v2 = program_v2,
+        .reified_program_v1 = reified_program_v1,
         .rnf = rnf,
     };
 }
@@ -677,6 +688,17 @@ pub fn build(b: *std.Build) void {
     );
     program_dead_control.addImport("compiler", host_core.compiler);
     program_dead_control.addImport("machine", host_core.machine);
+    const reified_program_test = programTestModule(
+        b,
+        host_core,
+        "test/reified_program_v1.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reified_program_test.addImport("compiler", host_core.compiler);
+    reified_program_test.addImport("machine", host_core.machine);
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -751,6 +773,13 @@ pub fn build(b: *std.Build) void {
         "Check private Resumption Normal Form synthesis.",
     );
     addTestArtifact(b, rnf_step, core.rnf);
+
+    const reified_core_step = b.step(
+        "check-boundary-reified-core",
+        "Prove direct specialization consumes one canonical Reified Program.",
+    );
+    reified_core_step.dependOn(reification_baseline_step);
+    addTestArtifact(b, reified_core_step, reified_program_test);
 
     const control_step = b.step(
         "check-boundary-rnf-control",
@@ -1006,6 +1035,7 @@ pub fn build(b: *std.Build) void {
                 "source_module machine {s} {s}\n" ++
                 "source_module portable_value {s} {s}\n" ++
                 "source_module program_v2 {s} {s}\n" ++
+                "source_module reified_program_v1 {s} {s}\n" ++
                 "source_module rnf {s} {s}\n",
             .{
                 std.meta.fields(CoreModules).len,
@@ -1025,6 +1055,8 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.portable_value),
                 @tagName(coreModuleRole(.program_v2)),
                 coreModulePath(.program_v2),
+                @tagName(coreModuleRole(.reified_program_v1)),
+                coreModulePath(.reified_program_v1),
                 @tagName(coreModuleRole(.rnf)),
                 coreModulePath(.rnf),
             },
@@ -1388,6 +1420,7 @@ pub fn build(b: *std.Build) void {
     inline for (.{
         test_step,
         reification_baseline_step,
+        reified_core_step,
         rnf_step,
         control_step,
         values_step,

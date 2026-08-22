@@ -8,6 +8,7 @@ src/effect_v2.zig
 src/machine.zig
 src/portable_value.zig
 src/program_v2.zig
+src/reified_program_v1.zig
 src/rnf.zig
 src/root.zig
 test/agent_loop.zig
@@ -50,6 +51,7 @@ test/program_integer_boolean_operations.zig
 test/program_operations.zig
 test/program_residual_effects.zig
 test/reification_baseline.zig
+test/reified_program_v1.zig
 test/research_digest_v2.zig
 test/run_machine_native.zig
 test/single_reducer.zig

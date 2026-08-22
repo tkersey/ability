@@ -1,6 +1,7 @@
 const control_ir = @import("control_ir");
 const machine = @import("machine");
 const portable_value = @import("portable_value");
+const reified_program_v1 = @import("reified_program_v1");
 const rnf = @import("rnf");
 const std = @import("std");
 
@@ -2184,8 +2185,8 @@ fn generatedReducerOperationCount(
     return total;
 }
 
-/// Generate one program-specific direct reducer from private typed Control IR.
-pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
+/// Analyze one source Body into the canonical post-normalization program.
+pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
     @setEvalBranchQuota(compiler_evaluation_branch_quota);
     if (label.len == 0) @compileError("Boundary program label must be non-empty");
     const source_program: control_ir.Program = Body.control_ir;
@@ -2247,6 +2248,35 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         reachability,
         semantic_canonicalization,
     );
+    return reified_program_v1.Program(
+        label,
+        Body,
+        limits,
+        program,
+        reachability,
+        semantic_canonicalization,
+        residual_effects,
+        invariant_constants,
+        normal_form,
+        generated_operation_count,
+        generated_semantic_digest,
+    );
+}
+
+/// Generate one program-specific direct reducer from one Reified Program.
+pub fn DirectDefinitionFor(comptime Reified: type) type {
+    comptime reified_program_v1.require(Reified);
+    const label = Reified.program_label;
+    const Body = Reified.Body;
+    const limits = Reified.compiler_limits;
+    const program = Reified.control;
+    const reachability = Reified.reachability;
+    const semantic_canonicalization = Reified.semantic_canonicalization;
+    const residual_effects = Reified.residual_effects;
+    const normal_form = Reified.rnf_value;
+    const generated_operation_count =
+        Reified.generated_reducer_operation_count;
+    const generated_semantic_digest = Reified.semantic_digest;
     const FrameType = frameType(Body, program, normal_form);
     const initial_constructor_index = comptime blk: {
         for (0..normal_form.constructor_count) |index| {
@@ -2291,6 +2321,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
     return struct {
         const Self = @This();
+
+        pub const reified_program = Reified;
 
         pub const Frame = FrameType;
         pub const minimum_initial_environment_bytes =
@@ -4630,4 +4662,9 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             _ = Self;
         }
     };
+}
+
+/// Compile one source Body through the canonical Reified Program boundary.
+pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
+    return DirectDefinitionFor(ReifiedFor(label, Body));
 }
