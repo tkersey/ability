@@ -43,6 +43,10 @@ const DirectMachine = machine.Machine(Direct, options);
 const ProgramMachine = Program.compile(options);
 const ProgramSchemas = image_emit_v1.ProgramSchemaSet(Reified, Direct);
 const ProgramRoots = image_emit_v1.ProgramRoots(Reified, ProgramSchemas);
+const ProgramFailures = image_emit_v1.ProgramFailures(Reified);
+const ProgramEffects = image_emit_v1.ProgramEffects(Direct, ProgramSchemas);
+const ProgramValues = image_emit_v1.ProgramValues(Reified, ProgramSchemas);
+const ProgramFunctions = image_emit_v1.ProgramFunctions(Reified, ProgramSchemas);
 
 test "direct specialization consumes the exact Reified Program" {
     try std.testing.expect(Direct.reified_program == Reified);
@@ -73,6 +77,10 @@ test "direct specialization consumes the exact Reified Program" {
         Reified.initial_constructor_id,
         std.mem.readInt(u32, ProgramRoots.bytes[16..20], .little),
     );
+    try std.testing.expectEqual(@as(usize, 20), ProgramFailures.bytes.len);
+    try std.testing.expectEqual(@as(usize, 4), ProgramEffects.bytes.len);
+    try std.testing.expectEqual(@as(usize, 8), ProgramValues.bytes.len);
+    try std.testing.expectEqual(@as(usize, 12), ProgramFunctions.bytes.len);
 }
 
 test "Reified Program preserves direct canonical State bytes" {

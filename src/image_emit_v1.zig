@@ -343,6 +343,141 @@ pub fn ProgramRoots(comptime Reified: type, comptime Schemas: type) type {
     };
 }
 
+pub fn ProgramFailures(comptime Reified: type) type {
+    const fields = std.meta.fields(Reified.Body.Failure);
+    const length = comptime blk: {
+        var total: usize = 4;
+        for (fields) |field| total += 8 + field.name.len;
+        break :blk total;
+    };
+    const encoded = comptime blk: {
+        var bytes: [length]u8 = undefined;
+        writeAt(u32, &bytes, 0, fields.len);
+        var cursor: usize = 4;
+        for (fields) |field| {
+            writeAt(u32, &bytes, cursor, field.value);
+            cursor += 4;
+            writeAt(u32, &bytes, cursor, field.name.len);
+            cursor += 4;
+            @memcpy(bytes[cursor..][0..field.name.len], field.name);
+            cursor += field.name.len;
+        }
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
+    };
+}
+
+pub fn ProgramEffects(
+    comptime Definition: type,
+    comptime Schemas: type,
+) type {
+    const count = Definition.EffectRow.operation_site_count;
+    const length = comptime blk: {
+        var total: usize = 4;
+        for (0..count) |ordinal| {
+            total += 84 + Definition.EffectRow.site(ordinal).semantic_identity.len;
+        }
+        break :blk total;
+    };
+    const encoded = comptime blk: {
+        var bytes: [length]u8 = [_]u8{0} ** length;
+        writeAt(u32, &bytes, 0, count);
+        var cursor: usize = 4;
+        for (0..count) |ordinal| {
+            const Site = Definition.EffectRow.site(ordinal);
+            writeAt(u32, &bytes, cursor, ordinal);
+            cursor += 4;
+            writeAt(u32, &bytes, cursor, Site.semantic_identity.len);
+            cursor += 4;
+            @memcpy(
+                bytes[cursor..][0..Site.semantic_identity.len],
+                Site.semantic_identity,
+            );
+            cursor += Site.semantic_identity.len;
+            writeAt(
+                u32,
+                &bytes,
+                cursor,
+                Schemas.root_ids[Schemas.effect_root_start + ordinal * 2],
+            );
+            cursor += 4;
+            writeAt(
+                u32,
+                &bytes,
+                cursor,
+                Schemas.root_ids[Schemas.effect_root_start + ordinal * 2 + 1],
+            );
+            cursor += 4;
+            bytes[cursor] = 0;
+            cursor += 4;
+            @memcpy(bytes[cursor..][0..32], &Site.semantic_contract_digest);
+            cursor += 32;
+            @memcpy(bytes[cursor..][0..32], &Site.contract_digest);
+            cursor += 32;
+        }
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
+    };
+}
+
+pub fn ProgramValues(comptime Reified: type, comptime Schemas: type) type {
+    const count = Reified.semantic_canonicalization.value_count;
+    const encoded = comptime blk: {
+        var bytes: [4 + count * 4]u8 = undefined;
+        writeAt(u32, &bytes, 0, count);
+        for (0..count) |dense_value| {
+            writeAt(
+                u32,
+                &bytes,
+                4 + dense_value * 4,
+                Schemas.root_ids[Schemas.value_root_start + dense_value],
+            );
+        }
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
+    };
+}
+
+pub fn ProgramFunctions(comptime Reified: type, comptime Schemas: type) type {
+    const count = Reified.semantic_canonicalization.function_count;
+    const encoded = comptime blk: {
+        var bytes: [4 + count * 8]u8 = undefined;
+        writeAt(u32, &bytes, 0, count);
+        for (0..count) |dense_function| {
+            const source_function = Reified.semantic_canonicalization
+                .function_dense_to_source[dense_function];
+            const entry = if (Reified.control.functions.len == 0)
+                Reified.control.entry
+            else
+                Reified.control.functions[source_function].entry;
+            const offset = 4 + dense_function * 8;
+            writeAt(u16, &bytes, offset, dense_function);
+            writeAt(
+                u16,
+                &bytes,
+                offset + 2,
+                Reified.semantic_canonicalization.blockId(entry),
+            );
+            writeAt(
+                u32,
+                &bytes,
+                offset + 4,
+                Schemas.root_ids[Schemas.function_root_start + dense_function],
+            );
+        }
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
+    };
+}
+
 fn integerKind(comptime T: type) dynamic_value_v1.Kind {
     return if (T == i8)
         .i8
