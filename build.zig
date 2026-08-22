@@ -389,6 +389,7 @@ fn addCoreModules(
         .optimize = optimize,
     });
     image_emit_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    image_emit_v1.addImport("image_v1", image_v1);
     image_emit_v1.addImport("portable_value", portable_value);
     const rnf = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.rnf)),

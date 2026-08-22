@@ -1,9 +1,85 @@
 const dynamic_value_v1 = @import("dynamic_value_v1");
+const image_v1 = @import("image_v1");
 const portable_value = @import("portable_value");
 const std = @import("std");
 
 const maximum_nodes = 1024;
 const maximum_bytes = 1 << 20;
+const maximum_image_bytes = 16 << 20;
+
+pub const EnvelopeOptions = struct {
+    program_semantic_digest: [32]u8,
+    machine_contract_digest: [32]u8,
+    maximum_frames: u32,
+    maximum_state_bytes: u32,
+    maximum_machine_fuel: u64,
+    maximum_kernel_scratch_bytes: u64,
+    maximum_single_value_bytes: u32,
+};
+
+/// Compose ten canonical section payloads into the exact BEI1 container.
+pub fn Envelope(
+    comptime options: EnvelopeOptions,
+    comptime sections: [image_v1.section_count][]const u8,
+) type {
+    const total_length = comptime blk: {
+        var total: usize = image_v1.header_length;
+        for (sections) |section| total += section.len;
+        if (total > maximum_image_bytes) {
+            @compileError("BEI1 image exceeds the default 16 MiB profile");
+        }
+        break :blk total;
+    };
+    const encoded = comptime blk: {
+        var bytes: [total_length]u8 = [_]u8{0} ** total_length;
+        @memcpy(bytes[0..image_v1.magic.len], &image_v1.magic);
+        writeAt(u16, &bytes, 8, image_v1.image_format_version);
+        writeAt(u16, &bytes, 10, image_v1.machine_abi_version);
+        writeAt(u16, &bytes, 12, image_v1.state_format_version);
+        writeAt(u16, &bytes, 14, image_v1.kernel_semantics_version);
+        writeAt(u32, &bytes, 20, image_v1.header_length);
+        writeAt(u64, &bytes, 24, total_length);
+        writeAt(u32, &bytes, 32, image_v1.section_count);
+        @memcpy(bytes[40..72], &options.program_semantic_digest);
+        @memcpy(bytes[72..104], &options.machine_contract_digest);
+        writeAt(u32, &bytes, 104, options.maximum_frames);
+        writeAt(u32, &bytes, 108, options.maximum_state_bytes);
+        writeAt(u64, &bytes, 112, options.maximum_machine_fuel);
+        writeAt(u64, &bytes, 120, options.maximum_kernel_scratch_bytes);
+        writeAt(u32, &bytes, 128, options.maximum_single_value_bytes);
+        var payload_offset: usize = image_v1.header_length;
+        for (sections, 0..) |section, index| {
+            const descriptor = image_v1.fixed_prefix_length +
+                index * image_v1.section_descriptor_length;
+            writeAt(u16, &bytes, descriptor, index + 1);
+            writeAt(u16, &bytes, descriptor + 2, 1);
+            writeAt(u64, &bytes, descriptor + 8, payload_offset);
+            writeAt(u64, &bytes, descriptor + 16, section.len);
+            @memcpy(bytes[payload_offset..][0..section.len], section);
+            payload_offset += section.len;
+        }
+        break :blk bytes;
+    };
+    const sha256 = comptime blk: {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&encoded, &digest, .{});
+        break :blk digest;
+    };
+    return struct {
+        pub const bytes = encoded;
+        pub const byte_length: u64 = total_length;
+        pub const artifact_sha256 = sha256;
+    };
+}
+
+fn writeAt(
+    comptime T: type,
+    bytes: []u8,
+    offset: usize,
+    value: anytype,
+) void {
+    std.mem.writeInt(T, bytes[offset..][0..@sizeOf(T)], @intCast(value), .little);
+}
 
 const Builder = struct {
     bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes,
@@ -249,4 +325,43 @@ test "typed canonical encoding validates through emitted dynamic schemas" {
         @as(u64, maximum_size),
         root.maximum_encoded_size,
     );
+}
+
+test "BEI1 envelope composition is exact and digest-bound" {
+    const Schemas = SchemaSet(.{u32});
+    const empty = "";
+    const sections = [image_v1.section_count][]const u8{
+        empty,
+        &Schemas.bytes,
+        empty,
+        empty,
+        empty,
+        empty,
+        empty,
+        empty,
+        empty,
+        empty,
+    };
+    const Image = Envelope(.{
+        .program_semantic_digest = [_]u8{1} ** 32,
+        .machine_contract_digest = [_]u8{2} ** 32,
+        .maximum_frames = 8,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 1000,
+        .maximum_kernel_scratch_bytes = 512,
+        .maximum_single_value_bytes = 4,
+    }, sections);
+    const envelope = try image_v1.validateEnvelope(&Image.bytes);
+    try std.testing.expectEqual(
+        @as(u64, image_v1.header_length + Schemas.bytes.len),
+        Image.byte_length,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &Schemas.bytes,
+        envelope.section(.schemas),
+    );
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&Image.bytes, &digest, .{});
+    try std.testing.expectEqual(Image.artifact_sha256, digest);
 }
