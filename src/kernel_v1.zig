@@ -404,7 +404,7 @@ fn stepSegment(
     try validateState(image, state, workspace);
     const cumulative = readInt(u64, state, 52);
     var slots = [_]Slot{.{}} ** 1024;
-    var preflight_sizes = [_]u64{0} ** 1024;
+    var preflight_sizes = [_]usize{0} ** 1024;
     var initially_available = [_]bool{false} ** 1024;
     var scratch_cursor: usize = 0;
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
@@ -1999,7 +1999,7 @@ fn addDynamicCost(
 fn addDynamicCostSize(
     image: image_v1.ValidatedImage,
     value: u16,
-    encoded_size: usize,
+    encoded_size: u64,
     cost: *u64,
 ) Error!void {
     const node = try valueNode(image, value);
@@ -2023,13 +2023,13 @@ fn preflightResultSize(
     result: u16,
     operand_bytes: []const u8,
     slots: *const [1024]Slot,
-    sizes: *const [1024]u64,
+    sizes: *const [1024]usize,
     initially_available: *const [1024]bool,
 ) Error!usize {
     const maximum: usize = @intCast((try valueNode(image, result)).maximum_encoded_size);
     const size = struct {
-        fn get(bytes: []const u8, index: usize, values: *const [1024]u64) usize {
-            return @intCast(values[readInt(u16, bytes, index * 2)]);
+        fn get(bytes: []const u8, index: usize, values: *const [1024]usize) usize {
+            return values[readInt(u16, bytes, index * 2)];
         }
     }.get;
     return switch (operation) {
@@ -2092,8 +2092,8 @@ fn preflightProductFieldSize(
     instruction_offset: usize,
     product_value: u16,
     field_index: u32,
-    sizes: *const [1024]u64,
-) ?u64 {
+    sizes: *const [1024]usize,
+) ?usize {
     var current_value = product_value;
     var current_limit = instruction_offset;
     while (true) {

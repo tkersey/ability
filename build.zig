@@ -13,6 +13,7 @@ const CoreModules = struct {
     image_emit_v1: *std.Build.Module,
     kernel_v1: *std.Build.Module,
     kernel_machine_v1: *std.Build.Module,
+    kernel_wasm_v1: *std.Build.Module,
     machine: *std.Build.Module,
     portable_value: *std.Build.Module,
     program_v2: *std.Build.Module,
@@ -32,6 +33,7 @@ const CoreModuleId = enum {
     image_emit_v1,
     kernel_v1,
     kernel_machine_v1,
+    kernel_wasm_v1,
     machine,
     portable_value,
     program_v2,
@@ -58,6 +60,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .image_emit_v1 => "src/image_emit_v1.zig",
         .kernel_v1 => "src/kernel_v1.zig",
         .kernel_machine_v1 => "src/kernel_machine_v1.zig",
+        .kernel_wasm_v1 => "src/kernel_wasm_v1.zig",
         .machine => "src/machine.zig",
         .portable_value => "src/portable_value.zig",
         .program_v2 => "src/program_v2.zig",
@@ -70,7 +73,12 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
         .compiler, .machine, .reducer_semantics_v1 => .direct_runtime_semantics,
-        .dynamic_value_v1, .image_v1, .kernel_v1, .kernel_machine_v1 => .image_runtime_semantics,
+        .dynamic_value_v1,
+        .image_v1,
+        .kernel_v1,
+        .kernel_machine_v1,
+        .kernel_wasm_v1,
+        => .image_runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
@@ -406,6 +414,13 @@ fn addCoreModules(
     kernel_machine_v1.addImport("kernel_v1", kernel_v1);
     kernel_machine_v1.addImport("machine", machine);
     kernel_machine_v1.addImport("portable_value", portable_value);
+    const kernel_wasm_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.kernel_wasm_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_wasm_v1.addImport("image_v1", image_v1);
+    kernel_wasm_v1.addImport("kernel_v1", kernel_v1);
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
         .target = target,
@@ -483,6 +498,7 @@ fn addCoreModules(
         .image_emit_v1 = image_emit_v1,
         .kernel_v1 = kernel_v1,
         .kernel_machine_v1 = kernel_machine_v1,
+        .kernel_wasm_v1 = kernel_wasm_v1,
         .machine = machine,
         .portable_value = portable_value,
         .program_v2 = program_v2,
@@ -1040,6 +1056,41 @@ pub fn build(b: *std.Build) void {
     performance_wasm_executable.rdynamic = true;
 
     const wasm_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const kernel_wasm_executable = b.addExecutable(.{
+        .name = "boundary-kernel-v1",
+        .root_module = wasm_core.kernel_wasm_v1,
+    });
+    kernel_wasm_executable.entry = .disabled;
+    kernel_wasm_executable.rdynamic = true;
+    kernel_wasm_executable.export_memory = true;
+    kernel_wasm_executable.max_memory = 128 << 20;
+    const kernel_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/kernel_wasm_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    kernel_vector_module.addImport("control_ir", host_core.control_ir);
+    kernel_vector_module.addImport("image_v1", host_core.image_v1);
+    kernel_vector_module.addImport("kernel_v1", host_core.kernel_v1);
+    kernel_vector_module.addImport("machine", host_core.machine);
+    kernel_vector_module.addImport("program_v2", host_core.program_v2);
+    const kernel_vector_executable = b.addExecutable(.{
+        .name = "boundary-kernel-wasm-vector",
+        .root_module = kernel_vector_module,
+    });
+    const run_kernel_vector = b.addRunArtifact(kernel_vector_executable);
+    const kernel_vector_output = run_kernel_vector.captureStdOut(.{
+        .basename = "boundary-kernel-wasm-vector.bin",
+    });
+    const run_kernel_wasm = b.addSystemCommand(&.{"node"});
+    run_kernel_wasm.addFileArg(b.path("test/run_kernel_wasm.mjs"));
+    run_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
+    run_kernel_wasm.addFileArg(kernel_vector_output);
+    const kernel_wasm_step = b.step(
+        "check-boundary-kernel-wasm",
+        "Check fixed import-free Boundary Kernel WASM ABI and profile.",
+    );
+    kernel_wasm_step.dependOn(&run_kernel_wasm.step);
     const parity_wasm = programTestModule(
         b,
         wasm_core,
@@ -1167,6 +1218,7 @@ pub fn build(b: *std.Build) void {
                 "source_module image_emit_v1 {s} {s}\n" ++
                 "source_module kernel_v1 {s} {s}\n" ++
                 "source_module kernel_machine_v1 image_runtime_semantics src/kernel_machine_v1.zig\n" ++
+                "source_module kernel_wasm_v1 image_runtime_semantics src/kernel_wasm_v1.zig\n" ++
                 "source_module machine {s} {s}\n" ++
                 "source_module portable_value {s} {s}\n" ++
                 "source_module program_v2 {s} {s}\n" ++
@@ -1579,6 +1631,7 @@ pub fn build(b: *std.Build) void {
         after_step,
         agent_step,
         parity_step,
+        kernel_wasm_step,
         no_interpreter_step,
         deletion_step,
         compile_fail_step,
