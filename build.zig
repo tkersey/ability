@@ -428,6 +428,7 @@ fn addCoreModules(
         .optimize = optimize,
     });
     program_v2.addImport("compiler", compiler);
+    program_v2.addImport("image_emit_v1", image_emit_v1);
     program_v2.addImport("machine", machine);
     const driver = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.driver)),
@@ -747,6 +748,7 @@ pub fn build(b: *std.Build) void {
     );
     reified_program_test.addImport("compiler", host_core.compiler);
     reified_program_test.addImport("image_emit_v1", host_core.image_emit_v1);
+    reified_program_test.addImport("image_v1", host_core.image_v1);
     reified_program_test.addImport("machine", host_core.machine);
     const reducer_semantics_test = b.createModule(.{
         .root_source_file = b.path("test/reducer_semantics_v1.zig"),

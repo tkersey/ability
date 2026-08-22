@@ -281,10 +281,21 @@ pub fn ProgramSchemaSet(comptime Reified: type, comptime Definition: type) type 
         break :blk result;
     };
     const Set = SchemaSet(roots);
+    const largest_value = comptime blk: {
+        var maximum: usize = 0;
+        for (roots) |Root| {
+            maximum = @max(
+                maximum,
+                portable_value.maximumEncodedSize(Root),
+            );
+        }
+        break :blk maximum;
+    };
     return struct {
         pub const bytes = Set.bytes;
         pub const root_ids = Set.root_ids;
         pub const node_count = Set.node_count;
+        pub const maximum_single_value_bytes: u32 = castU32(largest_value);
         pub const initial_args_root_index: usize = 0;
         pub const result_root_index: usize = 1;
         pub const failure_root_index: usize = 2;
@@ -303,6 +314,89 @@ pub fn ProgramSchemaSet(comptime Reified: type, comptime Definition: type) type 
             @compileError("BEI1 schema roots omit a reachable value type");
         }
     };
+}
+
+pub fn ProgramImage(
+    comptime Reified: type,
+    comptime Definition: type,
+    comptime Machine: type,
+) type {
+    const Schemas = ProgramSchemaSet(Reified, Definition);
+    const Roots = ProgramRoots(Reified, Schemas);
+    const Failures = ProgramFailures(Reified);
+    const Constants = ProgramConstants(Reified, Schemas);
+    const Effects = ProgramEffects(Definition, Schemas);
+    const Values = ProgramValues(Reified, Schemas);
+    const Functions = ProgramFunctions(Reified, Schemas);
+    const Segments = ProgramSegments(Reified, Schemas, Constants);
+    const Constructors = ProgramConstructors(Reified, Schemas);
+    const Transitions = ProgramEntryTransitions(Reified);
+    const sections = [image_v1.section_count][]const u8{
+        &Roots.bytes,
+        &Schemas.bytes,
+        &Failures.bytes,
+        &Constants.bytes,
+        &Effects.bytes,
+        &Values.bytes,
+        &Functions.bytes,
+        &Segments.bytes,
+        &Constructors.bytes,
+        &Transitions.bytes,
+    };
+    const scratch = comptime conservativeKernelScratch(Reified, Schemas);
+    const Encoded = Envelope(.{
+        .program_semantic_digest = Reified.semantic_digest,
+        .machine_contract_digest = Machine.Manifest.machine_contract_digest,
+        .maximum_frames = castU32(Machine.Manifest.maximum_frames),
+        .maximum_state_bytes = castU32(Machine.Manifest.maximum_state_bytes),
+        .maximum_machine_fuel = Machine.Manifest.maximum_machine_fuel,
+        .maximum_kernel_scratch_bytes = scratch,
+        .maximum_single_value_bytes = Schemas.maximum_single_value_bytes,
+    }, sections);
+    return struct {
+        pub const format_version = image_v1.image_format_version;
+        pub const bytes = Encoded.bytes;
+        pub const byte_length = Encoded.byte_length;
+        pub const program_semantic_digest = Reified.semantic_digest;
+        pub const machine_contract_digest = Machine.Manifest.machine_contract_digest;
+        pub const artifact_sha256 = Encoded.artifact_sha256;
+        pub const maximum_kernel_scratch_bytes = scratch;
+        pub const maximum_single_value_bytes = Schemas.maximum_single_value_bytes;
+        pub const Manifest = Machine.Manifest;
+    };
+}
+
+fn conservativeKernelScratch(comptime Reified: type, comptime Schemas: type) u64 {
+    var value_bytes: u64 = 0;
+    for (0..Reified.semantic_canonicalization.value_count) |dense_value| {
+        const source_value = Reified.semantic_canonicalization
+            .value_dense_to_source[dense_value];
+        const Value = Reified.portableType(
+            Reified.control.value_types[source_value],
+        );
+        value_bytes = std.math.add(
+            u64,
+            value_bytes,
+            portable_value.maximumEncodedSize(Value),
+        ) catch @compileError("BEI1 scratch requirement overflows u64");
+    }
+    const value_metadata = std.math.mul(
+        u64,
+        Reified.semantic_canonicalization.value_count,
+        16,
+    ) catch @compileError("BEI1 scratch requirement overflows u64");
+    const schema_stack = std.math.mul(u64, Schemas.node_count, 16) catch
+        @compileError("BEI1 scratch requirement overflows u64");
+    const framing = std.math.add(
+        u64,
+        std.math.mul(
+            u64,
+            Schemas.maximum_single_value_bytes,
+            3,
+        ) catch @compileError("BEI1 scratch requirement overflows u64"),
+        176,
+    ) catch @compileError("BEI1 scratch requirement overflows u64");
+    return value_bytes +| value_metadata +| schema_stack +| framing;
 }
 
 /// Emit the exact BEI1 roots section for one Reified Program.

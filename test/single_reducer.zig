@@ -48,11 +48,13 @@ const Body = struct {
 };
 
 const Program = boundary.program("single-reducer-proof", Body);
-const Machine = Program.compile(.{
+const options: boundary.MachineOptions = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
-});
+};
+const Machine = Program.compile(options);
+const Image = Program.image(options);
 const Reducer = fn (Machine.State, *u64) Machine.Error!Machine.Outcome;
 
 fn reducerDeclarationCount(comptime Owner: type) comptime_int {
@@ -84,8 +86,14 @@ comptime {
     if (reducerDeclarationCount(Machine) != 1) {
         @compileError("compiled Boundary Machine exposes more than one ABI-shaped reducer");
     }
-    if (!@hasDecl(Program, "compile") or functionDeclarationCount(Program) != 1) {
+    if (!@hasDecl(Program, "compile") or
+        !@hasDecl(Program, "image") or
+        functionDeclarationCount(Program) != 2)
+    {
         @compileError("Boundary Program exposes a competing compilation route");
+    }
+    if (@hasDecl(Image, "step") or @hasDecl(Image, "resume")) {
+        @compileError("Boundary image product exposes reducer authority");
     }
     if (@hasDecl(boundary, "Runtime") or
         @hasDecl(boundary, "staticMachine") or
@@ -113,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
             "program_compile_surface_count={d}\n",
         .{
             reducerDeclarationCount(Machine) == 1,
-            functionDeclarationCount(Program),
+            @intFromBool(@hasDecl(Program, "compile")),
         },
     );
     try stdout.flush();
