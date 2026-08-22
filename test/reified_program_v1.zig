@@ -172,6 +172,17 @@ test "BEI1 executable validation rejects a forged terminator" {
     );
 }
 
+test "BEI1 validation recomputes the Machine contract digest" {
+    const image_v1 = @import("image_v1");
+    var malformed = Image.bytes;
+    malformed[72] ^= 0xff;
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.MachineContractDigestMismatch,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
 test "Reified constants emit in canonical first-use order" {
     const constant_instructions = [_]cir.Instruction{.{
         .kind = .constant,

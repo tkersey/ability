@@ -47,6 +47,8 @@ pub const Error = error{
     InvalidInvariant,
     InvalidTransition,
     UnreachableEntry,
+    MachineContractDigestMismatch,
+    ScratchRequirementMismatch,
 };
 
 pub const SectionKind = enum(u16) {
@@ -212,6 +214,20 @@ pub fn validateCatalogs(
         envelope.section(.schemas),
         &workspace.schema_nodes,
     ) catch |err| return mapDynamicSchemaError(err);
+    if (envelope.header.maximum_single_value_bytes !=
+        maximumSingleValueBytes(schemas))
+    {
+        return error.ScratchRequirementMismatch;
+    }
+    const machine_digest = computeMachineContractDigest(envelope.header) catch
+        return error.MachineContractDigestMismatch;
+    if (!std.mem.eql(
+        u8,
+        &machine_digest,
+        &envelope.header.machine_contract_digest,
+    )) {
+        return error.MachineContractDigestMismatch;
+    }
     const roots = try validateRoots(envelope.section(.roots), schemas);
     try validateFailures(
         envelope.section(.failures),
@@ -919,6 +935,43 @@ fn mapDynamicSchemaError(err: dynamic_value_v1.Error) Error {
         error.LimitExceeded => error.LimitExceeded,
         else => error.InvalidSchema,
     };
+}
+
+fn maximumSingleValueBytes(schemas: dynamic_value_v1.Table) u32 {
+    var maximum: u64 = 0;
+    for (schemas.nodes) |node| {
+        maximum = @max(maximum, node.maximum_encoded_size);
+    }
+    return std.math.cast(u32, maximum) orelse std.math.maxInt(u32);
+}
+
+fn computeMachineContractDigest(header: Header) Error![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(&header.program_semantic_digest);
+    hasher.update("\x00boundary-machine-abi=2");
+    hasher.update("\x00state=rnf-v1");
+    var buffer: [32]u8 = undefined;
+    hasher.update("\x00frames=");
+    hasher.update(std.fmt.bufPrint(
+        &buffer,
+        "{d}",
+        .{header.maximum_frames},
+    ) catch return error.MachineContractDigestMismatch);
+    hasher.update("\x00state-bytes=");
+    hasher.update(std.fmt.bufPrint(
+        &buffer,
+        "{d}",
+        .{header.maximum_state_bytes},
+    ) catch return error.MachineContractDigestMismatch);
+    hasher.update("\x00fuel=");
+    hasher.update(std.fmt.bufPrint(
+        &buffer,
+        "{d}",
+        .{header.maximum_machine_fuel},
+    ) catch return error.MachineContractDigestMismatch);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
 }
 
 fn readInt(
