@@ -178,19 +178,26 @@ test "compiled pure operations construct products vectors and text" {
         &kernel_state,
         &workspace,
     );
-    var scratch: [4096]u8 = undefined;
+    var scratch: [8192]u8 = undefined;
     var kernel_output: [4096]u8 = undefined;
+    var kernel_next_state: [4096]u8 = undefined;
     var kernel_insufficient_fuel: u64 = 10;
-    try std.testing.expectEqual(
-        kernel_v1.Outcome.yielded,
-        try kernel_v1.step(
-            image,
-            kernel_state[0..kernel_state_length],
-            &kernel_insufficient_fuel,
-            &kernel_output,
-            &scratch,
-            &workspace,
-        ),
+    const kernel_yielded = switch (try kernel_v1.step(
+        image,
+        kernel_state[0..kernel_state_length],
+        &kernel_insufficient_fuel,
+        &kernel_next_state,
+        &kernel_output,
+        &scratch,
+        &workspace,
+    )) {
+        .yielded => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualSlices(
+        u8,
+        kernel_state[0..kernel_state_length],
+        kernel_yielded,
     );
     try std.testing.expectEqual(@as(u64, 10), kernel_insufficient_fuel);
 
@@ -199,6 +206,7 @@ test "compiled pure operations construct products vectors and text" {
         image,
         kernel_state[0..kernel_state_length],
         &kernel_fuel,
+        &kernel_next_state,
         &kernel_output,
         &scratch,
         &workspace,

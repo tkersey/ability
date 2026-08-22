@@ -18,7 +18,14 @@ pub const state_header_length: usize = 68;
 pub const frame_header_length: usize = 8;
 
 pub const Outcome = union(enum) {
-    yielded,
+    yielded: []const u8,
+    done: []const u8,
+    failed: []const u8,
+};
+
+const SegmentOutcome = union(enum) {
+    next: []const u8,
+    yielded: []const u8,
     done: []const u8,
     failed: []const u8,
 };
@@ -158,16 +165,71 @@ pub fn validateState(
     }
 }
 
-/// Execute one funded atomic segment. This initial kernel slice owns terminal
-/// clauses and the representation-neutral constant/copy operations.
 pub fn step(
     image: image_v1.ValidatedImage,
     state: []const u8,
     caller_fuel: *u64,
+    output_state: []u8,
     output_value: []u8,
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    const maximum_state: usize = image.catalogs.envelope.header.maximum_state_bytes;
+    if (scratch.len < maximum_state) return error.ScratchCapacity;
+    const temporary_state = scratch[0..maximum_state];
+    const value_scratch = scratch[maximum_state..];
+    var current = state;
+    var remaining = caller_fuel.*;
+    var next_uses_output = true;
+    while (true) {
+        const target = if (next_uses_output) output_state else temporary_state;
+        const outcome = try stepSegment(
+            image,
+            current,
+            &remaining,
+            target,
+            output_value,
+            value_scratch,
+            workspace,
+        );
+        switch (outcome) {
+            .next => |next| {
+                current = next;
+                next_uses_output = !next_uses_output;
+            },
+            .yielded => |yielded| {
+                const canonical = if (yielded.ptr == output_state.ptr)
+                    yielded
+                else blk: {
+                    if (output_state.len < yielded.len) return error.OutputCapacity;
+                    @memcpy(output_state[0..yielded.len], yielded);
+                    break :blk output_state[0..yielded.len];
+                };
+                caller_fuel.* = remaining;
+                return .{ .yielded = canonical };
+            },
+            .done => |done| {
+                caller_fuel.* = remaining;
+                return .{ .done = done };
+            },
+            .failed => |failed| {
+                caller_fuel.* = remaining;
+                return .{ .failed = failed };
+            },
+        }
+    }
+}
+
+/// Execute one funded atomic segment.
+fn stepSegment(
+    image: image_v1.ValidatedImage,
+    state: []const u8,
+    caller_fuel: *u64,
+    output_state: []u8,
+    output_value: []u8,
+    scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!SegmentOutcome {
     const constructor_id = topConstructorId(state) catch
         return error.InvalidState;
     const constructor = constructorRecord(image, constructor_id) catch
@@ -176,7 +238,7 @@ pub fn step(
     const segment = segmentRecord(image, segment_id) catch
         return error.InvalidImage;
     const minimum_cost = readInt(u64, segment, 16);
-    if (caller_fuel.* < minimum_cost) return .yielded;
+    if (caller_fuel.* < minimum_cost) return .{ .yielded = state };
     try validateState(image, state, workspace);
     const cumulative = readInt(u64, state, 52);
     var slots = [_]Slot{.{}} ** 1024;
@@ -270,7 +332,7 @@ pub fn step(
             );
         }
         if (failure) |failure_tag| {
-            if (caller_fuel.* < cost) return .yielded;
+            if (caller_fuel.* < cost) return .{ .yielded = state };
             const failure_cumulative = std.math.add(u64, cumulative, cost) catch
                 return error.ExecutionBudgetExceeded;
             if (failure_cumulative >
@@ -285,7 +347,7 @@ pub fn step(
         }
         cursor += instruction_length;
     }
-    if (caller_fuel.* < cost) return .yielded;
+    if (caller_fuel.* < cost) return .{ .yielded = state };
     const next_cumulative = std.math.add(u64, cumulative, cost) catch
         return error.ExecutionBudgetExceeded;
     if (next_cumulative > image.catalogs.envelope.header.maximum_machine_fuel) {
@@ -293,7 +355,63 @@ pub fn step(
     }
     const terminator_kind = segment[cursor + 4];
     const payload = cursor + 8;
-    const outcome: Outcome = switch (terminator_kind) {
+    const outcome: SegmentOutcome = switch (terminator_kind) {
+        0 => .{ .next = try transitionState(
+            image,
+            state,
+            segment_id,
+            0,
+            segment[payload..],
+            &slots,
+            next_cumulative,
+            output_state,
+        ) },
+        1 => blk: {
+            const condition = readInt(u16, segment, payload);
+            if (!slots[condition].initialized or slots[condition].bytes.len != 1) {
+                return error.InvalidState;
+            }
+            const then_edge = payload + 4;
+            const else_edge = then_edge + edgeLength(segment[then_edge..]);
+            const selected = if (slots[condition].bytes[0] == 1)
+                .{ @as(u8, 1), segment[then_edge..] }
+            else
+                .{ @as(u8, 2), segment[else_edge..] };
+            break :blk .{ .next = try transitionState(
+                image,
+                state,
+                segment_id,
+                selected[0],
+                selected[1],
+                &slots,
+                next_cumulative,
+                output_state,
+            ) };
+        },
+        2 => blk: {
+            const suspension_kind = segment[payload];
+            if (suspension_kind != 2 and suspension_kind != 3) {
+                return error.UnsupportedOperation;
+            }
+            const request_count = readInt(u16, segment, payload + 10);
+            var continuation = payload + 12 + @as(usize, request_count) * 2;
+            if (segment[continuation] != 0) return error.InvalidImage;
+            continuation += 4;
+            const next = try transitionState(
+                image,
+                state,
+                segment_id,
+                4,
+                segment[continuation..],
+                &slots,
+                next_cumulative,
+                output_state,
+            );
+            break :blk if (suspension_kind == 2)
+                .{ .yielded = next }
+            else
+                .{ .next = next };
+        },
         3 => blk: {
             const present = segment[payload] == 1;
             const value = readInt(u16, segment, payload + 2);
@@ -326,6 +444,124 @@ pub fn step(
     };
     caller_fuel.* -= cost;
     return outcome;
+}
+
+fn transitionState(
+    image: image_v1.ValidatedImage,
+    state: []const u8,
+    source_segment: u16,
+    edge_kind: u8,
+    edge: []const u8,
+    slots: *[1024]Slot,
+    cumulative_fuel: u64,
+    output: []u8,
+) Error![]const u8 {
+    const target_segment = readInt(u16, edge, 0);
+    const argument_count = readInt(u16, edge, 2);
+    const target = try segmentRecord(image, target_segment);
+    const parameter_count = readInt(u16, target, 10);
+    if (argument_count != parameter_count) return error.InvalidImage;
+    for (0..argument_count) |index| {
+        const argument_offset = 4 + index * 4;
+        if (edge[argument_offset] != 0) return error.UnsupportedOperation;
+        const source_value = readInt(u16, edge, argument_offset + 2);
+        const target_value = readInt(u16, target, 24 + index * 2);
+        if (!slots[source_value].initialized) return error.InvalidState;
+        slots[target_value] = slots[source_value];
+    }
+    const constructor_id = try transitionConstructor(
+        image,
+        source_segment,
+        edge_kind,
+        target_segment,
+    );
+    const constructor = try constructorRecord(image, constructor_id);
+    const top_offset = try topFrameOffset(state);
+    const current_constructor = try constructorRecord(
+        image,
+        readInt(u32, state, top_offset),
+    );
+    const current_environment_length = readInt(u32, state, top_offset + 4);
+    const current_environment = state[top_offset + 8 ..][0..current_environment_length];
+    const target_flags = readInt(u16, constructor, 10);
+    var activation_entry: ?u32 = null;
+    if (target_flags & 1 != 0) {
+        if (readInt(u16, current_constructor, 10) & 1 == 0 or
+            current_environment.len < 4)
+        {
+            return error.InvalidState;
+        }
+        activation_entry = readInt(u32, current_environment, 0);
+    }
+    const activation_count = readInt(u16, constructor, 16);
+    const environment_count = readInt(u16, constructor, 18);
+    var environment_length: usize = if (activation_entry != null) 4 else 0;
+    var field_cursor: usize = 24;
+    for (0..@as(u32, activation_count) + environment_count) |_| {
+        const value = readInt(u16, constructor, field_cursor);
+        if (!slots[value].initialized) return error.InvalidState;
+        environment_length = std.math.add(
+            usize,
+            environment_length,
+            slots[value].bytes.len,
+        ) catch return error.InvalidState;
+        field_cursor += 8;
+    }
+    const required = top_offset + frame_header_length + environment_length;
+    if (required > output.len or
+        required > image.catalogs.envelope.header.maximum_state_bytes)
+    {
+        return error.OutputCapacity;
+    }
+    @memcpy(output[0..top_offset], state[0..top_offset]);
+    std.mem.writeInt(u64, output[52..60], cumulative_fuel, .little);
+    var cursor = top_offset;
+    appendInt(u32, output, &cursor, constructor_id);
+    appendInt(u32, output, &cursor, environment_length);
+    if (activation_entry) |entry| appendInt(u32, output, &cursor, entry);
+    field_cursor = 24;
+    for (0..@as(u32, activation_count) + environment_count) |_| {
+        const value = readInt(u16, constructor, field_cursor);
+        appendBytes(output, &cursor, slots[value].bytes);
+        field_cursor += 8;
+    }
+    return output[0..required];
+}
+
+fn transitionConstructor(
+    image: image_v1.ValidatedImage,
+    source: u16,
+    edge_kind: u8,
+    target: u16,
+) Error!u32 {
+    const bytes = image.catalogs.envelope.section(.entry_transitions);
+    const count = readInt(u32, bytes, 0);
+    for (0..count) |index| {
+        const offset = 4 + index * 12;
+        if (readInt(u16, bytes, offset) == source and
+            bytes[offset + 2] == edge_kind and
+            readInt(u16, bytes, offset + 4) == target)
+        {
+            return readInt(u32, bytes, offset + 8);
+        }
+    }
+    return error.InvalidImage;
+}
+
+fn edgeLength(edge: []const u8) usize {
+    return 4 + @as(usize, readInt(u16, edge, 2)) * 4;
+}
+
+fn topFrameOffset(state: []const u8) Error!usize {
+    const frame_count = readInt(u32, state, 60);
+    if (frame_count == 0) return error.InvalidState;
+    var cursor: usize = state_header_length;
+    for (0..frame_count - 1) |_| {
+        if (state.len - cursor < frame_header_length) return error.InvalidState;
+        cursor += frame_header_length + readInt(u32, state, cursor + 4);
+        if (cursor > state.len) return error.InvalidState;
+    }
+    return cursor;
 }
 
 fn loadTopEnvironment(

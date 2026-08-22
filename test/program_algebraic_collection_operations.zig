@@ -308,11 +308,13 @@ test "compiled products sums optionals vectors text and bytes are first order" {
     );
     var kernel_fuel: u64 = 512;
     var kernel_output: [8192]u8 = undefined;
+    var kernel_next_state: [8192]u8 = undefined;
     var scratch: [64 * 1024]u8 = undefined;
     const kernel_done = switch (try kernel_v1.step(
         image,
         kernel_state[0..kernel_state_length],
         &kernel_fuel,
+        &kernel_next_state,
         &kernel_output,
         &scratch,
         &workspace,
