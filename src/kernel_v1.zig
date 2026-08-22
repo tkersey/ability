@@ -206,6 +206,7 @@ pub fn current(
     if (request_count != 1) return error.InvalidImage;
     const request_value = readInt(u16, segment, payload + 12);
     var slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     if (!slots[request_value].initialized) return error.InvalidState;
     if (output_payload.len < slots[request_value].bytes.len) {
@@ -249,6 +250,7 @@ pub fn @"resume"(
     const site_ordinal = readInt(u32, segment, payload + 4);
     const request_value = readInt(u16, segment, payload + 12);
     var slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     if (!slots[request_value].initialized) return error.InvalidState;
     const expected = try requestIdentity(
@@ -272,9 +274,22 @@ pub fn @"resume"(
     const target = try segmentRecord(image, target_segment);
     const argument_count = readInt(u16, continuation, 2);
     if (argument_count != readInt(u16, target, 10)) return error.InvalidImage;
+    const next_constructor = try transitionConstructor(
+        image,
+        segment_id,
+        4,
+        target_segment,
+    );
+    const next_constructor_record = try constructorRecord(
+        image,
+        next_constructor,
+    );
     for (0..argument_count) |index| {
         const argument_offset = 4 + index * 4;
         const target_value = readInt(u16, target, 24 + index * 2);
+        if (!constructorRetainsValue(next_constructor_record, target_value)) {
+            continue;
+        }
         switch (continuation[argument_offset]) {
             0 => {
                 const source_value = readInt(u16, continuation, argument_offset + 2);
@@ -288,12 +303,6 @@ pub fn @"resume"(
             else => return error.InvalidImage,
         }
     }
-    const next_constructor = try transitionConstructor(
-        image,
-        segment_id,
-        4,
-        target_segment,
-    );
     const successor = try encodeTopFrame(
         image,
         state,
@@ -407,6 +416,7 @@ fn stepSegment(
     var preflight_sizes = [_]usize{0} ** 1024;
     var initially_available = [_]bool{false} ** 1024;
     var scratch_cursor: usize = 0;
+    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     var cost = minimum_cost;
     const activation_count = readInt(u16, constructor, 16);
@@ -611,12 +621,18 @@ fn stepSegment(
                     output_state,
                 );
                 const target_segment = readInt(u16, callee, 0);
-                try applyValueEdge(image, callee, target_segment, &slots);
                 const child_constructor = try transitionConstructor(
                     image,
                     segment_id,
                     3,
                     target_segment,
+                );
+                try applyValueEdge(
+                    image,
+                    callee,
+                    target_segment,
+                    child_constructor,
+                    &slots,
                 );
                 break :blk .{ .next = try appendFrame(
                     image,
@@ -709,20 +725,22 @@ fn transitionState(
     const target = try segmentRecord(image, target_segment);
     const parameter_count = readInt(u16, target, 10);
     if (argument_count != parameter_count) return error.InvalidImage;
-    for (0..argument_count) |index| {
-        const argument_offset = 4 + index * 4;
-        if (edge[argument_offset] != 0) return error.UnsupportedOperation;
-        const source_value = readInt(u16, edge, argument_offset + 2);
-        const target_value = readInt(u16, target, 24 + index * 2);
-        if (!slots[source_value].initialized) return error.InvalidState;
-        slots[target_value] = slots[source_value];
-    }
     const constructor_id = try transitionConstructor(
         image,
         source_segment,
         edge_kind,
         target_segment,
     );
+    const constructor = try constructorRecord(image, constructor_id);
+    for (0..argument_count) |index| {
+        const argument_offset = 4 + index * 4;
+        if (edge[argument_offset] != 0) return error.UnsupportedOperation;
+        const source_value = readInt(u16, edge, argument_offset + 2);
+        const target_value = readInt(u16, target, 24 + index * 2);
+        if (!constructorRetainsValue(constructor, target_value)) continue;
+        if (!slots[source_value].initialized) return error.InvalidState;
+        slots[target_value] = slots[source_value];
+    }
     return encodeTopFrame(
         image,
         state,
@@ -732,6 +750,17 @@ fn transitionState(
         cumulative_fuel,
         output,
     );
+}
+
+fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
+    const activation_count = readInt(u16, constructor, 16);
+    const environment_count = readInt(u16, constructor, 18);
+    var cursor: usize = 24;
+    for (0..@as(u32, activation_count) + environment_count) |_| {
+        if (readInt(u16, constructor, cursor) == value) return true;
+        cursor += 8;
+    }
+    return false;
 }
 
 fn encodeTopFrame(
@@ -865,9 +894,11 @@ fn applyValueEdge(
     image: image_v1.ValidatedImage,
     edge: []const u8,
     target_segment: u16,
+    target_constructor: u32,
     slots: *[1024]Slot,
 ) Error!void {
     const target = try segmentRecord(image, target_segment);
+    const constructor = try constructorRecord(image, target_constructor);
     const count = readInt(u16, edge, 2);
     if (count != readInt(u16, target, 10)) return error.InvalidImage;
     for (0..count) |index| {
@@ -875,6 +906,7 @@ fn applyValueEdge(
         if (edge[argument] != 0) return error.InvalidImage;
         const source_value = readInt(u16, edge, argument + 2);
         const target_value = readInt(u16, target, 24 + index * 2);
+        if (!constructorRetainsValue(constructor, target_value)) continue;
         if (!slots[source_value].initialized) return error.InvalidState;
         slots[target_value] = slots[source_value];
     }
@@ -940,6 +972,7 @@ fn returnToCaller(
         return error.InvalidState;
     }
     var slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &slots);
     try loadFrameEnvironment(
         image,
         state,
@@ -960,9 +993,22 @@ fn returnToCaller(
     if (argument_count != readInt(u16, target_segment, 10)) {
         return error.InvalidImage;
     }
+    const next_constructor = try transitionConstructor(
+        image,
+        parent_segment_id,
+        4,
+        target_segment_id,
+    );
+    const next_constructor_record = try constructorRecord(
+        image,
+        next_constructor,
+    );
     for (0..argument_count) |index| {
         const argument = 4 + index * 4;
         const target_value = readInt(u16, target_segment, 24 + index * 2);
+        if (!constructorRetainsValue(next_constructor_record, target_value)) {
+            continue;
+        }
         switch (continuation[argument]) {
             0 => {
                 const source_value = readInt(u16, continuation, argument + 2);
@@ -976,12 +1022,6 @@ fn returnToCaller(
             else => return error.InvalidImage,
         }
     }
-    const next_constructor = try transitionConstructor(
-        image,
-        parent_segment_id,
-        4,
-        target_segment_id,
-    );
     return replaceFrameAndTruncate(
         image,
         state,
@@ -1200,6 +1240,21 @@ fn loadTopEnvironment(
         slots,
         workspace,
     );
+}
+
+fn initializeZeroWidthSlots(
+    image: image_v1.ValidatedImage,
+    slots: *[1024]Slot,
+) Error!void {
+    for (0..image.catalogs.value_count) |value| {
+        const schema_id = image.catalogs.valueSchemaId(@intCast(value)) catch
+            return error.InvalidImage;
+        const schema = image.catalogs.schemas.node(schema_id) catch
+            return error.InvalidImage;
+        if (schema.maximum_encoded_size == 0) {
+            slots[value] = .{ .bytes = &.{}, .initialized = true };
+        }
+    }
 }
 
 fn loadFrameEnvironment(

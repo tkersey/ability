@@ -1015,7 +1015,10 @@ pub fn maximumEncodedSize(comptime T: type) usize {
         .@"struct" => |info| blk: {
             comptime var total: usize = 0;
             inline for (info.fields) |field| {
-                total = addMaximum(total, maximumEncodedSize(field.type));
+                total = comptime addMaximum(
+                    total,
+                    maximumEncodedSize(field.type),
+                );
             }
             break :blk total;
         },
