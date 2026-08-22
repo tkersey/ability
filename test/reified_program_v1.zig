@@ -116,12 +116,15 @@ test "direct specialization consumes the exact Reified Program" {
     );
     const image_v1 = @import("image_v1");
     var workspace: image_v1.ValidationWorkspace = .{};
-    const catalogs = try image_v1.validateCatalogs(&Image.bytes, &workspace);
+    const validated = try image_v1.validateImage(&Image.bytes, &workspace);
+    const catalogs = validated.catalogs;
     try std.testing.expectEqual(
         Image.byte_length,
         catalogs.envelope.header.total_length,
     );
     try std.testing.expectEqual(@as(u32, 1), catalogs.value_count);
+    try std.testing.expectEqual(@as(u32, 1), validated.segment_count);
+    try std.testing.expectEqual(@as(u32, 1), validated.constructor_count);
 }
 
 test "Reified Program preserves direct canonical State bytes" {
@@ -153,6 +156,19 @@ test "BEI1 catalog validation fails closed on forged roots" {
     try std.testing.expectError(
         error.InvalidRoot,
         image_v1.validateCatalogs(&malformed, &workspace),
+    );
+}
+
+test "BEI1 executable validation rejects a forged terminator" {
+    const image_v1 = @import("image_v1");
+    var malformed = Image.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segment_offset: usize = envelope.sections[7].offset;
+    malformed[segment_offset + 34] = 0xff;
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&malformed, &workspace),
     );
 }
 

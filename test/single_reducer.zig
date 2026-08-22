@@ -104,6 +104,8 @@ comptime {
 }
 
 pub fn main(init: std.process.Init) !void {
+    var image_workspace: boundary.image.ValidationWorkspace = .{};
+    _ = try boundary.image.validateImage(&Image.bytes, &image_workspace);
     const state = try Machine.initialState(std.heap.page_allocator, 21);
     defer Machine.deinitState(state);
     var caller_fuel: u64 = 8;
