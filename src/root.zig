@@ -2,12 +2,15 @@ const agent_profile = @import("agent_profile");
 const control_ir = @import("control_ir");
 const driver = @import("driver");
 const effect_v2 = @import("effect_v2");
+const image_v1 = @import("image_v1");
 const machine = @import("machine");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 
 /// Public typed residual-effect authoring namespace.
 pub const effect = effect_v2;
+/// Canonical Boundary Executable Image v1 wire format and validation.
+pub const image = image_v1;
 /// Public canonical portable-value and codec namespace.
 pub const schema = portable_value;
 /// Advanced typed source/control authoring namespace.
@@ -34,6 +37,7 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(@hasDecl(@This(), "Driver"));
     try std.testing.expect(@hasDecl(@This(), "Agent"));
     try std.testing.expect(@hasDecl(@This(), "effect"));
+    try std.testing.expect(@hasDecl(@This(), "image"));
     try std.testing.expect(@hasDecl(@This(), "schema"));
     try std.testing.expect(@hasDecl(@This(), "ir"));
     try std.testing.expect(!@hasDecl(@This(), "Runtime"));

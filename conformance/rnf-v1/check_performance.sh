@@ -56,7 +56,10 @@ require_complete_current_topology() {
         }
         {
             if (NF != 4 || $1 != "source_module") exit 1
-            if ($3 != "support" && $3 != "runtime_semantics") exit 1
+            if ($3 != "support" &&
+                $3 != "runtime_semantics" &&
+                $3 != "direct_runtime_semantics" &&
+                $3 != "image_runtime_semantics") exit 1
         }
         END {
             if (NR < 2) exit 1
@@ -104,7 +107,22 @@ current_runtime_semantic_module_count() {
     topology_receipt=$2
     require_complete_current_topology "$source_root" "$topology_receipt"
     awk '
-        $1 == "source_module" && $3 == "runtime_semantics" { count += 1 }
+        $1 == "source_module" &&
+            ($3 == "runtime_semantics" ||
+             $3 == "direct_runtime_semantics" ||
+             $3 == "image_runtime_semantics") { count += 1 }
+        END { print count + 0 }
+    ' "$topology_receipt"
+}
+
+current_direct_runtime_semantic_module_count() {
+    source_root=$1
+    topology_receipt=$2
+    require_complete_current_topology "$source_root" "$topology_receipt"
+    awk '
+        $1 == "source_module" &&
+            ($3 == "runtime_semantics" ||
+             $3 == "direct_runtime_semantics") { count += 1 }
         END { print count + 0 }
     ' "$topology_receipt"
 }
@@ -283,6 +301,29 @@ self_test() {
     test "$(current_runtime_semantic_module_count \
         "$topology_test_root" \
         "$topology_test_receipt")" -eq 2
+    touch "$topology_test_root/src/image_v1.zig"
+    printf '%s\n' \
+        'core_module_count=4' \
+        'source_module root support src/root.zig' \
+        'source_module compiler direct_runtime_semantics src/compiler.zig' \
+        'source_module image_v1 image_runtime_semantics src/image_v1.zig' \
+        'source_module machine direct_runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
+        >"$topology_test_receipt"
+    test "$(current_runtime_semantic_module_count \
+        "$topology_test_root" \
+        "$topology_test_receipt")" -eq 3
+    test "$(current_direct_runtime_semantic_module_count \
+        "$topology_test_root" \
+        "$topology_test_receipt")" -eq 2
+    rm "$topology_test_root/src/image_v1.zig"
+    printf '%s\n' \
+        'core_module_count=3' \
+        'source_module root support src/root.zig' \
+        'source_module compiler runtime_semantics src/compiler.zig' \
+        'source_module machine runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
+        >"$topology_test_receipt"
     printf '%s\n' 'runtime_semantic_module_count=1' \
         >>"$reducer_test_receipt"
     if require_single_reducer_receipt "$reducer_test_receipt"; then
@@ -589,7 +630,12 @@ current_runtime_semantic_modules=$(
         "$repository_root" \
         "$topology_receipt"
 )
-test "$current_runtime_semantic_modules" \
+current_direct_runtime_semantic_modules=$(
+    current_direct_runtime_semantic_module_count \
+        "$repository_root" \
+        "$topology_receipt"
+)
+test "$current_direct_runtime_semantic_modules" \
     -lt "$baseline_runtime_semantic_modules"
 
 echo "boundary_performance_baseline_compile $baseline_compile_observation"
@@ -615,4 +661,5 @@ echo "boundary_performance_status=pass baseline_release=$baseline_tag" \
     "wasm_result_schema=i32" \
     "current_wasm_witness=machine-performance-one-effect" \
     "baseline_runtime_semantic_modules=$baseline_runtime_semantic_modules" \
+    "current_direct_runtime_semantic_modules=$current_direct_runtime_semantic_modules" \
     "current_runtime_semantic_modules=$current_runtime_semantic_modules"

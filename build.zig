@@ -8,6 +8,7 @@ const CoreModules = struct {
     control_ir: *std.Build.Module,
     driver: *std.Build.Module,
     effect_v2: *std.Build.Module,
+    image_v1: *std.Build.Module,
     machine: *std.Build.Module,
     portable_value: *std.Build.Module,
     program_v2: *std.Build.Module,
@@ -22,6 +23,7 @@ const CoreModuleId = enum {
     control_ir,
     driver,
     effect_v2,
+    image_v1,
     machine,
     portable_value,
     program_v2,
@@ -32,7 +34,8 @@ const CoreModuleId = enum {
 
 const CoreModuleRole = enum {
     support,
-    runtime_semantics,
+    direct_runtime_semantics,
+    image_runtime_semantics,
 };
 
 fn coreModulePath(module: CoreModuleId) []const u8 {
@@ -42,6 +45,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .control_ir => "src/control_ir.zig",
         .driver => "src/driver.zig",
         .effect_v2 => "src/effect_v2.zig",
+        .image_v1 => "src/image_v1.zig",
         .machine => "src/machine.zig",
         .portable_value => "src/portable_value.zig",
         .program_v2 => "src/program_v2.zig",
@@ -53,7 +57,8 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
 
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
-        .compiler, .machine, .reducer_semantics_v1 => .runtime_semantics,
+        .compiler, .machine, .reducer_semantics_v1 => .direct_runtime_semantics,
+        .image_v1 => .image_runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
@@ -361,6 +366,11 @@ fn addCoreModules(
         .optimize = optimize,
     });
     machine.addImport("portable_value", portable_value);
+    const image_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.image_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
     const rnf = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.rnf)),
         .target = target,
@@ -421,6 +431,7 @@ fn addCoreModules(
         .control_ir = control_ir,
         .driver = driver,
         .effect_v2 = effect_v2,
+        .image_v1 = image_v1,
         .machine = machine,
         .portable_value = portable_value,
         .program_v2 = program_v2,
@@ -435,6 +446,7 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("control_ir", core.control_ir);
     module.addImport("driver", core.driver);
     module.addImport("effect_v2", core.effect_v2);
+    module.addImport("image_v1", core.image_v1);
     module.addImport("machine", core.machine);
     module.addImport("portable_value", core.portable_value);
     module.addImport("program_v2", core.program_v2);
@@ -723,6 +735,12 @@ pub fn build(b: *std.Build) void {
         "reducer_semantics_v1",
         host_core.reducer_semantics_v1,
     );
+    const image_test = b.createModule(.{
+        .root_source_file = b.path("test/image_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    image_test.addImport("image_v1", host_core.image_v1);
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -805,6 +823,12 @@ pub fn build(b: *std.Build) void {
     reified_core_step.dependOn(reification_baseline_step);
     addTestArtifact(b, reified_core_step, reified_program_test);
     addTestArtifact(b, reified_core_step, reducer_semantics_test);
+
+    const image_step = b.step(
+        "check-boundary-image",
+        "Validate the canonical BEI1 envelope and section directory.",
+    );
+    addTestArtifact(b, image_step, image_test);
 
     const control_step = b.step(
         "check-boundary-rnf-control",
@@ -1057,6 +1081,7 @@ pub fn build(b: *std.Build) void {
                 "source_module control_ir {s} {s}\n" ++
                 "source_module driver {s} {s}\n" ++
                 "source_module effect_v2 {s} {s}\n" ++
+                "source_module image_v1 {s} {s}\n" ++
                 "source_module machine {s} {s}\n" ++
                 "source_module portable_value {s} {s}\n" ++
                 "source_module program_v2 {s} {s}\n" ++
@@ -1075,6 +1100,8 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.driver),
                 @tagName(coreModuleRole(.effect_v2)),
                 coreModulePath(.effect_v2),
+                @tagName(coreModuleRole(.image_v1)),
+                coreModulePath(.image_v1),
                 @tagName(coreModuleRole(.machine)),
                 coreModulePath(.machine),
                 @tagName(coreModuleRole(.portable_value)),
@@ -1449,6 +1476,7 @@ pub fn build(b: *std.Build) void {
         test_step,
         reification_baseline_step,
         reified_core_step,
+        image_step,
         rnf_step,
         control_step,
         values_step,
