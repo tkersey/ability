@@ -10,6 +10,7 @@ const CoreModules = struct {
     dynamic_value_v1: *std.Build.Module,
     effect_v2: *std.Build.Module,
     image_v1: *std.Build.Module,
+    image_emit_v1: *std.Build.Module,
     machine: *std.Build.Module,
     portable_value: *std.Build.Module,
     program_v2: *std.Build.Module,
@@ -26,6 +27,7 @@ const CoreModuleId = enum {
     dynamic_value_v1,
     effect_v2,
     image_v1,
+    image_emit_v1,
     machine,
     portable_value,
     program_v2,
@@ -49,6 +51,7 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .dynamic_value_v1 => "src/dynamic_value_v1.zig",
         .effect_v2 => "src/effect_v2.zig",
         .image_v1 => "src/image_v1.zig",
+        .image_emit_v1 => "src/image_emit_v1.zig",
         .machine => "src/machine.zig",
         .portable_value => "src/portable_value.zig",
         .program_v2 => "src/program_v2.zig",
@@ -66,6 +69,7 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .control_ir,
         .driver,
         .effect_v2,
+        .image_emit_v1,
         .portable_value,
         .program_v2,
         .reified_program_v1,
@@ -379,6 +383,13 @@ fn addCoreModules(
         .target = target,
         .optimize = optimize,
     });
+    const image_emit_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.image_emit_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    image_emit_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    image_emit_v1.addImport("portable_value", portable_value);
     const rnf = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.rnf)),
         .target = target,
@@ -441,6 +452,7 @@ fn addCoreModules(
         .dynamic_value_v1 = dynamic_value_v1,
         .effect_v2 = effect_v2,
         .image_v1 = image_v1,
+        .image_emit_v1 = image_emit_v1,
         .machine = machine,
         .portable_value = portable_value,
         .program_v2 = program_v2,
@@ -838,6 +850,7 @@ pub fn build(b: *std.Build) void {
         "Validate the canonical BEI1 envelope and section directory.",
     );
     addTestArtifact(b, image_step, host_core.dynamic_value_v1);
+    addTestArtifact(b, image_step, host_core.image_emit_v1);
     addTestArtifact(b, image_step, image_test);
 
     const control_step = b.step(
@@ -1093,6 +1106,7 @@ pub fn build(b: *std.Build) void {
                 "source_module dynamic_value_v1 {s} {s}\n" ++
                 "source_module effect_v2 {s} {s}\n" ++
                 "source_module image_v1 {s} {s}\n" ++
+                "source_module image_emit_v1 {s} {s}\n" ++
                 "source_module machine {s} {s}\n" ++
                 "source_module portable_value {s} {s}\n" ++
                 "source_module program_v2 {s} {s}\n" ++
@@ -1115,6 +1129,8 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.effect_v2),
                 @tagName(coreModuleRole(.image_v1)),
                 coreModulePath(.image_v1),
+                @tagName(coreModuleRole(.image_emit_v1)),
+                coreModulePath(.image_emit_v1),
                 @tagName(coreModuleRole(.machine)),
                 coreModulePath(.machine),
                 @tagName(coreModuleRole(.portable_value)),

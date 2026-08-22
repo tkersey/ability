@@ -6,6 +6,7 @@ src/control_ir.zig
 src/driver.zig
 src/dynamic_value_v1.zig
 src/effect_v2.zig
+src/image_emit_v1.zig
 src/image_v1.zig
 src/machine.zig
 src/portable_value.zig
