@@ -1,6 +1,7 @@
 const control_ir = @import("control_ir");
 const machine = @import("machine");
 const portable_value = @import("portable_value");
+const reducer_semantics_v1 = @import("reducer_semantics_v1");
 const reified_program_v1 = @import("reified_program_v1");
 const rnf = @import("rnf");
 const std = @import("std");
@@ -14,11 +15,6 @@ const implementation_limits: control_ir.CompilerLimits = .{
     .maximum_generated_operations = 32_768,
 };
 const compiler_evaluation_branch_quota = 500_000_000;
-const dynamic_fuel_quantum_bytes: u64 = 16;
-// Advance this domain whenever deterministic segment charging changes.
-const segment_fuel_semantic_domain =
-    "segment-fuel=preflight-resource-shape-v4";
-
 const ResidualResponseMode = enum {
     single_resume,
 };
@@ -735,7 +731,7 @@ fn failureFromTag(comptime Body: type, comptime tag: u16) Body.Failure {
 }
 
 fn minimumBlockCost(comptime block: control_ir.Block) u64 {
-    return @intCast(block.instructions.len + 1);
+    return reducer_semantics_v1.minimumBlockCost(block);
 }
 
 fn minimumSourceBlockCost(
@@ -813,6 +809,16 @@ fn validateInstruction(
     comptime instruction: control_ir.Instruction,
 ) void {
     const Result = typeForValue(Body, program.value_types[instruction.result]);
+    if (instruction.kind != reducer_semantics_v1.canonicalInstructionKind(
+        instruction.operation,
+    )) {
+        @compileError("Control IR operation has a noncanonical instruction kind");
+    }
+    inline for (reducer_semantics_v1.failureRoles(
+        instruction.operation,
+    )) |role| {
+        _ = failureNamed(Body, reducer_semantics_v1.failureName(role));
+    }
     switch (instruction.operation) {
         .metadata => @compileError(
             "executable Boundary Control IR instructions require normative operations",
@@ -847,16 +853,12 @@ fn validateInstruction(
         },
         .integer_add => {
             validateEqualIntegerBinary(Body, program, instruction, Result);
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .integer_subtract, .integer_multiply => {
             validateEqualIntegerBinary(Body, program, instruction, Result);
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .integer_divide, .integer_remainder => {
             validateEqualIntegerBinary(Body, program, instruction, Result);
-            _ = failureNamed(Body, "arithmetic_overflow");
-            _ = failureNamed(Body, "division_by_zero");
         },
         .integer_negate => {
             requireOperandCount(instruction, 1);
@@ -869,7 +871,6 @@ fn validateInstruction(
                     "integer_negate requires one signed fixed-width integer",
                 );
             }
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .integer_equal,
         .integer_not_equal,
@@ -898,7 +899,6 @@ fn validateInstruction(
                     "integer_convert requires fixed-width integer types",
                 );
             }
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .enum_to_u32 => {
             requireOperandCount(instruction, 1);
@@ -1050,7 +1050,6 @@ fn validateInstruction(
             {
                 @compileError("sum_extract variant or result is invalid");
             }
-            _ = failureNamed(Body, "invalid_variant");
         },
         .optional_none => {
             requireOperandCount(instruction, 0);
@@ -1094,7 +1093,6 @@ fn validateInstruction(
             if (!isVector(Vector) or Index != u32 or Result != Vector.ElementType) {
                 @compileError("vector_get requires Vector and u32 index");
             }
-            _ = failureNamed(Body, "invalid_index");
         },
         .vector_set => {
             requireOperandCount(instruction, 3);
@@ -1105,7 +1103,6 @@ fn validateInstruction(
             {
                 @compileError("vector_set type mismatch");
             }
-            _ = failureNamed(Body, "invalid_index");
         },
         .vector_push => {
             requireOperandCount(instruction, 2);
@@ -1116,7 +1113,6 @@ fn validateInstruction(
             {
                 @compileError("vector_push type mismatch");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .vector_pop => {
             requireOperandCount(instruction, 1);
@@ -1168,7 +1164,6 @@ fn validateInstruction(
             if (!isText(Destination) or !isText(Suffix) or Result != Destination) {
                 @compileError("text_append requires Text destination and suffix");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .text_append_scalar => {
             requireOperandCount(instruction, 2);
@@ -1178,8 +1173,6 @@ fn validateInstruction(
             {
                 @compileError("text_append_scalar requires Text and u32");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
-            _ = failureNamed(Body, "invalid_utf8");
         },
         .text_append_unsigned => {
             requireOperandCount(instruction, 2);
@@ -1191,7 +1184,6 @@ fn validateInstruction(
             {
                 @compileError("text_append_unsigned requires Text and unsigned integer");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .text_append_signed => {
             requireOperandCount(instruction, 2);
@@ -1205,7 +1197,6 @@ fn validateInstruction(
                     "text_append_signed requires Text and signed integer",
                 );
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .text_copy => {
             requireOperandCount(instruction, 3);
@@ -1216,8 +1207,6 @@ fn validateInstruction(
             {
                 @compileError("text_copy requires Text, u32, u32 -> Text");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
-            _ = failureNamed(Body, "invalid_utf8");
         },
         .text_compare => {
             requireOperandCount(instruction, 2);
@@ -1237,7 +1226,6 @@ fn validateInstruction(
             {
                 @compileError("text_join requires three Text operands");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_empty => {
             requireOperandCount(instruction, 0);
@@ -1259,7 +1247,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_append requires Bytes operands");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_append_scalar => {
             requireOperandCount(instruction, 2);
@@ -1269,7 +1256,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_append_scalar requires Bytes and u8");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_copy => {
             requireOperandCount(instruction, 3);
@@ -1280,7 +1266,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_copy requires Bytes, u32, u32 -> Bytes");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_compare => {
             requireOperandCount(instruction, 2);
@@ -1300,7 +1285,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_join requires three Bytes operands");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
     }
 }
@@ -1691,7 +1675,7 @@ fn semanticHashInstruction(
     }
     semanticHashU8(
         hasher,
-        @intCast(@intFromEnum(std.meta.activeTag(instruction.operation))),
+        reducer_semantics_v1.currentSemanticTag(instruction.operation),
     );
     switch (instruction.operation) {
         .constant => |constant| semanticHashConstantAt(
@@ -2010,9 +1994,12 @@ fn compilerSemanticDigest(
     semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
     semanticHashBytes(
         &hasher,
-        segment_fuel_semantic_domain,
+        reducer_semantics_v1.segment_fuel_semantic_domain,
     );
-    semanticHashU64(&hasher, dynamic_fuel_quantum_bytes);
+    semanticHashU64(
+        &hasher,
+        reducer_semantics_v1.dynamic_fuel_quantum_bytes,
+    );
     semanticHashSchema(Body.InitialArgs, &hasher);
     semanticHashSchema(Body.Result, &hasher);
     semanticHashSchema(Body.Failure, &hasher);
@@ -2094,7 +2081,7 @@ fn compilerSemanticDigest(
         semanticHashU64(&hasher, block_cost);
     }
     semanticHashBytes(&hasher, "await-effect-cost");
-    semanticHashU64(&hasher, 1);
+    semanticHashU64(&hasher, reducer_semantics_v1.await_effect_cost);
 
     semanticHashU32(
         &hasher,
@@ -2740,12 +2727,10 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
         }
 
         fn dynamicBytesCost(comptime T: type, canonical_bytes: u64) u64 {
-            if (comptime !hasDynamicEncodedSize(T)) return 0;
-            return std.math.divCeil(
-                u64,
+            return reducer_semantics_v1.dynamicBytesCost(
+                comptime hasDynamicEncodedSize(T),
                 canonical_bytes,
-                dynamic_fuel_quantum_bytes,
-            ) catch std.math.maxInt(u64);
+            );
         }
 
         fn boundedBytes(
@@ -3059,7 +3044,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
                             @field(store, valueName(instruction.operands[1])),
-                        ) catch return failureNamed(Body, "arithmetic_overflow");
+                        ) catch return failureNamed(Body, reducer_semantics_v1.failureName(.arithmetic_overflow));
                     },
                     .integer_subtract => {
                         const ResultType = @FieldType(ValueCatalog, result_name);
@@ -3067,7 +3052,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
                             @field(store, valueName(instruction.operands[1])),
-                        ) catch return failureNamed(Body, "arithmetic_overflow");
+                        ) catch return failureNamed(Body, reducer_semantics_v1.failureName(.arithmetic_overflow));
                     },
                     .integer_multiply => {
                         const ResultType = @FieldType(ValueCatalog, result_name);
@@ -3075,7 +3060,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             ResultType,
                             @field(store, valueName(instruction.operands[0])),
                             @field(store, valueName(instruction.operands[1])),
-                        ) catch return failureNamed(Body, "arithmetic_overflow");
+                        ) catch return failureNamed(Body, reducer_semantics_v1.failureName(.arithmetic_overflow));
                     },
                     .integer_divide => {
                         const ResultType = @FieldType(ValueCatalog, result_name);
@@ -3086,11 +3071,11 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                         ) catch |err| return switch (err) {
                             error.DivisionByZero => failureNamed(
                                 Body,
-                                "division_by_zero",
+                                reducer_semantics_v1.failureName(.division_by_zero),
                             ),
                             error.Overflow => failureNamed(
                                 Body,
-                                "arithmetic_overflow",
+                                reducer_semantics_v1.failureName(.arithmetic_overflow),
                             ),
                         };
                     },
@@ -3111,11 +3096,11 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                         ) catch |err| return switch (err) {
                             error.DivisionByZero => failureNamed(
                                 Body,
-                                "division_by_zero",
+                                reducer_semantics_v1.failureName(.division_by_zero),
                             ),
                             error.Overflow => failureNamed(
                                 Body,
-                                "arithmetic_overflow",
+                                reducer_semantics_v1.failureName(.arithmetic_overflow),
                             ),
                         };
                         @field(store, result_name) = @rem(left, right);
@@ -3126,7 +3111,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             valueName(instruction.operands[0]),
                         )) catch return failureNamed(
                             Body,
-                            "arithmetic_overflow",
+                            reducer_semantics_v1.failureName(.arithmetic_overflow),
                         );
                     },
                     .integer_equal => {
@@ -3223,7 +3208,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             @field(store, valueName(instruction.operands[0])),
                         ) orelse return failureNamed(
                             Body,
-                            "arithmetic_overflow",
+                            reducer_semantics_v1.failureName(.arithmetic_overflow),
                         );
                     },
                     .enum_to_u32 => {
@@ -3345,7 +3330,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                         const Tag = @typeInfo(Sum).@"union".tag_type.?;
                         const field = std.meta.fields(Sum)[variant_index];
                         if (std.meta.activeTag(sum) != @field(Tag, field.name)) {
-                            return failureNamed(Body, "invalid_variant");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.invalid_variant));
                         }
                         @field(store, result_name) = @field(sum, field.name);
                     },
@@ -3383,7 +3368,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             valueName(instruction.operands[1]),
                         )) catch unreachable;
                         @field(store, result_name) = observed orelse
-                            return failureNamed(Body, "invalid_index");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.invalid_index));
                     },
                     .vector_set => {
                         var vector = @field(
@@ -3399,7 +3384,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                                 store,
                                 valueName(instruction.operands[2]),
                             ),
-                        ) catch return failureNamed(Body, "invalid_index");
+                        ) catch return failureNamed(Body, reducer_semantics_v1.failureName(.invalid_index));
                         @field(store, result_name) = vector;
                     },
                     .vector_push => {
@@ -3410,7 +3395,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                         vector.push(@field(
                             store,
                             valueName(instruction.operands[1]),
-                        )) catch return failureNamed(Body, "capacity_exceeded");
+                        )) catch return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = vector;
                     },
                     .vector_pop => {
@@ -3465,7 +3450,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             valueName(instruction.operands[1]),
                         );
                         text.append(suffix.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = text;
                     },
                     .text_append_scalar => {
@@ -3479,17 +3464,17 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                                 store,
                                 valueName(instruction.operands[1]),
                             ),
-                        ) orelse return failureNamed(Body, "invalid_utf8");
+                        ) orelse return failureNamed(Body, reducer_semantics_v1.failureName(.invalid_utf8));
                         text.appendScalar(scalar) catch |err| return switch (err) {
                             error.InvalidUtf8 => failureNamed(
                                 Body,
-                                "invalid_utf8",
+                                reducer_semantics_v1.failureName(.invalid_utf8),
                             ),
                             error.CapacityExceeded => failureNamed(
                                 Body,
-                                "capacity_exceeded",
+                                reducer_semantics_v1.failureName(.capacity_exceeded),
                             ),
-                            else => failureNamed(Body, "capacity_exceeded"),
+                            else => failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded)),
                         };
                         @field(store, result_name) = text;
                     },
@@ -3501,7 +3486,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                         text.appendUnsigned(@intCast(@field(
                             store,
                             valueName(instruction.operands[1]),
-                        ))) catch return failureNamed(Body, "capacity_exceeded");
+                        ))) catch return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = text;
                     },
                     .text_append_signed => {
@@ -3512,7 +3497,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                         text.appendSigned(@intCast(@field(
                             store,
                             valueName(instruction.operands[1]),
-                        ))) catch return failureNamed(Body, "capacity_exceeded");
+                        ))) catch return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = text;
                     },
                     .text_copy => {
@@ -3542,13 +3527,13 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                         ) catch |err| return switch (err) {
                             error.InvalidUtf8 => failureNamed(
                                 Body,
-                                "invalid_utf8",
+                                reducer_semantics_v1.failureName(.invalid_utf8),
                             ),
                             error.CapacityExceeded => failureNamed(
                                 Body,
-                                "capacity_exceeded",
+                                reducer_semantics_v1.failureName(.capacity_exceeded),
                             ),
-                            else => failureNamed(Body, "capacity_exceeded"),
+                            else => failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded)),
                         };
                     },
                     .text_compare => {
@@ -3584,9 +3569,9 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             valueName(instruction.operands[2]),
                         );
                         text.append(separator.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         text.append(right.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = text;
                     },
                     .bytes_empty => {
@@ -3609,7 +3594,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             valueName(instruction.operands[1]),
                         );
                         bytes.append(suffix.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = bytes;
                     },
                     .bytes_append_scalar => {
@@ -3622,7 +3607,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             valueName(instruction.operands[1]),
                         );
                         bytes.append(&.{scalar}) catch
-                            return failureNamed(Body, "capacity_exceeded");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = bytes;
                     },
                     .bytes_copy => {
@@ -3646,7 +3631,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             ),
                         ) catch return failureNamed(
                             Body,
-                            "capacity_exceeded",
+                            reducer_semantics_v1.failureName(.capacity_exceeded),
                         );
                     },
                     .bytes_compare => {
@@ -3682,9 +3667,9 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                             valueName(instruction.operands[2]),
                         );
                         bytes.append(separator.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         bytes.append(right.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
+                            return failureNamed(Body, reducer_semantics_v1.failureName(.capacity_exceeded));
                         @field(store, result_name) = bytes;
                     },
                 }

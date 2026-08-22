@@ -8,6 +8,7 @@ src/effect_v2.zig
 src/machine.zig
 src/portable_value.zig
 src/program_v2.zig
+src/reducer_semantics_v1.zig
 src/reified_program_v1.zig
 src/rnf.zig
 src/root.zig
@@ -50,6 +51,7 @@ test/program_effect_morphism.zig
 test/program_integer_boolean_operations.zig
 test/program_operations.zig
 test/program_residual_effects.zig
+test/reducer_semantics_v1.zig
 test/reification_baseline.zig
 test/reified_program_v1.zig
 test/research_digest_v2.zig

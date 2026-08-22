@@ -12,6 +12,7 @@ const CoreModules = struct {
     portable_value: *std.Build.Module,
     program_v2: *std.Build.Module,
     reified_program_v1: *std.Build.Module,
+    reducer_semantics_v1: *std.Build.Module,
     rnf: *std.Build.Module,
 };
 
@@ -25,6 +26,7 @@ const CoreModuleId = enum {
     portable_value,
     program_v2,
     reified_program_v1,
+    reducer_semantics_v1,
     rnf,
 };
 
@@ -44,13 +46,14 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .portable_value => "src/portable_value.zig",
         .program_v2 => "src/program_v2.zig",
         .reified_program_v1 => "src/reified_program_v1.zig",
+        .reducer_semantics_v1 => "src/reducer_semantics_v1.zig",
         .rnf => "src/rnf.zig",
     };
 }
 
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
-        .compiler, .machine => .runtime_semantics,
+        .compiler, .machine, .reducer_semantics_v1 => .runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
@@ -369,6 +372,12 @@ fn addCoreModules(
         .target = target,
         .optimize = optimize,
     });
+    const reducer_semantics_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.reducer_semantics_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    reducer_semantics_v1.addImport("control_ir", control_ir);
     const compiler = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
@@ -378,6 +387,7 @@ fn addCoreModules(
     compiler.addImport("machine", machine);
     compiler.addImport("portable_value", portable_value);
     compiler.addImport("reified_program_v1", reified_program_v1);
+    compiler.addImport("reducer_semantics_v1", reducer_semantics_v1);
     compiler.addImport("rnf", rnf);
     const program_v2 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.program_v2)),
@@ -413,6 +423,7 @@ fn addCoreModules(
         .portable_value = portable_value,
         .program_v2 = program_v2,
         .reified_program_v1 = reified_program_v1,
+        .reducer_semantics_v1 = reducer_semantics_v1,
         .rnf = rnf,
     };
 }
@@ -699,6 +710,16 @@ pub fn build(b: *std.Build) void {
     );
     reified_program_test.addImport("compiler", host_core.compiler);
     reified_program_test.addImport("machine", host_core.machine);
+    const reducer_semantics_test = b.createModule(.{
+        .root_source_file = b.path("test/reducer_semantics_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    reducer_semantics_test.addImport("control_ir", host_core.control_ir);
+    reducer_semantics_test.addImport(
+        "reducer_semantics_v1",
+        host_core.reducer_semantics_v1,
+    );
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -780,6 +801,7 @@ pub fn build(b: *std.Build) void {
     );
     reified_core_step.dependOn(reification_baseline_step);
     addTestArtifact(b, reified_core_step, reified_program_test);
+    addTestArtifact(b, reified_core_step, reducer_semantics_test);
 
     const control_step = b.step(
         "check-boundary-rnf-control",
@@ -1036,6 +1058,7 @@ pub fn build(b: *std.Build) void {
                 "source_module portable_value {s} {s}\n" ++
                 "source_module program_v2 {s} {s}\n" ++
                 "source_module reified_program_v1 {s} {s}\n" ++
+                "source_module reducer_semantics_v1 {s} {s}\n" ++
                 "source_module rnf {s} {s}\n",
             .{
                 std.meta.fields(CoreModules).len,
@@ -1057,6 +1080,8 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.program_v2),
                 @tagName(coreModuleRole(.reified_program_v1)),
                 coreModulePath(.reified_program_v1),
+                @tagName(coreModuleRole(.reducer_semantics_v1)),
+                coreModulePath(.reducer_semantics_v1),
                 @tagName(coreModuleRole(.rnf)),
                 coreModulePath(.rnf),
             },
