@@ -1,4 +1,7 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
+const machine = @import("machine");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -228,14 +231,17 @@ const Body = struct {
     };
 };
 
-const Machine = program_v2.program(
+const Program = program_v2.program(
     "algebraic-collection-operations",
     Body,
-).compile(.{
+);
+const options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 8192,
     .maximum_machine_fuel = 512,
-});
+};
+const Machine = Program.compile(options);
+const Image = Program.image(options);
 
 test "compiled products sums optionals vectors text and bytes are first order" {
     const state = try Machine.initialState(std.testing.allocator, {});
@@ -290,6 +296,45 @@ test "compiled products sums optionals vectors text and bytes are first order" {
         .none => {},
         .value => return error.TestUnexpectedResult,
     }
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    var kernel_state: [8192]u8 = undefined;
+    const kernel_state_length = try kernel_v1.initial(
+        image,
+        &.{},
+        &kernel_state,
+        &workspace,
+    );
+    var kernel_fuel: u64 = 512;
+    var kernel_output: [8192]u8 = undefined;
+    var scratch: [64 * 1024]u8 = undefined;
+    const kernel_done = switch (try kernel_v1.step(
+        image,
+        kernel_state[0..kernel_state_length],
+        &kernel_fuel,
+        &kernel_output,
+        &scratch,
+        &workspace,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const maximum_result_size = comptime portable_value.maximumEncodedSize(
+        AlgebraicResult,
+    );
+    var direct_bytes: [maximum_result_size]u8 = undefined;
+    const direct_length = try portable_value.encode(
+        AlgebraicResult,
+        result.*,
+        &direct_bytes,
+    );
+    try std.testing.expectEqual(fuel, kernel_fuel);
+    try std.testing.expectEqualSlices(
+        u8,
+        direct_bytes[0..direct_length],
+        kernel_done,
+    );
 }
 
 test "fixed-payload optionals and sums expose variable canonical size" {

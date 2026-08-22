@@ -559,6 +559,9 @@ pub fn build(b: *std.Build) void {
         false,
         true,
     );
+    reification_operations_fixture.addImport("image_v1", host_core.image_v1);
+    reification_operations_fixture.addImport("kernel_v1", host_core.kernel_v1);
+    reification_operations_fixture.addImport("machine", host_core.machine);
     const reification_handler_fixture = programTestModule(
         b,
         host_core,
@@ -663,6 +666,9 @@ pub fn build(b: *std.Build) void {
         false,
         true,
     );
+    program_operations.addImport("image_v1", host_core.image_v1);
+    program_operations.addImport("kernel_v1", host_core.kernel_v1);
+    program_operations.addImport("machine", host_core.machine);
     const integer_boolean_operations = programTestModule(
         b,
         host_core,
@@ -681,6 +687,9 @@ pub fn build(b: *std.Build) void {
         false,
         true,
     );
+    algebraic_collection_operations.addImport("image_v1", host_core.image_v1);
+    algebraic_collection_operations.addImport("kernel_v1", host_core.kernel_v1);
+    algebraic_collection_operations.addImport("machine", host_core.machine);
     const research_digest = programTestModule(
         b,
         host_core,

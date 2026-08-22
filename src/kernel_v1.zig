@@ -10,6 +10,7 @@ pub const Error = error{
     ExecutionBudgetExceeded,
     UnsupportedOperation,
     ScratchCapacity,
+    CapacityExceeded,
 };
 
 pub const state_magic = "ABL_RNF2".*;
@@ -174,19 +175,26 @@ pub fn step(
     const segment_id = readInt(u16, constructor, 12);
     const segment = segmentRecord(image, segment_id) catch
         return error.InvalidImage;
-    const cost = readInt(u64, segment, 16);
-    if (caller_fuel.* < cost) return .yielded;
+    const minimum_cost = readInt(u64, segment, 16);
+    if (caller_fuel.* < minimum_cost) return .yielded;
     try validateState(image, state, workspace);
     const cumulative = readInt(u64, state, 52);
-    _ = std.math.add(u64, cumulative, cost) catch
-        return error.ExecutionBudgetExceeded;
-    if (cumulative + cost > image.catalogs.envelope.header.maximum_machine_fuel) {
-        return error.ExecutionBudgetExceeded;
-    }
-
     var slots = [_]Slot{.{}} ** 1024;
+    var preflight_sizes = [_]u64{0} ** 1024;
+    var initially_available = [_]bool{false} ** 1024;
     var scratch_cursor: usize = 0;
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
+    var cost = minimum_cost;
+    const activation_count = readInt(u16, constructor, 16);
+    const environment_count = readInt(u16, constructor, 18);
+    var environment_field_cursor: usize = 24;
+    for (0..@as(u32, activation_count) + environment_count) |_| {
+        const value = readInt(u16, constructor, environment_field_cursor);
+        preflight_sizes[value] = slots[value].bytes.len;
+        initially_available[value] = true;
+        try addDynamicCostSize(image, value, preflight_sizes[value], &cost);
+        environment_field_cursor += 8;
+    }
     var cursor: usize = 24;
     const parameter_count = readInt(u16, segment, 10);
     const instruction_count = readInt(u32, segment, 12);
@@ -197,6 +205,15 @@ pub fn step(
         const result = readInt(u16, segment, cursor + 8);
         const operand_count = readInt(u16, segment, cursor + 10);
         const immediate = readInt(u32, segment, cursor + 12);
+        for (0..operand_count) |operand_index| {
+            const operand = readInt(u16, segment, cursor + 16 + operand_index * 2);
+            try addDynamicCostSize(
+                image,
+                operand,
+                preflight_sizes[operand],
+                &cost,
+            );
+        }
         const failure: ?u32 = switch (operation) {
             0 => blk: {
                 slots[result] = .{
@@ -220,15 +237,59 @@ pub fn step(
                 scratch,
                 &scratch_cursor,
             ),
+            24...56 => try executeCompositeOperation(
+                image,
+                segment[cursor .. cursor + instruction_length],
+                result,
+                &slots,
+                scratch,
+                &scratch_cursor,
+                workspace,
+            ),
             else => return error.UnsupportedOperation,
         };
+        if (slots[result].initialized) {
+            preflight_sizes[result] = try preflightResultSize(
+                image,
+                segment,
+                cursor,
+                operation,
+                result,
+                operandsForInstruction(
+                    segment[cursor .. cursor + instruction_length],
+                ),
+                &slots,
+                &preflight_sizes,
+                &initially_available,
+            );
+            try addDynamicCostSize(
+                image,
+                result,
+                preflight_sizes[result],
+                &cost,
+            );
+        }
         if (failure) |failure_tag| {
+            if (caller_fuel.* < cost) return .yielded;
+            const failure_cumulative = std.math.add(u64, cumulative, cost) catch
+                return error.ExecutionBudgetExceeded;
+            if (failure_cumulative >
+                image.catalogs.envelope.header.maximum_machine_fuel)
+            {
+                return error.ExecutionBudgetExceeded;
+            }
             if (output_value.len < 4) return error.OutputCapacity;
             std.mem.writeInt(u32, output_value[0..4], failure_tag, .little);
             caller_fuel.* -= cost;
             return .{ .failed = output_value[0..4] };
         }
         cursor += instruction_length;
+    }
+    if (caller_fuel.* < cost) return .yielded;
+    const next_cumulative = std.math.add(u64, cumulative, cost) catch
+        return error.ExecutionBudgetExceeded;
+    if (next_cumulative > image.catalogs.envelope.header.maximum_machine_fuel) {
+        return error.ExecutionBudgetExceeded;
     }
     const terminator_kind = segment[cursor + 4];
     const payload = cursor + 8;
@@ -485,6 +546,724 @@ fn executeScalarOperation(
         .initialized = true,
     };
     return null;
+}
+
+fn executeCompositeOperation(
+    image: image_v1.ValidatedImage,
+    instruction: []const u8,
+    result: u16,
+    slots: *[1024]Slot,
+    scratch: []u8,
+    scratch_cursor: *usize,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!?u32 {
+    const operation = readInt(u16, instruction, 6);
+    const operand_count = readInt(u16, instruction, 10);
+    const immediate = readInt(u32, instruction, 12);
+    var operands: [1024]u16 = undefined;
+    if (operand_count > operands.len) return error.InvalidImage;
+    for (0..operand_count) |index| {
+        operands[index] = readInt(u16, instruction, 16 + index * 2);
+        if (!slots[operands[index]].initialized) return error.InvalidState;
+    }
+    switch (operation) {
+        24 => {
+            var length: usize = 0;
+            for (operands[0..operand_count]) |operand| {
+                length = std.math.add(
+                    usize,
+                    length,
+                    slots[operand].bytes.len,
+                ) catch return error.ScratchCapacity;
+            }
+            const output = try allocateScratch(scratch, scratch_cursor, length);
+            var cursor: usize = 0;
+            for (operands[0..operand_count]) |operand| {
+                @memcpy(
+                    output[cursor..][0..slots[operand].bytes.len],
+                    slots[operand].bytes,
+                );
+                cursor += slots[operand].bytes.len;
+            }
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        25 => {
+            const field = try productField(
+                image,
+                operands[0],
+                slots[operands[0]].bytes,
+                immediate,
+                workspace,
+            );
+            slots[result] = .{ .bytes = field, .initialized = true };
+        },
+        26 => {
+            const product = slots[operands[0]].bytes;
+            const field = try productField(
+                image,
+                operands[0],
+                product,
+                immediate,
+                workspace,
+            );
+            const prefix_length = @intFromPtr(field.ptr) - @intFromPtr(product.ptr);
+            const replacement = slots[operands[1]].bytes;
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                product.len - field.len + replacement.len,
+            );
+            @memcpy(output[0..prefix_length], product[0..prefix_length]);
+            @memcpy(output[prefix_length..][0..replacement.len], replacement);
+            @memcpy(
+                output[prefix_length + replacement.len ..],
+                product[prefix_length + field.len ..],
+            );
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        27 => {
+            const node = try valueNode(image, result);
+            if (node.kind != .sum) return error.InvalidImage;
+            const case_count = readInt(u32, node.payload, 4);
+            if (immediate >= case_count) return error.InvalidImage;
+            const case_offset = 8 + @as(usize, immediate) * 8;
+            const tag = readInt(u32, node.payload, case_offset);
+            const payload = if (operand_count == 0) &.{} else slots[operands[0]].bytes;
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                4 + payload.len,
+            );
+            std.mem.writeInt(u32, output[0..4], tag, .little);
+            @memcpy(output[4..], payload);
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        28, 29 => {
+            const node = try valueNode(image, operands[0]);
+            if (node.kind != .sum) return error.InvalidImage;
+            const case_count = readInt(u32, node.payload, 4);
+            if (immediate >= case_count) return error.InvalidImage;
+            const expected = readInt(
+                u32,
+                node.payload,
+                8 + @as(usize, immediate) * 8,
+            );
+            const matches = readInt(u32, slots[operands[0]].bytes, 0) == expected;
+            if (operation == 28) {
+                slots[result] = .{
+                    .bytes = try writeRaw(
+                        scratch,
+                        scratch_cursor,
+                        .bool,
+                        @intFromBool(matches),
+                    ),
+                    .initialized = true,
+                };
+            } else {
+                if (!matches) return try failureTag(image, "invalid_variant");
+                slots[result] = .{
+                    .bytes = slots[operands[0]].bytes[4..],
+                    .initialized = true,
+                };
+            }
+        },
+        30 => {
+            const output = try allocateScratch(scratch, scratch_cursor, 1);
+            output[0] = 0;
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        31 => {
+            const payload = slots[operands[0]].bytes;
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                1 + payload.len,
+            );
+            output[0] = 1;
+            @memcpy(output[1..], payload);
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        32 => {
+            slots[result] = .{
+                .bytes = try writeRaw(
+                    scratch,
+                    scratch_cursor,
+                    .bool,
+                    @intFromBool(slots[operands[0]].bytes[0] == 1),
+                ),
+                .initialized = true,
+            };
+        },
+        33, 41, 49 => {
+            const output = try allocateScratch(scratch, scratch_cursor, 4);
+            @memset(output, 0);
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        37 => {
+            const vector = slots[operands[0]].bytes;
+            const element = slots[operands[1]].bytes;
+            const schema = try valueNode(image, operands[0]);
+            const length = readInt(u32, vector, 0);
+            if (length >= readInt(u32, schema.payload, 0)) {
+                return try failureTag(image, "capacity_exceeded");
+            }
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                vector.len + element.len,
+            );
+            std.mem.writeInt(u32, output[0..4], length + 1, .little);
+            @memcpy(output[4..vector.len], vector[4..]);
+            @memcpy(output[vector.len..], element);
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        34, 53, 54 => {
+            const length = readInt(u32, slots[operands[0]].bytes, 0);
+            slots[result] = .{
+                .bytes = try writeRaw(
+                    scratch,
+                    scratch_cursor,
+                    .u32,
+                    length,
+                ),
+                .initialized = true,
+            };
+        },
+        35 => {
+            const index = readInt(u32, slots[operands[1]].bytes, 0);
+            const element = vectorElement(
+                image,
+                operands[0],
+                slots[operands[0]].bytes,
+                index,
+                workspace,
+            ) catch return try failureTag(image, "invalid_index");
+            slots[result] = .{ .bytes = element, .initialized = true };
+        },
+        36 => {
+            const vector = slots[operands[0]].bytes;
+            const index = readInt(u32, slots[operands[1]].bytes, 0);
+            const element = vectorElement(
+                image,
+                operands[0],
+                vector,
+                index,
+                workspace,
+            ) catch return try failureTag(image, "invalid_index");
+            const prefix_length = @intFromPtr(element.ptr) - @intFromPtr(vector.ptr);
+            const replacement = slots[operands[2]].bytes;
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                vector.len - element.len + replacement.len,
+            );
+            @memcpy(output[0..prefix_length], vector[0..prefix_length]);
+            @memcpy(output[prefix_length..][0..replacement.len], replacement);
+            @memcpy(
+                output[prefix_length + replacement.len ..],
+                vector[prefix_length + element.len ..],
+            );
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        38 => {
+            const vector = slots[operands[0]].bytes;
+            const length = readInt(u32, vector, 0);
+            const popped = if (length == 0)
+                null
+            else
+                try vectorElement(
+                    image,
+                    operands[0],
+                    vector,
+                    length - 1,
+                    workspace,
+                );
+            const prefix_length = if (popped) |element|
+                @intFromPtr(element.ptr) - @intFromPtr(vector.ptr)
+            else
+                vector.len;
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                prefix_length + 1 + if (popped) |element| element.len else 0,
+            );
+            std.mem.writeInt(
+                u32,
+                output[0..4],
+                if (length == 0) 0 else length - 1,
+                .little,
+            );
+            @memcpy(output[4..prefix_length], vector[4..prefix_length]);
+            output[prefix_length] = @intFromBool(popped != null);
+            if (popped) |element| @memcpy(output[prefix_length + 1 ..], element);
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        39 => {
+            const vector = slots[operands[0]].bytes;
+            const current_length = readInt(u32, vector, 0);
+            const requested = readInt(u32, slots[operands[1]].bytes, 0);
+            if (requested >= current_length) {
+                slots[result] = slots[operands[0]];
+            } else {
+                const first_removed = try vectorElement(
+                    image,
+                    operands[0],
+                    vector,
+                    requested,
+                    workspace,
+                );
+                const prefix_length = @intFromPtr(first_removed.ptr) -
+                    @intFromPtr(vector.ptr);
+                const output = try allocateScratch(
+                    scratch,
+                    scratch_cursor,
+                    prefix_length,
+                );
+                @memcpy(output, vector[0..prefix_length]);
+                std.mem.writeInt(u32, output[0..4], requested, .little);
+                slots[result] = .{ .bytes = output, .initialized = true };
+            }
+        },
+        40 => {
+            const output = try allocateScratch(scratch, scratch_cursor, 4);
+            @memset(output, 0);
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        42, 50 => {
+            const destination = slots[operands[0]].bytes;
+            const suffix = slots[operands[1]].bytes;
+            const destination_length = readInt(u32, destination, 0);
+            const suffix_length = readInt(u32, suffix, 0);
+            const combined = std.math.add(
+                u32,
+                destination_length,
+                suffix_length,
+            ) catch return try failureTag(image, "capacity_exceeded");
+            const schema = try valueNode(image, result);
+            if (combined > readInt(u32, schema.payload, 0)) {
+                return try failureTag(image, "capacity_exceeded");
+            }
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                4 + @as(usize, combined),
+            );
+            std.mem.writeInt(u32, output[0..4], combined, .little);
+            @memcpy(
+                output[4..][0..destination_length],
+                destination[4..][0..destination_length],
+            );
+            @memcpy(
+                output[4 + destination_length ..][0..suffix_length],
+                suffix[4..][0..suffix_length],
+            );
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        43 => {
+            const raw = readInt(u32, slots[operands[1]].bytes, 0);
+            if (raw > std.math.maxInt(u21)) {
+                return try failureTag(image, "invalid_utf8");
+            }
+            var encoded: [4]u8 = undefined;
+            const encoded_length = std.unicode.utf8Encode(
+                @intCast(raw),
+                &encoded,
+            ) catch return try failureTag(image, "invalid_utf8");
+            slots[result] = .{
+                .bytes = appendSequence(
+                    image,
+                    result,
+                    slots[operands[0]].bytes,
+                    &.{encoded[0..encoded_length]},
+                    scratch,
+                    scratch_cursor,
+                ) catch |err| switch (err) {
+                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    else => return err,
+                },
+                .initialized = true,
+            };
+        },
+        44, 45 => {
+            const integer = try decodeInteger(
+                try valueKind(image, operands[1]),
+                slots[operands[1]].bytes,
+            );
+            var formatted_storage: [20]u8 = undefined;
+            const formatted = if (operation == 44)
+                std.fmt.bufPrint(
+                    &formatted_storage,
+                    "{d}",
+                    .{integer.raw},
+                ) catch return try failureTag(image, "capacity_exceeded")
+            else
+                std.fmt.bufPrint(
+                    &formatted_storage,
+                    "{d}",
+                    .{signedValue(integer)},
+                ) catch return try failureTag(image, "capacity_exceeded");
+            slots[result] = .{
+                .bytes = appendSequence(
+                    image,
+                    result,
+                    slots[operands[0]].bytes,
+                    &.{formatted},
+                    scratch,
+                    scratch_cursor,
+                ) catch |err| switch (err) {
+                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    else => return err,
+                },
+                .initialized = true,
+            };
+        },
+        46, 51 => {
+            const source = slots[operands[0]].bytes;
+            const start = readInt(u32, slots[operands[1]].bytes, 0);
+            const end = readInt(u32, slots[operands[2]].bytes, 0);
+            const source_length = readInt(u32, source, 0);
+            if (start > end or end > source_length) {
+                return try failureTag(image, "capacity_exceeded");
+            }
+            const copied = source[4 + start .. 4 + end];
+            const node = try valueNode(image, result);
+            if (copied.len > readInt(u32, node.payload, 0)) {
+                return try failureTag(image, "capacity_exceeded");
+            }
+            if (operation == 46 and !std.unicode.utf8ValidateSlice(copied)) {
+                return try failureTag(image, "invalid_utf8");
+            }
+            const output = try allocateScratch(
+                scratch,
+                scratch_cursor,
+                4 + copied.len,
+            );
+            std.mem.writeInt(u32, output[0..4], @intCast(copied.len), .little);
+            @memcpy(output[4..], copied);
+            slots[result] = .{ .bytes = output, .initialized = true };
+        },
+        47, 52 => {
+            const left = sequencePayload(slots[operands[0]].bytes);
+            const right = sequencePayload(slots[operands[1]].bytes);
+            const ordered: i8 = switch (std.mem.order(u8, left, right)) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            };
+            slots[result] = .{
+                .bytes = try writeRaw(
+                    scratch,
+                    scratch_cursor,
+                    .i8,
+                    @as(u8, @bitCast(ordered)),
+                ),
+                .initialized = true,
+            };
+        },
+        48, 56 => {
+            slots[result] = .{
+                .bytes = appendSequence(
+                    image,
+                    result,
+                    slots[operands[0]].bytes,
+                    &.{
+                        sequencePayload(slots[operands[1]].bytes),
+                        sequencePayload(slots[operands[2]].bytes),
+                    },
+                    scratch,
+                    scratch_cursor,
+                ) catch |err| switch (err) {
+                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    else => return err,
+                },
+                .initialized = true,
+            };
+        },
+        55 => {
+            slots[result] = .{
+                .bytes = appendSequence(
+                    image,
+                    result,
+                    slots[operands[0]].bytes,
+                    &.{slots[operands[1]].bytes[0..1]},
+                    scratch,
+                    scratch_cursor,
+                ) catch |err| switch (err) {
+                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    else => return err,
+                },
+                .initialized = true,
+            };
+        },
+        else => return error.UnsupportedOperation,
+    }
+    return null;
+}
+
+fn appendSequence(
+    image: image_v1.ValidatedImage,
+    result_value: u16,
+    prefix: []const u8,
+    suffixes: []const []const u8,
+    scratch: []u8,
+    scratch_cursor: *usize,
+) Error![]const u8 {
+    var logical_length: usize = readInt(u32, prefix, 0);
+    for (suffixes) |suffix| {
+        logical_length = std.math.add(usize, logical_length, suffix.len) catch
+            return error.CapacityExceeded;
+    }
+    const node = try valueNode(image, result_value);
+    if (logical_length > readInt(u32, node.payload, 0)) {
+        return error.CapacityExceeded;
+    }
+    const output = try allocateScratch(
+        scratch,
+        scratch_cursor,
+        4 + logical_length,
+    );
+    std.mem.writeInt(u32, output[0..4], @intCast(logical_length), .little);
+    const prefix_payload = sequencePayload(prefix);
+    @memcpy(output[4..][0..prefix_payload.len], prefix_payload);
+    var cursor = 4 + prefix_payload.len;
+    for (suffixes) |suffix| {
+        @memcpy(output[cursor..][0..suffix.len], suffix);
+        cursor += suffix.len;
+    }
+    return output;
+}
+
+fn sequencePayload(value: []const u8) []const u8 {
+    return value[4..][0..readInt(u32, value, 0)];
+}
+
+fn productField(
+    image: image_v1.ValidatedImage,
+    product_value: u16,
+    product: []const u8,
+    field_index: u32,
+    workspace: *image_v1.ValidationWorkspace,
+) Error![]const u8 {
+    const node = try valueNode(image, product_value);
+    if (node.kind != .product or field_index >= readInt(u32, node.payload, 0)) {
+        return error.InvalidImage;
+    }
+    var cursor: usize = 0;
+    for (0..field_index) |index| {
+        const schema_id = readInt(u32, node.payload, 4 + index * 4);
+        cursor += dynamic_value_v1.validateValuePrefix(
+            image.catalogs.schemas,
+            schema_id,
+            product[cursor..],
+            &workspace.value_tasks,
+        ) catch return error.InvalidState;
+    }
+    const schema_id = readInt(u32, node.payload, 4 + @as(usize, field_index) * 4);
+    const length = dynamic_value_v1.validateValuePrefix(
+        image.catalogs.schemas,
+        schema_id,
+        product[cursor..],
+        &workspace.value_tasks,
+    ) catch return error.InvalidState;
+    return product[cursor..][0..length];
+}
+
+fn vectorElement(
+    image: image_v1.ValidatedImage,
+    vector_value: u16,
+    vector: []const u8,
+    target: u32,
+    workspace: *image_v1.ValidationWorkspace,
+) Error![]const u8 {
+    const node = try valueNode(image, vector_value);
+    if (node.kind != .vector) return error.InvalidImage;
+    const length = readInt(u32, vector, 0);
+    if (target >= length) return error.InvalidState;
+    const element_schema = readInt(u32, node.payload, 4);
+    var cursor: usize = 4;
+    for (0..target) |_| {
+        cursor += dynamic_value_v1.validateValuePrefix(
+            image.catalogs.schemas,
+            element_schema,
+            vector[cursor..],
+            &workspace.value_tasks,
+        ) catch return error.InvalidState;
+    }
+    const element_length = dynamic_value_v1.validateValuePrefix(
+        image.catalogs.schemas,
+        element_schema,
+        vector[cursor..],
+        &workspace.value_tasks,
+    ) catch return error.InvalidState;
+    return vector[cursor..][0..element_length];
+}
+
+fn addDynamicCost(
+    image: image_v1.ValidatedImage,
+    value: u16,
+    slot: Slot,
+    cost: *u64,
+) Error!void {
+    if (!slot.initialized) return error.InvalidState;
+    try addDynamicCostSize(image, value, slot.bytes.len, cost);
+}
+
+fn addDynamicCostSize(
+    image: image_v1.ValidatedImage,
+    value: u16,
+    encoded_size: usize,
+    cost: *u64,
+) Error!void {
+    const node = try valueNode(image, value);
+    if (node.minimum_encoded_size == node.maximum_encoded_size) return;
+    const dynamic = std.math.divCeil(u64, encoded_size, 16) catch
+        return error.ExecutionBudgetExceeded;
+    cost.* = std.math.add(u64, cost.*, dynamic) catch
+        return error.ExecutionBudgetExceeded;
+}
+
+fn operandsForInstruction(instruction: []const u8) []const u8 {
+    const count = readInt(u16, instruction, 10);
+    return instruction[16..][0 .. @as(usize, count) * 2];
+}
+
+fn preflightResultSize(
+    image: image_v1.ValidatedImage,
+    segment: []const u8,
+    instruction_offset: usize,
+    operation: u16,
+    result: u16,
+    operand_bytes: []const u8,
+    slots: *const [1024]Slot,
+    sizes: *const [1024]u64,
+    initially_available: *const [1024]bool,
+) Error!usize {
+    const maximum: usize = @intCast((try valueNode(image, result)).maximum_encoded_size);
+    const size = struct {
+        fn get(bytes: []const u8, index: usize, values: *const [1024]u64) usize {
+            return @intCast(values[readInt(u16, bytes, index * 2)]);
+        }
+    }.get;
+    return switch (operation) {
+        0, 1, 2...22, 28, 32, 34, 40, 47, 52, 53, 54, 57 => slots[result].bytes.len,
+        23 => @max(size(operand_bytes, 1, sizes), size(operand_bytes, 2, sizes)),
+        24 => blk: {
+            var total: usize = 0;
+            var index: usize = 0;
+            while (index < operand_bytes.len) : (index += 2) {
+                total +|= sizes[readInt(u16, operand_bytes, index)];
+            }
+            break :blk @min(maximum, total);
+        },
+        25 => @intCast(preflightProductFieldSize(
+            segment,
+            instruction_offset,
+            readInt(u16, operand_bytes, 0),
+            readInt(u32, segment, instruction_offset + 12),
+            sizes,
+        ) orelse maximum),
+        35 => if (initially_available[readInt(u16, operand_bytes, 0)] and
+            initially_available[readInt(u16, operand_bytes, 2)])
+            slots[result].bytes.len
+        else
+            maximum,
+        26, 29, 36, 38 => maximum,
+        27 => @min(
+            maximum,
+            4 + if (operand_bytes.len == 0) 0 else size(operand_bytes, 0, sizes),
+        ),
+        30 => 1,
+        31 => @min(maximum, 1 + size(operand_bytes, 0, sizes)),
+        33, 41, 49 => 4,
+        37 => @min(
+            maximum,
+            size(operand_bytes, 0, sizes) +| size(operand_bytes, 1, sizes),
+        ),
+        39 => @min(maximum, size(operand_bytes, 0, sizes)),
+        42, 50 => @min(
+            maximum,
+            size(operand_bytes, 0, sizes) +|
+                (size(operand_bytes, 1, sizes) -| 4),
+        ),
+        43 => @min(maximum, size(operand_bytes, 0, sizes) +| 4),
+        44, 45 => @min(maximum, size(operand_bytes, 0, sizes) +| 20),
+        46, 51 => @min(maximum, size(operand_bytes, 0, sizes)),
+        48, 56 => @min(
+            maximum,
+            size(operand_bytes, 0, sizes) +|
+                (size(operand_bytes, 1, sizes) -| 4) +|
+                (size(operand_bytes, 2, sizes) -| 4),
+        ),
+        55 => @min(maximum, size(operand_bytes, 0, sizes) +| 1),
+        else => return error.UnsupportedOperation,
+    };
+}
+
+fn preflightProductFieldSize(
+    segment: []const u8,
+    instruction_offset: usize,
+    product_value: u16,
+    field_index: u32,
+    sizes: *const [1024]u64,
+) ?u64 {
+    var current_value = product_value;
+    var current_limit = instruction_offset;
+    while (true) {
+        var cursor: usize = 24 + @as(usize, readInt(u16, segment, 10)) * 2;
+        var definition: ?usize = null;
+        while (cursor < current_limit) {
+            const length = readInt(u32, segment, cursor);
+            if (readInt(u16, segment, cursor + 8) == current_value) {
+                definition = cursor;
+                break;
+            }
+            cursor += length;
+        }
+        const offset = definition orelse return null;
+        switch (readInt(u16, segment, offset + 6)) {
+            1 => {
+                current_value = readInt(u16, segment, offset + 16);
+                current_limit = offset;
+            },
+            24 => return sizes[
+                readInt(
+                    u16,
+                    segment,
+                    offset + 16 + @as(usize, field_index) * 2,
+                )
+            ],
+            26 => {
+                if (readInt(u32, segment, offset + 12) == field_index) {
+                    return sizes[readInt(u16, segment, offset + 18)];
+                }
+                current_value = readInt(u16, segment, offset + 16);
+                current_limit = offset;
+            },
+            else => return null,
+        }
+    }
+}
+
+fn valueNode(
+    image: image_v1.ValidatedImage,
+    value: u16,
+) Error!dynamic_value_v1.Node {
+    const schema_id = image.catalogs.valueSchemaId(value) catch
+        return error.InvalidImage;
+    return image.catalogs.schemas.node(schema_id) catch error.InvalidImage;
+}
+
+fn allocateScratch(
+    scratch: []u8,
+    cursor: *usize,
+    length: usize,
+) Error![]u8 {
+    if (cursor.* > scratch.len or length > scratch.len - cursor.*) {
+        return error.ScratchCapacity;
+    }
+    const result = scratch[cursor.*..][0..length];
+    cursor.* += length;
+    return result;
 }
 
 const Integer = struct {

@@ -1,4 +1,7 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
+const machine = @import("machine");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -120,11 +123,13 @@ const Body = struct {
 };
 
 const Program = program_v2.program("pure-operation-algebra", Body);
-const PureMachine = Program.compile(.{
+const pure_options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 128,
-});
+};
+const PureMachine = Program.compile(pure_options);
+const PureImage = Program.image(pure_options);
 
 pub const ReificationBaselineBody = Body;
 pub const ReificationBaselineProgram = Program;
@@ -163,6 +168,59 @@ test "compiled pure operations construct products vectors and text" {
     try std.testing.expectEqual(@as(u32, 7), item.score);
     try std.testing.expectEqualStrings("alpha", try result.digest.slice());
     try std.testing.expectEqual(@as(u32, 8), result.total);
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&PureImage.bytes, &workspace);
+    var kernel_state: [4096]u8 = undefined;
+    const kernel_state_length = try kernel_v1.initial(
+        image,
+        &.{},
+        &kernel_state,
+        &workspace,
+    );
+    var scratch: [4096]u8 = undefined;
+    var kernel_output: [4096]u8 = undefined;
+    var kernel_insufficient_fuel: u64 = 10;
+    try std.testing.expectEqual(
+        kernel_v1.Outcome.yielded,
+        try kernel_v1.step(
+            image,
+            kernel_state[0..kernel_state_length],
+            &kernel_insufficient_fuel,
+            &kernel_output,
+            &scratch,
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 10), kernel_insufficient_fuel);
+
+    var kernel_fuel: u64 = 64;
+    const kernel_done = switch (try kernel_v1.step(
+        image,
+        kernel_state[0..kernel_state_length],
+        &kernel_fuel,
+        &kernel_output,
+        &scratch,
+        &workspace,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const maximum_result_size = comptime portable_value.maximumEncodedSize(
+        PureResult,
+    );
+    var direct_bytes: [maximum_result_size]u8 = undefined;
+    const direct_length = try portable_value.encode(
+        PureResult,
+        result.*,
+        &direct_bytes,
+    );
+    try std.testing.expectEqual(fuel, kernel_fuel);
+    try std.testing.expectEqualSlices(
+        u8,
+        direct_bytes[0..direct_length],
+        kernel_done,
+    );
 }
 
 const ConstantTitles = portable_value.Vector(Title, 2);
