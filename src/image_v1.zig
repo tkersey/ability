@@ -122,6 +122,11 @@ pub const Catalogs = struct {
     functions_section: []const u8,
     entry_parameter_count: u16,
     entry_parameter_value_id: u16,
+
+    pub fn valueSchemaId(self: Catalogs, value: u16) Error!u32 {
+        if (value >= self.value_count) return error.InvalidValue;
+        return readInt(u32, self.values_section, 4 + @as(usize, value) * 4);
+    }
 };
 
 pub const ValidatedImage = struct {

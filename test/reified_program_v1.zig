@@ -191,11 +191,13 @@ test "Reified Program preserves direct canonical State bytes" {
     defer direct_done.deinit();
     var kernel_fuel: u64 = 8;
     var kernel_result: [4]u8 = undefined;
+    var kernel_scratch: [4096]u8 = undefined;
     const kernel_done = try kernel_v1.step(
         validated,
         kernel_state[0..kernel_length],
         &kernel_fuel,
         &kernel_result,
+        &kernel_scratch,
         &workspace,
     );
     const kernel_value = switch (kernel_done) {
@@ -325,11 +327,13 @@ test "Reified constants emit in canonical first-use order" {
     );
     var fuel: u64 = 8;
     var output: [4]u8 = undefined;
+    var scratch: [4096]u8 = undefined;
     const outcome = try kernel_v1.step(
         validated,
         state[0..state_length],
         &fuel,
         &output,
+        &scratch,
         &workspace,
     );
     const value = switch (outcome) {
@@ -340,4 +344,108 @@ test "Reified constants emit in canonical first-use order" {
         @as(u32, 42),
         std.mem.readInt(u32, value[0..4], .little),
     );
+}
+
+test "fixed kernel scalar algebra matches direct success and failure" {
+    const instructions = [_]cir.Instruction{
+        .{
+            .kind = .constant,
+            .result = 1,
+            .operation = .{ .constant = 0 },
+        },
+        .{
+            .kind = .pure,
+            .result = 2,
+            .operands = &.{ 0, 1 },
+            .operation = .integer_add,
+        },
+    };
+    const scalar_blocks = [_]cir.Block{.{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &instructions,
+        .terminator = .{ .return_value = 2 },
+    }};
+    const ScalarBody = struct {
+        pub const InitialArgs = u32;
+        pub const Result = u32;
+        pub const Failure = enum { arithmetic_overflow };
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const constants = .{@as(u32, 1)};
+        pub const control_ir: cir.Program = .{
+            .label = "kernel-scalar-proof",
+            .value_types = &.{ u32_type, u32_type, u32_type },
+            .blocks = &scalar_blocks,
+            .entry = 0,
+            .result_type = u32_type,
+        };
+    };
+    const ScalarProgram = program_v2.program("kernel-scalar-proof", ScalarBody);
+    const ScalarMachine = ScalarProgram.compile(options);
+    const ScalarImage = ScalarProgram.image(options);
+    const image_v1 = @import("image_v1");
+    const kernel_v1 = @import("kernel_v1");
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const validated = try image_v1.validateImage(&ScalarImage.bytes, &workspace);
+
+    inline for (.{ @as(u32, 41), std.math.maxInt(u32) }) |input| {
+        const direct_state = try ScalarMachine.initialState(
+            std.testing.allocator,
+            input,
+        );
+        defer ScalarMachine.deinitState(direct_state);
+        var direct_fuel: u64 = 8;
+        const direct = try ScalarMachine.step(direct_state, &direct_fuel);
+
+        var args: [4]u8 = undefined;
+        std.mem.writeInt(u32, &args, input, .little);
+        var state: [4096]u8 = undefined;
+        const state_length = try kernel_v1.initial(
+            validated,
+            &args,
+            &state,
+            &workspace,
+        );
+        var kernel_fuel: u64 = 8;
+        var output: [4]u8 = undefined;
+        var scratch: [64]u8 = undefined;
+        const kernel = try kernel_v1.step(
+            validated,
+            state[0..state_length],
+            &kernel_fuel,
+            &output,
+            &scratch,
+            &workspace,
+        );
+        try std.testing.expectEqual(direct_fuel, kernel_fuel);
+        if (input == 41) {
+            const direct_done = switch (direct) {
+                .done => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            defer direct_done.deinit();
+            const kernel_done = switch (kernel) {
+                .done => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(
+                direct_done.value().*,
+                std.mem.readInt(u32, kernel_done[0..4], .little),
+            );
+        } else {
+            const direct_failed = switch (direct) {
+                .failed => |failure| failure,
+                else => return error.TestUnexpectedResult,
+            };
+            const kernel_failed = switch (kernel) {
+                .failed => |failure| failure,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(
+                @intFromEnum(direct_failed.authored),
+                std.mem.readInt(u32, kernel_failed[0..4], .little),
+            );
+        }
+    }
 }
