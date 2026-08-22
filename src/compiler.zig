@@ -2742,18 +2742,6 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
             return @min(maximumEncodedBytes(T), candidate);
         }
 
-        fn combinedSequenceBytes(
-            comptime T: type,
-            prefix: u64,
-            suffixes: []const u64,
-        ) u64 {
-            var result = prefix;
-            for (suffixes) |suffix| {
-                result +|= suffix -| 4;
-            }
-            return boundedBytes(T, result);
-        }
-
         fn definingInstructionInBlock(
             comptime block: control_ir.Block,
             comptime value: control_ir.ValueId,
@@ -2885,129 +2873,82 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
             sizes: *const [limits.maximum_values]u64,
             available: *const [limits.maximum_values]bool,
         ) u64 {
-            const result_name = comptime valueName(instruction.result);
-            const ResultType = @FieldType(ValueCatalog, result_name);
-            const maximum = maximumEncodedBytes(ResultType);
-            return switch (instruction.operation) {
-                .metadata => unreachable,
-                .constant => |constant_index| encodedBytes(
-                    ResultType,
-                    Body.constants[constant_index],
-                ),
-                .copy => sizes[@intCast(instruction.operands[0])],
-                .product_construct => blk: {
-                    var total: u64 = 0;
-                    inline for (instruction.operands) |operand| {
-                        total +|= sizes[@intCast(operand)];
-                    }
-                    break :blk boundedBytes(ResultType, total);
+            return reducer_semantics_v1.resultEncodedBytes(
+                instruction,
+                .{
+                    .block = block,
+                    .environment = environment,
+                    .sizes = sizes,
+                    .available = available,
                 },
-                .product_extract => |field_index| exactProductFieldBytes(
-                    block,
+                TypedPreflightBackend,
+            );
+        }
+
+        const TypedPreflightBackend = struct {
+            pub fn maximumResultBytes(
+                comptime instruction: control_ir.Instruction,
+            ) u64 {
+                const name = comptime valueName(instruction.result);
+                return maximumEncodedBytes(@FieldType(ValueCatalog, name));
+            }
+
+            pub fn constantBytes(
+                comptime instruction: control_ir.Instruction,
+            ) u64 {
+                const name = comptime valueName(instruction.result);
+                const ResultType = @FieldType(ValueCatalog, name);
+                return encodedBytes(
+                    ResultType,
+                    Body.constants[instruction.operation.constant],
+                );
+            }
+
+            pub fn operandBytes(
+                context: anytype,
+                value: control_ir.ValueId,
+            ) u64 {
+                return context.sizes[@intCast(value)];
+            }
+
+            pub fn boundedResultBytes(
+                comptime instruction: control_ir.Instruction,
+                candidate: u64,
+            ) u64 {
+                const name = comptime valueName(instruction.result);
+                return boundedBytes(
+                    @FieldType(ValueCatalog, name),
+                    candidate,
+                );
+            }
+
+            pub fn exactProductFieldBytes(
+                context: anytype,
+                comptime instruction: control_ir.Instruction,
+                comptime field_index: usize,
+            ) ?u64 {
+                return Self.exactProductFieldBytes(
+                    context.block,
                     instruction.operands[0],
                     field_index,
-                    environment,
-                    sizes,
-                    available,
-                ) orelse maximum,
-                .product_replace => maximum,
-                .sum_construct => boundedBytes(
-                    ResultType,
-                    4 +| if (instruction.operands.len == 0)
-                        0
-                    else
-                        sizes[@intCast(instruction.operands[0])],
-                ),
-                .sum_extract => maximum,
-                .optional_none => 1,
-                .optional_some => boundedBytes(
-                    ResultType,
-                    1 +| sizes[@intCast(instruction.operands[0])],
-                ),
-                .select => @max(
-                    sizes[@intCast(instruction.operands[1])],
-                    sizes[@intCast(instruction.operands[2])],
-                ),
-                .vector_empty, .text_empty, .bytes_empty => 4,
-                .vector_get => exactVectorElementBytes(
-                    block,
+                    context.environment,
+                    context.sizes,
+                    context.available,
+                );
+            }
+
+            pub fn exactVectorElementBytes(
+                context: anytype,
+                comptime instruction: control_ir.Instruction,
+            ) ?u64 {
+                return Self.exactVectorElementBytes(
+                    context.block,
                     instruction.result,
-                    environment,
-                    available,
-                ) orelse maximum,
-                .vector_set => maximum,
-                .vector_push => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +|
-                        sizes[@intCast(instruction.operands[1])],
-                ),
-                .vector_pop => maximum,
-                .vector_truncate => @min(
-                    maximum,
-                    sizes[@intCast(instruction.operands[0])],
-                ),
-                .vector_clear => 4,
-                .text_append, .bytes_append => combinedSequenceBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])],
-                    &.{sizes[@intCast(instruction.operands[1])]},
-                ),
-                .bytes_append_scalar => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +| 1,
-                ),
-                .text_append_scalar => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +| 4,
-                ),
-                .text_append_unsigned, .text_append_signed => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +| 20,
-                ),
-                .text_copy, .bytes_copy => @min(
-                    maximum,
-                    sizes[@intCast(instruction.operands[0])],
-                ),
-                .text_join, .bytes_join => combinedSequenceBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])],
-                    &.{
-                        sizes[@intCast(instruction.operands[1])],
-                        sizes[@intCast(instruction.operands[2])],
-                    },
-                ),
-                .compare_eq_zero,
-                .integer_add,
-                .integer_subtract,
-                .integer_multiply,
-                .integer_divide,
-                .integer_remainder,
-                .integer_negate,
-                .integer_equal,
-                .integer_not_equal,
-                .integer_less_than,
-                .integer_less_equal,
-                .integer_greater_than,
-                .integer_greater_equal,
-                .integer_bit_not,
-                .integer_bit_and,
-                .integer_bit_or,
-                .integer_bit_xor,
-                .integer_convert,
-                .enum_to_u32,
-                .boolean_not,
-                .boolean_and,
-                .boolean_or,
-                .sum_tag_is,
-                .optional_is_some,
-                .vector_length,
-                .text_length,
-                .bytes_length,
-                .text_compare,
-                .bytes_compare,
-                => maximum,
-            };
-        }
+                    context.environment,
+                    context.available,
+                );
+            }
+        };
 
         // Keep each typed Control IR block as one direct code-generation unit.
         // Inlining every block into the constructor dispatcher makes LLVM

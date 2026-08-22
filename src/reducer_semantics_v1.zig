@@ -365,6 +365,143 @@ pub fn dynamicBytesCost(variable_size: bool, canonical_bytes: u64) u64 {
     ) catch std.math.maxInt(u64);
 }
 
+/// Compute the exact-or-bounded canonical result size used by segment fuel
+/// preflight. `Backend` supplies representation-specific schema and value
+/// access; this exhaustive operation law is shared by every execution engine.
+pub fn resultEncodedBytes(
+    comptime instruction: control_ir.Instruction,
+    context: anytype,
+    comptime Backend: type,
+) u64 {
+    const maximum = Backend.maximumResultBytes(instruction);
+    return switch (instruction.operation) {
+        .metadata => unreachable,
+        .constant => Backend.constantBytes(instruction),
+        .copy => Backend.operandBytes(context, instruction.operands[0]),
+        .product_construct => blk: {
+            var total: u64 = 0;
+            inline for (instruction.operands) |operand| {
+                total +|= Backend.operandBytes(context, operand);
+            }
+            break :blk Backend.boundedResultBytes(instruction, total);
+        },
+        .product_extract => |field_index| Backend.exactProductFieldBytes(
+            context,
+            instruction,
+            field_index,
+        ) orelse maximum,
+        .product_replace => maximum,
+        .sum_construct => Backend.boundedResultBytes(
+            instruction,
+            4 +| if (instruction.operands.len == 0)
+                0
+            else
+                Backend.operandBytes(context, instruction.operands[0]),
+        ),
+        .sum_extract => maximum,
+        .optional_none => 1,
+        .optional_some => Backend.boundedResultBytes(
+            instruction,
+            1 +| Backend.operandBytes(context, instruction.operands[0]),
+        ),
+        .select => @max(
+            Backend.operandBytes(context, instruction.operands[1]),
+            Backend.operandBytes(context, instruction.operands[2]),
+        ),
+        .vector_empty, .text_empty, .bytes_empty => 4,
+        .vector_get => Backend.exactVectorElementBytes(
+            context,
+            instruction,
+        ) orelse maximum,
+        .vector_set => maximum,
+        .vector_push => Backend.boundedResultBytes(
+            instruction,
+            Backend.operandBytes(context, instruction.operands[0]) +|
+                Backend.operandBytes(context, instruction.operands[1]),
+        ),
+        .vector_pop => maximum,
+        .vector_truncate => @min(
+            maximum,
+            Backend.operandBytes(context, instruction.operands[0]),
+        ),
+        .vector_clear => 4,
+        .text_append, .bytes_append => combinedSequenceBytes(
+            instruction,
+            context,
+            Backend,
+            &.{1},
+        ),
+        .bytes_append_scalar => Backend.boundedResultBytes(
+            instruction,
+            Backend.operandBytes(context, instruction.operands[0]) +| 1,
+        ),
+        .text_append_scalar => Backend.boundedResultBytes(
+            instruction,
+            Backend.operandBytes(context, instruction.operands[0]) +| 4,
+        ),
+        .text_append_unsigned, .text_append_signed => Backend.boundedResultBytes(
+            instruction,
+            Backend.operandBytes(context, instruction.operands[0]) +| 20,
+        ),
+        .text_copy, .bytes_copy => @min(
+            maximum,
+            Backend.operandBytes(context, instruction.operands[0]),
+        ),
+        .text_join, .bytes_join => combinedSequenceBytes(
+            instruction,
+            context,
+            Backend,
+            &.{ 1, 2 },
+        ),
+        .compare_eq_zero,
+        .integer_add,
+        .integer_subtract,
+        .integer_multiply,
+        .integer_divide,
+        .integer_remainder,
+        .integer_negate,
+        .integer_equal,
+        .integer_not_equal,
+        .integer_less_than,
+        .integer_less_equal,
+        .integer_greater_than,
+        .integer_greater_equal,
+        .integer_bit_not,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .integer_convert,
+        .enum_to_u32,
+        .boolean_not,
+        .boolean_and,
+        .boolean_or,
+        .sum_tag_is,
+        .optional_is_some,
+        .vector_length,
+        .text_length,
+        .bytes_length,
+        .text_compare,
+        .bytes_compare,
+        => maximum,
+    };
+}
+
+fn combinedSequenceBytes(
+    comptime instruction: control_ir.Instruction,
+    context: anytype,
+    comptime Backend: type,
+    comptime suffix_operand_indexes: []const usize,
+) u64 {
+    var result = Backend.operandBytes(context, instruction.operands[0]);
+    inline for (suffix_operand_indexes) |operand_index| {
+        result +|= Backend.operandBytes(
+            context,
+            instruction.operands[operand_index],
+        ) -| 4;
+    }
+    return Backend.boundedResultBytes(instruction, result);
+}
+
 pub noinline fn executeTypedInstructions(
     comptime Body: type,
     comptime ValueCatalog: type,

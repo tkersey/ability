@@ -150,3 +150,83 @@ test "BEI1 control and RNF wire tags are pinned" {
         @intFromEnum(reducer.wireIncomingEdge(.suspension_continuation)),
     );
 }
+
+test "result-size preflight follows the shared operation law" {
+    const Backend = struct {
+        pub fn maximumResultBytes(
+            comptime _: control_ir.Instruction,
+        ) u64 {
+            return 100;
+        }
+
+        pub fn constantBytes(comptime _: control_ir.Instruction) u64 {
+            return 7;
+        }
+
+        pub fn operandBytes(context: anytype, value: control_ir.ValueId) u64 {
+            return context.sizes[@intCast(value)];
+        }
+
+        pub fn boundedResultBytes(
+            comptime _: control_ir.Instruction,
+            candidate: u64,
+        ) u64 {
+            return @min(100, candidate);
+        }
+
+        pub fn exactProductFieldBytes(
+            _: anytype,
+            comptime _: control_ir.Instruction,
+            comptime _: usize,
+        ) ?u64 {
+            return null;
+        }
+
+        pub fn exactVectorElementBytes(
+            _: anytype,
+            comptime _: control_ir.Instruction,
+        ) ?u64 {
+            return null;
+        }
+    };
+    const context = .{ .sizes = [_]u64{ 0, 12, 9, 7 } };
+    try std.testing.expectEqual(
+        @as(u64, 10),
+        reducer.resultEncodedBytes(
+            .{
+                .kind = .pure,
+                .result = 0,
+                .operands = &.{2},
+                .operation = .optional_some,
+            },
+            context,
+            Backend,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 21),
+        reducer.resultEncodedBytes(
+            .{
+                .kind = .pure,
+                .result = 0,
+                .operands = &.{ 1, 2 },
+                .operation = .vector_push,
+            },
+            context,
+            Backend,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 20),
+        reducer.resultEncodedBytes(
+            .{
+                .kind = .pure,
+                .result = 0,
+                .operands = &.{ 1, 2, 3 },
+                .operation = .text_join,
+            },
+            context,
+            Backend,
+        ),
+    );
+}
