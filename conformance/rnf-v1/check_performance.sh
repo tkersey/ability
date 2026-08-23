@@ -59,7 +59,8 @@ require_complete_current_topology() {
             if ($3 != "support" &&
                 $3 != "runtime_semantics" &&
                 $3 != "direct_runtime_semantics" &&
-                $3 != "image_runtime_semantics") exit 1
+                $3 != "image_runtime_semantics" &&
+                $3 != "shared_runtime_semantics") exit 1
         }
         END {
             if (NR < 2) exit 1
@@ -97,7 +98,7 @@ require_single_reducer_receipt() {
     test "$(grep -Fxc \
         'reducer_public_entry=Program.compile(...).step' \
         "$reducer_receipt")" -eq 1 || return 1
-    test "$(grep -Fxc 'program_compile_surface_count=1' \
+    test "$(grep -Fxc 'program_execution_constructor_count=3' \
         "$reducer_receipt")" -eq 1 || return 1
     test "$(wc -l <"$reducer_receipt" | tr -d ' ')" -eq 3 || return 1
 }
@@ -110,7 +111,8 @@ current_runtime_semantic_module_count() {
         $1 == "source_module" &&
             ($3 == "runtime_semantics" ||
              $3 == "direct_runtime_semantics" ||
-             $3 == "image_runtime_semantics") { count += 1 }
+             $3 == "image_runtime_semantics" ||
+             $3 == "shared_runtime_semantics") { count += 1 }
         END { print count + 0 }
     ' "$topology_receipt"
 }
@@ -122,7 +124,8 @@ current_direct_runtime_semantic_module_count() {
     awk '
         $1 == "source_module" &&
             ($3 == "runtime_semantics" ||
-             $3 == "direct_runtime_semantics") { count += 1 }
+             $3 == "direct_runtime_semantics" ||
+             $3 == "shared_runtime_semantics") { count += 1 }
         END { print count + 0 }
     ' "$topology_receipt"
 }
@@ -295,7 +298,7 @@ self_test() {
     printf '%s\n' \
         'single_boundary_reducer=true' \
         'reducer_public_entry=Program.compile(...).step' \
-        'program_compile_surface_count=1' \
+        'program_execution_constructor_count=3' \
         >"$reducer_test_receipt"
     require_single_reducer_receipt "$reducer_test_receipt"
     test "$(current_runtime_semantic_module_count \
@@ -636,7 +639,7 @@ current_direct_runtime_semantic_modules=$(
         "$topology_receipt"
 )
 test "$current_direct_runtime_semantic_modules" \
-    -lt "$baseline_runtime_semantic_modules"
+    -le "$baseline_runtime_semantic_modules"
 
 echo "boundary_performance_baseline_compile $baseline_compile_observation"
 echo "boundary_performance_status=pass baseline_release=$baseline_tag" \

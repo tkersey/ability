@@ -49,8 +49,8 @@ try {
     engine_switch_count: 1,
     finite_state_count: 1,
     generated_trace_count: 1,
-    generated_trace_seed: "seed",
-    generated_trace_sha256: "digest",
+    generated_trace_seed: "0x4245493100010000",
+    generated_trace_sha256: "a".repeat(64),
   }));
   const root = path.join(temporary, "root.zig");
   fs.writeFileSync(root, "pub const program = void;\n");
@@ -109,6 +109,19 @@ try {
     "installation.step.dependOn(reification_receipt_step);\n" +
       "emit_reification_assets_step.dependOn(reification_receipt_step);\n",
   );
+  const malformedProvenance = JSON.parse(fs.readFileSync(generated, "utf8"));
+  malformedProvenance.generated_trace_sha256 = "digest";
+  fs.writeFileSync(generated, JSON.stringify(malformedProvenance));
+  const forgedProvenance = childProcess.spawnSync(
+    process.execPath,
+    proofArgs,
+    { encoding: "utf8" },
+  );
+  if (forgedProvenance.status === 0) {
+    throw new Error("malformed generated-trace provenance was accepted");
+  }
+  malformedProvenance.generated_trace_sha256 = "a".repeat(64);
+  fs.writeFileSync(generated, JSON.stringify(malformedProvenance));
 
   const forgedBaseline = JSON.parse(fs.readFileSync(baseline, "utf8"));
   forgedBaseline.oracle_mismatch_count = 1;

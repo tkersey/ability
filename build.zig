@@ -52,6 +52,7 @@ const CoreModuleRole = enum {
     support,
     direct_runtime_semantics,
     image_runtime_semantics,
+    shared_runtime_semantics,
 };
 
 fn coreModulePath(module: CoreModuleId) []const u8 {
@@ -84,13 +85,13 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .compiler, .machine, .machine_v2_metering_v1 => .direct_runtime_semantics,
         .dynamic_value_v1,
         .image_v1,
-        .program_semantics_v1,
         .reducer_clause_v1,
         .kernel_v1,
         .kernel_machine_v1,
         .kernel_wasm_v1,
         .machine_v2_profile_v1,
         => .image_runtime_semantics,
+        .program_semantics_v1 => .shared_runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
@@ -1656,7 +1657,7 @@ pub fn build(b: *std.Build) void {
                 "source_module machine_v2_metering_v1 direct_runtime_semantics src/machine_v2_metering_v1.zig\n" ++
                 "source_module machine_v2_profile_v1 image_runtime_semantics src/machine_v2_profile_v1.zig\n" ++
                 "source_module portable_value {s} {s}\n" ++
-                "source_module program_semantics_v1 image_runtime_semantics src/program_semantics_v1.zig\n" ++
+                "source_module program_semantics_v1 shared_runtime_semantics src/program_semantics_v1.zig\n" ++
                 "source_module program_v2 {s} {s}\n" ++
                 "source_module reducer_clause_v1 image_runtime_semantics src/reducer_clause_v1.zig\n" ++
                 "source_module reified_program_v1 {s} {s}\n" ++

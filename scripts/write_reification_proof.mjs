@@ -54,7 +54,9 @@ if (
   positiveCount(generated, "generated_trace_count") <= 0 ||
   positiveCount(generated, "native_transition_comparison_count") <= 0 ||
   positiveCount(generated, "engine_switch_count") <= 0 ||
-  positiveCount(generated, "finite_state_count") <= 0
+  positiveCount(generated, "finite_state_count") <= 0 ||
+  !/^0x[0-9a-f]{16}$/.test(generated.generated_trace_seed) ||
+  !/^[0-9a-f]{64}$/.test(generated.generated_trace_sha256)
 ) {
   throw new Error("reification proof observation failed");
 }

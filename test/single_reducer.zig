@@ -448,10 +448,12 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print(
         "single_boundary_reducer={}\n" ++
             "reducer_public_entry=Program.compile(...).step\n" ++
-            "program_compile_surface_count={d}\n",
+            "program_execution_constructor_count={d}\n",
         .{
             reducerDeclarationCount(Machine) == 1,
-            @intFromBool(@hasDecl(Program, "compile")),
+            @as(u8, @intFromBool(@hasDecl(Program, "compile"))) +
+                @as(u8, @intFromBool(@hasDecl(Program, "compileV2"))) +
+                @as(u8, @intFromBool(@hasDecl(Program, "kernelMachineV2"))),
         },
     );
     try stdout.flush();
