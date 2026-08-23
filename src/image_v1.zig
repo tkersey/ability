@@ -958,6 +958,7 @@ fn addGuaranteedConstructorValues(
     const bytes = catalogs.envelope.section(.constructors);
     if (bytes.len < 4) return error.InvalidConstructor;
     const count = readInt(u32, bytes, 0);
+    if (count == 0 or count > 256) return error.InvalidConstructor;
     var guaranteed = [_]bool{false} ** 1024;
     var found = false;
     var cursor: usize = 4;
