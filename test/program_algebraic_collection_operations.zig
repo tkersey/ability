@@ -244,6 +244,99 @@ const Machine = Program.compile(options);
 const Image = Program.image();
 const Profile = Program.machineV2Profile(options);
 
+const MeterText = portable_value.Text(64);
+const MeterProduct = struct { label: MeterText };
+const MeterVector = portable_value.Vector(MeterProduct, 1);
+const MeterInput = struct {
+    values: MeterVector,
+    index: u32,
+};
+const metering_entry_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .{ .product_extract = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{0},
+        .operation = .{ .product_extract = 1 },
+    },
+};
+const metering_entry_arguments = [_]cir.EdgeArgument{
+    .{ .value = 1 },
+    .{ .value = 2 },
+};
+const metering_extract_instructions = [_]cir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 5,
+        .operands = &.{ 3, 4 },
+        .operation = .vector_get,
+    },
+    .{
+        .kind = .pure,
+        .result = 6,
+        .operands = &.{5},
+        .operation = .{ .product_extract = 0 },
+    },
+};
+const metering_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &metering_entry_instructions,
+        .terminator = .{ .jump = .{
+            .target = 1,
+            .arguments = &metering_entry_arguments,
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{ 3, 4 },
+        .instructions = &metering_extract_instructions,
+        .terminator = .{ .return_value = 6 },
+    },
+};
+const MeteringBody = struct {
+    pub const InitialArgs = MeterInput;
+    pub const Result = MeterText;
+    pub const Failure = enum { invalid_index };
+    pub const effect_sites = .{};
+    pub const schema_types = .{ MeterInput, MeterVector, MeterProduct, MeterText };
+    pub const control_ir: cir.Program = .{
+        .label = "vector-product-field-metering",
+        .value_types = &.{
+            cir.ValueType{ .schema = 0 },
+            cir.ValueType{ .schema = 1 },
+            cir.ValueType{ .scalar = .u32 },
+            cir.ValueType{ .schema = 1 },
+            cir.ValueType{ .scalar = .u32 },
+            cir.ValueType{ .schema = 2 },
+            cir.ValueType{ .schema = 3 },
+        },
+        .blocks = &metering_blocks,
+        .entry = 0,
+        .result_type = .{ .schema = 3 },
+    };
+};
+const MeteringProgram = program_v2.program(
+    "vector-product-field-metering",
+    MeteringBody,
+);
+const MeteringDirect = MeteringProgram.compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 256,
+});
+const MeteringKernel = MeteringProgram.kernelMachineV2(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 256,
+});
+
 test "compiled products sums optionals vectors text and bytes are first order" {
     const state = try Machine.initialState(std.testing.allocator, {});
     defer Machine.deinitState(state);
@@ -341,6 +434,60 @@ test "compiled products sums optionals vectors text and bytes are first order" {
         direct_bytes[0..direct_length],
         kernel_done,
     );
+}
+
+test "vector-derived product fields use exact Machine-v2 fuel" {
+    const label = try MeterText.fromSlice("a");
+    const input: MeterInput = .{
+        .values = try MeterVector.fromSlice(&.{.{ .label = label }}),
+        .index = 0,
+    };
+    var observed_yield = false;
+    var observed_done = false;
+    for (0..33) |fuel_value| {
+        const direct = try MeteringDirect.initialState(std.testing.allocator, input);
+        defer MeteringDirect.deinitState(direct);
+        const kernel = try MeteringKernel.initialState(std.testing.allocator, input);
+        defer MeteringKernel.deinitState(kernel);
+        var direct_fuel: u64 = fuel_value;
+        var kernel_fuel: u64 = fuel_value;
+        const direct_outcome = try MeteringDirect.step(direct, &direct_fuel);
+        const kernel_outcome = try MeteringKernel.step(kernel, &kernel_fuel);
+        try std.testing.expectEqualStrings(
+            @tagName(std.meta.activeTag(direct_outcome)),
+            @tagName(std.meta.activeTag(kernel_outcome)),
+        );
+        try std.testing.expectEqual(direct_fuel, kernel_fuel);
+        switch (direct_outcome) {
+            .yielded => {
+                observed_yield = true;
+                const direct_state = try MeteringDirect.encodeState(
+                    std.testing.allocator,
+                    direct,
+                );
+                defer std.testing.allocator.free(direct_state);
+                const kernel_state = try MeteringKernel.encodeState(
+                    std.testing.allocator,
+                    kernel,
+                );
+                defer std.testing.allocator.free(kernel_state);
+                try std.testing.expectEqualSlices(u8, direct_state, kernel_state);
+            },
+            .done => |direct_result| {
+                observed_done = true;
+                defer direct_result.deinit();
+                const kernel_result = kernel_outcome.done;
+                defer kernel_result.deinit();
+                try std.testing.expectEqualStrings(
+                    try direct_result.value().slice(),
+                    try kernel_result.value().slice(),
+                );
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expect(observed_yield);
+    try std.testing.expect(observed_done);
 }
 
 test "fixed-payload optionals and sums expose variable canonical size" {

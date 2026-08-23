@@ -661,14 +661,24 @@ fn validateStackPair(
 
     var parent_slots = [_]Slot{.{}} ** 1024;
     var child_slots = [_]Slot{.{}} ** 1024;
+    var child_activation_slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &parent_slots);
     try initializeZeroWidthSlots(image, &child_slots);
+    try initializeZeroWidthSlots(image, &child_activation_slots);
     try loadFrameEnvironment(
         image,
         state,
         parent_offset,
         parent_constructor,
         &parent_slots,
+        workspace,
+    );
+    try loadActivationSlots(
+        image,
+        state,
+        child_offset,
+        child_constructor,
+        &child_activation_slots,
         workspace,
     );
     try loadFrameEnvironment(
@@ -692,11 +702,11 @@ fn validateStackPair(
             target_value,
         )) continue;
         if (!parent_slots[source_value].initialized or
-            !child_slots[target_value].initialized or
+            !child_activation_slots[target_value].initialized or
             !std.mem.eql(
                 u8,
                 parent_slots[source_value].bytes,
-                child_slots[target_value].bytes,
+                child_activation_slots[target_value].bytes,
             ))
         {
             return error.InvalidState;
@@ -845,6 +855,7 @@ fn resumeValidated(
         readInt(u64, state, 44),
         readInt(u64, state, 52),
         output_state,
+        workspace,
     );
     try validateStateValidated(image, successor, workspace);
     return successor.len;
@@ -1017,6 +1028,7 @@ fn stepSegment(
             &slots,
             next_cumulative,
             output_state,
+            workspace,
         ) },
         .requested => |request| blk: {
             const sequence = std.math.add(
@@ -1036,6 +1048,7 @@ fn stepSegment(
                 sequence,
                 next_cumulative,
                 output_state,
+                workspace,
             );
             if (try maximumResumeStateSizeValidated(image, parked) >
                 image.profile.maximum_state_bytes)
@@ -1068,6 +1081,7 @@ fn stepSegment(
                 readInt(u64, state, 44),
                 next_cumulative,
                 output_state,
+                workspace,
             );
             const target_segment = readInt(u16, callee, 0);
             const child_constructor = try transitionConstructor(
@@ -1101,6 +1115,7 @@ fn stepSegment(
                 &slots,
                 next_cumulative,
                 output_state,
+                workspace,
             );
             break :blk .{ .yielded = next };
         },
@@ -1201,6 +1216,7 @@ fn transitionState(
     slots: *[1024]Slot,
     cumulative_fuel: u64,
     output: []u8,
+    workspace: *image_v1.ValidationWorkspace,
 ) Error![]const u8 {
     const target_segment = readInt(u16, edge, 0);
     const argument_count = readInt(u16, edge, 2);
@@ -1231,6 +1247,7 @@ fn transitionState(
         readInt(u64, state, 44),
         cumulative_fuel,
         output,
+        workspace,
     );
 }
 
@@ -1253,6 +1270,7 @@ fn encodeTopFrame(
     sequence: u64,
     cumulative_fuel: u64,
     output: []u8,
+    workspace: *image_v1.ValidationWorkspace,
 ) Error![]const u8 {
     const constructor = try constructorRecord(image, constructor_id);
     const top_offset = try topFrameOffset(state);
@@ -1274,15 +1292,31 @@ fn encodeTopFrame(
     }
     const activation_count = readInt(u16, constructor, 16);
     const environment_count = readInt(u16, constructor, 18);
+    var activation_slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &activation_slots);
+    if (activation_count != 0) {
+        try loadActivationSlots(
+            image,
+            state,
+            top_offset,
+            current_constructor,
+            &activation_slots,
+            workspace,
+        );
+    }
     var environment_length: usize = if (activation_entry != null) 4 else 0;
     var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
+    for (0..@as(u32, activation_count) + environment_count) |index| {
         const value = readInt(u16, constructor, field_cursor);
-        if (!slots[value].initialized) return error.InvalidState;
+        const slot = if (index < activation_count)
+            activation_slots[value]
+        else
+            slots[value];
+        if (!slot.initialized) return error.InvalidState;
         environment_length = std.math.add(
             usize,
             environment_length,
-            slots[value].bytes.len,
+            slot.bytes.len,
         ) catch return error.InvalidState;
         field_cursor += 8;
     }
@@ -1309,9 +1343,13 @@ fn encodeTopFrame(
     appendInt(u32, output, &cursor, environment_length);
     if (activation_entry) |entry| appendInt(u32, output, &cursor, entry);
     field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
+    for (0..@as(u32, activation_count) + environment_count) |index| {
         const value = readInt(u16, constructor, field_cursor);
-        appendBytes(output, &cursor, slots[value].bytes);
+        const slot = if (index < activation_count)
+            activation_slots[value]
+        else
+            slots[value];
+        appendBytes(output, &cursor, slot.bytes);
         field_cursor += 8;
     }
     return output[0..required];
@@ -1530,6 +1568,7 @@ fn returnToCaller(
         &slots,
         cumulative_fuel,
         output,
+        workspace,
     );
 }
 
@@ -1675,6 +1714,7 @@ fn replaceFrameAndTruncate(
     slots: *const [1024]Slot,
     cumulative_fuel: u64,
     output: []u8,
+    workspace: *image_v1.ValidationWorkspace,
 ) Error![]const u8 {
     const constructor = try constructorRecord(image, constructor_id);
     const current_constructor = try constructorRecord(
@@ -1694,15 +1734,44 @@ fn replaceFrameAndTruncate(
     }
     const activation_count = readInt(u16, constructor, 16);
     const environment_count = readInt(u16, constructor, 18);
+    var activation_slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &activation_slots);
+    if (activation_count != 0) {
+        try loadActivationSlots(
+            image,
+            state,
+            frame_offset,
+            current_constructor,
+            &activation_slots,
+            workspace,
+        );
+    }
     var environment_length: usize = if (activation_entry != null) 4 else 0;
     var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
+    for (0..@as(u32, activation_count) + environment_count) |index| {
         const value = readInt(u16, constructor, field_cursor);
-        if (!slots[value].initialized) return error.InvalidState;
-        environment_length += slots[value].bytes.len;
+        const slot = if (index < activation_count)
+            activation_slots[value]
+        else
+            slots[value];
+        if (!slot.initialized) return error.InvalidState;
+        environment_length = std.math.add(
+            usize,
+            environment_length,
+            slot.bytes.len,
+        ) catch return error.OutputCapacity;
         field_cursor += 8;
     }
-    const required = frame_offset + frame_header_length + environment_length;
+    const frame_length = std.math.add(
+        usize,
+        frame_header_length,
+        environment_length,
+    ) catch return error.OutputCapacity;
+    const required = std.math.add(
+        usize,
+        frame_offset,
+        frame_length,
+    ) catch return error.OutputCapacity;
     if (required > output.len or
         required > image.profile.maximum_state_bytes)
     {
@@ -1716,9 +1785,13 @@ fn replaceFrameAndTruncate(
     appendInt(u32, output, &cursor, environment_length);
     if (activation_entry) |entry| appendInt(u32, output, &cursor, entry);
     field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
+    for (0..@as(u32, activation_count) + environment_count) |index| {
         const value = readInt(u16, constructor, field_cursor);
-        appendBytes(output, &cursor, slots[value].bytes);
+        const slot = if (index < activation_count)
+            activation_slots[value]
+        else
+            slots[value];
+        appendBytes(output, &cursor, slot.bytes);
         field_cursor += 8;
     }
     return output[0..required];
@@ -1781,13 +1854,39 @@ fn loadFrameEnvironment(
             &workspace.value_tasks,
         ) catch return error.InvalidState;
         const encoded = environment[value_cursor .. value_cursor + consumed];
-        if (slots[value].initialized and
-            !std.mem.eql(u8, slots[value].bytes, encoded))
-        {
-            return error.InvalidState;
-        }
         slots[value] = .{
             .bytes = encoded,
+            .initialized = true,
+        };
+        value_cursor += consumed;
+        field_cursor += 8;
+    }
+}
+
+fn loadActivationSlots(
+    image: ValidatedProgram,
+    state: []const u8,
+    frame_offset: usize,
+    constructor: []const u8,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    const environment_length = readInt(u32, state, frame_offset + 4);
+    const environment = state[frame_offset + 8 ..][0..environment_length];
+    var value_cursor: usize = 0;
+    if (readInt(u16, constructor, 10) & 1 != 0) value_cursor = 4;
+    var field_cursor: usize = 24;
+    for (0..readInt(u16, constructor, 16)) |_| {
+        const value = readInt(u16, constructor, field_cursor);
+        const schema_id = readInt(u32, constructor, field_cursor + 4);
+        const consumed = dynamic_value_v1.validateValuePrefix(
+            image.catalogs.schemas,
+            schema_id,
+            environment[value_cursor..],
+            &workspace.value_tasks,
+        ) catch return error.InvalidState;
+        slots[value] = .{
+            .bytes = environment[value_cursor .. value_cursor + consumed],
             .initialized = true,
         };
         value_cursor += consumed;

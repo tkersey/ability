@@ -1240,35 +1240,74 @@ test "helper entry backedges rebind future state without overwriting activation 
         .maximum_state_bytes = 4096,
         .maximum_machine_fuel = 64,
     });
+    const BackedgeKernel = HelperBackedgeProgram.kernelMachineV2(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
     const state = try BackedgeMachine.initialState(std.testing.allocator, 2);
     defer BackedgeMachine.deinitState(state);
+    const kernel_state = try BackedgeKernel.initialState(std.testing.allocator, 2);
+    defer BackedgeKernel.deinitState(kernel_state);
 
     var caller_fuel: u64 = 16;
+    var kernel_fuel: u64 = 16;
     try std.testing.expectEqual(
         BackedgeMachine.Outcome.yielded,
         try BackedgeMachine.step(state, &caller_fuel),
     );
+    try std.testing.expectEqual(
+        BackedgeKernel.Outcome.yielded,
+        try BackedgeKernel.step(kernel_state, &kernel_fuel),
+    );
+    try std.testing.expectEqual(caller_fuel, kernel_fuel);
     const encoded = try BackedgeMachine.encodeState(
         std.testing.allocator,
         state,
     );
     defer std.testing.allocator.free(encoded);
+    const kernel_encoded = try BackedgeKernel.encodeState(
+        std.testing.allocator,
+        kernel_state,
+    );
+    defer std.testing.allocator.free(kernel_encoded);
+    try std.testing.expectEqualSlices(u8, encoded, kernel_encoded);
     const restored = try BackedgeMachine.decodeState(
         std.testing.allocator,
         encoded,
     );
     defer BackedgeMachine.deinitState(restored);
+    const kernel_restored = try BackedgeKernel.decodeState(
+        std.testing.allocator,
+        kernel_encoded,
+    );
+    defer BackedgeKernel.deinitState(kernel_restored);
 
     try std.testing.expectEqual(
         BackedgeMachine.Outcome.yielded,
         try BackedgeMachine.step(restored, &caller_fuel),
     );
+    try std.testing.expectEqual(
+        BackedgeKernel.Outcome.yielded,
+        try BackedgeKernel.step(kernel_restored, &kernel_fuel),
+    );
+    try std.testing.expectEqual(caller_fuel, kernel_fuel);
     const done = switch (try BackedgeMachine.step(restored, &caller_fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,
     };
     defer done.deinit();
+    const kernel_done = switch (try BackedgeKernel.step(
+        kernel_restored,
+        &kernel_fuel,
+    )) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer kernel_done.deinit();
     try std.testing.expectEqual(@as(u32, 2), done.value().*);
+    try std.testing.expectEqual(done.value().*, kernel_done.value().*);
+    try std.testing.expectEqual(caller_fuel, kernel_fuel);
 }
 
 test "progressed helper requests observe current environment before activation" {

@@ -295,11 +295,15 @@ fn preflightResultSize(
                 ) catch break :blk maximum).len;
             }
             break :blk @intCast(preflightProductFieldSize(
+                image,
                 segment,
                 instruction_offset,
                 product,
                 field_index,
+                slots,
                 sizes,
+                initially_available,
+                workspace,
             ) orelse maximum);
         },
         35 => blk: {
@@ -357,11 +361,15 @@ fn preflightResultSize(
 }
 
 fn preflightProductFieldSize(
+    image: anytype,
     segment: []const u8,
     instruction_offset: usize,
     product_value: u16,
     field_index: u32,
+    slots: *const [1024]reducer_clause_v1.Slot,
     sizes: *const [1024]usize,
+    initially_available: *const [1024]bool,
+    workspace: *image_v1.ValidationWorkspace,
 ) ?usize {
     var current_value = product_value;
     var current_limit = instruction_offset;
@@ -396,6 +404,34 @@ fn preflightProductFieldSize(
                 }
                 current_value = readInt(u16, segment, offset + 16);
                 current_limit = offset;
+            },
+            35 => {
+                const vector = readInt(u16, segment, offset + 16);
+                const index = readInt(u16, segment, offset + 18);
+                if (!initially_available[vector] or
+                    !initially_available[index]) return null;
+                const index_kind = reducer_clause_v1.valueKind(image, index) catch
+                    return null;
+                const raw_index = reducer_clause_v1.decodeInteger(
+                    index_kind,
+                    slots[index].bytes,
+                ) catch return null;
+                const target = std.math.cast(u32, raw_index.raw) orelse
+                    return null;
+                const element = reducer_clause_v1.vectorElement(
+                    image,
+                    vector,
+                    slots[vector].bytes,
+                    target,
+                    workspace,
+                ) catch return null;
+                return (reducer_clause_v1.productField(
+                    image,
+                    current_value,
+                    element,
+                    field_index,
+                    workspace,
+                ) catch return null).len;
             },
             else => return null,
         }
