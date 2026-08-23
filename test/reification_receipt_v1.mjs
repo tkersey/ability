@@ -68,6 +68,9 @@ try {
     root,
     build,
     pure,
+    "--all-sources",
+    root,
+    pure,
   ];
   const proof = JSON.parse(childProcess.execFileSync(
     process.execPath,
@@ -75,6 +78,17 @@ try {
     { encoding: "utf8" },
   ));
   fs.writeFileSync(proofPath, JSON.stringify(proof));
+  const loaderSource = path.join(temporary, "loader.zig");
+  fs.writeFileSync(loaderSource, "pub const DefinitionLoader = void;\n");
+  const forgedSource = childProcess.spawnSync(
+    process.execPath,
+    [...proofArgs, loaderSource],
+    { encoding: "utf8" },
+  );
+  if (forgedSource.status === 0) {
+    throw new Error("runtime loader outside the package root was missed");
+  }
+
   const forgedBaseline = JSON.parse(fs.readFileSync(baseline, "utf8"));
   forgedBaseline.oracle_mismatch_count = 1;
   fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));

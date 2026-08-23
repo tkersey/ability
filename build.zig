@@ -2197,6 +2197,20 @@ pub fn build(b: *std.Build) void {
     reification_proof_stamp_command.addFileArg(
         b.path("src/reified_program_v1.zig"),
     );
+    reification_proof_stamp_command.addArg("--all-sources");
+    var reification_source_paths = std.mem.splitScalar(
+        u8,
+        @embedFile("repo_zig_paths.txt"),
+        '\n',
+    );
+    while (reification_source_paths.next()) |source_path| {
+        if (!std.mem.startsWith(u8, source_path, "src/") or
+            source_path.len == 0)
+        {
+            continue;
+        }
+        reification_proof_stamp_command.addFileArg(b.path(source_path));
+    }
     const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
         .basename = "boundary-reification-v1-proof.json",
     });

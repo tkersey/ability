@@ -26,8 +26,8 @@ test "$(field vectors_sha256)" = "$(sha256 "$vectors")"
 test "$(field performance_gate_sha256)" = "$(sha256 conformance/rnf-v1/check_performance.sh)"
 test "$(field performance_patch_sha256)" = "$(sha256 conformance/rnf-v1/v0.7.0-performance.patch)"
 
-current_output=${TMPDIR:-/tmp}/boundary-reification-current-$$.json
-oracle_output=${TMPDIR:-/tmp}/boundary-reification-oracle-$$.json
+current_output=$(mktemp "${TMPDIR:-/tmp}/boundary-reification-current.XXXXXX")
+oracle_output=$(mktemp "${TMPDIR:-/tmp}/boundary-reification-output.XXXXXX")
 oracle_root=$(mktemp -d "${TMPDIR:-/tmp}/boundary-reification-oracle.XXXXXX")
 trap 'rm -f "$current_output" "$oracle_output"; rm -rf "$oracle_root"' EXIT
 

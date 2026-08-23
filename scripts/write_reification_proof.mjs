@@ -7,8 +7,17 @@ const [
   generatedPath,
   rootPath,
   buildPath,
-  ...purePaths
+  ...sourcePaths
 ] = process.argv.slice(2);
+const sourceDelimiter = sourcePaths.indexOf("--all-sources");
+if (sourceDelimiter < 0) {
+  throw new Error("missing complete source inventory delimiter");
+}
+const purePaths = sourcePaths.slice(0, sourceDelimiter);
+const allSourcePaths = sourcePaths.slice(sourceDelimiter + 1);
+if (allSourcePaths.length === 0) {
+  throw new Error("empty complete source inventory");
+}
 
 const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
 const baseline = readJson(baselinePath);
@@ -52,6 +61,7 @@ if (
 const root = fs.readFileSync(rootPath, "utf8");
 const build = fs.readFileSync(buildPath, "utf8");
 const pureSources = purePaths.map((path) => fs.readFileSync(path, "utf8")).join("\n");
+const allSources = allSourcePaths.map((path) => fs.readFileSync(path, "utf8")).join("\n");
 const publicClauseEvaluatorPresent = /pub const (evaluator|reducer|clause|program_evaluator|internal_evaluator)\b/.test(root);
 const pureClauseMachineV2DependencyPresent = /@import\("(?:machine|machine_v2|kernel)/.test(pureSources) ||
   /\b(?:MachineOptions|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|ABL_RNF2)\b/.test(pureSources);
@@ -78,9 +88,9 @@ const proof = {
   application_abi_changed: false,
   frame_format_changed: false,
   effect_protocol_changed: false,
-  source_interpreter_present: /(?:src\/interpreter\.zig|pub const Runtime\b)/.test(root),
-  runtime_definition_loader_present: /(?:DefinitionLoader|LoadedDefinition|RuntimeDefinition)/.test(root),
-  callback_registry_present: /(?:CallbackRegistry|callback_registry)/.test(root),
+  source_interpreter_present: /(?:@import\("interpreter"\)|pub const Runtime\b)/.test(allSources),
+  runtime_definition_loader_present: /(?:DefinitionLoader|LoadedDefinition|RuntimeDefinition)/.test(allSources),
+  callback_registry_present: /(?:CallbackRegistry|callback_registry)/.test(allSources),
   public_clause_evaluator_present: publicClauseEvaluatorPresent,
   pure_clause_machine_v2_dependency_present: pureClauseMachineV2DependencyPresent,
   proof_gate_required_before_emission: proofGateRequiredBeforeEmission,
@@ -95,6 +105,9 @@ const proof = {
 if (
   proof.machine_abi_changed ||
   proof.state_format_changed ||
+  proof.source_interpreter_present ||
+  proof.runtime_definition_loader_present ||
+  proof.callback_registry_present ||
   proof.public_clause_evaluator_present ||
   proof.pure_clause_machine_v2_dependency_present ||
   !proof.proof_gate_required_before_emission
