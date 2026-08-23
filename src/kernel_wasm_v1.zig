@@ -228,6 +228,10 @@ fn executeStep(
             failure,
             &.{},
         ),
+        .machine_failed => |failure| switch (failure.failure) {
+            .execution_budget_exceeded => error.ExecutionBudgetExceeded,
+            .frame_depth_exceeded => error.FrameDepthExceeded,
+        },
     };
 }
 
@@ -366,6 +370,7 @@ fn errorCode(err: ExecuteError) u32 {
         error.UnsupportedOperation,
         error.InvalidImage,
         error.InvalidUtf8,
+        error.FrameDepthExceeded,
         => 6,
     };
 }

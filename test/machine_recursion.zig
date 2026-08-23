@@ -1966,4 +1966,32 @@ test "compiled frame-depth failure preserves state and caller fuel" {
     const after = try ShallowMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
+
+    const ShallowKernel = Program.kernelMachine(.{
+        .maximum_frames = 3,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const kernel = try ShallowKernel.initialState(std.testing.allocator, 3);
+    defer ShallowKernel.deinitState(kernel);
+    const kernel_before = try ShallowKernel.encodeState(
+        std.testing.allocator,
+        kernel,
+    );
+    defer std.testing.allocator.free(kernel_before);
+    var kernel_fuel: u64 = 20;
+    switch (try ShallowKernel.step(kernel, &kernel_fuel)) {
+        .failed => |failure| try std.testing.expectEqual(
+            ShallowKernel.Failure.frame_depth_exceeded,
+            failure,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u64, 20), kernel_fuel);
+    const kernel_after = try ShallowKernel.encodeState(
+        std.testing.allocator,
+        kernel,
+    );
+    defer std.testing.allocator.free(kernel_after);
+    try std.testing.expectEqualSlices(u8, kernel_before, kernel_after);
 }

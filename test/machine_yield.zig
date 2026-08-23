@@ -220,3 +220,33 @@ test "fixed kernel preserves explicit and caller-fuel checkpoints" {
         try std.testing.expectEqual(@as(u64, 0), resume_fuel);
     }
 }
+
+test "KernelMachine preserves terminal execution-budget failure and prior charges" {
+    const budget_options: machine.Options = .{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 1,
+    };
+    const Direct = CheckpointProgram.compile(budget_options);
+    const Kernel = CheckpointProgram.kernelMachine(budget_options);
+    const direct = try Direct.initialState(std.testing.allocator, 19);
+    defer Direct.deinitState(direct);
+    const kernel = try Kernel.initialState(std.testing.allocator, 19);
+    defer Kernel.deinitState(kernel);
+    var direct_fuel: u64 = 5;
+    var kernel_fuel: u64 = 5;
+    try std.testing.expectEqual(
+        Direct.Outcome{ .failed = .execution_budget_exceeded },
+        try Direct.step(direct, &direct_fuel),
+    );
+    try std.testing.expectEqual(
+        Kernel.Outcome{ .failed = .execution_budget_exceeded },
+        try Kernel.step(kernel, &kernel_fuel),
+    );
+    try std.testing.expectEqual(@as(u64, 4), direct_fuel);
+    try std.testing.expectEqual(direct_fuel, kernel_fuel);
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        Kernel.validateState(kernel),
+    );
+}

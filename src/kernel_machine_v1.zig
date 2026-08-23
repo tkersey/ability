@@ -265,6 +265,19 @@ pub fn Machine(
                     value.terminal = true;
                     break :blk .{ .failed = .{ .authored = authored } };
                 },
+                .machine_failed => |failed| blk: {
+                    switch (failed.failure) {
+                        .execution_budget_exceeded => {
+                            commitState(value, candidate, failed.state.len);
+                            value.terminal = true;
+                            break :blk .{ .failed = .execution_budget_exceeded };
+                        },
+                        .frame_depth_exceeded => {
+                            value.allocator.free(candidate);
+                            break :blk .{ .failed = .frame_depth_exceeded };
+                        },
+                    }
+                },
             };
         }
 

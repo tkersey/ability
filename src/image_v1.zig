@@ -106,6 +106,11 @@ pub const ValidationWorkspace = struct {
     schema_hash_tasks: [8192]dynamic_value_v1.SchemaHashTask = undefined,
     invariant_instruction: [16 + 2 * 1024]u8 = undefined,
     invariant_result: []u8 = &.{},
+    catalog_digests: [1024][32]u8 = undefined,
+    catalog_keys: [1024]u32 = undefined,
+    catalog_offsets: [1024]u32 = undefined,
+    catalog_lengths: [1024]u32 = undefined,
+    constant_used: [1024]bool = undefined,
 };
 
 pub const Catalogs = struct {
@@ -246,16 +251,19 @@ pub fn validateCatalogs(
         envelope.section(.failures),
         schemas,
         roots.failure_schema_id,
+        workspace,
     );
     const constant_count = try validateConstants(
         envelope.section(.constants),
         schemas,
         &workspace.value_tasks,
+        workspace,
     );
     const effect_count = try validateEffects(
         envelope.section(.effects),
         schemas,
         &workspace.schema_hash_tasks,
+        workspace,
     );
     const values = try validateValues(envelope.section(.values), schemas);
     if (envelope.header.maximum_kernel_scratch_bytes !=
@@ -299,7 +307,14 @@ pub fn validateImage(
     workspace: *ValidationWorkspace,
 ) Error!ValidatedImage {
     const catalogs = try validateCatalogs(image, workspace);
-    const segment_count = try validateSegments(catalogs);
+    @memset(workspace.constant_used[0..catalogs.constant_count], false);
+    const segment_count = try validateSegments(
+        catalogs,
+        &workspace.constant_used,
+    );
+    for (workspace.constant_used[0..catalogs.constant_count]) |used| {
+        if (!used) return error.InvalidConstant;
+    }
     try validateFunctionEntries(catalogs, segment_count);
     const constructor_count = try validateConstructors(
         catalogs,
@@ -391,13 +406,14 @@ fn validateFailures(
     bytes: []const u8,
     schemas: dynamic_value_v1.Table,
     failure_schema_id: u32,
+    workspace: *ValidationWorkspace,
 ) Error!void {
     if (bytes.len < 4) return error.InvalidFailureMap;
     const failure_schema = schemas.node(failure_schema_id) catch
         return error.InvalidFailureMap;
     if (failure_schema.kind != .@"enum") return error.InvalidFailureMap;
     const count = readInt(u32, bytes, 0);
-    if (count != readInt(u32, failure_schema.payload, 0)) {
+    if (count > 1024 or count != readInt(u32, failure_schema.payload, 0)) {
         return error.InvalidFailureMap;
     }
     var cursor: usize = 4;
@@ -415,22 +431,32 @@ fn validateFailures(
         if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) {
             return error.InvalidUtf8;
         }
-        var prior_cursor: usize = 4;
-        for (0..index) |_| {
-            const prior_tag = readInt(u32, bytes, prior_cursor);
-            prior_cursor += 4;
-            const prior_length = readInt(u32, bytes, prior_cursor);
-            prior_cursor += 4;
-            const prior_name = takeCatalogSlice(
-                bytes,
-                &prior_cursor,
-                prior_length,
-            ) catch return error.InvalidFailureMap;
-            if (prior_tag == tag) return error.DuplicateFailureTag;
-            if (std.mem.eql(u8, prior_name, name)) {
+        std.crypto.hash.sha2.Sha256.hash(
+            name,
+            &workspace.catalog_digests[index],
+            .{},
+        );
+        for (0..index) |prior| {
+            if (workspace.catalog_keys[prior] == tag) {
+                return error.DuplicateFailureTag;
+            }
+            const prior_offset: usize = workspace.catalog_offsets[prior];
+            const prior_length: usize = workspace.catalog_lengths[prior];
+            if (std.mem.eql(
+                u8,
+                &workspace.catalog_digests[prior],
+                &workspace.catalog_digests[index],
+            ) and std.mem.eql(
+                u8,
+                bytes[prior_offset..][0..prior_length],
+                name,
+            )) {
                 return error.DuplicateFailureName;
             }
         }
+        workspace.catalog_keys[index] = tag;
+        workspace.catalog_offsets[index] = @intCast(cursor - name.len);
+        workspace.catalog_lengths[index] = @intCast(name.len);
     }
     if (cursor != bytes.len) return error.InvalidFailureMap;
 }
@@ -439,9 +465,11 @@ fn validateConstants(
     bytes: []const u8,
     schemas: dynamic_value_v1.Table,
     tasks: []dynamic_value_v1.ValueTask,
+    workspace: *ValidationWorkspace,
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidConstant;
     const count = readInt(u32, bytes, 0);
+    if (count > 1024) return error.InvalidConstant;
     var cursor: usize = 4;
     for (0..count) |index| {
         if (bytes.len - cursor < 8) return error.InvalidConstant;
@@ -454,25 +482,28 @@ fn validateConstants(
             return error.InvalidConstant;
         dynamic_value_v1.validateValue(schemas, schema_id, value, tasks) catch
             return error.InvalidConstant;
-        var prior_cursor: usize = 4;
-        for (0..index) |_| {
-            const prior_start = prior_cursor;
-            const prior_schema = readInt(u32, bytes, prior_cursor);
-            prior_cursor += 4;
-            const prior_length = readInt(u32, bytes, prior_cursor);
-            prior_cursor += 4;
-            _ = takeCatalogSlice(bytes, &prior_cursor, prior_length) catch
-                return error.InvalidConstant;
-            if (prior_schema == schema_id and
-                std.mem.eql(
-                    u8,
-                    bytes[prior_start..prior_cursor],
-                    bytes[record_start..cursor],
-                ))
-            {
+        std.crypto.hash.sha2.Sha256.hash(
+            bytes[record_start..cursor],
+            &workspace.catalog_digests[index],
+            .{},
+        );
+        for (0..index) |prior| {
+            const prior_offset: usize = workspace.catalog_offsets[prior];
+            const prior_length: usize = workspace.catalog_lengths[prior];
+            if (std.mem.eql(
+                u8,
+                &workspace.catalog_digests[prior],
+                &workspace.catalog_digests[index],
+            ) and std.mem.eql(
+                u8,
+                bytes[prior_offset..][0..prior_length],
+                bytes[record_start..cursor],
+            )) {
                 return error.DuplicateConstant;
             }
         }
+        workspace.catalog_offsets[index] = @intCast(record_start);
+        workspace.catalog_lengths[index] = @intCast(cursor - record_start);
     }
     if (cursor != bytes.len) return error.InvalidConstant;
     return count;
@@ -482,9 +513,11 @@ fn validateEffects(
     bytes: []const u8,
     schemas: dynamic_value_v1.Table,
     hash_tasks: []dynamic_value_v1.SchemaHashTask,
+    workspace: *ValidationWorkspace,
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidEffect;
     const count = readInt(u32, bytes, 0);
+    if (count > 128) return error.InvalidEffect;
     var cursor: usize = 4;
     for (0..count) |ordinal| {
         if (bytes.len - cursor < 84) return error.InvalidEffect;
@@ -505,6 +538,26 @@ fn validateEffects(
         if (identity.len == 0 or !std.unicode.utf8ValidateSlice(identity)) {
             return error.InvalidUtf8;
         }
+        std.crypto.hash.sha2.Sha256.hash(
+            identity,
+            &workspace.catalog_digests[ordinal],
+            .{},
+        );
+        for (0..ordinal) |prior| {
+            const prior_offset: usize = workspace.catalog_offsets[prior];
+            const prior_length: usize = workspace.catalog_lengths[prior];
+            if (std.mem.eql(
+                u8,
+                &workspace.catalog_digests[prior],
+                &workspace.catalog_digests[ordinal],
+            ) and std.mem.eql(
+                u8,
+                bytes[prior_offset..][0..prior_length],
+                identity,
+            )) return error.DuplicateEffectIdentity;
+        }
+        workspace.catalog_offsets[ordinal] = @intCast(cursor - identity.len);
+        workspace.catalog_lengths[ordinal] = @intCast(identity.len);
         const payload_schema = readInt(u32, bytes, cursor);
         _ = schemas.node(payload_schema) catch
             return error.InvalidEffect;
@@ -541,21 +594,6 @@ fn validateEffects(
             return error.DigestMismatch;
         }
         cursor += 32;
-        var prior_cursor: usize = 4;
-        for (0..ordinal) |_| {
-            prior_cursor += 4;
-            const prior_length = readInt(u32, bytes, prior_cursor);
-            prior_cursor += 4;
-            const prior_identity = takeCatalogSlice(
-                bytes,
-                &prior_cursor,
-                prior_length,
-            ) catch return error.InvalidEffect;
-            if (std.mem.eql(u8, prior_identity, identity)) {
-                return error.DuplicateEffectIdentity;
-            }
-            prior_cursor += 8 + 4 + 64;
-        }
     }
     if (cursor != bytes.len) return error.InvalidEffect;
     return count;
@@ -684,7 +722,10 @@ fn validateFunctions(
     return count;
 }
 
-fn validateSegments(catalogs: Catalogs) Error!u32 {
+fn validateSegments(
+    catalogs: Catalogs,
+    constant_used: *[1024]bool,
+) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
     if (bytes.len < 4) return error.InvalidSegment;
     const count = readInt(u32, bytes, 0);
@@ -720,7 +761,13 @@ fn validateSegments(catalogs: Catalogs) Error!u32 {
             cursor += 2;
         }
         for (0..instruction_count) |_| {
-            cursor = try validateInstruction(catalogs, bytes, cursor, end);
+            cursor = try validateInstruction(
+                catalogs,
+                bytes,
+                cursor,
+                end,
+                constant_used,
+            );
         }
         cursor = try validateTerminator(catalogs, bytes, cursor, end);
         if (cursor != end) return error.InvalidSegment;
@@ -734,6 +781,7 @@ fn validateInstruction(
     bytes: []const u8,
     start: usize,
     segment_end: usize,
+    constant_used: *[1024]bool,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
     const end = recordEnd(bytes, start, 16) catch
@@ -757,6 +805,7 @@ fn validateInstruction(
     }
     if (operation == 0) {
         if (immediate >= catalogs.constant_count) return error.InvalidInstruction;
+        constant_used[immediate] = true;
     } else if (operation < 25 or operation > 29) {
         if (immediate != 0) return error.InvalidInstruction;
     }

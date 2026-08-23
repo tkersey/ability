@@ -277,6 +277,57 @@ test "BEI1 rejects schema-invalid operation substitutions before execution" {
     );
 }
 
+test "BEI1 rejects constants made unreachable by instruction mutation" {
+    var malformed = PureImage.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segment_offset: usize = @intCast(envelope.sections[7].offset);
+    var cursor = segment_offset + 4;
+    cursor += 24 + @as(usize, std.mem.readInt(
+        u16,
+        malformed[cursor + 10 ..][0..2],
+        .little,
+    )) * 2;
+    const instruction_count = std.mem.readInt(
+        u32,
+        malformed[segment_offset + 4 + 12 ..][0..4],
+        .little,
+    );
+    var replaced = false;
+    for (0..instruction_count) |_| {
+        const operation = std.mem.readInt(
+            u16,
+            malformed[cursor + 6 ..][0..2],
+            .little,
+        );
+        const immediate = std.mem.readInt(
+            u32,
+            malformed[cursor + 12 ..][0..4],
+            .little,
+        );
+        if (operation == 0 and immediate == 2) {
+            std.mem.writeInt(
+                u32,
+                malformed[cursor + 12 ..][0..4],
+                1,
+                .little,
+            );
+            replaced = true;
+            break;
+        }
+        cursor += std.mem.readInt(
+            u32,
+            malformed[cursor..][0..4],
+            .little,
+        );
+    }
+    try std.testing.expect(replaced);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidConstant,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
 const ConstantTitles = portable_value.Vector(Title, 2);
 const ConstantResult = struct {
     title: Title,

@@ -11,6 +11,12 @@ pub const Error = error{
     UnsupportedOperation,
     ScratchCapacity,
     CapacityExceeded,
+    FrameDepthExceeded,
+};
+
+pub const MachineFailure = enum {
+    execution_budget_exceeded,
+    frame_depth_exceeded,
 };
 
 pub const state_magic = "ABL_RNF2".*;
@@ -22,6 +28,10 @@ pub const Outcome = union(enum) {
     yielded: []const u8,
     done: []const u8,
     failed: []const u8,
+    machine_failed: struct {
+        state: []const u8,
+        failure: MachineFailure,
+    },
 };
 
 const SegmentOutcome = union(enum) {
@@ -358,7 +368,7 @@ pub fn step(
     var next_uses_output = true;
     while (true) {
         const target = if (next_uses_output) output_state else temporary_state;
-        const outcome = try stepSegment(
+        const outcome = stepSegment(
             image,
             current_state,
             &remaining,
@@ -366,7 +376,29 @@ pub fn step(
             output_value,
             value_scratch,
             workspace,
-        );
+        ) catch |err| switch (err) {
+            error.ExecutionBudgetExceeded => {
+                const canonical = if (current_state.ptr == output_state.ptr)
+                    current_state
+                else blk: {
+                    if (output_state.len < current_state.len) {
+                        return error.OutputCapacity;
+                    }
+                    @memcpy(output_state[0..current_state.len], current_state);
+                    break :blk output_state[0..current_state.len];
+                };
+                caller_fuel.* = remaining;
+                return .{ .machine_failed = .{
+                    .state = canonical,
+                    .failure = .execution_budget_exceeded,
+                } };
+            },
+            error.FrameDepthExceeded => return .{ .machine_failed = .{
+                .state = state,
+                .failure = .frame_depth_exceeded,
+            } },
+            else => return err,
+        };
         switch (outcome) {
             .next => |next| {
                 current_state = next;
@@ -1025,7 +1057,7 @@ fn appendFrame(
 ) Error![]const u8 {
     const frame_count = readInt(u32, parent, 60);
     if (frame_count >= image.catalogs.envelope.header.maximum_frames) {
-        return error.ExecutionBudgetExceeded;
+        return error.FrameDepthExceeded;
     }
     const constructor = try constructorRecord(image, constructor_id);
     if (readInt(u16, constructor, 10) & 1 == 0) return error.InvalidImage;
