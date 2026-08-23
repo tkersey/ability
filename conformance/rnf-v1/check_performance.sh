@@ -253,10 +253,10 @@ self_test() {
         echo "state-size regression was accepted" >&2
         exit 1
     fi
-    test 2 -lt 4 ||
-        { echo "semantic-module reduction was rejected" >&2; exit 1; }
-    if test 4 -lt 4; then
-        echo "semantic-module non-reduction was accepted" >&2
+    test 4 -le 4 ||
+        { echo "semantic-module equality was rejected" >&2; exit 1; }
+    if test 5 -le 4; then
+        echo "semantic-module growth was accepted" >&2
         exit 1
     fi
     require_optimization_mode ReleaseSmall

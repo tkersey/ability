@@ -475,6 +475,7 @@ fn addCoreModules(
         .optimize = optimize,
     });
     machine_v2_metering_v1.addImport("control_ir", control_ir);
+    machine_v2_metering_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     machine_v2_metering_v1.addImport("image_v1", image_v1);
     machine_v2_metering_v1.addImport(
         "program_semantics_v1",

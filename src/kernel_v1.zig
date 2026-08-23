@@ -983,6 +983,87 @@ fn segmentIsUnfunded(
     return caller_fuel < minimum_cost;
 }
 
+const SegmentPreflight = struct {
+    constructor: []const u8,
+    segment: []const u8,
+    segment_id: u16,
+    cumulative: u64,
+    cost: u64,
+    slots: [1024]Slot,
+};
+
+fn preflightCurrentSegment(
+    image: ValidatedProgram,
+    state: []const u8,
+    caller_fuel: u64,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!?SegmentPreflight {
+    if (try segmentIsUnfunded(image, state, caller_fuel)) return null;
+    try validateStateValidated(image, state, workspace);
+    const constructor_id = try topConstructorId(state);
+    const constructor = try constructorRecord(image, constructor_id);
+    const segment_id = readInt(u16, constructor, 12);
+    const segment = try segmentRecord(image, segment_id);
+    const minimum_cost = image.profile.segmentCost(segment_id) catch
+        return error.InvalidImage;
+    var slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &slots);
+    try loadTopEnvironment(image, state, constructor, &slots, workspace);
+    const top_offset = try topFrameOffset(state);
+    const environment_length = readInt(u32, state, top_offset + 4);
+    const environment = state[top_offset + frame_header_length ..][0..environment_length];
+    const cost = machine_v2_metering_v1.preflightSegmentCost(
+        image,
+        segment,
+        constructor,
+        environment,
+        &slots,
+        minimum_cost,
+        workspace,
+    ) catch |err| return switch (err) {
+        error.InvalidBindings => error.InvalidState,
+        else => err,
+    };
+    return .{
+        .constructor = constructor,
+        .segment = segment,
+        .segment_id = segment_id,
+        .cumulative = readInt(u64, state, 52),
+        .cost = cost,
+        .slots = slots,
+    };
+}
+
+pub const StepAdmission = enum {
+    yielded,
+    funded,
+    execution_budget_exceeded,
+};
+
+pub fn preflightStep(
+    binding: BoundProgram,
+    state: []const u8,
+    caller_fuel: u64,
+    invariant_scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!StepAdmission {
+    const image = try acquire(binding, workspace);
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = &.{};
+    const preflight = preflightCurrentSegment(
+        image,
+        state,
+        caller_fuel,
+        workspace,
+    ) catch |err| return switch (err) {
+        error.ExecutionBudgetExceeded => .execution_budget_exceeded,
+        else => err,
+    };
+    const prepared = preflight orelse return .yielded;
+    if (caller_fuel < prepared.cost) return .yielded;
+    return .funded;
+}
+
 /// Execute one funded atomic segment under Machine ABI v2 policy.
 fn stepSegment(
     image: ValidatedProgram,
@@ -993,39 +1074,18 @@ fn stepSegment(
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!SegmentOutcome {
-    try validateStateEnvelope(image, state);
-    const constructor_id = topConstructorId(state) catch
-        return error.InvalidState;
-    const constructor = constructorRecord(image, constructor_id) catch
-        return error.InvalidState;
-    if (constructor[8] == 3) return error.InvalidState;
-    const segment_id = readInt(u16, constructor, 12);
-    const segment = segmentRecord(image, segment_id) catch
-        return error.InvalidImage;
-    const minimum_cost = image.profile.segmentCost(segment_id) catch
-        return error.InvalidImage;
-    // BPI1 section 28.2 intentionally validates only the State envelope and
-    // top constructor before an unfunded segment. Environment and invariant
-    // validation remains deferred until the caller funds the atomic segment.
-    if (caller_fuel.* < minimum_cost) return .{ .yielded = state };
-    try validateStateValidated(image, state, workspace);
-    const cumulative = readInt(u64, state, 52);
-    var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
-    try loadTopEnvironment(image, state, constructor, &slots, workspace);
-    const cost = machine_v2_metering_v1.preflightSegmentCost(
+    var prepared = (try preflightCurrentSegment(
         image,
-        segment,
-        constructor,
-        &slots,
-        minimum_cost,
+        state,
+        caller_fuel.*,
         workspace,
-    ) catch |err| return switch (err) {
-        error.InvalidBindings => error.InvalidState,
-        else => err,
-    };
-    if (caller_fuel.* < cost) return .{ .yielded = state };
-    const next_cumulative = std.math.add(u64, cumulative, cost) catch
+    )) orelse return .{ .yielded = state };
+    if (caller_fuel.* < prepared.cost) return .{ .yielded = state };
+    const next_cumulative = std.math.add(
+        u64,
+        prepared.cumulative,
+        prepared.cost,
+    ) catch
         return error.ExecutionBudgetExceeded;
     if (next_cumulative > image.profile.maximum_machine_fuel) {
         return error.ExecutionBudgetExceeded;
@@ -1033,8 +1093,8 @@ fn stepSegment(
 
     const clause = reducer_clause_v1.evaluateClause(
         programView(image),
-        segment_id,
-        &slots,
+        prepared.segment_id,
+        &prepared.slots,
         output_value,
         scratch,
         workspace,
@@ -1046,10 +1106,10 @@ fn stepSegment(
         .progressed => |progressed| .{ .next = try transitionState(
             image,
             state,
-            segment_id,
+            prepared.segment_id,
             progressed.edge_kind,
             progressed.edge,
-            &slots,
+            &prepared.slots,
             next_cumulative,
             output_state,
             workspace,
@@ -1062,13 +1122,13 @@ fn stepSegment(
             ) catch return error.InvalidState;
             const await_constructor = try awaitingConstructor(
                 image,
-                segment_id,
+                prepared.segment_id,
             );
             const parked = try encodeTopFrame(
                 image,
                 state,
                 await_constructor,
-                &slots,
+                &prepared.slots,
                 sequence,
                 next_cumulative,
                 output_state,
@@ -1095,13 +1155,13 @@ fn stepSegment(
         .call => |callee| blk: {
             const return_constructor = try awaitCallConstructor(
                 image,
-                segment_id,
+                prepared.segment_id,
             );
             const parent = try encodeTopFrame(
                 image,
                 state,
                 return_constructor,
-                &slots,
+                &prepared.slots,
                 readInt(u64, state, 44),
                 next_cumulative,
                 output_state,
@@ -1110,7 +1170,7 @@ fn stepSegment(
             const target_segment = readInt(u16, callee, 0);
             const child_constructor = try transitionConstructor(
                 image,
-                segment_id,
+                prepared.segment_id,
                 3,
                 target_segment,
             );
@@ -1119,13 +1179,13 @@ fn stepSegment(
                 callee,
                 target_segment,
                 child_constructor,
-                &slots,
+                &prepared.slots,
             );
             break :blk .{ .next = try appendFrame(
                 image,
                 parent,
                 child_constructor,
-                &slots,
+                &prepared.slots,
                 output_state,
             ) };
         },
@@ -1133,10 +1193,10 @@ fn stepSegment(
             const next = try transitionState(
                 image,
                 state,
-                segment_id,
+                prepared.segment_id,
                 4,
                 continuation,
-                &slots,
+                &prepared.slots,
                 next_cumulative,
                 output_state,
                 workspace,
@@ -1170,7 +1230,7 @@ fn stepSegment(
         ),
         .done, .failed => {},
     }
-    caller_fuel.* -= cost;
+    caller_fuel.* -= prepared.cost;
     return outcome;
 }
 

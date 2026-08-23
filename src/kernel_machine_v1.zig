@@ -222,26 +222,21 @@ pub fn Machine(
             errdefer caller_fuel.* = original_caller_fuel;
             var workspace: image_v1.ValidationWorkspace = .{};
             const image = try validatedProgram(&workspace);
-            var probe_fuel = caller_fuel.*;
-            const probe: ?kernel_v1.Outcome = kernel_v1.step(
+            const admission = kernel_v1.preflightStep(
                 image,
                 value.storage[0..value.length],
-                &probe_fuel,
-                &.{},
-                &.{},
-                &.{},
+                caller_fuel.*,
+                value.invariant_storage,
                 &workspace,
-            ) catch |err| switch (err) {
-                error.ScratchCapacity => null,
-                else => return error.ProgramContractViolation,
-            };
-            if (probe) |outcome| return switch (outcome) {
-                .yielded => blk: {
-                    caller_fuel.* = probe_fuel;
-                    break :blk .yielded;
+            ) catch return error.ProgramContractViolation;
+            switch (admission) {
+                .yielded => return .yielded,
+                .execution_budget_exceeded => {
+                    value.terminal = true;
+                    return .{ .failed = .execution_budget_exceeded };
                 },
-                else => error.ProgramContractViolation,
-            };
+                .funded => {},
+            }
             const candidate = value.allocator.alloc(
                 u8,
                 options.maximum_state_bytes,

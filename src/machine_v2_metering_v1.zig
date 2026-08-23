@@ -1,4 +1,5 @@
 const control_ir = @import("control_ir");
+const dynamic_value_v1 = @import("dynamic_value_v1");
 const image_v1 = @import("image_v1");
 const program_semantics_v1 = @import("program_semantics_v1");
 const reducer_clause_v1 = @import("reducer_clause_v1");
@@ -174,6 +175,7 @@ pub fn preflightSegmentCost(
     image: anytype,
     segment: []const u8,
     constructor: []const u8,
+    environment: []const u8,
     slots: *const [1024]reducer_clause_v1.Slot,
     base_cost: u64,
     workspace: *image_v1.ValidationWorkspace,
@@ -184,13 +186,36 @@ pub fn preflightSegmentCost(
     const activation_count = readInt(u16, constructor, 16);
     const environment_count = readInt(u16, constructor, 18);
     var environment_field_cursor: usize = 24;
+    var environment_value_cursor: usize = if (readInt(
+        u16,
+        constructor,
+        10,
+    ) & 1 != 0) 4 else 0;
+    if (environment_value_cursor > environment.len) {
+        return error.InvalidBindings;
+    }
     for (0..@as(u32, activation_count) + environment_count) |_| {
         const value = readInt(u16, constructor, environment_field_cursor);
         if (!slots[value].initialized) return error.InvalidBindings;
-        sizes[value] = slots[value].bytes.len;
+        const schema_id = readInt(
+            u32,
+            constructor,
+            environment_field_cursor + 4,
+        );
+        const consumed = dynamic_value_v1.validateValuePrefix(
+            image.catalogs.schemas,
+            schema_id,
+            environment[environment_value_cursor..],
+            &workspace.value_tasks,
+        ) catch return error.InvalidBindings;
+        sizes[value] = consumed;
         initially_available[value] = true;
-        try addDynamicCostSize(image, value, sizes[value], &cost);
+        try addDynamicCostSize(image, value, consumed, &cost);
+        environment_value_cursor += consumed;
         environment_field_cursor += 8;
+    }
+    if (environment_value_cursor != environment.len) {
+        return error.InvalidBindings;
     }
     var cursor: usize = image_v1.segment_prefix_length +
         @as(usize, readInt(u16, segment, 10)) * 2;
