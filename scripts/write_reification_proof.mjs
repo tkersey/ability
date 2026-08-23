@@ -48,6 +48,8 @@ if (
   !/^[0-9a-f]{64}$/.test(baseline.oracle_fixture_patch_sha256) ||
   semantic.image_profile_invariance_passed !== true ||
   semantic.metering_annotation_invariance_passed !== true ||
+  positiveCount(semantic, "malformed_image_case_count") <= 0 ||
+  positiveCount(semantic, "malformed_state_case_count") <= 0 ||
   wasmExecution.import_count !== 0 ||
   wasmExecution.abi !== 1 ||
   positiveCount(wasmExecution, "transition_comparison_count") <= 0 ||

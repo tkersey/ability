@@ -137,6 +137,23 @@ try {
   forgedBaseline.oracle_mismatch_count = 0;
   fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));
 
+  const forgedSemantic = JSON.parse(fs.readFileSync(semantic, "utf8"));
+  for (const field of ["malformed_image_case_count", "malformed_state_case_count"]) {
+    const authentic = forgedSemantic[field];
+    forgedSemantic[field] = 0;
+    fs.writeFileSync(semantic, JSON.stringify(forgedSemantic));
+    const emptyCorpus = childProcess.spawnSync(
+      process.execPath,
+      proofArgs,
+      { encoding: "utf8" },
+    );
+    if (emptyCorpus.status === 0) {
+      throw new Error(`empty ${field} proof was accepted`);
+    }
+    forgedSemantic[field] = authentic;
+  }
+  fs.writeFileSync(semantic, JSON.stringify(forgedSemantic));
+
   const args = [script, artifact, artifact, artifact, artifact, artifact, generated, proofPath];
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
   if (
