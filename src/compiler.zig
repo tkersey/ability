@@ -1,8 +1,9 @@
 const control_ir = @import("control_ir");
 const machine = @import("machine");
+const machine_v2_metering_v1 = @import("machine_v2_metering_v1");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const portable_value = @import("portable_value");
-const reducer_semantics_v1 = @import("reducer_semantics_v1");
+const program_semantics_v1 = @import("program_semantics_v1");
 const reified_program_v1 = @import("reified_program_v1");
 const rnf = @import("rnf");
 const std = @import("std");
@@ -780,7 +781,7 @@ fn failureFromTag(comptime Body: type, comptime tag: u16) Body.Failure {
 }
 
 fn minimumBlockCost(comptime block: control_ir.Block) u64 {
-    return reducer_semantics_v1.minimumBlockCost(block);
+    return machine_v2_metering_v1.minimumBlockCost(block);
 }
 
 fn minimumSourceBlockCost(
@@ -858,15 +859,15 @@ fn validateInstruction(
     comptime instruction: control_ir.Instruction,
 ) void {
     const Result = typeForValue(Body, program.value_types[instruction.result]);
-    if (instruction.kind != reducer_semantics_v1.canonicalInstructionKind(
+    if (instruction.kind != program_semantics_v1.canonicalInstructionKind(
         instruction.operation,
     )) {
         @compileError("Control IR operation has a noncanonical instruction kind");
     }
-    inline for (reducer_semantics_v1.failureRoles(
+    inline for (program_semantics_v1.failureRoles(
         instruction.operation,
     )) |role| {
-        _ = failureNamed(Body, reducer_semantics_v1.failureName(role));
+        _ = failureNamed(Body, program_semantics_v1.failureName(role));
     }
     switch (instruction.operation) {
         .metadata => @compileError(
@@ -1724,7 +1725,7 @@ fn semanticHashInstruction(
     }
     semanticHashU8(
         hasher,
-        reducer_semantics_v1.currentSemanticTag(instruction.operation),
+        program_semantics_v1.currentSemanticTag(instruction.operation),
     );
     switch (instruction.operation) {
         .constant => |constant| semanticHashConstantAt(
@@ -2045,11 +2046,11 @@ fn transitionDigest(
         semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
         semanticHashBytes(
             &hasher,
-            reducer_semantics_v1.segment_fuel_semantic_domain,
+            machine_v2_metering_v1.segment_fuel_semantic_domain,
         );
         semanticHashU64(
             &hasher,
-            reducer_semantics_v1.dynamic_fuel_quantum_bytes,
+            machine_v2_metering_v1.dynamic_fuel_quantum_bytes,
         );
     } else {
         semanticHashBytes(&hasher, "boundary-program-transition-v1");
@@ -2138,7 +2139,7 @@ fn transitionDigest(
     }
     if (machine_v2_metering) {
         semanticHashBytes(&hasher, "await-effect-cost");
-        semanticHashU64(&hasher, reducer_semantics_v1.await_effect_cost);
+        semanticHashU64(&hasher, machine_v2_metering_v1.await_effect_cost);
     }
 
     semanticHashU32(
@@ -2888,7 +2889,7 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
         }
 
         fn dynamicBytesCost(comptime T: type, canonical_bytes: u64) u64 {
-            return reducer_semantics_v1.dynamicBytesCost(
+            return machine_v2_metering_v1.dynamicBytesCost(
                 comptime hasDynamicEncodedSize(T),
                 canonical_bytes,
             );
@@ -3032,7 +3033,7 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
             sizes: *const [limits.maximum_values]u64,
             available: *const [limits.maximum_values]bool,
         ) u64 {
-            return reducer_semantics_v1.resultEncodedBytes(
+            return machine_v2_metering_v1.resultEncodedBytes(
                 instruction,
                 .{
                     .block = block,
@@ -3118,11 +3119,11 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
             }
 
             pub fn failure(
-                comptime role: reducer_semantics_v1.FailureRole,
+                comptime role: program_semantics_v1.FailureRole,
             ) Body.Failure {
                 return failureNamed(
                     Body,
-                    reducer_semantics_v1.failureName(role),
+                    program_semantics_v1.failureName(role),
                 );
             }
         };
@@ -3131,7 +3132,7 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
             comptime block: control_ir.Block,
             store: anytype,
         ) ?Failure {
-            return reducer_semantics_v1.executeTypedInstructions(
+            return program_semantics_v1.executeTypedInstructions(
                 Body,
                 ValueCatalog,
                 TypedReducerBackend,

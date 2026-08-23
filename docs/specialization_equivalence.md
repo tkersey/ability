@@ -21,6 +21,7 @@ Canonical State is the engine-switch boundary. No translation is permitted.
 `check-boundary-engine-switch` own this claim; final-outcome-only comparison is
 insufficient.
 
-Separately, the direct unmetered reducer clause and BPI1 clause evaluator must
-agree before Machine v2 policy is applied. This release does not claim the
-later open Process ABI is complete.
+Separately, the direct unmetered reducer clause and the internal BPI1 clause
+evaluator must agree before Machine v2 policy is applied. The clause evaluator
+is a repository-internal proof seam, not a package-root API. This release does
+not claim the later open Process ABI is complete.

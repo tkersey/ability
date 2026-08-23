@@ -1,6 +1,6 @@
 const dynamic_value_v1 = @import("dynamic_value_v1");
 const image_v1 = @import("image_v1");
-const reducer_semantics_v1 = @import("reducer_semantics_v1");
+const machine_v2_metering_v1 = @import("machine_v2_metering_v1");
 const std = @import("std");
 
 pub const magic = "ABL_MV2P1".*;
@@ -26,6 +26,8 @@ pub const Validated = struct {
     segment_count: u32,
     constructor_count: u32,
     transition_count: u32,
+    initial_constructor_id: u32,
+    bpi_constructor_count: u32,
 
     pub fn segmentCost(self: Validated, segment_id: u16) Error!u64 {
         if (segment_id >= self.segment_count) return error.InvalidProfile;
@@ -46,12 +48,30 @@ pub const Validated = struct {
         return self.bytes[header_length + self.segment_count * 9 + constructor_id];
     }
 
+    pub fn mappedConstructor(self: Validated, constructor_id: u32) Error!u32 {
+        if (constructor_id >= self.constructor_count) return error.InvalidProfile;
+        const offset = header_length + self.segment_count * 9 +
+            self.constructor_count + constructor_id * 4;
+        return std.mem.readInt(u32, self.bytes[offset..][0..4], .little);
+    }
+
     pub fn transitionKind(self: Validated, transition_id: u32) Error!u8 {
         if (transition_id >= self.transition_count) return error.InvalidProfile;
         return self.bytes[
-            header_length + self.segment_count * 9 + self.constructor_count +
-                transition_id
+            header_length + self.segment_count * 9 +
+                self.constructor_count * 5 + transition_id
         ];
+    }
+
+    pub fn transitionConstructor(
+        self: Validated,
+        transition_id: u32,
+    ) Error!u32 {
+        if (transition_id >= self.transition_count) return error.InvalidProfile;
+        const offset = header_length + self.segment_count * 9 +
+            self.constructor_count * 5 + self.transition_count +
+            transition_id * 4;
+        return std.mem.readInt(u32, self.bytes[offset..][0..4], .little);
     }
 };
 
@@ -67,7 +87,7 @@ pub fn validate(
         std.mem.readInt(u32, bytes[16..20], .little) != header_length or
         !allZero(bytes[20..24]) or
         std.mem.readInt(u64, bytes[24..32], .little) != bytes.len or
-        !allZero(bytes[164..168]) or !allZero(bytes[180..192]))
+        !allZero(bytes[164..168]) or !allZero(bytes[188..192]))
     {
         return error.InvalidProfile;
     }
@@ -80,6 +100,8 @@ pub fn validate(
     const segment_count = std.mem.readInt(u32, bytes[168..172], .little);
     const constructor_count = std.mem.readInt(u32, bytes[172..176], .little);
     const transition_count = std.mem.readInt(u32, bytes[176..180], .little);
+    const initial_constructor_id = std.mem.readInt(u32, bytes[180..184], .little);
+    const bpi_constructor_count = std.mem.readInt(u32, bytes[184..188], .little);
     var expected_length = std.math.add(
         usize,
         header_length,
@@ -88,12 +110,14 @@ pub fn validate(
     expected_length = std.math.add(
         usize,
         expected_length,
-        constructor_count,
+        std.math.mul(usize, constructor_count, 5) catch
+            return error.InvalidProfile,
     ) catch return error.InvalidProfile;
     expected_length = std.math.add(
         usize,
         expected_length,
-        transition_count,
+        std.math.mul(usize, transition_count, 5) catch
+            return error.InvalidProfile,
     ) catch return error.InvalidProfile;
     if (bytes.len != expected_length or segment_count == 0 or
         std.mem.readInt(u32, bytes[128..132], .little) == 0 or
@@ -101,7 +125,8 @@ pub fn validate(
         std.mem.readInt(u64, bytes[144..152], .little) != 16 or
         std.mem.readInt(u64, bytes[152..160], .little) != 1 or
         std.mem.readInt(u32, bytes[160..164], .little) != 1 or
-        constructor_count == 0)
+        constructor_count == 0 or bpi_constructor_count == 0 or
+        initial_constructor_id >= constructor_count)
     {
         return error.InvalidProfile;
     }
@@ -119,12 +144,26 @@ pub fn validate(
         if (bytes[header_length + segment_count * 9 + constructor] > 2) {
             return error.InvalidProfile;
         }
+        const mapping_offset = header_length + segment_count * 9 +
+            constructor_count + constructor * 4;
+        if (std.mem.readInt(u32, bytes[mapping_offset..][0..4], .little) >=
+            bpi_constructor_count)
+        {
+            return error.InvalidProfile;
+        }
     }
     for (0..transition_count) |transition| {
         if (bytes[
-            header_length + segment_count * 9 + constructor_count +
+            header_length + segment_count * 9 + constructor_count * 5 +
                 transition
         ] > 4) {
+            return error.InvalidProfile;
+        }
+        const constructor_offset = header_length + segment_count * 9 +
+            constructor_count * 5 + transition_count + transition * 4;
+        if (std.mem.readInt(u32, bytes[constructor_offset..][0..4], .little) >=
+            constructor_count)
+        {
             return error.InvalidProfile;
         }
     }
@@ -152,6 +191,8 @@ pub fn validate(
         .segment_count = segment_count,
         .constructor_count = constructor_count,
         .transition_count = transition_count,
+        .initial_constructor_id = initial_constructor_id,
+        .bpi_constructor_count = bpi_constructor_count,
     };
 }
 
@@ -164,7 +205,7 @@ pub fn semanticDigestForImage(
 ) (Error || image_v1.Error)![32]u8 {
     const catalogs = image.catalogs;
     if (profile.segment_count != image.segment_count or
-        profile.constructor_count != image.constructor_count or
+        profile.bpi_constructor_count != image.constructor_count or
         profile.transition_count != transitionCount(catalogs))
     {
         return error.InvalidProfile;
@@ -173,18 +214,18 @@ pub fn semanticDigestForImage(
     image_v1.semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
     image_v1.semanticHashBytes(
         &hasher,
-        reducer_semantics_v1.segment_fuel_semantic_domain,
+        machine_v2_metering_v1.segment_fuel_semantic_domain,
     );
     image_v1.semanticHashU64(
         &hasher,
-        reducer_semantics_v1.dynamic_fuel_quantum_bytes,
+        machine_v2_metering_v1.dynamic_fuel_quantum_bytes,
     );
     try hashCommonPrefix(&hasher, catalogs, schema_tasks);
     try hashSegments(&hasher, catalogs, profile, schema_tasks);
     image_v1.semanticHashBytes(&hasher, "await-effect-cost");
     image_v1.semanticHashU64(
         &hasher,
-        reducer_semantics_v1.await_effect_cost,
+        machine_v2_metering_v1.await_effect_cost,
     );
     try hashConstructors(&hasher, catalogs, profile, schema_tasks);
     try hashTransitions(&hasher, catalogs, profile);
@@ -269,13 +310,17 @@ fn hashSegments(
     image_v1.semanticHashU32(hasher, profile.segment_count);
     var cursor: usize = 4;
     for (0..profile.segment_count) |segment| {
-        const end = try recordEnd(bytes, cursor, 24);
+        const end = try recordEnd(
+            bytes,
+            cursor,
+            image_v1.segment_prefix_length,
+        );
         image_v1.semanticHashU16(hasher, readInt(u16, bytes, cursor + 4));
         image_v1.semanticHashU16(hasher, readInt(u16, bytes, cursor + 6));
         const parameter_count = readInt(u16, bytes, cursor + 10);
         const instruction_count = readInt(u32, bytes, cursor + 12);
         image_v1.semanticHashU32(hasher, parameter_count);
-        cursor += 24;
+        cursor += image_v1.segment_prefix_length;
         for (0..parameter_count) |_| {
             image_v1.semanticHashU16(hasher, readInt(u16, bytes, cursor));
             cursor += 2;
@@ -337,16 +382,18 @@ fn hashConstructors(
 ) (Error || image_v1.Error)!void {
     const bytes = catalogs.envelope.section(.constructors);
     image_v1.semanticHashU32(hasher, profile.constructor_count);
-    var cursor: usize = 4;
     for (0..profile.constructor_count) |constructor| {
-        const end = try recordEnd(bytes, cursor, 24);
-        image_v1.semanticHashU32(hasher, readInt(u32, bytes, cursor + 4));
+        const mapped = try profile.mappedConstructor(@intCast(constructor));
+        const record = try bpiConstructorRecord(bytes, mapped);
+        var cursor: usize = 0;
+        const end = record.len;
+        image_v1.semanticHashU32(hasher, @intCast(constructor));
         image_v1.semanticHashU8(
             hasher,
             try profile.constructorOrigin(@intCast(constructor)),
         );
-        image_v1.semanticHashU16(hasher, readInt(u16, bytes, cursor + 12));
-        const resume_target = readInt(u16, bytes, cursor + 14);
+        image_v1.semanticHashU16(hasher, readInt(u16, record, cursor + 12));
+        const resume_target = readInt(u16, record, cursor + 14);
         image_v1.semanticHashBool(
             hasher,
             resume_target != std.math.maxInt(u16),
@@ -356,11 +403,11 @@ fn hashConstructors(
         }
         image_v1.semanticHashBool(
             hasher,
-            readInt(u16, bytes, cursor + 10) & 1 == 1,
+            readInt(u16, record, cursor + 10) & 1 == 1,
         );
-        const activation_count = readInt(u16, bytes, cursor + 16);
-        const environment_count = readInt(u16, bytes, cursor + 18);
-        const invariant_count = readInt(u16, bytes, cursor + 20);
+        const activation_count = readInt(u16, record, cursor + 16);
+        const environment_count = readInt(u16, record, cursor + 18);
+        const invariant_count = readInt(u16, record, cursor + 20);
         image_v1.semanticHashU32(hasher, activation_count);
         cursor += 24;
         for (0..activation_count) |_| {
@@ -368,7 +415,7 @@ fn hashConstructors(
                 hasher,
                 catalogs,
                 schema_tasks,
-                bytes,
+                record,
                 &cursor,
             );
         }
@@ -378,16 +425,29 @@ fn hashConstructors(
                 hasher,
                 catalogs,
                 schema_tasks,
-                bytes,
+                record,
                 &cursor,
             );
         }
         image_v1.semanticHashU32(hasher, invariant_count);
         for (0..invariant_count) |_| {
-            cursor = try image_v1.hashInvariant(hasher, bytes, cursor);
+            cursor = try image_v1.hashInvariant(hasher, record, cursor);
         }
         if (cursor != end) return error.InvalidProfile;
     }
+}
+
+fn bpiConstructorRecord(
+    bytes: []const u8,
+    target: u32,
+) image_v1.Error![]const u8 {
+    var cursor: usize = 4;
+    for (0..readInt(u32, bytes, 0)) |constructor| {
+        const end = try recordEnd(bytes, cursor, 24);
+        if (constructor == target) return bytes[cursor..end];
+        cursor = end;
+    }
+    return error.InvalidConstructor;
 }
 
 fn hashTransitions(
@@ -405,7 +465,10 @@ fn hashTransitions(
             try profile.transitionKind(@intCast(transition)),
         );
         image_v1.semanticHashU16(hasher, readInt(u16, bytes, offset + 4));
-        image_v1.semanticHashU32(hasher, readInt(u32, bytes, offset + 8));
+        image_v1.semanticHashU32(
+            hasher,
+            try profile.transitionConstructor(@intCast(transition)),
+        );
     }
 }
 
@@ -546,13 +609,20 @@ pub fn Profile(
     comptime segment_costs: []const u64,
     comptime segment_terminator_overrides: []const u8,
     comptime constructor_origins: []const u8,
+    comptime constructor_mappings: []const u32,
     comptime transition_kinds: []const u8,
+    comptime transition_constructors: []const u32,
+    comptime initial_constructor_id: u32,
+    comptime bpi_constructor_count: u32,
 ) type {
-    if (segment_terminator_overrides.len != segment_costs.len) {
-        @compileError("Machine v2 segment profile lengths differ");
+    if (segment_terminator_overrides.len != segment_costs.len or
+        constructor_mappings.len != constructor_origins.len or
+        transition_constructors.len != transition_kinds.len)
+    {
+        @compileError("Machine v2 profile projection lengths differ");
     }
     const byte_length = header_length + segment_costs.len * 9 +
-        constructor_origins.len + transition_kinds.len;
+        constructor_origins.len * 5 + transition_kinds.len * 5;
     const encoded = comptime blk: {
         var bytes: [byte_length]u8 = [_]u8{0} ** byte_length;
         @memcpy(bytes[0..9], &magic);
@@ -575,6 +645,8 @@ pub fn Profile(
         std.mem.writeInt(u32, bytes[168..172], @intCast(segment_costs.len), .little);
         std.mem.writeInt(u32, bytes[172..176], @intCast(constructor_origins.len), .little);
         std.mem.writeInt(u32, bytes[176..180], @intCast(transition_kinds.len), .little);
+        std.mem.writeInt(u32, bytes[180..184], initial_constructor_id, .little);
+        std.mem.writeInt(u32, bytes[184..188], bpi_constructor_count, .little);
         var cursor: usize = header_length;
         for (segment_costs) |cost| {
             std.mem.writeInt(u64, bytes[cursor..][0..8], cost, .little);
@@ -590,10 +662,19 @@ pub fn Profile(
             constructor_origins,
         );
         cursor += constructor_origins.len;
+        for (constructor_mappings) |mapping| {
+            std.mem.writeInt(u32, bytes[cursor..][0..4], mapping, .little);
+            cursor += 4;
+        }
         @memcpy(
             bytes[cursor..][0..transition_kinds.len],
             transition_kinds,
         );
+        cursor += transition_kinds.len;
+        for (transition_constructors) |constructor| {
+            std.mem.writeInt(u32, bytes[cursor..][0..4], constructor, .little);
+            cursor += 4;
+        }
         break :blk bytes;
     };
     const sha256 = comptime blk: {

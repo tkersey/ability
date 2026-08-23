@@ -25,3 +25,7 @@ it does not replace semantic or Machine identity.
 BPI1 identity is independent of fuel and deployment capacity. It is a compiler artifact and has no automatic migration promise to future
 image versions. Live State migration across changed Program meaning remains an
 explicit non-feature.
+
+No public raw evaluator is introduced. Repository-internal clause evaluation
+exists only to prove BPI1/direct equivalence; external execution remains the
+typed or byte-level Machine ABI v2 compatibility surface.

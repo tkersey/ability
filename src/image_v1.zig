@@ -1,14 +1,15 @@
 const dynamic_value_v1 = @import("dynamic_value_v1");
-const reducer_semantics_v1 = @import("reducer_semantics_v1");
+const program_semantics_v1 = @import("program_semantics_v1");
 const std = @import("std");
 
 pub const magic = "ABL_BPI1".*;
 pub const image_format_version: u16 = 1;
 pub const evaluator_semantics_version: u16 = 1;
-pub const fixed_prefix_length: u32 = 144;
+pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
 pub const maximum_catalog_entries: u32 = 1024;
+pub const segment_prefix_length: u32 = 16;
 pub const header_length: u32 = fixed_prefix_length +
     section_count * section_descriptor_length;
 
@@ -152,8 +153,8 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (readInt(u16, image, 10) != evaluator_semantics_version) {
         return error.UnsupportedEvaluatorSemantics;
     }
-    if (!allZero(image[12..20])) return error.UnknownFlags;
-    if (readInt(u32, image, 20) != header_length) {
+    if (readInt(u32, image, 12) != 0) return error.UnknownFlags;
+    if (readInt(u32, image, 16) != header_length) {
         return error.InvalidHeaderLength;
     }
     const declared_total = readInt(u64, image, 24);
@@ -162,13 +163,8 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (declared_total < header_length) return error.LengthMismatch;
     if (declared_total < actual_total) return error.TrailingBytes;
     if (declared_total > actual_total) return error.LengthMismatch;
-    if (readInt(u32, image, 32) != section_count) {
+    if (readInt(u32, image, 20) != section_count) {
         return error.InvalidSectionCount;
-    }
-    if (!allZero(image[36..40]) or !allZero(image[72..120]) or
-        !allZero(image[132..144]))
-    {
-        return error.UnknownFlags;
     }
 
     var sections: [section_count]Section = undefined;
@@ -204,9 +200,9 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
         .image = image,
         .header = .{
             .total_length = declared_total,
-            .program_transition_digest = image[40..72].*,
-            .maximum_kernel_scratch_bytes = readInt(u64, image, 120),
-            .maximum_single_value_bytes = readInt(u32, image, 128),
+            .program_transition_digest = image[32..64].*,
+            .maximum_kernel_scratch_bytes = readInt(u64, image, 64),
+            .maximum_single_value_bytes = readInt(u32, image, 72),
         },
         .sections = sections,
     };
@@ -870,13 +866,12 @@ fn validateSegments(
     if (count == 0 or count > 128) return error.InvalidSegment;
     var cursor: usize = 4;
     for (0..count) |segment_id| {
-        if (bytes.len - cursor < 24) return error.InvalidSegment;
-        const end = recordEnd(bytes, cursor, 24) catch
+        if (bytes.len - cursor < segment_prefix_length) return error.InvalidSegment;
+        const end = recordEnd(bytes, cursor, segment_prefix_length) catch
             return error.InvalidSegment;
         if (readInt(u16, bytes, cursor + 4) != segment_id or
             readInt(u16, bytes, cursor + 6) >= catalogs.function_count or
-            bytes[cursor + 8] > 4 or bytes[cursor + 9] != 0 or
-            !allZero(bytes[cursor + 16 .. cursor + 24]))
+            bytes[cursor + 8] > 4 or bytes[cursor + 9] != 0)
         {
             return error.InvalidSegment;
         }
@@ -899,7 +894,7 @@ fn validateSegments(
             @intCast(segment_id),
             &available,
         );
-        cursor += 24;
+        cursor += segment_prefix_length;
         for (0..parameter_count) |index| {
             if (end - cursor < 2) return error.InvalidSegment;
             const value = readInt(u16, bytes, cursor);
@@ -1007,7 +1002,7 @@ fn validateInstruction(
     const operand_count = readInt(u16, bytes, start + 10);
     const immediate = readInt(u32, bytes, start + 12);
     const wire_operation = std.enums.fromInt(
-        reducer_semantics_v1.WireOperation,
+        program_semantics_v1.WireOperation,
         operation,
     ) orelse return error.InvalidInstruction;
     const expected_kind: u8 = if (operation <= 2) @intCast(operation) else 3;
@@ -1051,13 +1046,13 @@ fn validateInstruction(
 
 fn validateInstructionSchemas(
     catalogs: Catalogs,
-    operation: reducer_semantics_v1.WireOperation,
+    operation: program_semantics_v1.WireOperation,
     result: u16,
     operand_bytes: []const u8,
     operand_count: u16,
     immediate: u32,
 ) Error!void {
-    if (reducer_semantics_v1.fixedOperandCount(operation)) |expected| {
+    if (program_semantics_v1.fixedOperandCount(operation)) |expected| {
         if (operand_count != expected) return error.InvalidInstruction;
     }
     const result_schema = valueSchema(catalogs, result);
@@ -1714,7 +1709,7 @@ fn validateEdge(
         const target_value = readInt(
             u16,
             target_segment,
-            24 + index * 2,
+            segment_prefix_length + index * 2,
         );
         if (bytes[cursor.*] == 0) {
             if (valueSchema(catalogs, value) !=
@@ -1868,7 +1863,7 @@ fn imageSegmentRecord(catalogs: Catalogs, target: u16) Error![]const u8 {
     const bytes = catalogs.envelope.section(.segments);
     var cursor: usize = 4;
     for (0..readInt(u32, bytes, 0)) |id| {
-        const end = try recordEnd(bytes, cursor, 24);
+        const end = try recordEnd(bytes, cursor, segment_prefix_length);
         if (id == target) return bytes[cursor..end];
         cursor = end;
     }
@@ -1876,7 +1871,8 @@ fn imageSegmentRecord(catalogs: Catalogs, target: u16) Error![]const u8 {
 }
 
 fn imageSegmentTerminator(segment: []const u8) usize {
-    var cursor: usize = 24 + @as(usize, readInt(u16, segment, 10)) * 2;
+    var cursor: usize = segment_prefix_length +
+        @as(usize, readInt(u16, segment, 10)) * 2;
     for (0..readInt(u32, segment, 12)) |_| {
         cursor += readInt(u32, segment, cursor);
     }
@@ -2147,7 +2143,7 @@ fn imageConstructorRecord(
     const bytes = catalogs.envelope.section(.constructors);
     var cursor: usize = 4;
     for (0..readInt(u32, bytes, 0)) |constructor| {
-        const end = try recordEnd(bytes, cursor, 24);
+        const end = try recordEnd(bytes, cursor, segment_prefix_length);
         if (constructor == target) return bytes[cursor..end];
         cursor = end;
     }
@@ -2331,13 +2327,13 @@ fn hashSegments(
     semanticHashU32(hasher, count);
     var cursor: usize = 4;
     for (0..count) |_| {
-        const end = try recordEnd(bytes, cursor, 24);
+        const end = try recordEnd(bytes, cursor, segment_prefix_length);
         semanticHashU16(hasher, readInt(u16, bytes, cursor + 4));
         semanticHashU16(hasher, readInt(u16, bytes, cursor + 6));
         const parameter_count = readInt(u16, bytes, cursor + 10);
         const instruction_count = readInt(u32, bytes, cursor + 12);
         semanticHashU32(hasher, parameter_count);
-        cursor += 24;
+        cursor += segment_prefix_length;
         for (0..parameter_count) |_| {
             semanticHashU16(hasher, readInt(u16, bytes, cursor));
             cursor += 2;
@@ -2380,12 +2376,12 @@ pub fn hashInstruction(
         semanticHashU16(hasher, readInt(u16, bytes, cursor));
         cursor += 2;
     }
-    const wire: reducer_semantics_v1.WireOperation = @enumFromInt(
+    const wire: program_semantics_v1.WireOperation = @enumFromInt(
         readInt(u16, bytes, start + 6),
     );
     semanticHashU8(
         hasher,
-        reducer_semantics_v1.currentSemanticTagForWire(wire),
+        program_semantics_v1.currentSemanticTagForWire(wire),
     );
     const immediate = readInt(u32, bytes, start + 12);
     switch (wire) {

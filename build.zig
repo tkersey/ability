@@ -15,12 +15,13 @@ const CoreModules = struct {
     kernel_machine_v1: *std.Build.Module,
     kernel_wasm_v1: *std.Build.Module,
     machine: *std.Build.Module,
+    machine_v2_metering_v1: *std.Build.Module,
     machine_v2_profile_v1: *std.Build.Module,
     portable_value: *std.Build.Module,
-    program_evaluator_v1: *std.Build.Module,
+    program_semantics_v1: *std.Build.Module,
     program_v2: *std.Build.Module,
+    reducer_clause_v1: *std.Build.Module,
     reified_program_v1: *std.Build.Module,
-    reducer_semantics_v1: *std.Build.Module,
     rnf: *std.Build.Module,
 };
 
@@ -37,12 +38,13 @@ const CoreModuleId = enum {
     kernel_machine_v1,
     kernel_wasm_v1,
     machine,
+    machine_v2_metering_v1,
     machine_v2_profile_v1,
     portable_value,
-    program_evaluator_v1,
+    program_semantics_v1,
     program_v2,
+    reducer_clause_v1,
     reified_program_v1,
-    reducer_semantics_v1,
     rnf,
 };
 
@@ -66,26 +68,28 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .kernel_machine_v1 => "src/kernel_machine_v1.zig",
         .kernel_wasm_v1 => "src/kernel_wasm_v1.zig",
         .machine => "src/machine.zig",
+        .machine_v2_metering_v1 => "src/machine_v2_metering_v1.zig",
         .machine_v2_profile_v1 => "src/machine_v2_profile_v1.zig",
         .portable_value => "src/portable_value.zig",
-        .program_evaluator_v1 => "src/program_evaluator_v1.zig",
+        .program_semantics_v1 => "src/program_semantics_v1.zig",
         .program_v2 => "src/program_v2.zig",
+        .reducer_clause_v1 => "src/reducer_clause_v1.zig",
         .reified_program_v1 => "src/reified_program_v1.zig",
-        .reducer_semantics_v1 => "src/reducer_semantics_v1.zig",
         .rnf => "src/rnf.zig",
     };
 }
 
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
-        .compiler, .machine, .reducer_semantics_v1 => .direct_runtime_semantics,
+        .compiler, .machine, .machine_v2_metering_v1 => .direct_runtime_semantics,
         .dynamic_value_v1,
         .image_v1,
+        .program_semantics_v1,
+        .reducer_clause_v1,
         .kernel_v1,
         .kernel_machine_v1,
         .kernel_wasm_v1,
         .machine_v2_profile_v1,
-        .program_evaluator_v1,
         => .image_runtime_semantics,
         .agent_profile,
         .control_ir,
@@ -114,7 +118,7 @@ fn requireDirectDependency(
 }
 
 comptime {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(50_000);
     const module_fields = std.meta.fields(CoreModules);
     const module_ids = std.meta.fields(CoreModuleId);
     if (module_fields.len != module_ids.len) {
@@ -374,43 +378,112 @@ fn addExpectedCompileFailure(
     step.dependOn(&compilation.step);
 }
 
+const PureProgramModules = struct {
+    control_ir: *std.Build.Module,
+    portable_value: *std.Build.Module,
+    rnf: *std.Build.Module,
+    dynamic_value_v1: *std.Build.Module,
+    program_semantics_v1: *std.Build.Module,
+    image_v1: *std.Build.Module,
+    reducer_clause_v1: *std.Build.Module,
+};
+
+fn addPureProgramModules(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) PureProgramModules {
+    const control_ir = b.createModule(.{
+        .root_source_file = b.path("src/control_ir.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const portable_value = b.createModule(.{
+        .root_source_file = b.path("src/portable_value.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const rnf = b.createModule(.{
+        .root_source_file = b.path("src/rnf.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rnf.addImport("control_ir", control_ir);
+    const dynamic_value_v1 = b.createModule(.{
+        .root_source_file = b.path("src/dynamic_value_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const program_semantics_v1 = b.createModule(.{
+        .root_source_file = b.path("src/program_semantics_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    program_semantics_v1.addImport("control_ir", control_ir);
+    program_semantics_v1.addImport("portable_value", portable_value);
+    program_semantics_v1.addImport("rnf", rnf);
+    const image_v1 = b.createModule(.{
+        .root_source_file = b.path("src/image_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    image_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    image_v1.addImport("program_semantics_v1", program_semantics_v1);
+    const reducer_clause_v1 = b.createModule(.{
+        .root_source_file = b.path("src/reducer_clause_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    reducer_clause_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    reducer_clause_v1.addImport("image_v1", image_v1);
+    reducer_clause_v1.addImport("program_semantics_v1", program_semantics_v1);
+    return .{
+        .control_ir = control_ir,
+        .portable_value = portable_value,
+        .rnf = rnf,
+        .dynamic_value_v1 = dynamic_value_v1,
+        .program_semantics_v1 = program_semantics_v1,
+        .image_v1 = image_v1,
+        .reducer_clause_v1 = reducer_clause_v1,
+    };
+}
+
 fn addCoreModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) CoreModules {
-    const control_ir = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.control_ir)),
-        .target = target,
-        .optimize = optimize,
-    });
-    const portable_value = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.portable_value)),
-        .target = target,
-        .optimize = optimize,
-    });
+    const pure = addPureProgramModules(b, target, optimize);
+    const control_ir = pure.control_ir;
+    const portable_value = pure.portable_value;
+    const rnf = pure.rnf;
+    const dynamic_value_v1 = pure.dynamic_value_v1;
+    const program_semantics_v1 = pure.program_semantics_v1;
+    const image_v1 = pure.image_v1;
+    const reducer_clause_v1 = pure.reducer_clause_v1;
     const machine = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.machine)),
         .target = target,
         .optimize = optimize,
     });
     machine.addImport("portable_value", portable_value);
+    const machine_v2_metering_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.machine_v2_metering_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    machine_v2_metering_v1.addImport("control_ir", control_ir);
+    machine_v2_metering_v1.addImport("image_v1", image_v1);
+    machine_v2_metering_v1.addImport(
+        "program_semantics_v1",
+        program_semantics_v1,
+    );
+    machine_v2_metering_v1.addImport("reducer_clause_v1", reducer_clause_v1);
     const machine_v2_profile_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.machine_v2_profile_v1)),
         .target = target,
         .optimize = optimize,
     });
-    const dynamic_value_v1 = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.dynamic_value_v1)),
-        .target = target,
-        .optimize = optimize,
-    });
-    const image_v1 = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.image_v1)),
-        .target = target,
-        .optimize = optimize,
-    });
-    image_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     const kernel_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.kernel_v1)),
         .target = target,
@@ -418,7 +491,9 @@ fn addCoreModules(
     });
     kernel_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     kernel_v1.addImport("image_v1", image_v1);
+    kernel_v1.addImport("machine_v2_metering_v1", machine_v2_metering_v1);
     kernel_v1.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
+    kernel_v1.addImport("reducer_clause_v1", reducer_clause_v1);
     const kernel_machine_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.kernel_machine_v1)),
         .target = target,
@@ -428,13 +503,6 @@ fn addCoreModules(
     kernel_machine_v1.addImport("kernel_v1", kernel_v1);
     kernel_machine_v1.addImport("machine", machine);
     kernel_machine_v1.addImport("portable_value", portable_value);
-    const program_evaluator_v1 = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.program_evaluator_v1)),
-        .target = target,
-        .optimize = optimize,
-    });
-    program_evaluator_v1.addImport("image_v1", image_v1);
-    program_evaluator_v1.addImport("reducer_clause_impl", kernel_v1);
     const kernel_wasm_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.kernel_wasm_v1)),
         .target = target,
@@ -450,33 +518,18 @@ fn addCoreModules(
     image_emit_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     image_emit_v1.addImport("image_v1", image_v1);
     image_emit_v1.addImport("portable_value", portable_value);
-    const rnf = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.rnf)),
-        .target = target,
-        .optimize = optimize,
-    });
-    rnf.addImport("control_ir", control_ir);
     const reified_program_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.reified_program_v1)),
         .target = target,
         .optimize = optimize,
     });
-    const reducer_semantics_v1 = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.reducer_semantics_v1)),
-        .target = target,
-        .optimize = optimize,
-    });
-    reducer_semantics_v1.addImport("control_ir", control_ir);
-    reducer_semantics_v1.addImport("portable_value", portable_value);
-    reducer_semantics_v1.addImport("rnf", rnf);
     machine_v2_profile_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     machine_v2_profile_v1.addImport("image_v1", image_v1);
     machine_v2_profile_v1.addImport(
-        "reducer_semantics_v1",
-        reducer_semantics_v1,
+        "machine_v2_metering_v1",
+        machine_v2_metering_v1,
     );
-    image_v1.addImport("reducer_semantics_v1", reducer_semantics_v1);
-    image_emit_v1.addImport("reducer_semantics_v1", reducer_semantics_v1);
+    image_emit_v1.addImport("program_semantics_v1", program_semantics_v1);
     const compiler = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
@@ -484,10 +537,11 @@ fn addCoreModules(
     });
     compiler.addImport("control_ir", control_ir);
     compiler.addImport("machine", machine);
+    compiler.addImport("machine_v2_metering_v1", machine_v2_metering_v1);
     compiler.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
     compiler.addImport("portable_value", portable_value);
     compiler.addImport("reified_program_v1", reified_program_v1);
-    compiler.addImport("reducer_semantics_v1", reducer_semantics_v1);
+    compiler.addImport("program_semantics_v1", program_semantics_v1);
     compiler.addImport("rnf", rnf);
     const program_v2 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.program_v2)),
@@ -529,12 +583,13 @@ fn addCoreModules(
         .kernel_machine_v1 = kernel_machine_v1,
         .kernel_wasm_v1 = kernel_wasm_v1,
         .machine = machine,
+        .machine_v2_metering_v1 = machine_v2_metering_v1,
         .machine_v2_profile_v1 = machine_v2_profile_v1,
         .portable_value = portable_value,
-        .program_evaluator_v1 = program_evaluator_v1,
+        .program_semantics_v1 = program_semantics_v1,
         .program_v2 = program_v2,
+        .reducer_clause_v1 = reducer_clause_v1,
         .reified_program_v1 = reified_program_v1,
-        .reducer_semantics_v1 = reducer_semantics_v1,
         .rnf = rnf,
     };
 }
@@ -549,7 +604,6 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("machine", core.machine);
     module.addImport("machine_v2_profile_v1", core.machine_v2_profile_v1);
     module.addImport("portable_value", core.portable_value);
-    module.addImport("program_evaluator_v1", core.program_evaluator_v1);
     module.addImport("program_v2", core.program_v2);
 }
 
@@ -845,8 +899,8 @@ pub fn build(b: *std.Build) void {
         host_core.machine_v2_profile_v1,
     );
     reified_program_test.addImport(
-        "program_evaluator_v1",
-        host_core.program_evaluator_v1,
+        "reducer_clause_v1",
+        host_core.reducer_clause_v1,
     );
     const reification_generated_test = programTestModule(
         b,
@@ -869,15 +923,25 @@ pub fn build(b: *std.Build) void {
         .basename = "boundary-reification-generated-proof.json",
     });
     const reducer_semantics_test = b.createModule(.{
-        .root_source_file = b.path("test/reducer_semantics_v1.zig"),
+        .root_source_file = b.path("test/program_semantics_v1.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
     reducer_semantics_test.addImport("control_ir", host_core.control_ir);
     reducer_semantics_test.addImport("rnf", host_core.rnf);
     reducer_semantics_test.addImport(
-        "reducer_semantics_v1",
-        host_core.reducer_semantics_v1,
+        "program_semantics_v1",
+        host_core.program_semantics_v1,
+    );
+    const machine_v2_metering_test = b.createModule(.{
+        .root_source_file = b.path("test/machine_v2_metering_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    machine_v2_metering_test.addImport("control_ir", host_core.control_ir);
+    machine_v2_metering_test.addImport(
+        "machine_v2_metering_v1",
+        host_core.machine_v2_metering_v1,
     );
     const image_test = b.createModule(.{
         .root_source_file = b.path("test/image_v1.zig"),
@@ -938,6 +1002,10 @@ pub fn build(b: *std.Build) void {
     machine_yield.addImport("image_v1", host_core.image_v1);
     machine_yield.addImport("kernel_v1", host_core.kernel_v1);
     machine_yield.addImport("machine", host_core.machine);
+    machine_yield.addImport(
+        "machine_v2_profile_v1",
+        host_core.machine_v2_profile_v1,
+    );
     const agent_loop = programTestModule(
         b,
         host_core,
@@ -980,6 +1048,7 @@ pub fn build(b: *std.Build) void {
     reified_core_step.dependOn(reification_baseline_step);
     addTestArtifact(b, reified_core_step, reified_program_test);
     addTestArtifact(b, reified_core_step, reducer_semantics_test);
+    addTestArtifact(b, reified_core_step, machine_v2_metering_test);
     const reification_generated_step = b.step(
         "check-boundary-reification-generated",
         "Exhaust finite graphs and run 10000 seeded direct/kernel traces.",
@@ -1539,12 +1608,13 @@ pub fn build(b: *std.Build) void {
                 "source_module kernel_machine_v1 image_runtime_semantics src/kernel_machine_v1.zig\n" ++
                 "source_module kernel_wasm_v1 image_runtime_semantics src/kernel_wasm_v1.zig\n" ++
                 "source_module machine {s} {s}\n" ++
+                "source_module machine_v2_metering_v1 direct_runtime_semantics src/machine_v2_metering_v1.zig\n" ++
                 "source_module machine_v2_profile_v1 image_runtime_semantics src/machine_v2_profile_v1.zig\n" ++
                 "source_module portable_value {s} {s}\n" ++
-                "source_module program_evaluator_v1 image_runtime_semantics src/program_evaluator_v1.zig\n" ++
+                "source_module program_semantics_v1 image_runtime_semantics src/program_semantics_v1.zig\n" ++
                 "source_module program_v2 {s} {s}\n" ++
+                "source_module reducer_clause_v1 image_runtime_semantics src/reducer_clause_v1.zig\n" ++
                 "source_module reified_program_v1 {s} {s}\n" ++
-                "source_module reducer_semantics_v1 {s} {s}\n" ++
                 "source_module rnf {s} {s}\n",
             .{
                 std.meta.fields(CoreModules).len,
@@ -1574,8 +1644,6 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.program_v2),
                 @tagName(coreModuleRole(.reified_program_v1)),
                 coreModulePath(.reified_program_v1),
-                @tagName(coreModuleRole(.reducer_semantics_v1)),
-                coreModulePath(.reducer_semantics_v1),
                 @tagName(coreModuleRole(.rnf)),
                 coreModulePath(.rnf),
             },
@@ -1942,17 +2010,56 @@ pub fn build(b: *std.Build) void {
         "Prove BPI1 bytes ignore Machine v2 profiles and metering annotations.",
     );
     image_profile_invariance_step.dependOn(reified_core_step);
+    const machine_v2_profile_projection_step = b.step(
+        "check-boundary-machine-v2-profile-projection",
+        "Prove semantic RNF quotients mixed legacy checkpoint and jump paths.",
+    );
+    addTestArtifact(b, machine_v2_profile_projection_step, machine_yield);
     const pure_evaluator_surface_guard = b.addSystemCommand(&.{
         "sh",
         "-c",
-        "if rg -n 'machine\\.zig|MachineOptions|caller_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded' src/image_v1.zig src/image_emit_v1.zig src/reified_program_v1.zig src/program_evaluator_v1.zig; then exit 1; fi",
+        "if rg -n 'machine_v2|machine\\.zig|MachineOptions|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded|ABL_RNF2' src/program_semantics_v1.zig src/reducer_clause_v1.zig src/image_v1.zig src/reified_program_v1.zig; then exit 1; fi; if rg -n '@import\\(\"(machine|machine_v2|kernel)' src/program_semantics_v1.zig src/reducer_clause_v1.zig src/image_v1.zig src/image_emit_v1.zig src/reified_program_v1.zig; then exit 1; fi",
     });
+    const isolated_pure = addPureProgramModules(
+        b,
+        b.graph.host,
+        optimize,
+    );
+    const isolated_clause_test = b.createModule(.{
+        .root_source_file = b.path("test/reducer_clause_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    isolated_clause_test.addImport(
+        "reducer_clause_v1",
+        isolated_pure.reducer_clause_v1,
+    );
+    const pure_topology_files = b.addWriteFiles();
+    const pure_topology_receipt = pure_topology_files.add(
+        "boundary-pure-module-topology.txt",
+        "control_ir -> program_semantics_v1\n" ++
+            "portable_value -> program_semantics_v1\n" ++
+            "rnf -> program_semantics_v1\n" ++
+            "dynamic_value_v1 -> image_v1\n" ++
+            "program_semantics_v1 -> image_v1\n" ++
+            "dynamic_value_v1 -> reducer_clause_v1\n" ++
+            "image_v1 -> reducer_clause_v1\n" ++
+            "program_semantics_v1 -> reducer_clause_v1\n",
+    );
+    const pure_topology_guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "test \"$(wc -l < \"$1\" | tr -d ' ')\" -eq 8 && ! rg -n 'machine|kernel' \"$1\"",
+        "sh",
+    });
+    pure_topology_guard.addFileArg(pure_topology_receipt);
     const pure_evaluator_step = b.step(
         "check-boundary-pure-evaluator",
         "Check one finite BPI1 reducer clause without Machine v2 policy.",
     );
-    pure_evaluator_step.dependOn(reified_core_step);
+    addTestArtifact(b, pure_evaluator_step, isolated_clause_test);
     pure_evaluator_step.dependOn(&pure_evaluator_surface_guard.step);
+    pure_evaluator_step.dependOn(&pure_topology_guard.step);
     const image_malformed_step = b.step(
         "check-boundary-image-malformed",
         "Reject deterministic malformed BPI1 and ABL_RNF2 corpora.",
@@ -2009,6 +2116,7 @@ pub fn build(b: *std.Build) void {
     inline for (.{
         image_canonical_step,
         image_profile_invariance_step,
+        machine_v2_profile_projection_step,
         image_malformed_step,
         image_digest_step,
         pure_evaluator_step,

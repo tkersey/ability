@@ -3,11 +3,6 @@ const portable_value = @import("portable_value");
 const rnf = @import("rnf");
 const std = @import("std");
 
-pub const segment_fuel_semantic_domain =
-    "segment-fuel=preflight-resource-shape-v4";
-pub const dynamic_fuel_quantum_bytes: u64 = 16;
-pub const await_effect_cost: u64 = 1;
-
 pub const FailureRole = enum {
     arithmetic_overflow,
     division_by_zero,
@@ -31,7 +26,6 @@ pub const WireSuspension = enum(u8) {
     effect = 0,
     call = 1,
     explicit_yield = 2,
-    caller_fuel = 3,
 };
 
 pub const WireInvariant = enum(u8) {
@@ -95,15 +89,6 @@ pub fn wireTerminator(terminator: control_ir.Terminator) WireTerminator {
     };
 }
 
-pub fn wireSuspension(kind: control_ir.SuspensionKind) WireSuspension {
-    return switch (kind) {
-        .effect => .effect,
-        .call => .call,
-        .explicit_yield => .explicit_yield,
-        .caller_fuel => .caller_fuel,
-    };
-}
-
 pub fn wireInvariant(invariant: rnf.InvariantTerm) WireInvariant {
     return switch (invariant) {
         .boolean => .boolean,
@@ -127,19 +112,6 @@ pub fn wireInvariant(invariant: rnf.InvariantTerm) WireInvariant {
         .integer_relation_result => .integer_relation_result,
         .sum_case => .sum_case,
         .sum_case_result => .sum_case_result,
-    };
-}
-
-pub fn wireConstructorKind(kind: rnf.ConstructorKind) WireConstructorKind {
-    return switch (kind) {
-        .entry => .entry,
-        .segment_entry => .segment_entry,
-        .loop_header => .loop_header,
-        .await_effect => .await_effect,
-        .call_return => .call_return,
-        .after_handler => .after_handler,
-        .caller_fuel_yield => .explicit_yield,
-        .terminal_handoff => .terminal_handoff,
     };
 }
 
@@ -423,156 +395,6 @@ pub fn failureRoles(
         => &.{.capacity_exceeded},
         else => &.{},
     };
-}
-
-pub fn minimumBlockCost(comptime block: control_ir.Block) u64 {
-    return @intCast(block.instructions.len + 1);
-}
-
-pub fn dynamicBytesCost(variable_size: bool, canonical_bytes: u64) u64 {
-    if (!variable_size) return 0;
-    return std.math.divCeil(
-        u64,
-        canonical_bytes,
-        dynamic_fuel_quantum_bytes,
-    ) catch std.math.maxInt(u64);
-}
-
-/// Compute the exact-or-bounded canonical result size used by segment fuel
-/// preflight. `Backend` supplies representation-specific schema and value
-/// access; this exhaustive operation law is shared by every execution engine.
-pub fn resultEncodedBytes(
-    comptime instruction: control_ir.Instruction,
-    context: anytype,
-    comptime Backend: type,
-) u64 {
-    const maximum = Backend.maximumResultBytes(instruction);
-    return switch (instruction.operation) {
-        .metadata => unreachable,
-        .constant => Backend.constantBytes(instruction),
-        .copy => Backend.operandBytes(context, instruction.operands[0]),
-        .product_construct => blk: {
-            var total: u64 = 0;
-            inline for (instruction.operands) |operand| {
-                total +|= Backend.operandBytes(context, operand);
-            }
-            break :blk Backend.boundedResultBytes(instruction, total);
-        },
-        .product_extract => |field_index| Backend.exactProductFieldBytes(
-            context,
-            instruction,
-            field_index,
-        ) orelse maximum,
-        .product_replace => maximum,
-        .sum_construct => Backend.boundedResultBytes(
-            instruction,
-            4 +| if (instruction.operands.len == 0)
-                0
-            else
-                Backend.operandBytes(context, instruction.operands[0]),
-        ),
-        .sum_extract => maximum,
-        .optional_none => 1,
-        .optional_some => Backend.boundedResultBytes(
-            instruction,
-            1 +| Backend.operandBytes(context, instruction.operands[0]),
-        ),
-        .select => @max(
-            Backend.operandBytes(context, instruction.operands[1]),
-            Backend.operandBytes(context, instruction.operands[2]),
-        ),
-        .vector_empty, .text_empty, .bytes_empty => 4,
-        .vector_get => Backend.exactVectorElementBytes(
-            context,
-            instruction,
-        ) orelse maximum,
-        .vector_set => maximum,
-        .vector_push => Backend.boundedResultBytes(
-            instruction,
-            Backend.operandBytes(context, instruction.operands[0]) +|
-                Backend.operandBytes(context, instruction.operands[1]),
-        ),
-        .vector_pop => maximum,
-        .vector_truncate => @min(
-            maximum,
-            Backend.operandBytes(context, instruction.operands[0]),
-        ),
-        .vector_clear => 4,
-        .text_append, .bytes_append => combinedSequenceBytes(
-            instruction,
-            context,
-            Backend,
-            &.{1},
-        ),
-        .bytes_append_scalar => Backend.boundedResultBytes(
-            instruction,
-            Backend.operandBytes(context, instruction.operands[0]) +| 1,
-        ),
-        .text_append_scalar => Backend.boundedResultBytes(
-            instruction,
-            Backend.operandBytes(context, instruction.operands[0]) +| 4,
-        ),
-        .text_append_unsigned, .text_append_signed => Backend.boundedResultBytes(
-            instruction,
-            Backend.operandBytes(context, instruction.operands[0]) +| 20,
-        ),
-        .text_copy, .bytes_copy => @min(
-            maximum,
-            Backend.operandBytes(context, instruction.operands[0]),
-        ),
-        .text_join, .bytes_join => combinedSequenceBytes(
-            instruction,
-            context,
-            Backend,
-            &.{ 1, 2 },
-        ),
-        .compare_eq_zero,
-        .integer_add,
-        .integer_subtract,
-        .integer_multiply,
-        .integer_divide,
-        .integer_remainder,
-        .integer_negate,
-        .integer_equal,
-        .integer_not_equal,
-        .integer_less_than,
-        .integer_less_equal,
-        .integer_greater_than,
-        .integer_greater_equal,
-        .integer_bit_not,
-        .integer_bit_and,
-        .integer_bit_or,
-        .integer_bit_xor,
-        .integer_convert,
-        .enum_to_u32,
-        .boolean_not,
-        .boolean_and,
-        .boolean_or,
-        .sum_tag_is,
-        .optional_is_some,
-        .vector_length,
-        .text_length,
-        .bytes_length,
-        .text_compare,
-        .bytes_compare,
-        => maximum,
-    };
-}
-
-fn combinedSequenceBytes(
-    comptime instruction: control_ir.Instruction,
-    context: anytype,
-    comptime Backend: type,
-    comptime suffix_operand_indexes: []const usize,
-) u64 {
-    var result = Backend.operandBytes(context, instruction.operands[0]);
-    inline for (suffix_operand_indexes) |operand_index| {
-        result +|= Backend.operandBytes(
-            context,
-            instruction.operands[operand_index],
-        ) -| 4;
-    }
-    return Backend.boundedResultBytes(instruction, result);
 }
 
 pub noinline fn executeTypedInstructions(

@@ -5,8 +5,8 @@ const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
-const program_evaluator_v1 = @import("program_evaluator_v1");
 const program_v2 = @import("program_v2");
+const reducer_clause_v1 = @import("reducer_clause_v1");
 const std = @import("std");
 
 const u32_type: cir.ValueType = .{ .scalar = .u32 };
@@ -122,12 +122,12 @@ test "direct specialization consumes the exact Reified Program" {
     try std.testing.expectEqual(@as(usize, 4), ProgramConstants.bytes.len);
     try std.testing.expectEqual(@as(usize, 8), ProgramValues.bytes.len);
     try std.testing.expectEqual(@as(usize, 12), ProgramFunctions.bytes.len);
-    try std.testing.expectEqual(@as(usize, 42), ProgramSegments.bytes.len);
+    try std.testing.expectEqual(@as(usize, 34), ProgramSegments.bytes.len);
     try std.testing.expectEqual(
-        @as(u32, 38),
+        @as(u32, 30),
         std.mem.readInt(u32, ProgramSegments.bytes[4..8], .little),
     );
-    try std.testing.expectEqual(@as(u8, 3), ProgramSegments.bytes[34]);
+    try std.testing.expectEqual(@as(u8, 3), ProgramSegments.bytes[26]);
     try std.testing.expectEqual(@as(usize, 4), ProgramTransitions.bytes.len);
     try std.testing.expectEqual(@as(usize, 36), ProgramConstructors.bytes.len);
     try std.testing.expectEqual(@as(u8, 0), ProgramConstructors.bytes[12]);
@@ -230,11 +230,11 @@ test "direct unmetered clause and BPI1 evaluator have one transition meaning" {
     const image = try image_v1.validateImage(&Image.bytes, &workspace);
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 77, .little);
-    var slots = [_]program_evaluator_v1.Slot{.{}} ** 1024;
+    var slots = [_]reducer_clause_v1.Slot{.{}} ** 1024;
     slots[0] = .{ .bytes = &args, .initialized = true };
     var output: [4]u8 = undefined;
     var scratch: [8192]u8 = undefined;
-    const evaluated = try program_evaluator_v1.evaluate(
+    const evaluated = try reducer_clause_v1.evaluateClause(
         image,
         image.catalogs.entry_segment_id,
         &slots,
@@ -381,7 +381,7 @@ test "BPI1 executable validation rejects a forged terminator" {
     var malformed = Image.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segment_offset: usize = envelope.sections[7].offset;
-    malformed[segment_offset + 34] = 0xff;
+    malformed[segment_offset + 26] = 0xff;
     var workspace: image_v1.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.InvalidTerminator,
@@ -417,6 +417,47 @@ test "MachineV2Profile binds segment costs to v2 semantic identity" {
     );
 }
 
+test "self-consistent forged Machine contract cannot authenticate profile semantics" {
+    var malformed = Profile.bytes;
+    const cost_offset = machine_v2_profile_v1.header_length;
+    std.mem.writeInt(
+        u64,
+        malformed[cost_offset..][0..8],
+        std.mem.readInt(u64, malformed[cost_offset..][0..8], .little) + 1,
+        .little,
+    );
+    malformed[64] ^= 1;
+    const contract = machine_v2_profile_v1.machineV2ContractDigest(
+        malformed[64..96].*,
+        std.mem.readInt(u32, malformed[128..132], .little),
+        std.mem.readInt(u32, malformed[132..136], .little),
+        std.mem.readInt(u64, malformed[136..144], .little),
+    );
+    @memcpy(malformed[96..128], &contract);
+    _ = try machine_v2_profile_v1.validate(
+        &malformed,
+        Image.program_transition_digest,
+    );
+
+    const state = try ProgramMachine.initialState(std.testing.allocator, 29);
+    defer ProgramMachine.deinitState(state);
+    const authoritative = try ProgramMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(authoritative);
+    const before = try std.testing.allocator.dupe(u8, authoritative);
+    defer std.testing.allocator.free(before);
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    try std.testing.expectError(
+        error.InvalidProfile,
+        kernel_v1.bindMachineV2(image, &malformed, &workspace),
+    );
+    try std.testing.expectEqualSlices(u8, before, authoritative);
+}
+
 test "MachineV2Profile rejects a State ceiling below one RNF frame" {
     var malformed = Profile.bytes;
     std.mem.writeInt(u32, malformed[132..136], 75, .little);
@@ -435,9 +476,43 @@ test "MachineV2Profile rejects a State ceiling below one RNF frame" {
     );
 }
 
+test "MachineV2Profile authenticates every scalar and constructor component" {
+    const segment_count = std.mem.readInt(u32, Profile.bytes[168..172], .little);
+    const terminator_override = machine_v2_profile_v1.header_length +
+        @as(usize, segment_count) * 8;
+    const constructor_origin = machine_v2_profile_v1.header_length +
+        @as(usize, segment_count) * 9;
+    const constructor_mapping = constructor_origin + std.mem.readInt(
+        u32,
+        Profile.bytes[172..176],
+        .little,
+    );
+    inline for (.{
+        @as(usize, 32), // Program transition binding
+        @as(usize, 64), // Machine-v2 semantic digest
+        @as(usize, 96), // Machine-v2 contract digest
+        @as(usize, 128), // Maximum frames
+        @as(usize, 132), // Maximum State bytes
+        @as(usize, 136), // Maximum Machine fuel
+        @as(usize, 180), // Initial Machine-v2 constructor
+        terminator_override,
+        constructor_origin,
+        constructor_mapping,
+    }) |offset| {
+        var malformed = Profile.bytes;
+        malformed[offset] ^= 1;
+        var workspace: image_v1.ValidationWorkspace = .{};
+        const image = try image_v1.validateImage(&Image.bytes, &workspace);
+        try std.testing.expectError(
+            error.InvalidProfile,
+            kernel_v1.bindMachineV2(image, &malformed, &workspace),
+        );
+    }
+}
+
 test "BPI1 validation recomputes the Program transition digest" {
     var malformed = Image.bytes;
-    malformed[40] ^= 0x01;
+    malformed[32] ^= 0x01;
     var workspace: image_v1.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.ProgramTransitionDigestMismatch,
@@ -447,7 +522,7 @@ test "BPI1 validation recomputes the Program transition digest" {
 
 test "BPI1 validation recomputes evaluator scratch requirements" {
     var malformed = Image.bytes;
-    malformed[120] ^= 0x01;
+    malformed[64] ^= 0x01;
     var workspace: image_v1.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.ScratchRequirementMismatch,
@@ -799,7 +874,7 @@ test "fixed kernel scalar algebra matches direct success and failure" {
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segments_offset: usize = @intCast(envelope.sections[7].offset);
     const record = segments_offset + 4;
-    var instruction = record + 24 +
+    var instruction = record + image_v1.segment_prefix_length +
         @as(usize, std.mem.readInt(u16, malformed[record + 10 ..][0..2], .little)) * 2;
     instruction += std.mem.readInt(
         u32,
@@ -839,7 +914,7 @@ test "BPI1 rejects out-of-domain authored failure tags" {
     ).image();
     const envelope = try image_v1.validateEnvelope(&FailImage.bytes);
     const segments_offset: usize = @intCast(envelope.sections[7].offset);
-    const terminator_payload = segments_offset + 4 + 24 + 8;
+    const terminator_payload = segments_offset + 4 + image_v1.segment_prefix_length + 8;
     inline for (.{ @as(u32, 1), std.math.maxInt(u32) }) |tag| {
         var malformed = FailImage.bytes;
         std.mem.writeInt(
@@ -976,7 +1051,7 @@ test "BPI1 type-checks branch and terminal values" {
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segments_offset: usize = @intCast(envelope.sections[7].offset);
     const record = segments_offset + 4;
-    var terminator = record + 24 + 2;
+    var terminator = record + image_v1.segment_prefix_length + 2;
     terminator += std.mem.readInt(
         u32,
         malformed[terminator..][0..4],
@@ -1037,7 +1112,7 @@ test "BPI1 enforces one resume marker for effect continuations" {
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segments_offset: usize = @intCast(envelope.sections[7].offset);
     const record = segments_offset + 4;
-    const terminator = record + 24 + 2;
+    const terminator = record + image_v1.segment_prefix_length + 2;
     const payload = terminator + 8;
     const request_count = std.mem.readInt(
         u16,

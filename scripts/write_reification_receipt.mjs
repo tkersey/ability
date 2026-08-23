@@ -19,6 +19,7 @@ const receipt = {
   zig_version: "0.16.0",
   image_format: "BPI1",
   image_magic: "ABL_BPI1",
+  image_header_length: 316,
   program_transition_domain: "boundary-program-transition-v1",
   machine_v2_profile_format: "ABL_MV2P1",
   machine_v2_kernel_abi: 1,
@@ -63,6 +64,8 @@ const receipt = {
   source_interpreter_present: false,
   runtime_definition_loader_present: false,
   callback_registry_present: false,
+  public_clause_evaluator_present: false,
+  pure_clause_machine_v2_dependency_present: false,
   proof_gate: "check-boundary-reification-receipt",
   proof_gate_required_before_emission: true,
   proof_source_sha256: Object.fromEntries(

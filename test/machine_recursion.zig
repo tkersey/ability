@@ -1124,7 +1124,7 @@ test "BPI1 rejects call edges outside the declared callee function" {
             malformed[segments_offset + cursor ..][0..4],
             .little,
         );
-        var terminator = segments_offset + cursor + 24 +
+        var terminator = segments_offset + cursor + image_v1.segment_prefix_length +
             @as(
                 usize,
                 std.mem.readInt(

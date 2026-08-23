@@ -56,6 +56,8 @@ const KernelMachine = Program.kernelMachineV2(machine_options);
 Fuel, frame ceilings, State-byte ceilings, caller checkpoints, and cumulative
 budgets belong to `Profile` and Machine ABI v2. They are not Program Image
 semantics. Reification v1 does not yet provide the later open Process ABI.
+Boundary's finite BPI1 clause evaluator is an internal proof and implementation
+seam; no raw evaluator is exported from the package root.
 
 ## Portable language
 

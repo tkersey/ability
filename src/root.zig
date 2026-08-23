@@ -7,7 +7,6 @@ const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const portable_value = @import("portable_value");
-const program_evaluator_v1 = @import("program_evaluator_v1");
 const program_v2 = @import("program_v2");
 
 /// Published Boundary package identity.
@@ -17,8 +16,6 @@ pub const package_version = "1.6.0";
 pub const effect = effect_v2;
 /// Canonical Boundary Program Image v1 wire format and validation.
 pub const image = image_v1;
-/// One finite profile-independent BPI1 reducer-clause evaluator.
-pub const evaluator = program_evaluator_v1;
 /// Bounded Machine ABI v2 compatibility surfaces.
 pub const machine_v2 = struct {
     pub const Options = machine.Options;
@@ -52,7 +49,11 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(@hasDecl(@This(), "Agent"));
     try std.testing.expect(@hasDecl(@This(), "effect"));
     try std.testing.expect(@hasDecl(@This(), "image"));
-    try std.testing.expect(@hasDecl(@This(), "evaluator"));
+    try std.testing.expect(!@hasDecl(@This(), "evaluator"));
+    try std.testing.expect(!@hasDecl(@This(), "reducer"));
+    try std.testing.expect(!@hasDecl(@This(), "clause"));
+    try std.testing.expect(!@hasDecl(@This(), "program_evaluator"));
+    try std.testing.expect(!@hasDecl(@This(), "internal_evaluator"));
     try std.testing.expect(@hasDecl(@This(), "machine_v2"));
     try std.testing.expect(!@hasDecl(@This(), "kernel"));
     try std.testing.expect(@hasDecl(@This(), "schema"));

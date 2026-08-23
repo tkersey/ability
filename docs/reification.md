@@ -21,6 +21,11 @@ the same State or Request identity.
 Valid images describe effects but grant no authority; the kernel returns a
 typed request and stops.
 
+The finite byte-level BPI1 clause evaluator is internal. It is compiled and
+tested from a module graph that contains no Machine-v2 modules, but it is not a
+public operational API. The supported v1.6 execution surface remains the
+bounded Machine ABI v2 compatibility path.
+
 The v2 compatibility claim is transition equivalence: outcome tag, caller fuel, State,
 request identity and payload, result, failure, and operational rejection must
 agree at every boundary. Run `zig build check-boundary-reification-receipt` for

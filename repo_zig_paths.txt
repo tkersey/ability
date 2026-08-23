@@ -12,11 +12,12 @@ src/kernel_machine_v1.zig
 src/kernel_v1.zig
 src/kernel_wasm_v1.zig
 src/machine.zig
+src/machine_v2_metering_v1.zig
 src/machine_v2_profile_v1.zig
 src/portable_value.zig
-src/program_evaluator_v1.zig
+src/program_semantics_v1.zig
 src/program_v2.zig
-src/reducer_semantics_v1.zig
+src/reducer_clause_v1.zig
 src/reified_program_v1.zig
 src/rnf.zig
 src/root.zig
@@ -56,6 +57,7 @@ test/machine_after.zig
 test/machine_native_wasm.zig
 test/machine_performance.zig
 test/machine_recursion.zig
+test/machine_v2_metering_v1.zig
 test/machine_yield.zig
 test/program_algebraic_collection_operations.zig
 test/program_compile.zig
@@ -67,7 +69,8 @@ test/program_effect_morphism.zig
 test/program_integer_boolean_operations.zig
 test/program_operations.zig
 test/program_residual_effects.zig
-test/reducer_semantics_v1.zig
+test/program_semantics_v1.zig
+test/reducer_clause_v1.zig
 test/reification_baseline.zig
 test/reification_generated_v1.zig
 test/reified_program_v1.zig

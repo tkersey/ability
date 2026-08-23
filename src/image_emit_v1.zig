@@ -1,7 +1,7 @@
 const dynamic_value_v1 = @import("dynamic_value_v1");
 const image_v1 = @import("image_v1");
 const portable_value = @import("portable_value");
-const reducer_semantics_v1 = @import("reducer_semantics_v1");
+const program_semantics_v1 = @import("program_semantics_v1");
 const std = @import("std");
 
 const maximum_nodes = 1024;
@@ -82,12 +82,12 @@ pub fn Envelope(
         @memcpy(bytes[0..image_v1.magic.len], &image_v1.magic);
         writeAt(u16, &bytes, 8, image_v1.image_format_version);
         writeAt(u16, &bytes, 10, image_v1.evaluator_semantics_version);
-        writeAt(u32, &bytes, 20, image_v1.header_length);
+        writeAt(u32, &bytes, 16, image_v1.header_length);
         writeAt(u64, &bytes, 24, total_length);
-        writeAt(u32, &bytes, 32, image_v1.section_count);
-        @memcpy(bytes[40..72], &options.program_transition_digest);
-        writeAt(u64, &bytes, 120, options.maximum_kernel_scratch_bytes);
-        writeAt(u32, &bytes, 128, options.maximum_single_value_bytes);
+        writeAt(u32, &bytes, 20, image_v1.section_count);
+        @memcpy(bytes[32..64], &options.program_transition_digest);
+        writeAt(u64, &bytes, 64, options.maximum_kernel_scratch_bytes);
+        writeAt(u32, &bytes, 72, options.maximum_single_value_bytes);
         var payload_offset: usize = image_v1.header_length;
         for (sections, 0..) |section, index| {
             const descriptor = image_v1.fixed_prefix_length +
@@ -758,12 +758,6 @@ pub fn ProgramSegments(
             appendInt(u8, &bytes, &cursor, 0);
             appendInt(u16, &bytes, &cursor, block.parameters.len);
             appendInt(u32, &bytes, &cursor, block.instructions.len);
-            appendInt(
-                u64,
-                &bytes,
-                &cursor,
-                0,
-            );
             for (block.parameters) |parameter| {
                 appendInt(
                     u16,
@@ -786,7 +780,7 @@ pub fn ProgramSegments(
                     u16,
                     &bytes,
                     &cursor,
-                    reducer_semantics_v1.wireTag(instruction.operation),
+                    program_semantics_v1.wireTag(instruction.operation),
                 );
                 appendInt(
                     u16,
@@ -848,7 +842,7 @@ pub fn ProgramEntryTransitions(comptime Reified: type) type {
                 .source = Reified.semantic_canonicalization.blockId(
                     transition.source_block,
                 ),
-                .edge = @intFromEnum(reducer_semantics_v1.wireIncomingEdge(
+                .edge = @intFromEnum(program_semantics_v1.wireIncomingEdge(
                     transition.edge_kind,
                 )),
                 .target = Reified.semantic_canonicalization.blockId(
@@ -902,15 +896,13 @@ pub fn ProgramConstructors(comptime Reified: type, comptime Schemas: type) type 
                 u8,
                 &bytes,
                 &cursor,
-                @intFromEnum(reducer_semantics_v1.wireConstructorKind(
-                    constructor.kind,
-                )),
+                @intFromEnum(imageConstructorKind(constructor.kind)),
             );
             appendInt(
                 u8,
                 &bytes,
                 &cursor,
-                @intFromEnum(reducer_semantics_v1.wireConstructorOrigin(
+                @intFromEnum(program_semantics_v1.wireConstructorOrigin(
                     constructor.origin,
                 )),
             );
@@ -990,7 +982,7 @@ fn appendInvariant(
         u8,
         bytes,
         cursor,
-        @intFromEnum(reducer_semantics_v1.wireInvariant(invariant)),
+        @intFromEnum(program_semantics_v1.wireInvariant(invariant)),
     );
     appendInt(u8, bytes, cursor, 0);
     appendInt(u16, bytes, cursor, 0);
@@ -1218,7 +1210,7 @@ fn appendTerminator(
         u8,
         bytes,
         cursor,
-        @intFromEnum(reducer_semantics_v1.wireTerminator(terminator)),
+        @intFromEnum(program_semantics_v1.wireTerminator(terminator)),
     );
     appendInt(u8, bytes, cursor, 0);
     appendInt(u16, bytes, cursor, 0);
@@ -1240,9 +1232,7 @@ fn appendTerminator(
                 u8,
                 bytes,
                 cursor,
-                @intFromEnum(reducer_semantics_v1.wireSuspension(
-                    suspension.kind,
-                )),
+                @intFromEnum(imageSuspensionKind(suspension.kind)),
             );
             appendInt(u8, bytes, cursor, 0);
             appendInt(u16, bytes, cursor, 0);
@@ -1353,7 +1343,7 @@ fn appendEdge(
 }
 
 fn instructionKindTag(comptime operation: anytype) u8 {
-    return switch (reducer_semantics_v1.canonicalInstructionKind(operation)) {
+    return switch (program_semantics_v1.canonicalInstructionKind(operation)) {
         .constant => 0,
         .copy => 1,
         .compare_eq_zero => 2,
@@ -1383,6 +1373,28 @@ fn blockRoleTag(comptime role: anytype) u8 {
         .call_return => 2,
         .after_handler => 3,
         .terminal_handoff => 4,
+    };
+}
+
+fn imageSuspensionKind(kind: anytype) program_semantics_v1.WireSuspension {
+    return switch (kind) {
+        .effect => .effect,
+        .call => .call,
+        .explicit_yield => .explicit_yield,
+        else => @compileError("BPI1 excludes synthetic scheduling suspensions"),
+    };
+}
+
+fn imageConstructorKind(kind: anytype) program_semantics_v1.WireConstructorKind {
+    return switch (kind) {
+        .entry => .entry,
+        .segment_entry => .segment_entry,
+        .loop_header => .loop_header,
+        .await_effect => .await_effect,
+        .call_return => .call_return,
+        .after_handler => .after_handler,
+        .caller_fuel_yield => .explicit_yield,
+        .terminal_handoff => .terminal_handoff,
     };
 }
 

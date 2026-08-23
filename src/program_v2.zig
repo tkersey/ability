@@ -4,6 +4,31 @@ const kernel_machine_v1 = @import("kernel_machine_v1");
 const machine = @import("machine");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 
+fn constructorFieldsEqual(
+    left: anytype,
+    right: anytype,
+    allow_invariants: bool,
+) bool {
+    if (left.source_block != right.source_block or
+        left.resume_target != right.resume_target or
+        left.has_activation_context != right.has_activation_context or
+        left.activation_len != right.activation_len or
+        left.environment_len != right.environment_len or
+        left.invariant_len != right.invariant_len)
+    {
+        return false;
+    }
+    for (left.activationFields(), right.activationFields()) |a, b| {
+        if (a.value != b.value or !a.value_type.eql(b.value_type)) return false;
+    }
+    for (left.environmentFields(), right.environmentFields()) |a, b| {
+        if (a.value != b.value or !a.value_type.eql(b.value_type)) return false;
+    }
+    // Divergent catalogs are admitted only when the quotient constructor has
+    // no path-local invariant data to lose. Equal catalogs retain identity.
+    return allow_invariants or left.invariant_len == 0;
+}
+
 /// Declare one typed Boundary source program with one Machine meaning.
 pub fn program(comptime label: []const u8, comptime Body: type) type {
     const Reified = compiler.ReifiedFor(label, Body);
@@ -82,12 +107,10 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                         @compileError("Machine v2 segment ids diverge from BPI1");
                     }
                 }
-                if (MachineV2Lowering.rnf_value.constructor_count !=
-                    Reified.rnf_value.constructor_count or
-                    MachineV2Lowering.rnf_value.entry_transition_count !=
-                        Reified.rnf_value.entry_transition_count)
+                if (MachineV2Lowering.rnf_value.entry_transition_count !=
+                    Reified.rnf_value.entry_transition_count)
                 {
-                    @compileError("Machine v2 RNF identity catalog diverges from BPI1");
+                    @compileError("Machine v2 transition catalog diverges from BPI1");
                 }
             }
             const costs = comptime blk: {
@@ -130,6 +153,56 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 }
                 break :blk values;
             };
+            const constructor_mappings = comptime blk: {
+                var values: [MachineV2Lowering.rnf_value.constructor_count]u32 =
+                    undefined;
+                for (MachineV2Lowering.rnf_value.constructorSlice(), 0..) |
+                    v2_constructor,
+                    v2_id,
+                | {
+                    if (MachineV2Lowering.rnf_value.constructor_count ==
+                        Reified.rnf_value.constructor_count)
+                    {
+                        if (!constructorFieldsEqual(
+                            &v2_constructor,
+                            &Reified.rnf_value.constructors[v2_id],
+                            true,
+                        )) {
+                            @compileError("Machine v2 constructor layout diverges from BPI1");
+                        }
+                        values[v2_id] = @intCast(v2_id);
+                        continue;
+                    }
+                    if (v2_id < Reified.rnf_value.constructor_count and
+                        constructorFieldsEqual(
+                            &v2_constructor,
+                            &Reified.rnf_value.constructors[v2_id],
+                            true,
+                        ))
+                    {
+                        values[v2_id] = @intCast(v2_id);
+                        continue;
+                    }
+                    var match: ?u32 = null;
+                    for (Reified.rnf_value.constructorSlice(), 0..) |
+                        pure_constructor,
+                        pure_id,
+                    | {
+                        if (!constructorFieldsEqual(
+                            &v2_constructor,
+                            &pure_constructor,
+                            false,
+                        )) continue;
+                        if (match != null) {
+                            @compileError("Machine v2 constructor mapping is ambiguous");
+                        }
+                        match = @intCast(pure_id);
+                    }
+                    values[v2_id] = match orelse
+                        @compileError("Machine v2 constructor lacks a BPI1 quotient");
+                }
+                break :blk values;
+            };
             const transition_kinds = comptime blk: {
                 var values: [MachineV2Lowering.rnf_value.entry_transition_count]u8 =
                     undefined;
@@ -137,7 +210,35 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                     transition,
                     index,
                 | {
+                    const pure_transition = Reified.rnf_value
+                        .entryTransitionSlice()[index];
+                    if (transition.source_block != pure_transition.source_block or
+                        transition.target_block != pure_transition.target_block)
+                    {
+                        @compileError("Machine v2 transition endpoints diverge from BPI1");
+                    }
+                    if (transition.edge_kind != pure_transition.edge_kind and
+                        !(transition.edge_kind == .suspension_continuation and
+                            pure_transition.edge_kind == .jump and
+                            terminator_overrides[
+                                MachineV2Lowering.semantic_canonicalization
+                                    .blockId(transition.source_block)
+                            ] == 1))
+                    {
+                        @compileError("Machine v2 transition delta is not profile-owned");
+                    }
                     values[index] = @intFromEnum(transition.edge_kind);
+                }
+                break :blk values;
+            };
+            const transition_constructors = comptime blk: {
+                var values: [MachineV2Lowering.rnf_value.entry_transition_count]u32 =
+                    undefined;
+                for (MachineV2Lowering.rnf_value.entryTransitionSlice(), 0..) |
+                    transition,
+                    index,
+                | {
+                    values[index] = transition.constructor_id;
                 }
                 break :blk values;
             };
@@ -149,7 +250,11 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 &costs,
                 &terminator_overrides,
                 &constructor_origins,
+                &constructor_mappings,
                 &transition_kinds,
+                &transition_constructors,
+                MachineV2Lowering.initial_constructor_id,
+                Reified.rnf_value.constructor_count,
             );
         }
 

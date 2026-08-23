@@ -4,10 +4,13 @@
 BPI1, `ABL_MV2P1` MachineV2Profile, and canonical `ABL_RNF2` bytes. It retains
 no authoritative State and invokes no callback. It is not the future generic
 Boundary Process kernel.
+The raw clause evaluator beneath it is internal and has no package-root alias.
 
 The profile carries only v2 policy deltas: hard limits, segment costs, and the
 constructor/transition classifications needed to preserve synthetic caller
-checkpoints. Binding recomputes the frozen
+checkpoints. When semantic RNF quotients multiple legacy constructors, the
+profile also carries the authenticated v2-to-BPI1 constructor mapping and v2
+transition constructor identities. Binding recomputes the frozen
 `boundary-rnf-compiler-semantics-v4` digest from BPI1 plus those deltas before
 accepting the Machine contract. Changing a cost or checkpoint annotation
 without changing the v2 semantic and contract identities is rejected.

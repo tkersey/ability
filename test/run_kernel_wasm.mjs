@@ -72,7 +72,7 @@ if (instance.exports.boundary_machine_v2_kernel_execute(wrapped.length) !== 6) {
   throw new Error("wrapped aggregate input lengths were accepted");
 }
 if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
-const sectionOffset = (image, kind) => Number(image.readBigUInt64LE(144 + (kind - 1) * 24 + 8));
+const sectionOffset = (image, kind) => Number(image.readBigUInt64LE(76 + (kind - 1) * 24 + 8));
 for (const [name, mutate] of [
   ["functions", (image) => image.writeUInt32LE(0x20000000, sectionOffset(image, 7))],
   ["transitions", (image) => image.writeUInt32LE(0x20000000, sectionOffset(image, 10))],

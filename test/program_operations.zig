@@ -238,7 +238,7 @@ test "BPI1 rejects schema-invalid operation substitutions before execution" {
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segment_offset: usize = @intCast(envelope.sections[7].offset);
     var cursor = segment_offset + 4;
-    cursor += 24 + @as(usize, std.mem.readInt(
+    cursor += image_v1.segment_prefix_length + @as(usize, std.mem.readInt(
         u16,
         malformed[cursor + 10 ..][0..2],
         .little,
@@ -284,7 +284,7 @@ test "BPI1 rejects constants made unreachable by instruction mutation" {
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segment_offset: usize = @intCast(envelope.sections[7].offset);
     var cursor = segment_offset + 4;
-    cursor += 24 + @as(usize, std.mem.readInt(
+    cursor += image_v1.segment_prefix_length + @as(usize, std.mem.readInt(
         u16,
         malformed[cursor + 10 ..][0..2],
         .little,

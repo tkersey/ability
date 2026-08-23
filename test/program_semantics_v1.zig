@@ -1,5 +1,5 @@
 const control_ir = @import("control_ir");
-const reducer = @import("reducer_semantics_v1");
+const reducer = @import("program_semantics_v1");
 const rnf = @import("rnf");
 const std = @import("std");
 
@@ -98,7 +98,7 @@ test "BPI1 operation tags are exhaustive and independent of current enum tags" {
     }
 }
 
-test "operation failure roles and dynamic fuel have one owner" {
+test "operation failure roles have one pure owner" {
     try std.testing.expectEqualSlices(
         reducer.FailureRole,
         &.{.arithmetic_overflow},
@@ -119,10 +119,6 @@ test "operation failure roles and dynamic fuel have one owner" {
         &.{},
         reducer.failureRoles(.integer_equal),
     );
-    try std.testing.expectEqual(@as(u64, 0), reducer.dynamicBytesCost(false, 33));
-    try std.testing.expectEqual(@as(u64, 0), reducer.dynamicBytesCost(true, 0));
-    try std.testing.expectEqual(@as(u64, 1), reducer.dynamicBytesCost(true, 16));
-    try std.testing.expectEqual(@as(u64, 2), reducer.dynamicBytesCost(true, 17));
 }
 
 test "BPI1 control and RNF wire tags are pinned" {
@@ -132,8 +128,8 @@ test "BPI1 control and RNF wire tags are pinned" {
         @intFromEnum(reducer.wireTerminator(jump)),
     );
     try std.testing.expectEqual(
-        @as(u8, 3),
-        @intFromEnum(reducer.wireSuspension(.caller_fuel)),
+        @as(u8, 2),
+        @intFromEnum(reducer.WireSuspension.explicit_yield),
     );
     const invariant = rnf.InvariantTerm{ .boolean = .{
         .value = 0,
@@ -145,7 +141,7 @@ test "BPI1 control and RNF wire tags are pinned" {
     );
     try std.testing.expectEqual(
         @as(u8, 7),
-        @intFromEnum(reducer.wireConstructorKind(.terminal_handoff)),
+        @intFromEnum(reducer.WireConstructorKind.terminal_handoff),
     );
     try std.testing.expectEqual(
         @as(u8, 2),
@@ -154,85 +150,5 @@ test "BPI1 control and RNF wire tags are pinned" {
     try std.testing.expectEqual(
         @as(u8, 4),
         @intFromEnum(reducer.wireIncomingEdge(.suspension_continuation)),
-    );
-}
-
-test "result-size preflight follows the shared operation law" {
-    const Backend = struct {
-        pub fn maximumResultBytes(
-            comptime _: control_ir.Instruction,
-        ) u64 {
-            return 100;
-        }
-
-        pub fn constantBytes(comptime _: control_ir.Instruction) u64 {
-            return 7;
-        }
-
-        pub fn operandBytes(context: anytype, value: control_ir.ValueId) u64 {
-            return context.sizes[@intCast(value)];
-        }
-
-        pub fn boundedResultBytes(
-            comptime _: control_ir.Instruction,
-            candidate: u64,
-        ) u64 {
-            return @min(100, candidate);
-        }
-
-        pub fn exactProductFieldBytes(
-            _: anytype,
-            comptime _: control_ir.Instruction,
-            comptime _: usize,
-        ) ?u64 {
-            return null;
-        }
-
-        pub fn exactVectorElementBytes(
-            _: anytype,
-            comptime _: control_ir.Instruction,
-        ) ?u64 {
-            return null;
-        }
-    };
-    const context = .{ .sizes = [_]u64{ 0, 12, 9, 7 } };
-    try std.testing.expectEqual(
-        @as(u64, 10),
-        reducer.resultEncodedBytes(
-            .{
-                .kind = .pure,
-                .result = 0,
-                .operands = &.{2},
-                .operation = .optional_some,
-            },
-            context,
-            Backend,
-        ),
-    );
-    try std.testing.expectEqual(
-        @as(u64, 21),
-        reducer.resultEncodedBytes(
-            .{
-                .kind = .pure,
-                .result = 0,
-                .operands = &.{ 1, 2 },
-                .operation = .vector_push,
-            },
-            context,
-            Backend,
-        ),
-    );
-    try std.testing.expectEqual(
-        @as(u64, 20),
-        reducer.resultEncodedBytes(
-            .{
-                .kind = .pure,
-                .result = 0,
-                .operands = &.{ 1, 2, 3 },
-                .operation = .text_join,
-            },
-            context,
-            Backend,
-        ),
     );
 }
