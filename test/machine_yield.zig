@@ -452,6 +452,31 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
             &workspace,
         ),
     );
+    var malformed_initial = MixedProfile.bytes;
+    const initial_constructor = std.mem.readInt(
+        u32,
+        malformed_initial[180..184],
+        .little,
+    );
+    std.mem.writeInt(
+        u32,
+        malformed_initial[180..184],
+        (initial_constructor + 1) % profile_constructor_count,
+        .little,
+    );
+    workspace = .{};
+    const initial_image = try image_v1.validateImage(
+        &MixedImage.bytes,
+        &workspace,
+    );
+    try std.testing.expectError(
+        error.InvalidProfile,
+        kernel_v1.bindMachineV2(
+            initial_image,
+            &malformed_initial,
+            &workspace,
+        ),
+    );
     const segments = program_image.catalogs.envelope.section(.segments);
     var segment_cursor: usize = 4;
     for (0..program_image.segment_count) |_| {

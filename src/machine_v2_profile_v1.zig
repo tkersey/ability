@@ -210,6 +210,12 @@ pub fn semanticDigestForImage(
     {
         return error.InvalidProfile;
     }
+    const mapped_initial = profile.mappedConstructor(
+        profile.initial_constructor_id,
+    ) catch return error.InvalidProfile;
+    if (mapped_initial != catalogs.initial_constructor_id) {
+        return error.InvalidProfile;
+    }
     var hasher = image_v1.SemanticHasher.init(.{});
     image_v1.semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
     image_v1.semanticHashBytes(
