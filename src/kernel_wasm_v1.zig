@@ -121,6 +121,15 @@ fn execute(input: []const u8) ExecuteError!u32 {
     expected = std.math.add(usize, expected, auxiliary_length) catch
         return error.MalformedKernelInput;
     if (expected != input.len) return error.MalformedKernelInput;
+    switch (command) {
+        0 => if (state_length != 0 or auxiliary_length != 0)
+            return error.MalformedKernelInput,
+        1 => if (state_length != 0) return error.MalformedKernelInput,
+        2, 3, 4 => if (auxiliary_length != 0)
+            return error.MalformedKernelInput,
+        5 => {},
+        else => return error.MalformedKernelInput,
+    }
     const image_start = input_header_length;
     const profile_start = std.math.add(usize, image_start, image_length) catch
         return error.MalformedKernelInput;
@@ -392,6 +401,9 @@ fn errorCode(err: ExecuteError) u32 {
         error.InvalidInvariant,
         error.InvalidTransition,
         error.UnreachableEntry,
+        error.LengthOverflow,
+        error.LengthMismatch,
+        error.TrailingBytes,
         error.ProgramTransitionDigestMismatch,
         error.DigestMismatch,
         error.ScratchRequirementMismatch,
@@ -407,9 +419,6 @@ fn errorCode(err: ExecuteError) u32 {
         error.InvalidInitialArgs => 4,
         error.OutputCapacity => 5,
         error.LimitExceeded,
-        error.LengthOverflow,
-        error.LengthMismatch,
-        error.TrailingBytes,
         error.ScratchCapacity,
         error.ProfileResourceLimit,
         error.ExecutionBudgetExceeded,

@@ -112,6 +112,7 @@ if (instance.exports.boundary_machine_v2_kernel_execute(maximumResume.length) !=
 if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
 const sectionOffset = (image, kind) => Number(image.readBigUInt64LE(76 + (kind - 1) * 24 + 8));
 for (const [name, mutate] of [
+  ["total length", (image) => image.writeBigUInt64LE(image.readBigUInt64LE(24) + 1n, 24)],
   ["functions", (image) => image.writeUInt32LE(0x20000000, sectionOffset(image, 7))],
   ["transitions", (image) => image.writeUInt32LE(0x20000000, sectionOffset(image, 10))],
   ["effect identity tail", (image) => {
@@ -129,6 +130,31 @@ for (const [name, mutate] of [
     throw new Error(`malformed ${name} catalog was accepted`);
   }
   if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
+}
+for (const [command, stateSize, auxiliarySize] of [
+  [0, 1, 0],
+  [0, 0, 1],
+  [1, 1, 0],
+  [2, 0, 1],
+  [3, 0, 1],
+  [4, 0, 1],
+]) {
+  const ignored = Buffer.alloc(48 + imageLength + profileLength + stateSize + auxiliarySize);
+  ignored.write("ABL_KIN1", 0, "ascii");
+  ignored.writeUInt16LE(1, 8);
+  ignored.writeUInt16LE(command, 10);
+  ignored.writeUInt32LE(imageLength, 24);
+  ignored.writeUInt32LE(profileLength, 28);
+  ignored.writeUInt32LE(stateSize, 32);
+  ignored.writeUInt32LE(auxiliarySize, 36);
+  input.copy(ignored, 48, 48, 48 + imageLength + profileLength);
+  memory.set(ignored, inputPtr);
+  if (instance.exports.boundary_machine_v2_kernel_execute(ignored.length) !== 1) {
+    throw new Error(`command ${command} accepted ignored State or auxiliary bytes`);
+  }
+  if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) {
+    throw new Error("reset failed");
+  }
 }
 const unboundCost = Buffer.from(input.subarray(0, 48 + imageLength + profileLength));
 unboundCost.writeUInt16LE(0, 10);
