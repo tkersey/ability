@@ -1726,6 +1726,10 @@ pub fn build(b: *std.Build) void {
             "Body.Failure must be an exhaustive enum",
         },
         .{
+            "test/compile_fail/image_failure_variant_limit.zig",
+            "BPI1 failure variants exceed validator capacity",
+        },
+        .{
             "test/compile_fail/oversized_machine_state.zig",
             "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
         },

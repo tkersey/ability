@@ -33,6 +33,7 @@ test/compile_fail/effect_site_ordinal_mismatch.zig
 test/compile_fail/forged_portable_container_marker.zig
 test/compile_fail/generated_container_product_access.zig
 test/compile_fail/generated_reducer_limit.zig
+test/compile_fail/image_failure_variant_limit.zig
 test/compile_fail/machine_state_below_entry_environment.zig
 test/compile_fail/missing_arithmetic_failure.zig
 test/compile_fail/non_enum_failure_tagged_union.zig

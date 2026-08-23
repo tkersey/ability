@@ -8,6 +8,7 @@ pub const evaluator_semantics_version: u16 = 1;
 pub const fixed_prefix_length: u32 = 144;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
+pub const maximum_catalog_entries: u32 = 1024;
 pub const header_length: u32 = fixed_prefix_length +
     section_count * section_descriptor_length;
 
@@ -547,7 +548,9 @@ fn validateFailures(
         return error.InvalidFailureMap;
     if (failure_schema.kind != .@"enum") return error.InvalidFailureMap;
     const count = readInt(u32, bytes, 0);
-    if (count > 1024 or count != readInt(u32, failure_schema.payload, 0)) {
+    if (count > maximum_catalog_entries or
+        count != readInt(u32, failure_schema.payload, 0))
+    {
         return error.InvalidFailureMap;
     }
     var cursor: usize = 4;
@@ -1458,9 +1461,9 @@ fn validateTerminator(
             available,
         ),
         1 => {
+            if (end - cursor < 4) return error.InvalidTerminator;
             const condition = readInt(u16, bytes, cursor);
-            if (end - cursor < 4 or
-                condition >= catalogs.value_count or !available[condition] or
+            if (condition >= catalogs.value_count or !available[condition] or
                 valueNodeKind(catalogs, condition) != .bool or
                 readInt(u16, bytes, cursor + 2) != 0)
             {
@@ -1495,9 +1498,9 @@ fn validateTerminator(
             cursor += 4;
         },
         4 => {
+            if (end - cursor != 4) return error.InvalidTerminator;
             const value = readInt(u16, bytes, cursor);
-            if (end - cursor != 4 or
-                value >= catalogs.value_count or !available[value] or
+            if (value >= catalogs.value_count or !available[value] or
                 valueSchema(catalogs, value) !=
                     functionResultSchema(catalogs, function_id) or
                 readInt(u16, bytes, cursor + 2) != 0)
@@ -1507,8 +1510,9 @@ fn validateTerminator(
             cursor += 4;
         },
         5 => {
+            if (end - cursor != 4) return error.InvalidTerminator;
             const tag = readInt(u32, bytes, cursor);
-            if (end - cursor != 4 or tag > std.math.maxInt(u16) or
+            if (tag > std.math.maxInt(u16) or
                 !failureTagExists(catalogs, tag))
             {
                 return error.InvalidTerminator;
@@ -1516,9 +1520,9 @@ fn validateTerminator(
             cursor += 4;
         },
         6 => {
+            if (end - cursor != 4) return error.InvalidTerminator;
             const value = readInt(u16, bytes, cursor);
-            if (end - cursor != 4 or
-                value >= catalogs.value_count or !available[value] or
+            if (value >= catalogs.value_count or !available[value] or
                 valueSchema(catalogs, value) != catalogs.failure_schema_id or
                 readInt(u16, bytes, cursor + 2) != 0)
             {
@@ -1858,7 +1862,55 @@ fn validateInvariant(
             }
         }
     }
+    const payload = start + 8;
+    switch (bytes[start + 4]) {
+        0 => if (bytes[payload + 2] > 1 or bytes[payload + 3] != 0)
+            return error.InvalidInvariant,
+        3 => if (bytes[payload + 6] > 1 or bytes[payload + 7] != 0)
+            return error.InvalidInvariant,
+        6 => {
+            const kind = bytes[payload + 4];
+            const value = readInt(u64, bytes, payload + 12);
+            if (!allZero(bytes[payload + 2 .. payload + 4]) or kind > 3 or
+                !allZero(bytes[payload + 5 .. payload + 12]) or
+                (kind == 0 and value > 1) or
+                (kind == 3 and value > std.math.maxInt(u16)))
+            {
+                return error.InvalidInvariant;
+            }
+        },
+        8 => if (readInt(u16, bytes, payload + 6) != 0)
+            return error.InvalidInvariant,
+        9, 10, 20 => if (readInt(u16, bytes, payload + 6) != 0)
+            return error.InvalidInvariant,
+        12 => if (bytes[payload + 4] > 1 or
+            !isScalarSchemaTag(bytes[payload + 5]) or
+            readInt(u16, bytes, payload + 6) != 0)
+            return error.InvalidInvariant,
+        13 => if (bytes[payload + 6] > 7 or
+            !isScalarSchemaTag(bytes[payload + 7]))
+            return error.InvalidInvariant,
+        14 => if (!isScalarSchemaTag(bytes[payload + 4]) or
+            !allZero(bytes[payload + 5 .. payload + 8]))
+            return error.InvalidInvariant,
+        15 => if (bytes[payload + 2] > 1 or bytes[payload + 3] != 0)
+            return error.InvalidInvariant,
+        17 => if (bytes[payload + 4] > 5 or bytes[payload + 5] > 1 or
+            readInt(u16, bytes, payload + 6) != 0)
+            return error.InvalidInvariant,
+        18 => if (bytes[payload + 6] > 5 or bytes[payload + 7] != 0)
+            return error.InvalidInvariant,
+        19 => if (bytes[payload + 4] > 1 or
+            !allZero(bytes[payload + 5 .. payload + 8]))
+            return error.InvalidInvariant,
+        else => {},
+    }
     return end;
+}
+
+fn isScalarSchemaTag(tag: u8) bool {
+    return tag >= @intFromEnum(dynamic_value_v1.Kind.i8) and
+        tag <= @intFromEnum(dynamic_value_v1.Kind.u64);
 }
 
 fn validateTransitions(

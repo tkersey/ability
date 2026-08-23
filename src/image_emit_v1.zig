@@ -484,6 +484,9 @@ pub fn ProgramRoots(comptime Reified: type, comptime Schemas: type) type {
 
 pub fn ProgramFailures(comptime Reified: type) type {
     const fields = std.meta.fields(Reified.Body.Failure);
+    if (fields.len > image_v1.maximum_catalog_entries) {
+        @compileError("BPI1 failure variants exceed validator capacity");
+    }
     const length = comptime blk: {
         var total: usize = 4;
         for (fields) |field| total += 8 + field.name.len;

@@ -12,6 +12,7 @@ const frame_header_length: usize = 4 + 4;
 const first_environment_offset = state_header_length + frame_header_length;
 
 test "BPI1 emits the admitted constructor invariant families" {
+    var relation_probe_count: usize = 0;
     inline for (.{
         SumBody,
         OptionalBody,
@@ -27,6 +28,7 @@ test "BPI1 emits the admitted constructor invariant families" {
         VectorLengthBody,
         BooleanConstantBody,
         LocalTextBody,
+        RelationBody,
     }) |Body| {
         const Reified = compiler.ReifiedFor(Body.control_ir.label, Body);
         const Schemas = image_emit_v1.ProgramSchemaSet(Reified);
@@ -38,9 +40,104 @@ test "BPI1 emits the admitted constructor invariant families" {
         const Program = program_v2.program(Body.control_ir.label, Body);
         const Image = Program.image();
         var workspace: image_v1.ValidationWorkspace = .{};
-        _ = try image_v1.validateImage(&Image.bytes, &workspace);
+        const validated = try image_v1.validateImage(&Image.bytes, &workspace);
+        const constructors = validated.catalogs.envelope.section(.constructors);
+        const section_offset: usize = @intCast(
+            validated.catalogs.envelope.sections[8].offset,
+        );
+        var constructor_cursor: usize = 4;
+        for (0..std.mem.readInt(u32, constructors[0..4], .little)) |_| {
+            const constructor_end = constructor_cursor + std.mem.readInt(
+                u32,
+                constructors[constructor_cursor..][0..4],
+                .little,
+            );
+            const activation_count = std.mem.readInt(
+                u16,
+                constructors[constructor_cursor + 16 ..][0..2],
+                .little,
+            );
+            const environment_count = std.mem.readInt(
+                u16,
+                constructors[constructor_cursor + 18 ..][0..2],
+                .little,
+            );
+            const invariant_count = std.mem.readInt(
+                u16,
+                constructors[constructor_cursor + 20 ..][0..2],
+                .little,
+            );
+            var invariant_cursor = constructor_cursor + 24 +
+                @as(usize, activation_count + environment_count) * 8;
+            for (0..invariant_count) |_| {
+                const tag = constructors[invariant_cursor + 4];
+                if (tag == 17 or tag == 18) {
+                    var malformed = Image.bytes;
+                    const relation_offset = section_offset + invariant_cursor +
+                        8 + if (tag == 17) @as(usize, 4) else 6;
+                    malformed[relation_offset] = 0xff;
+                    workspace = .{};
+                    try std.testing.expectError(
+                        error.InvalidInvariant,
+                        image_v1.validateImage(&malformed, &workspace),
+                    );
+                    relation_probe_count += 1;
+                }
+                invariant_cursor += std.mem.readInt(
+                    u32,
+                    constructors[invariant_cursor..][0..4],
+                    .little,
+                );
+            }
+            try std.testing.expectEqual(constructor_end, invariant_cursor);
+            constructor_cursor = constructor_end;
+        }
     }
+    try std.testing.expect(relation_probe_count > 0);
 }
+
+const relation_instructions = [_]cir.Instruction{
+    .{ .kind = .constant, .result = 0, .operation = .{ .constant = 0 } },
+    .{ .kind = .constant, .result = 1, .operation = .{ .constant = 1 } },
+    .{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{ 0, 1 },
+        .operation = .integer_less_than,
+    },
+};
+const relation_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &relation_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 2,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{ .id = 1, .terminator = .{ .return_value = 0 } },
+    .{ .id = 2, .terminator = .{ .return_value = 1 } },
+};
+const RelationBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const constants = .{ @as(u32, 1), @as(u32, 2) };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "integer-relation-invariant",
+        .value_types = &.{
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .boolean },
+        },
+        .blocks = &relation_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+    };
+};
 
 const Choice = union(enum) {
     left: u32,

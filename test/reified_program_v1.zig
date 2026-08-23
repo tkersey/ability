@@ -854,6 +854,64 @@ test "BPI1 rejects out-of-domain authored failure tags" {
             image_v1.validateImage(&malformed, &workspace),
         );
     }
+    var truncated: [FailImage.bytes.len - 4]u8 = undefined;
+    @memcpy(
+        truncated[0..terminator_payload],
+        FailImage.bytes[0..terminator_payload],
+    );
+    @memcpy(
+        truncated[terminator_payload..],
+        FailImage.bytes[terminator_payload + 4 ..],
+    );
+    std.mem.writeInt(u64, truncated[24..32], truncated.len, .little);
+    const segment_descriptor = image_v1.fixed_prefix_length + 7 *
+        image_v1.section_descriptor_length;
+    std.mem.writeInt(
+        u64,
+        truncated[segment_descriptor + 16 ..][0..8],
+        std.mem.readInt(
+            u64,
+            FailImage.bytes[segment_descriptor + 16 ..][0..8],
+            .little,
+        ) - 4,
+        .little,
+    );
+    inline for (.{ @as(usize, 8), @as(usize, 9) }) |section| {
+        const descriptor = image_v1.fixed_prefix_length + section *
+            image_v1.section_descriptor_length;
+        std.mem.writeInt(
+            u64,
+            truncated[descriptor + 8 ..][0..8],
+            std.mem.readInt(
+                u64,
+                FailImage.bytes[descriptor + 8 ..][0..8],
+                .little,
+            ) - 4,
+            .little,
+        );
+    }
+    const segment_record = segments_offset + 4;
+    std.mem.writeInt(
+        u32,
+        truncated[segment_record..][0..4],
+        std.mem.readInt(
+            u32,
+            FailImage.bytes[segment_record..][0..4],
+            .little,
+        ) - 4,
+        .little,
+    );
+    std.mem.writeInt(
+        u32,
+        truncated[terminator_payload - 8 ..][0..4],
+        8,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&truncated, &workspace),
+    );
 }
 
 test "BPI1 type-checks branch and terminal values" {
