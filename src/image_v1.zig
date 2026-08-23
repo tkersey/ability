@@ -1561,6 +1561,10 @@ fn validateTerminator(
             }
             const value = readInt(u16, bytes, cursor + 2);
             if ((bytes[cursor] == 0 and value != std.math.maxInt(u16)) or
+                (bytes[cursor] == 0 and
+                    (catalogs.schemas.node(
+                        functionResultSchema(catalogs, function_id),
+                    ) catch return error.InvalidTerminator).kind != .unit) or
                 (bytes[cursor] == 1 and
                     (value >= catalogs.value_count or !available[value] or
                         valueSchema(catalogs, value) !=
@@ -2526,12 +2530,14 @@ fn validateTransitionShape(catalogs: Catalogs) Error!u32 {
 
 fn validateInitialTuple(catalogs: Catalogs) Error!void {
     if (catalogs.function_count == 0 or
-        readInt(u16, catalogs.functions_section, 6) != catalogs.entry_segment_id)
+        readInt(u16, catalogs.functions_section, 6) != catalogs.entry_segment_id or
+        readInt(u32, catalogs.functions_section, 8) != catalogs.result_schema_id)
     {
         return error.InvalidRoot;
     }
     const entry = imageSegmentRecord(catalogs, catalogs.entry_segment_id) catch
         return error.InvalidRoot;
+    if (readInt(u16, entry, 6) != 0) return error.InvalidRoot;
     const parameter_count = readInt(u16, entry, 10);
     if (parameter_count != catalogs.entry_parameter_count) {
         return error.InvalidRoot;

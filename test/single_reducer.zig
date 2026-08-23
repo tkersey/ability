@@ -326,6 +326,14 @@ pub fn main(init: std.process.Init) !void {
         21,
     );
     defer KernelMachine.deinitState(preflight_state);
+    failing.fail_index = failing.allocations;
+    var unfunded_fuel: u64 = 0;
+    try std.testing.expectEqual(
+        KernelMachine.Outcome.yielded,
+        try KernelMachine.step(preflight_state, &unfunded_fuel),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
     var preflight_fuel: u64 = 8;
     const preflight_request = switch (try KernelMachine.step(
         preflight_state,

@@ -368,6 +368,30 @@ test "Program.image has no Machine options parameter" {
     try std.testing.expectEqual(@as(usize, 0), info.params.len);
 }
 
+test "non-unit root result rejects valueless completion" {
+    var malformed = Image.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segments_offset: usize = @intCast(envelope.sections[7].offset);
+    const segment = segments_offset + 4;
+    const terminator = segment + image_v1.segment_prefix_length +
+        @as(
+            usize,
+            std.mem.readInt(u16, malformed[segment + 10 ..][0..2], .little),
+        ) * 2;
+    malformed[terminator + 8] = 0;
+    std.mem.writeInt(
+        u16,
+        malformed[terminator + 10 ..][0..2],
+        std.math.maxInt(u16),
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
 test "direct unmetered clause and BPI1 evaluator have one transition meaning" {
     const direct = Direct.reduceClause(Direct.initial(77));
     const direct_result = switch (direct) {

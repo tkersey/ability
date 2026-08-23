@@ -870,6 +870,9 @@ fn stepValidated(
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    if (try segmentIsUnfunded(image, state, caller_fuel.*)) {
+        return .{ .yielded = state };
+    }
     const maximum_state: usize = image.profile.maximum_state_bytes;
     if (scratch.len < maximum_state) return error.ScratchCapacity;
     const temporary_state = scratch[0..maximum_state];
@@ -957,6 +960,24 @@ fn stepValidated(
             },
         }
     }
+}
+
+fn segmentIsUnfunded(
+    image: ValidatedProgram,
+    state: []const u8,
+    caller_fuel: u64,
+) Error!bool {
+    try validateStateEnvelope(image, state);
+    const constructor_id = topConstructorId(state) catch
+        return error.InvalidState;
+    const constructor = constructorRecord(image, constructor_id) catch
+        return error.InvalidState;
+    if (constructor[8] == 3) return error.InvalidState;
+    const segment_id = readInt(u16, constructor, 12);
+    _ = segmentRecord(image, segment_id) catch return error.InvalidImage;
+    const minimum_cost = image.profile.segmentCost(segment_id) catch
+        return error.InvalidImage;
+    return caller_fuel < minimum_cost;
 }
 
 /// Execute one funded atomic segment under Machine ABI v2 policy.
