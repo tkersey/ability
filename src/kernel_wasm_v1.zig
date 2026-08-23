@@ -7,7 +7,8 @@ const input_capacity = 24 << 20;
 const output_capacity = 8 << 20;
 const state_capacity = 4 << 20;
 const value_capacity = 2 << 20;
-const scratch_capacity = 68 << 20;
+const image_scratch_capacity = 64 << 20;
+const scratch_capacity = image_scratch_capacity + state_capacity;
 const error_capacity = 4 << 10;
 const input_header_length = 48;
 const output_header_length = 40;
@@ -22,6 +23,33 @@ var error_storage: [error_capacity]u8 align(16) = undefined;
 var validation_workspace: image_v1.ValidationWorkspace = .{};
 var output_length: u32 = 0;
 var error_length: u32 = 0;
+
+fn profileResourcesAdmitted(
+    image_scratch: u64,
+    maximum_state: u64,
+    maximum_value: u64,
+) bool {
+    const combined_scratch = std.math.add(
+        u64,
+        maximum_state,
+        image_scratch,
+    ) catch return false;
+    return image_scratch <= image_scratch_capacity and
+        maximum_state <= state_capacity and
+        maximum_value <= value_capacity and
+        combined_scratch <= scratch_capacity;
+}
+
+comptime {
+    if (!profileResourcesAdmitted(
+        image_scratch_capacity,
+        state_capacity,
+        value_capacity,
+    )) @compileError("valid Machine-v2 WASM profile ceiling rejected");
+    if (profileResourcesAdmitted(image_scratch_capacity + 1, 0, 0)) {
+        @compileError("Machine-v2 WASM image scratch ceiling is not fail-closed");
+    }
+}
 
 pub export fn boundary_machine_v2_kernel_abi_version() u32 {
     return abi_version;
@@ -150,16 +178,11 @@ fn execute(input: []const u8) ExecuteError!u32 {
         profile_bytes,
         &validation_workspace,
     );
-    const required_scratch = std.math.add(
-        u64,
-        image.maximum_state_bytes,
+    if (!profileResourcesAdmitted(
         program_image.catalogs.envelope.header.maximum_kernel_scratch_bytes,
-    ) catch return error.ProfileResourceLimit;
-    if (image.maximum_state_bytes > state_capacity or
-        program_image.catalogs.envelope.header.maximum_single_value_bytes >
-            value_capacity or
-        required_scratch > scratch_capacity)
-    {
+        image.maximum_state_bytes,
+        program_image.catalogs.envelope.header.maximum_single_value_bytes,
+    )) {
         return error.ProfileResourceLimit;
     }
     return switch (command) {
