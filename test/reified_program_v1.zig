@@ -1520,6 +1520,80 @@ test "BPI1 enforces one resume marker for effect continuations" {
     );
 }
 
+test "BPI1 rejects an unused residual effect catalog entry" {
+    const SiteA = struct {
+        pub const id: u32 = 0;
+        pub const semantic_identity = "test.catalog-use.a.v1";
+        pub const Payload = u32;
+        pub const Resume = u32;
+    };
+    const SiteB = struct {
+        pub const id: u32 = 1;
+        pub const semantic_identity = "test.catalog-use.b.v1";
+        pub const Payload = u32;
+        pub const Resume = u32;
+    };
+    const resume_args = [_]cir.EdgeArgument{.@"resume"};
+    const effect_blocks = [_]cir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .@"suspend" = .{
+                .kind = .effect,
+                .site_id = 0,
+                .request_values = &.{0},
+                .continuation = .{ .target = 1, .arguments = &resume_args },
+                .resume_type = u32_type,
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{1},
+            .terminator = .{ .@"suspend" = .{
+                .kind = .effect,
+                .site_id = 1,
+                .request_values = &.{1},
+                .continuation = .{ .target = 2, .arguments = &resume_args },
+                .resume_type = u32_type,
+            } },
+        },
+        .{ .id = 2, .parameters = &.{2}, .terminator = .{ .return_value = 2 } },
+    };
+    const EffectBody = struct {
+        pub const InitialArgs = u32;
+        pub const Result = u32;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{ SiteA, SiteB };
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "effect-catalog-use",
+            .value_types = &.{ u32_type, u32_type, u32_type },
+            .blocks = &effect_blocks,
+            .entry = 0,
+            .result_type = u32_type,
+        };
+    };
+    const EffectImage = program_v2.program(
+        "effect-catalog-use",
+        EffectBody,
+    ).image();
+    var malformed = EffectImage.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    var second_segment: usize = @intCast(envelope.sections[7].offset + 4);
+    second_segment += std.mem.readInt(
+        u32,
+        malformed[second_segment..][0..4],
+        .little,
+    );
+    const terminator = second_segment + image_v1.segment_prefix_length + 2;
+    std.mem.writeInt(u32, malformed[terminator + 12 ..][0..4], 0, .little);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidEffect,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
 test "fixed kernel branches and yields at the next segment boundary" {
     const branch_blocks = [_]cir.Block{
         .{
@@ -1575,6 +1649,65 @@ test "fixed kernel branches and yields at the next segment boundary" {
     const BranchProfile = BranchProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
     const parsed = try image_v1.validateImage(&BranchImage.bytes, &workspace);
+
+    var opposite_branch_invariant = BranchImage.bytes;
+    const transitions_offset: usize = @intCast(
+        parsed.catalogs.envelope.sections[9].offset,
+    );
+    var branch_constructor: ?u32 = null;
+    for (0..std.mem.readInt(
+        u32,
+        opposite_branch_invariant[transitions_offset..][0..4],
+        .little,
+    )) |index| {
+        const transition = transitions_offset + 4 + index * 12;
+        if (opposite_branch_invariant[transition + 2] == 1) {
+            branch_constructor = std.mem.readInt(
+                u32,
+                opposite_branch_invariant[transition + 8 ..][0..4],
+                .little,
+            );
+            break;
+        }
+    }
+    const constructors_offset: usize = @intCast(
+        parsed.catalogs.envelope.sections[8].offset,
+    );
+    var constructor_cursor = constructors_offset + 4;
+    while (std.mem.readInt(
+        u32,
+        opposite_branch_invariant[constructor_cursor + 4 ..][0..4],
+        .little,
+    ) != branch_constructor.?) {
+        constructor_cursor += std.mem.readInt(
+            u32,
+            opposite_branch_invariant[constructor_cursor..][0..4],
+            .little,
+        );
+    }
+    var invariant_cursor = constructor_cursor + 24 +
+        (@as(usize, std.mem.readInt(
+            u16,
+            opposite_branch_invariant[constructor_cursor + 16 ..][0..2],
+            .little,
+        )) + std.mem.readInt(
+            u16,
+            opposite_branch_invariant[constructor_cursor + 18 ..][0..2],
+            .little,
+        )) * 8;
+    while (opposite_branch_invariant[invariant_cursor + 4] != 0) {
+        invariant_cursor += std.mem.readInt(
+            u32,
+            opposite_branch_invariant[invariant_cursor..][0..4],
+            .little,
+        );
+    }
+    opposite_branch_invariant[invariant_cursor + 10] ^= 1;
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidInvariant,
+        image_v1.validateImage(&opposite_branch_invariant, &workspace),
+    );
 
     var permuted_definitions = BranchImage.bytes;
     const permutation_segments: usize = @intCast(

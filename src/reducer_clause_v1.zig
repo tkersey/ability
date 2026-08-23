@@ -44,6 +44,7 @@ pub fn evaluateClause(
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!ClauseOutcome {
+    try initializeZeroWidthSlots(image, slots);
     const segment = segmentRecord(image, segment_id) catch
         return error.InvalidImage;
     var cursor: usize = image_v1.segment_prefix_length +
@@ -175,6 +176,21 @@ pub fn evaluateClause(
         },
         else => error.UnsupportedOperation,
     };
+}
+
+pub fn initializeZeroWidthSlots(
+    image: image_v1.ValidatedImage,
+    slots: *[1024]Slot,
+) Error!void {
+    for (0..image.catalogs.value_count) |value| {
+        const schema_id = image.catalogs.valueSchemaId(@intCast(value)) catch
+            return error.InvalidImage;
+        const schema = image.catalogs.schemas.node(schema_id) catch
+            return error.InvalidImage;
+        if (schema.maximum_encoded_size == 0) {
+            slots[value] = .{ .bytes = &.{}, .initialized = true };
+        }
+    }
 }
 
 fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {

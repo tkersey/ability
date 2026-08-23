@@ -310,6 +310,7 @@ pub fn validateImage(
         if (!defined) return error.InvalidValue;
     }
     if (next_value != catalogs.value_count) return error.InvalidValue;
+    try validateCatalogUse(catalogs, segment_count);
     try validateFunctionEntries(catalogs, segment_count);
     const constructor_count = try validateConstructors(
         catalogs,
@@ -323,6 +324,7 @@ pub fn validateImage(
     }
     try validateInitialTuple(catalogs);
     try validateConstructorExecution(catalogs, segment_count, constructor_count);
+    try validateDirectBranchInvariants(catalogs);
     try validateConsumedParametersRetained(catalogs, segment_count);
     try validateSegmentReachability(catalogs, segment_count);
     const program_digest = try computeProgramTransitionDigest(
@@ -886,6 +888,54 @@ fn validateFunctions(
             return error.InvalidFunction;
     }
     return count;
+}
+
+fn validateCatalogUse(catalogs: Catalogs, segment_count: u32) Error!void {
+    var function_seen = [_]bool{false} ** 128;
+    var effect_used = [_]bool{false} ** 128;
+    var next_function: u32 = 0;
+    const segments = catalogs.envelope.section(.segments);
+    var segment_cursor: usize = 4;
+    for (0..segment_count) |segment_id| {
+        const end = recordEnd(
+            segments,
+            segment_cursor,
+            segment_prefix_length,
+        ) catch return error.InvalidSegment;
+        const function_id = readInt(u16, segments, segment_cursor + 6);
+        if (!function_seen[function_id]) {
+            if (function_id != next_function or
+                functionEntrySegment(catalogs, function_id) != segment_id)
+            {
+                return error.InvalidFunction;
+            }
+            function_seen[function_id] = true;
+            next_function += 1;
+        }
+        var terminator = segment_cursor + segment_prefix_length +
+            @as(usize, readInt(u16, segments, segment_cursor + 10)) * 2;
+        for (0..readInt(u32, segments, segment_cursor + 12)) |_| {
+            terminator = recordEnd(segments, terminator, 16) catch
+                return error.InvalidSegment;
+        }
+        if (segments[terminator + 4] == 2) {
+            const payload = terminator + 8;
+            switch (segments[payload]) {
+                0 => effect_used[readInt(u32, segments, payload + 4)] = true,
+                1 => {
+                    const callee = readInt(u16, segments, payload + 8);
+                    if (callee == 0) return error.InvalidFunction;
+                },
+                2 => {},
+                else => return error.InvalidTerminator,
+            }
+        }
+        segment_cursor = end;
+    }
+    if (next_function != catalogs.function_count) return error.InvalidFunction;
+    for (effect_used[0..catalogs.effect_count]) |used| {
+        if (!used) return error.InvalidEffect;
+    }
 }
 
 fn validateSegments(
@@ -2943,6 +2993,95 @@ fn validateTransitionConstructorFields(
         )) return error.InvalidConstructor;
         cursor += 8;
     }
+}
+
+fn validateDirectBranchInvariants(catalogs: Catalogs) Error!void {
+    const transitions = catalogs.envelope.section(.entry_transitions);
+    for (0..readInt(u32, transitions, 0)) |index| {
+        const offset = 4 + index * 12;
+        const source = readInt(u16, transitions, offset);
+        const edge_kind = transitions[offset + 2];
+        if (edge_kind != 1 and edge_kind != 2) continue;
+        const target = readInt(u16, transitions, offset + 4);
+        const constructor = imageConstructorRecord(
+            catalogs,
+            readInt(u32, transitions, offset + 8),
+        ) catch return error.InvalidConstructor;
+        const edge = imageTransitionEdge(
+            catalogs,
+            source,
+            edge_kind,
+            target,
+        ) catch return error.InvalidTransition;
+        const target_segment = imageSegmentRecord(catalogs, target) catch
+            return error.InvalidSegment;
+        try validateDirectBranchInvariant(
+            catalogs,
+            constructor,
+            source,
+            edge_kind,
+            target_segment,
+            edge,
+        );
+    }
+}
+
+fn validateDirectBranchInvariant(
+    catalogs: Catalogs,
+    constructor: []const u8,
+    source: u16,
+    edge_kind: u8,
+    target_segment: []const u8,
+    edge: []const u8,
+) Error!void {
+    if (edge_kind != 1 and edge_kind != 2) return;
+    const source_segment = imageSegmentRecord(catalogs, source) catch
+        return error.InvalidConstructor;
+    const terminator = imageSegmentTerminator(source_segment);
+    if (source_segment[terminator + 4] != 1) {
+        return error.InvalidConstructor;
+    }
+    const condition = readInt(u16, source_segment, terminator + 8);
+    const expected = edge_kind == 1;
+    var cursor: usize = 24 +
+        (@as(usize, readInt(u16, constructor, 16)) +
+            readInt(u16, constructor, 18)) * 8;
+    for (0..readInt(u16, constructor, 20)) |_| {
+        const end = recordEnd(constructor, cursor, 8) catch
+            return error.InvalidInvariant;
+        if (constructor[cursor + 4] == 0) {
+            const value = readInt(u16, constructor, cursor + 8);
+            const source_value = try edgeSourceValue(
+                target_segment,
+                edge,
+                value,
+            );
+            if (source_value == condition and
+                (constructor[cursor + 10] == 1) != expected)
+            {
+                return error.InvalidInvariant;
+            }
+        }
+        cursor = end;
+    }
+}
+
+fn edgeSourceValue(
+    target_segment: []const u8,
+    edge: []const u8,
+    value: u16,
+) Error!u16 {
+    for (0..readInt(u16, target_segment, 10)) |index| {
+        if (readInt(
+            u16,
+            target_segment,
+            segment_prefix_length + index * 2,
+        ) != value) continue;
+        const argument = 4 + index * 4;
+        if (edge[argument] != 0) return error.InvalidInvariant;
+        return readInt(u16, edge, argument + 2);
+    }
+    return value;
 }
 
 fn constructorFieldMaterializable(

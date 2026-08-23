@@ -1156,6 +1156,20 @@ fn stepSegment(
         .completed => |result| .{ .done = result },
         .authored_failure => |failure| .{ .failed = failure },
     };
+    switch (outcome) {
+        .next => |next| try validateStateValidated(image, next, workspace),
+        .requested => |requested| try validateStateValidated(
+            image,
+            requested.state,
+            workspace,
+        ),
+        .yielded => |yielded| try validateStateValidated(
+            image,
+            yielded,
+            workspace,
+        ),
+        .done, .failed => {},
+    }
     caller_fuel.* -= cost;
     return outcome;
 }
@@ -1842,15 +1856,10 @@ fn initializeZeroWidthSlots(
     image: ValidatedProgram,
     slots: *[1024]Slot,
 ) Error!void {
-    for (0..image.catalogs.value_count) |value| {
-        const schema_id = image.catalogs.valueSchemaId(@intCast(value)) catch
-            return error.InvalidImage;
-        const schema = image.catalogs.schemas.node(schema_id) catch
-            return error.InvalidImage;
-        if (schema.maximum_encoded_size == 0) {
-            slots[value] = .{ .bytes = &.{}, .initialized = true };
-        }
-    }
+    reducer_clause_v1.initializeZeroWidthSlots(
+        programView(image),
+        slots,
+    ) catch return error.InvalidImage;
 }
 
 fn loadFrameEnvironment(
@@ -1978,6 +1987,7 @@ fn validateEnvironment(
     var field_cursor: usize = 24;
     var value_cursor: usize = 0;
     var slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &slots);
     if (flags & 1 != 0) {
         if (environment.len < 4) return error.InvalidState;
         const entry_constructor = readInt(u32, environment, 0);
