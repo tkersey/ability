@@ -11,6 +11,7 @@ const scratch_capacity = 68 << 20;
 const error_capacity = 4 << 10;
 const input_header_length = 48;
 const output_header_length = 40;
+const resume_metadata_length = 184;
 
 var input_storage: [input_capacity]u8 align(16) = undefined;
 var output_storage: [output_capacity]u8 align(16) = undefined;
@@ -97,10 +98,14 @@ fn execute(input: []const u8) ExecuteError!u32 {
     const profile_length = readInt(u32, input, 28);
     const state_length = readInt(u32, input, 32);
     const auxiliary_length = readInt(u32, input, 36);
+    const maximum_auxiliary: u32 = if (command == 5)
+        value_capacity + resume_metadata_length
+    else
+        value_capacity;
     if (image_length > 16 << 20 or
         profile_length > 1 << 20 or
         state_length > 4 << 20 or
-        auxiliary_length > 2 << 20)
+        auxiliary_length > maximum_auxiliary)
     {
         return error.LimitExceeded;
     }

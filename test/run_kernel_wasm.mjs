@@ -94,6 +94,22 @@ if (instance.exports.boundary_machine_v2_kernel_execute(oversizedProfile.length)
   throw new Error("unexecutable Machine v2 profile capacity was accepted");
 }
 if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
+const maximumResume = Buffer.alloc(48 + imageLength + profileLength + 184 + 2 * 1024 * 1024);
+maximumResume.write("ABL_KIN1", 0, "ascii");
+maximumResume.writeUInt16LE(1, 8);
+maximumResume.writeUInt16LE(5, 10);
+maximumResume.writeUInt32LE(imageLength, 24);
+maximumResume.writeUInt32LE(profileLength, 28);
+maximumResume.writeUInt32LE(0, 32);
+maximumResume.writeUInt32LE(184 + 2 * 1024 * 1024, 36);
+input.copy(maximumResume, 48, 48, 48 + imageLength + profileLength);
+const resumeAuxiliary = 48 + imageLength + profileLength;
+maximumResume.writeUInt32LE(2 * 1024 * 1024, resumeAuxiliary + 176);
+memory.set(maximumResume, inputPtr);
+if (instance.exports.boundary_machine_v2_kernel_execute(maximumResume.length) !== 3) {
+  throw new Error("maximum response plus resume metadata was rejected at admission");
+}
+if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
 const sectionOffset = (image, kind) => Number(image.readBigUInt64LE(76 + (kind - 1) * 24 + 8));
 for (const [name, mutate] of [
   ["functions", (image) => image.writeUInt32LE(0x20000000, sectionOffset(image, 7))],

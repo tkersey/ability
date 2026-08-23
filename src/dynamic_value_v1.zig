@@ -267,6 +267,8 @@ pub fn validateValuePrefix(
             },
             .repeat => |repeat| {
                 if (repeat.remaining == 0) continue;
+                const repeated = try table.node(repeat.schema);
+                if (repeated.maximum_encoded_size == 0) continue;
                 try pushTask(task_storage, &task_count, .{
                     .repeat = .{
                         .schema = repeat.schema,
@@ -779,6 +781,27 @@ test "dynamic schema validation indexes canonical postorder nodes" {
         error.InvalidValue,
         validateValue(table, 1, &value, &tasks),
     );
+}
+
+test "zero-width arrays and vectors validate without count traversal" {
+    var bytes = [_]u8{0} ** 44;
+    std.mem.writeInt(u32, bytes[0..4], 3, .little);
+    std.mem.writeInt(u32, bytes[4..8], 8, .little);
+    bytes[8] = @intFromEnum(Kind.unit);
+    std.mem.writeInt(u32, bytes[12..16], 16, .little);
+    bytes[16] = @intFromEnum(Kind.array);
+    std.mem.writeInt(u32, bytes[20..24], std.math.maxInt(u32), .little);
+    std.mem.writeInt(u32, bytes[24..28], 0, .little);
+    std.mem.writeInt(u32, bytes[28..32], 16, .little);
+    bytes[32] = @intFromEnum(Kind.vector);
+    std.mem.writeInt(u32, bytes[36..40], std.math.maxInt(u32), .little);
+    std.mem.writeInt(u32, bytes[40..44], 0, .little);
+    var nodes: [3]NodeIndex = undefined;
+    const table = try validateSchemaSection(&bytes, &nodes);
+    var tasks: [1]ValueTask = undefined;
+    try validateValue(table, 1, &.{}, &tasks);
+    var vector = [_]u8{0xff} ** 4;
+    try validateValue(table, 2, &vector, &tasks);
 }
 
 test "dynamic schema validation rejects forward references" {

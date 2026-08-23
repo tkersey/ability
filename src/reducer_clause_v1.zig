@@ -914,6 +914,9 @@ pub fn vectorElement(
     if (target >= length) return error.InvalidBindings;
     const element_schema = readInt(u32, node.payload, 4);
     var cursor: usize = 4;
+    const element_node = image.catalogs.schemas.node(element_schema) catch
+        return error.InvalidImage;
+    if (element_node.maximum_encoded_size == 0) return vector[cursor..cursor];
     for (0..target) |_| {
         cursor += dynamic_value_v1.validateValuePrefix(
             image.catalogs.schemas,
