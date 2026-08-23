@@ -35,7 +35,10 @@ pub const NodeIndex = struct {
     length: u32,
     minimum_encoded_size: u64,
     maximum_encoded_size: u64,
+    structural_digest: [32]u8,
 };
+
+const maximum_schema_members: usize = 8192;
 
 pub const Table = struct {
     bytes: []const u8,
@@ -124,13 +127,22 @@ pub fn validateSchemaSection(
             payload,
             index_storage[0..node_id],
         );
+        var structural_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(
+            bytes[cursor..record_end],
+            &structural_digest,
+            .{},
+        );
         for (index_storage[0..node_id]) |prior| {
             const prior_start: usize = prior.offset;
-            if (prior.length == record_length and std.mem.eql(
-                u8,
-                bytes[prior_start .. prior_start + prior.length],
-                bytes[cursor..record_end],
-            )) {
+            if (prior.length == record_length and
+                std.mem.eql(u8, &prior.structural_digest, &structural_digest) and
+                std.mem.eql(
+                    u8,
+                    bytes[prior_start .. prior_start + prior.length],
+                    bytes[cursor..record_end],
+                ))
+            {
                 return error.InvalidSchema;
             }
         }
@@ -140,6 +152,7 @@ pub fn validateSchemaSection(
             .length = record_length,
             .minimum_encoded_size = sizes.minimum,
             .maximum_encoded_size = sizes.maximum,
+            .structural_digest = structural_digest,
         };
         cursor = record_end;
     }
@@ -611,16 +624,18 @@ fn validateOptional(
 fn validateEnum(payload: []const u8) Error!Sizes {
     if (payload.len < 4) return error.InvalidSchema;
     const count = readInt(u32, payload, 0);
-    if (count == 0 or payload.len != try recordArrayLength(4, count, 4)) {
+    if (count == 0 or count > maximum_schema_members or
+        payload.len != try recordArrayLength(4, count, 4))
+    {
         return error.InvalidSchema;
     }
-    for (0..count) |left| {
-        const left_tag = readInt(u32, payload, 4 + left * 4);
-        for (0..left) |right| {
-            if (left_tag == readInt(u32, payload, 4 + right * 4)) {
-                return error.InvalidSchema;
-            }
-        }
+    var tags: [maximum_schema_members]u32 = undefined;
+    for (0..count) |index| {
+        tags[index] = readInt(u32, payload, 4 + index * 4);
+    }
+    std.mem.sortUnstable(u32, tags[0..count], {}, std.sort.asc(u32));
+    for (tags[1..count], tags[0 .. count - 1]) |current, previous| {
+        if (current == previous) return error.InvalidSchema;
     }
     return .{ .minimum = 4, .maximum = 4 };
 }
@@ -631,7 +646,9 @@ fn validateProduct(
 ) Error!Sizes {
     if (payload.len < 4) return error.InvalidSchema;
     const count = readInt(u32, payload, 0);
-    if (payload.len != try recordArrayLength(4, count, 4)) {
+    if (count > maximum_schema_members or
+        payload.len != try recordArrayLength(4, count, 4))
+    {
         return error.InvalidSchema;
     }
     var sizes: Sizes = .{ .minimum = 0, .maximum = 0 };
@@ -656,23 +673,27 @@ fn validateSum(
     const tag_node = try priorNodeView(section, prior, tag_schema);
     if (tag_node.kind != .@"enum") return error.InvalidSchema;
     const count = readInt(u32, payload, 4);
-    if (count == 0 or
+    if (count == 0 or count > maximum_schema_members or
         count != readInt(u32, tag_node.payload, 0) or
         payload.len != try recordArrayLength(8, count, 8))
     {
+        return error.InvalidSchema;
+    }
+    var enum_tags: [maximum_schema_members]u32 = undefined;
+    var sum_tags: [maximum_schema_members]u32 = undefined;
+    for (0..count) |index| {
+        enum_tags[index] = readInt(u32, tag_node.payload, 4 + index * 4);
+        sum_tags[index] = readInt(u32, payload, 8 + index * 8);
+    }
+    std.mem.sortUnstable(u32, enum_tags[0..count], {}, std.sort.asc(u32));
+    std.mem.sortUnstable(u32, sum_tags[0..count], {}, std.sort.asc(u32));
+    if (!std.mem.eql(u32, enum_tags[0..count], sum_tags[0..count])) {
         return error.InvalidSchema;
     }
     var minimum: u64 = std.math.maxInt(u64);
     var maximum: u64 = 0;
     for (0..count) |index| {
         const tag_offset = 8 + index * 8;
-        const tag = readInt(u32, payload, tag_offset);
-        if (!tagInEnum(tag_node, tag)) return error.InvalidSchema;
-        for (0..index) |prior_index| {
-            if (tag == readInt(u32, payload, 8 + prior_index * 8)) {
-                return error.InvalidSchema;
-            }
-        }
         const child = try priorNode(
             prior,
             readInt(u32, payload, tag_offset + 4),
@@ -814,6 +835,36 @@ test "schema hashing streams wide product fields through bounded tasks" {
     var tasks: [4]SchemaHashTask = undefined;
     const digest = try schemaDigest(table, 1, &tasks);
     try std.testing.expect(!std.mem.eql(u8, &digest, &([_]u8{0} ** 32)));
+}
+
+test "schema validation sorts the maximum enum tag frontier" {
+    const field_count: u32 = maximum_schema_members;
+    const record_length: u32 = 8 + 4 + field_count * 4;
+    var section: [4 + record_length]u8 = [_]u8{0} ** (4 + record_length);
+    std.mem.writeInt(u32, section[0..4], 1, .little);
+    std.mem.writeInt(u32, section[4..8], record_length, .little);
+    section[8] = @intFromEnum(Kind.@"enum");
+    std.mem.writeInt(u32, section[12..16], field_count, .little);
+    for (0..field_count) |index| {
+        std.mem.writeInt(
+            u32,
+            section[16 + index * 4 ..][0..4],
+            @intCast(index),
+            .little,
+        );
+    }
+    var nodes: [1]NodeIndex = undefined;
+    _ = try validateSchemaSection(&section, &nodes);
+    std.mem.writeInt(
+        u32,
+        section[16 + (@as(usize, field_count) - 1) * 4 ..][0..4],
+        0,
+        .little,
+    );
+    try std.testing.expectError(
+        error.InvalidSchema,
+        validateSchemaSection(&section, &nodes),
+    );
 }
 
 test "dynamic values reject noncanonical booleans and trailing bytes" {
