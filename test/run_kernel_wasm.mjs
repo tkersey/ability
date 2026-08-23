@@ -119,6 +119,13 @@ for (const [name, mutate] of [
     const offset = sectionOffset(image, 5);
     image.writeUInt32LE(image.length - offset, offset + 8);
   }],
+  ["failure name UTF-8", (image) => {
+    const offset = sectionOffset(image, 3);
+    if (image.readUInt32LE(offset) === 0 || image.readUInt32LE(offset + 8) === 0) {
+      throw new Error("WASM malformed-image fixture has no failure name");
+    }
+    image[offset + 12] = 0xff;
+  }],
 ]) {
   const malformed = Buffer.from(input.subarray(0, 48 + imageLength + profileLength));
   malformed.writeUInt16LE(0, 10);

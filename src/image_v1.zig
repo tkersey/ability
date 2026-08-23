@@ -294,11 +294,13 @@ pub fn validateImage(
     @memset(workspace.constant_used[0..catalogs.constant_count], false);
     @memset(workspace.value_defined[0..catalogs.value_count], false);
     var next_constant: u32 = 0;
+    var next_value: u32 = 0;
     const segment_count = try validateSegments(
         catalogs,
         &workspace.constant_used,
         &next_constant,
         &workspace.value_defined,
+        &next_value,
     );
     for (workspace.constant_used[0..catalogs.constant_count]) |used| {
         if (!used) return error.InvalidConstant;
@@ -306,6 +308,7 @@ pub fn validateImage(
     for (workspace.value_defined[0..catalogs.value_count]) |defined| {
         if (!defined) return error.InvalidValue;
     }
+    if (next_value != catalogs.value_count) return error.InvalidValue;
     try validateFunctionEntries(catalogs, segment_count);
     const constructor_count = try validateConstructors(
         catalogs,
@@ -877,6 +880,7 @@ fn validateSegments(
     constant_used: *[1024]bool,
     next_constant: *u32,
     value_defined: *[1024]bool,
+    next_value: *u32,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
     if (bytes.len < 4) return error.InvalidSegment;
@@ -916,6 +920,7 @@ fn validateSegments(
             if (end - cursor < 2) return error.InvalidSegment;
             const value = readInt(u16, bytes, cursor);
             if (value >= catalogs.value_count) return error.InvalidSegment;
+            if (value != next_value.*) return error.InvalidValue;
             if (value_defined[value]) return error.InvalidValue;
             var prior = cursor - index * 2;
             while (prior < cursor) : (prior += 2) {
@@ -925,6 +930,7 @@ fn validateSegments(
             }
             available[value] = true;
             value_defined[value] = true;
+            next_value.* += 1;
             cursor += 2;
         }
         for (0..instruction_count) |_| {
@@ -937,6 +943,7 @@ fn validateSegments(
                 next_constant,
                 &available,
                 value_defined,
+                next_value,
             );
         }
         cursor = try validateTerminator(
@@ -1020,6 +1027,7 @@ fn validateInstruction(
     next_constant: *u32,
     available: *[1024]bool,
     value_defined: *[1024]bool,
+    next_value: *u32,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
     const end = recordEnd(bytes, start, 16) catch
@@ -1051,7 +1059,9 @@ fn validateInstruction(
     } else if (operation < 25 or operation > 29) {
         if (immediate != 0) return error.InvalidInstruction;
     }
-    if (value_defined[result]) return error.InvalidValue;
+    if (result != next_value.* or value_defined[result]) {
+        return error.InvalidValue;
+    }
     var cursor = start + 16;
     for (0..operand_count) |_| {
         const operand = readInt(u16, bytes, cursor);
@@ -1076,6 +1086,7 @@ fn validateInstruction(
     }
     available[result] = true;
     value_defined[result] = true;
+    next_value.* += 1;
     return end;
 }
 
@@ -2411,13 +2422,59 @@ fn validateInvariantConstantSchema(
 ) Error!void {
     const result_kind = try invariantKind(catalogs, result);
     switch (kind) {
-        0 => if (result_kind != .bool) return error.InvalidInvariant,
-        1 => if (!isSignedIntegerKind(result_kind)) return error.InvalidInvariant,
+        0 => if (result_kind != .bool or payload > 1)
+            return error.InvalidInvariant,
+        1 => if (!isSignedIntegerKind(result_kind) or
+            !invariantConstantFitsKind(result_kind, payload))
+            return error.InvalidInvariant,
         2 => if (!isIntegerKind(result_kind) or
-            isSignedIntegerKind(result_kind)) return error.InvalidInvariant,
+            isSignedIntegerKind(result_kind) or
+            !invariantConstantFitsKind(result_kind, payload))
+            return error.InvalidInvariant,
         3 => try requireInvariantSumCase(catalogs, result, payload),
         else => return error.InvalidInvariant,
     }
+}
+
+fn invariantConstantFitsKind(
+    kind: dynamic_value_v1.Kind,
+    payload: u64,
+) bool {
+    const signed: i64 = @bitCast(payload);
+    return switch (kind) {
+        .bool => payload <= 1,
+        .i8 => std.math.cast(i8, signed) != null,
+        .i16 => std.math.cast(i16, signed) != null,
+        .i32 => std.math.cast(i32, signed) != null,
+        .i64 => true,
+        .u8 => std.math.cast(u8, payload) != null,
+        .u16 => std.math.cast(u16, payload) != null,
+        .u32 => std.math.cast(u32, payload) != null,
+        .u64 => true,
+        else => false,
+    };
+}
+
+test "invariant scalar constants fit their canonical schema widths" {
+    try std.testing.expect(invariantConstantFitsKind(.bool, 0));
+    try std.testing.expect(invariantConstantFitsKind(.bool, 1));
+    try std.testing.expect(!invariantConstantFitsKind(.bool, 2));
+    try std.testing.expect(invariantConstantFitsKind(.i8, @bitCast(@as(i64, -128))));
+    try std.testing.expect(invariantConstantFitsKind(.i8, 127));
+    try std.testing.expect(!invariantConstantFitsKind(.i8, 128));
+    try std.testing.expect(!invariantConstantFitsKind(.i8, 0xff));
+    try std.testing.expect(invariantConstantFitsKind(.i16, @bitCast(@as(i64, -32768))));
+    try std.testing.expect(!invariantConstantFitsKind(.i16, 32768));
+    try std.testing.expect(invariantConstantFitsKind(.i32, @bitCast(@as(i64, std.math.minInt(i32)))));
+    try std.testing.expect(!invariantConstantFitsKind(.i32, @as(u64, std.math.maxInt(i32)) + 1));
+    try std.testing.expect(invariantConstantFitsKind(.i64, std.math.maxInt(u64)));
+    try std.testing.expect(invariantConstantFitsKind(.u8, std.math.maxInt(u8)));
+    try std.testing.expect(!invariantConstantFitsKind(.u8, @as(u64, std.math.maxInt(u8)) + 1));
+    try std.testing.expect(invariantConstantFitsKind(.u16, std.math.maxInt(u16)));
+    try std.testing.expect(!invariantConstantFitsKind(.u16, @as(u64, std.math.maxInt(u16)) + 1));
+    try std.testing.expect(invariantConstantFitsKind(.u32, std.math.maxInt(u32)));
+    try std.testing.expect(!invariantConstantFitsKind(.u32, @as(u64, std.math.maxInt(u32)) + 1));
+    try std.testing.expect(invariantConstantFitsKind(.u64, std.math.maxInt(u64)));
 }
 
 fn requireInvariantSumCase(

@@ -1570,6 +1570,52 @@ test "fixed kernel branches and yields at the next segment boundary" {
     var workspace: image_v1.ValidationWorkspace = .{};
     const parsed = try image_v1.validateImage(&BranchImage.bytes, &workspace);
 
+    var permuted_definitions = BranchImage.bytes;
+    const permutation_segments: usize = @intCast(
+        parsed.catalogs.envelope.sections[7].offset,
+    );
+    var second_segment = permutation_segments + 4;
+    second_segment += std.mem.readInt(
+        u32,
+        permuted_definitions[second_segment..][0..4],
+        .little,
+    );
+    const third_permuted_segment = second_segment + std.mem.readInt(
+        u32,
+        permuted_definitions[second_segment..][0..4],
+        .little,
+    );
+    inline for (.{
+        .{ second_segment, @as(u16, 2) },
+        .{ third_permuted_segment, @as(u16, 1) },
+    }) |replacement| {
+        const segment = replacement[0];
+        const value = replacement[1];
+        const instruction = segment + image_v1.segment_prefix_length;
+        const terminator = instruction + std.mem.readInt(
+            u32,
+            permuted_definitions[instruction..][0..4],
+            .little,
+        );
+        std.mem.writeInt(
+            u16,
+            permuted_definitions[instruction + 8 ..][0..2],
+            value,
+            .little,
+        );
+        std.mem.writeInt(
+            u16,
+            permuted_definitions[terminator + 10 ..][0..2],
+            value,
+            .little,
+        );
+    }
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidValue,
+        image_v1.validateImage(&permuted_definitions, &workspace),
+    );
+
     var duplicate_definition = BranchImage.bytes;
     const segments_offset: usize = @intCast(
         parsed.catalogs.envelope.sections[7].offset,

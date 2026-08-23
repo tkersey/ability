@@ -434,6 +434,7 @@ fn errorCode(err: ExecuteError) u32 {
         error.DuplicateFailureTag,
         error.DuplicateConstant,
         error.DuplicateEffectIdentity,
+        error.InvalidUtf8,
         error.InvalidProfile,
         => 2,
         error.InvalidBindings,
@@ -448,7 +449,6 @@ fn errorCode(err: ExecuteError) u32 {
         error.CapacityExceeded,
         error.UnsupportedOperation,
         error.InvalidImage,
-        error.InvalidUtf8,
         error.FrameDepthExceeded,
         => 6,
     };
