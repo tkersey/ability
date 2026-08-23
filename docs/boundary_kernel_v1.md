@@ -27,3 +27,8 @@ The public profile admits 16 MiB images, 4 MiB States, 2 MiB auxiliary values,
 memory. Commands validate image, initialize, validate State, inspect current
 request, step, and resume. Semantic outcomes are successful ABI outputs;
 malformed/resource failures are result codes.
+
+Kernel output outcomes `7` and `8` carry Machine-owned
+`execution_budget_exceeded` and `frame_depth_exceeded` results respectively.
+They preserve remaining caller fuel and the canonical State selected by the
+Machine law; they are semantic outcomes, not kernel result-code failures.

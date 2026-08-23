@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 
-const [kernelPath, oneEffectPath, portableValuesPath] = process.argv.slice(2);
+const [kernelPath, oneEffectPath, portableValuesPath, ...proofPaths] = process.argv.slice(2);
 const digest = (path) => crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");
 const receipt = {
   format: "boundary-reification-receipt/v1",
@@ -45,5 +45,10 @@ const receipt = {
   source_interpreter_present: false,
   runtime_definition_loader_present: false,
   callback_registry_present: false,
+  proof_gate: "check-boundary-reification-receipt",
+  proof_gate_required_before_emission: true,
+  proof_source_sha256: Object.fromEntries(
+    proofPaths.map((path) => [path.split("/").at(-1), digest(path)]),
+  ),
 };
 process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);

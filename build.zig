@@ -1110,6 +1110,26 @@ pub fn build(b: *std.Build) void {
     const kernel_vector_output = run_kernel_vector.captureStdOut(.{
         .basename = "boundary-kernel-wasm-vector.bin",
     });
+    const kernel_failure_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/kernel_wasm_machine_failure_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    kernel_failure_vector_module.addImport("control_ir", host_core.control_ir);
+    kernel_failure_vector_module.addImport("image_v1", host_core.image_v1);
+    kernel_failure_vector_module.addImport("kernel_v1", host_core.kernel_v1);
+    kernel_failure_vector_module.addImport("machine", host_core.machine);
+    kernel_failure_vector_module.addImport("program_v2", host_core.program_v2);
+    const kernel_failure_vector_executable = b.addExecutable(.{
+        .name = "boundary-kernel-wasm-machine-failure-vector",
+        .root_module = kernel_failure_vector_module,
+    });
+    const run_kernel_failure_vector = b.addRunArtifact(
+        kernel_failure_vector_executable,
+    );
+    const kernel_failure_vector_output = run_kernel_failure_vector.captureStdOut(.{
+        .basename = "boundary-kernel-wasm-machine-failure-vector.bin",
+    });
     const one_effect_image_module = b.createModule(.{
         .root_source_file = b.path("test/emit_one_effect_image.zig"),
         .target = b.graph.host,
@@ -1183,6 +1203,15 @@ pub fn build(b: *std.Build) void {
     );
     reification_asset_receipt_command.addFileArg(one_effect_image);
     reification_asset_receipt_command.addFileArg(portable_values_image);
+    reification_asset_receipt_command.addFileArg(
+        b.path("test/reification_generated_v1.zig"),
+    );
+    reification_asset_receipt_command.addFileArg(
+        b.path("test/reified_program_v1.zig"),
+    );
+    reification_asset_receipt_command.addFileArg(
+        b.path("test/program_constructor_invariants.zig"),
+    );
     const reification_receipt_file = reification_asset_receipt_command.captureStdOut(.{
         .basename = "boundary-reification-v1-receipt.json",
     });
@@ -1238,6 +1267,7 @@ pub fn build(b: *std.Build) void {
     run_kernel_wasm.addFileArg(b.path("test/run_kernel_wasm.mjs"));
     run_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
     run_kernel_wasm.addFileArg(kernel_vector_output);
+    run_kernel_wasm.addFileArg(kernel_failure_vector_output);
     const kernel_wasm_step = b.step(
         "check-boundary-kernel-wasm",
         "Check fixed import-free Boundary Kernel WASM ABI and profile.",
@@ -1828,6 +1858,17 @@ pub fn build(b: *std.Build) void {
         reification_deletion_step,
         reification_measure_step,
     }) |dependency| reification_receipt_step.dependOn(dependency);
+    const reification_proof_stamp_command = b.addSystemCommand(&.{
+        "node",
+        "-e",
+        "process.stdout.write(JSON.stringify({gate:'check-boundary-reification-receipt',status:'passed'})+'\\n')",
+    });
+    reification_proof_stamp_command.step.dependOn(reification_receipt_step);
+    const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
+        .basename = "boundary-reification-v1-proof.json",
+    });
+    reification_asset_receipt_command.addFileArg(reification_proof_stamp);
+    emit_reification_assets_step.dependOn(reification_receipt_step);
 
     const receipt_falsifier_step = b.step(
         "check-boundary-machine-receipt-falsifiers",

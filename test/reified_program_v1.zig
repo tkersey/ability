@@ -420,12 +420,14 @@ test "KernelMachine terminal owner OOM preserves State ownership" {
     const before = try KernelMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(before);
     var fuel: u64 = 8;
+    const fuel_before = fuel;
     failing.fail_index = failing.allocations + 2;
     try std.testing.expectError(
         error.OutOfMemory,
         KernelMachine.step(state, &fuel),
     );
     try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(fuel_before, fuel);
     failing.fail_index = std.math.maxInt(usize);
     const after = try KernelMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
@@ -436,6 +438,19 @@ test "KernelMachine terminal owner OOM preserves State ownership" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 29), done.value().*);
+}
+
+test "KernelMachine debug metadata matches its inherited Manifest" {
+    const DebugKernel = Program.kernelMachine(.{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+        .debug_metadata = true,
+    });
+    try std.testing.expect(DebugKernel.Manifest.includes_debug_metadata);
+    try std.testing.expect(@hasDecl(DebugKernel, "DebugMetadata"));
+    try std.testing.expect(@hasDecl(DebugKernel, "debug_metadata"));
+    try std.testing.expect(DebugKernel.DebugMetadata != void);
 }
 
 test "Reified constants emit in canonical first-use order" {

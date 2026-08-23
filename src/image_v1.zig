@@ -1202,7 +1202,7 @@ fn validateTerminator(
     }
     var cursor = start + 8;
     switch (bytes[start + 4]) {
-        0 => try validateEdge(catalogs, bytes, &cursor, end),
+        0 => try validateEdge(catalogs, bytes, &cursor, end, null),
         1 => {
             if (end - cursor < 4 or
                 readInt(u16, bytes, cursor) >= catalogs.value_count or
@@ -1211,8 +1211,8 @@ fn validateTerminator(
                 return error.InvalidTerminator;
             }
             cursor += 4;
-            try validateEdge(catalogs, bytes, &cursor, end);
-            try validateEdge(catalogs, bytes, &cursor, end);
+            try validateEdge(catalogs, bytes, &cursor, end, null);
+            try validateEdge(catalogs, bytes, &cursor, end, null);
         },
         2 => try validateSuspension(catalogs, bytes, &cursor, end),
         3 => {
@@ -1272,6 +1272,8 @@ fn validateSuspension(
     {
         return error.InvalidTerminator;
     }
+    if (kind == 0 and request_count != 1) return error.InvalidTerminator;
+    const request_values_start = cursor.*;
     for (0..request_count) |_| {
         if (end - cursor.* < 2 or
             readInt(u16, bytes, cursor.*) >= catalogs.value_count)
@@ -1279,6 +1281,16 @@ fn validateSuspension(
             return error.InvalidTerminator;
         }
         cursor.* += 2;
+    }
+    const declared_resume_schema = readInt(u32, bytes, end - 4);
+    if (kind == 0) {
+        const schemas = try effectSchemas(catalogs, site);
+        const request_value = readInt(u16, bytes, request_values_start);
+        if (valueSchema(catalogs, request_value) != schemas.payload or
+            declared_resume_schema != schemas.resume_schema)
+        {
+            return error.InvalidTerminator;
+        }
     }
     if (end - cursor.* < 4) return error.InvalidTerminator;
     const callee_present = bytes[cursor.*];
@@ -1288,8 +1300,19 @@ fn validateSuspension(
         return error.InvalidTerminator;
     }
     cursor.* += 4;
-    if (callee_present == 1) try validateEdge(catalogs, bytes, cursor, end);
-    try validateEdge(catalogs, bytes, cursor, end);
+    if (callee_present == 1) {
+        try validateEdge(catalogs, bytes, cursor, end, null);
+    }
+    try validateEdge(
+        catalogs,
+        bytes,
+        cursor,
+        end,
+        if (declared_resume_schema == std.math.maxInt(u32))
+            null
+        else
+            declared_resume_schema,
+    );
     if (end - cursor.* != 4) return error.InvalidTerminator;
     const resume_schema = readInt(u32, bytes, cursor.*);
     if (resume_schema != std.math.maxInt(u32)) {
@@ -1304,6 +1327,7 @@ fn validateEdge(
     bytes: []const u8,
     cursor: *usize,
     end: usize,
+    resume_schema: ?u32,
 ) Error!void {
     if (end - cursor.* < 4) return error.InvalidTerminator;
     const target = readInt(u16, bytes, cursor.*);
@@ -1311,8 +1335,13 @@ fn validateEdge(
     if (target >= readInt(u32, catalogs.envelope.section(.segments), 0)) {
         return error.InvalidTerminator;
     }
+    const target_segment = imageSegmentRecord(catalogs, target) catch
+        return error.InvalidTerminator;
+    if (count != readInt(u16, target_segment, 10)) {
+        return error.InvalidTerminator;
+    }
     cursor.* += 4;
-    for (0..count) |_| {
+    for (0..count) |index| {
         if (end - cursor.* < 4 or bytes[cursor.*] > 1 or
             bytes[cursor.* + 1] != 0)
         {
@@ -1324,8 +1353,45 @@ fn validateEdge(
         {
             return error.InvalidTerminator;
         }
+        const target_value = readInt(
+            u16,
+            target_segment,
+            24 + index * 2,
+        );
+        if (bytes[cursor.*] == 0) {
+            if (valueSchema(catalogs, value) !=
+                valueSchema(catalogs, target_value))
+            {
+                return error.InvalidTerminator;
+            }
+        } else if (resume_schema == null or
+            resume_schema.? != valueSchema(catalogs, target_value))
+        {
+            return error.InvalidTerminator;
+        }
         cursor.* += 4;
     }
+}
+
+fn effectSchemas(
+    catalogs: Catalogs,
+    target: u32,
+) Error!struct { payload: u32, resume_schema: u32 } {
+    const bytes = catalogs.envelope.section(.effects);
+    var cursor: usize = 4;
+    for (0..catalogs.effect_count) |ordinal| {
+        cursor += 4;
+        const identity_length = readInt(u32, bytes, cursor);
+        cursor += 4 + identity_length;
+        const payload = readInt(u32, bytes, cursor);
+        const resume_schema = readInt(u32, bytes, cursor + 4);
+        if (ordinal == target) return .{
+            .payload = payload,
+            .resume_schema = resume_schema,
+        };
+        cursor += 8 + 4 + 64;
+    }
+    return error.InvalidTerminator;
 }
 
 fn validateFunctionEntries(catalogs: Catalogs, segment_count: u32) Error!void {

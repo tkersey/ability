@@ -19,6 +19,8 @@ pub fn Machine(
         pub const Failure = Direct.Failure;
         pub const EffectRow = Definition.EffectRow;
         pub const RequestValue = Definition.Request;
+        pub const DebugMetadata = Direct.DebugMetadata;
+        pub const debug_metadata = Direct.debug_metadata;
         pub const Manifest = Direct.Manifest;
         pub const Error = portable_value.Error || error{
             OutOfMemory,
@@ -203,6 +205,8 @@ pub fn Machine(
             if (value.terminal or value.prepared_active) {
                 return error.ProgramContractViolation;
             }
+            const original_caller_fuel = caller_fuel.*;
+            errdefer caller_fuel.* = original_caller_fuel;
             var workspace: image_v1.ValidationWorkspace = .{};
             const image = image_v1.validateImage(&Image.bytes, &workspace) catch
                 return error.ProgramContractViolation;

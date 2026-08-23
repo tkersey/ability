@@ -45,6 +45,7 @@ test/compile_fail/vector_uninhabited_element.zig
 test/emit_one_effect_image.zig
 test/emit_portable_values_image.zig
 test/image_v1.zig
+test/kernel_wasm_machine_failure_vector.zig
 test/kernel_wasm_vector.zig
 test/machine_after.zig
 test/machine_native_wasm.zig

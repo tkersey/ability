@@ -96,6 +96,12 @@ fn execute(input: []const u8) ExecuteError!u32 {
     const image_length = readInt(u32, input, 24);
     const state_length = readInt(u32, input, 28);
     const auxiliary_length = readInt(u32, input, 32);
+    if (image_length > 16 << 20 or
+        state_length > 4 << 20 or
+        auxiliary_length > 2 << 20)
+    {
+        return error.LimitExceeded;
+    }
     var expected = std.math.add(
         usize,
         input_header_length,
@@ -228,10 +234,17 @@ fn executeStep(
             failure,
             &.{},
         ),
-        .machine_failed => |failure| switch (failure.failure) {
-            .execution_budget_exceeded => error.ExecutionBudgetExceeded,
-            .frame_depth_exceeded => error.FrameDepthExceeded,
-        },
+        .machine_failed => |failure| try writeOutput(
+            command,
+            switch (failure.failure) {
+                .execution_budget_exceeded => 7,
+                .frame_depth_exceeded => 8,
+            },
+            remaining,
+            failure.state,
+            &.{},
+            &.{},
+        ),
     };
 }
 
