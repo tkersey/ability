@@ -172,3 +172,113 @@ test "compiled integer and boolean algebra is deterministic" {
     try std.testing.expect(result.boolean_or);
     try std.testing.expectEqual(@as(i32, 26), result.selected);
 }
+
+fn SignedRemainderBody(
+    comptime T: type,
+    comptime scalar: cir.ScalarType,
+) type {
+    return struct {
+        const local_value_types = [_]cir.ValueType{
+            .{ .scalar = scalar },
+            .{ .scalar = scalar },
+            .{ .scalar = scalar },
+        };
+        const local_instructions = [_]cir.Instruction{
+            .{ .kind = .constant, .result = 0, .operation = .{ .constant = 0 } },
+            .{ .kind = .constant, .result = 1, .operation = .{ .constant = 1 } },
+            .{
+                .kind = .pure,
+                .result = 2,
+                .operands = &.{ 0, 1 },
+                .operation = .integer_remainder,
+            },
+        };
+        const local_blocks = [_]cir.Block{.{
+            .id = 0,
+            .instructions = &local_instructions,
+            .terminator = .{ .return_value = 2 },
+        }};
+
+        pub const InitialArgs = void;
+        pub const Result = T;
+        pub const Failure = enum {
+            arithmetic_overflow,
+            division_by_zero,
+        };
+        pub const constants = .{ @as(T, std.math.minInt(T)), @as(T, -1) };
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "signed-remainder-overflow",
+            .value_types = &local_value_types,
+            .blocks = &local_blocks,
+            .entry = 0,
+            .result_type = .{ .scalar = scalar },
+        };
+    };
+}
+
+test "direct and kernel preserve signed remainder overflow at every width" {
+    inline for (.{
+        struct {
+            const T = i8;
+            const scalar: cir.ScalarType = .i8;
+        },
+        struct {
+            const T = i16;
+            const scalar: cir.ScalarType = .i16;
+        },
+        struct {
+            const T = i32;
+            const scalar: cir.ScalarType = .i32;
+        },
+        struct {
+            const T = i64;
+            const scalar: cir.ScalarType = .i64;
+        },
+    }) |Case| {
+        const Program = program_v2.program(
+            "signed-remainder-overflow",
+            SignedRemainderBody(Case.T, Case.scalar),
+        );
+        const Direct = Program.compile(.{
+            .maximum_frames = 4,
+            .maximum_state_bytes = 4096,
+            .maximum_machine_fuel = 32,
+        });
+        const Kernel = Program.kernelMachineV2(.{
+            .maximum_frames = 4,
+            .maximum_state_bytes = 4096,
+            .maximum_machine_fuel = 32,
+        });
+        const direct_state = try Direct.initialState(std.testing.allocator, {});
+        defer Direct.deinitState(direct_state);
+        const kernel_state = try Kernel.initialState(std.testing.allocator, {});
+        defer Kernel.deinitState(kernel_state);
+        var direct_fuel: u64 = 32;
+        var kernel_fuel: u64 = 32;
+        const direct_failure = switch (try Direct.step(
+            direct_state,
+            &direct_fuel,
+        )) {
+            .failed => |failure| failure,
+            else => return error.TestUnexpectedResult,
+        };
+        const kernel_failure = switch (try Kernel.step(
+            kernel_state,
+            &kernel_fuel,
+        )) {
+            .failed => |failure| failure,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(direct_fuel, kernel_fuel);
+        try std.testing.expectEqual(
+            Direct.Failure{ .authored = .arithmetic_overflow },
+            direct_failure,
+        );
+        try std.testing.expectEqual(
+            Kernel.Failure{ .authored = .arithmetic_overflow },
+            kernel_failure,
+        );
+    }
+}

@@ -2696,6 +2696,11 @@ fn integerArithmetic(
         if ((operation == 6 or operation == 7) and b == 0) {
             return error.DivisionByZero;
         }
+        if ((operation == 6 or operation == 7) and b == -1 and
+            a == -(@as(i128, 1) << @intCast(left.bits - 1)))
+        {
+            return error.Overflow;
+        }
         const value = switch (operation) {
             3 => std.math.add(i128, a, b) catch return error.Overflow,
             4 => std.math.sub(i128, a, b) catch return error.Overflow,
