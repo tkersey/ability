@@ -79,6 +79,194 @@ const ProgramConstructors = image_emit_v1.ProgramConstructors(
     ProgramSchemas,
 );
 
+pub const ReificationReceiptWitness = struct {
+    image_profile_invariance_passed: bool,
+    metering_annotation_invariance_passed: bool,
+    malformed_image_case_count: u32,
+    malformed_state_case_count: u32,
+    machine_abi: u16,
+    state_format_version: u16,
+};
+
+const InvarianceWitness = struct {
+    image_profile: bool,
+    metering_annotation: bool,
+};
+
+fn invarianceWitness() InvarianceWitness {
+    const LowProfile = Program.machineV2Profile(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 1024,
+        .maximum_machine_fuel = 8,
+    });
+    const HighProfile = Program.machineV2Profile(.{
+        .maximum_frames = 32,
+        .maximum_state_bytes = 1 << 20,
+        .maximum_machine_fuel = 1_000_000,
+    });
+    const CheapProgram = program_v2.program("metering-invariant", MeteredBody(1));
+    const CostlyProgram = program_v2.program("metering-invariant", MeteredBody(9));
+    const CheapImage = CheapProgram.image();
+    const CostlyImage = CostlyProgram.image();
+    const CheapProfile = CheapProgram.machineV2Profile(options);
+    const CostlyProfile = CostlyProgram.machineV2Profile(options);
+    return .{
+        .image_profile = std.mem.eql(u8, &Image.bytes, &Program.image().bytes) and
+            std.mem.eql(
+                u8,
+                &Image.program_transition_digest,
+                &Program.program_transition_digest,
+            ) and
+            !std.mem.eql(u8, &LowProfile.bytes, &HighProfile.bytes) and
+            !std.mem.eql(
+                u8,
+                &LowProfile.machine_v2_contract_digest,
+                &HighProfile.machine_v2_contract_digest,
+            ),
+        .metering_annotation = std.mem.eql(
+            u8,
+            &CheapImage.bytes,
+            &CostlyImage.bytes,
+        ) and std.mem.eql(
+            u8,
+            &CheapProgram.program_transition_digest,
+            &CostlyProgram.program_transition_digest,
+        ) and !std.mem.eql(
+            u8,
+            &CheapProfile.bytes,
+            &CostlyProfile.bytes,
+        ) and !std.mem.eql(
+            u8,
+            &CheapProgram.machine_v2_semantic_digest,
+            &CostlyProgram.machine_v2_semantic_digest,
+        ),
+    };
+}
+
+fn malformedImageCaseCount() !u32 {
+    var malformed: [Image.bytes.len]u8 = undefined;
+    var rejected: u32 = 0;
+    for (0..1000) |index| {
+        @memcpy(&malformed, &Image.bytes);
+        const offset = (index * 104729) % malformed.len;
+        malformed[offset] ^= @as(u8, 1) << @intCast(index % 8);
+        var workspace: image_v1.ValidationWorkspace = .{};
+        if (image_v1.validateImage(&malformed, &workspace)) |_| {
+            return error.MalformedImageAccepted;
+        } else |_| {
+            rejected += 1;
+        }
+    }
+    return rejected;
+}
+
+fn malformedStateCaseCount(allocator: std.mem.Allocator) !u32 {
+    const state = try ProgramMachine.initialState(allocator, 29);
+    defer ProgramMachine.deinitState(state);
+    const encoded = try ProgramMachine.encodeState(allocator, state);
+    defer allocator.free(encoded);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(
+        program_image,
+        &Profile.bytes,
+        &workspace,
+    );
+    var malformed: [4096]u8 = undefined;
+    var rejected: u32 = 0;
+    for (0..12) |case| {
+        @memcpy(malformed[0..encoded.len], encoded);
+        var length = encoded.len;
+        switch (case) {
+            0 => malformed[0] ^= 0xff,
+            1 => std.mem.writeInt(u16, malformed[8..10], 2, .little),
+            2 => std.mem.writeInt(u16, malformed[10..12], 3, .little),
+            3 => malformed[12] ^= 0xff,
+            4 => std.mem.writeInt(u64, malformed[44..52], 1, .little),
+            5 => std.mem.writeInt(
+                u64,
+                malformed[52..60],
+                options.maximum_machine_fuel + 1,
+                .little,
+            ),
+            6 => std.mem.writeInt(u32, malformed[60..64], 0, .little),
+            7 => std.mem.writeInt(u32, malformed[64..68], 1, .little),
+            8 => std.mem.writeInt(u32, malformed[68..72], 0xffff, .little),
+            9 => std.mem.writeInt(u32, malformed[72..76], 0, .little),
+            10 => length -= 1,
+            11 => {
+                malformed[length] = 0;
+                length += 1;
+            },
+            else => unreachable,
+        }
+        const bytes = malformed[0..length];
+        if (ProgramMachine.decodeState(allocator, bytes)) |decoded| {
+            ProgramMachine.deinitState(decoded);
+            return error.MalformedDirectStateAccepted;
+        } else |_| {}
+        workspace = .{};
+        if (kernel_v1.validateState(image, bytes, &workspace)) {
+            return error.MalformedKernelStateAccepted;
+        } else |_| {
+            rejected += 1;
+        }
+    }
+    return rejected;
+}
+
+fn zeroFuelMalformedStateRejected(allocator: std.mem.Allocator) !bool {
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(
+        program_image,
+        &Profile.bytes,
+        &workspace,
+    );
+    const state = try ProgramMachine.initialState(allocator, 29);
+    defer ProgramMachine.deinitState(state);
+    const encoded = try ProgramMachine.encodeState(allocator, state);
+    defer allocator.free(encoded);
+    const malformed = try allocator.dupe(u8, encoded);
+    defer allocator.free(malformed);
+    malformed[0] ^= 0xff;
+    var fuel: u64 = 0;
+    var output_state: [4096]u8 = undefined;
+    var output_value: [4096]u8 = undefined;
+    var scratch: [8192]u8 = undefined;
+    workspace = .{};
+    if (kernel_v1.step(
+        image,
+        malformed,
+        &fuel,
+        &output_state,
+        &output_value,
+        &scratch,
+        &workspace,
+    )) |_| {
+        return false;
+    } else |err| {
+        if (err != error.InvalidState or fuel != 0) return false;
+    }
+    return true;
+}
+
+pub fn reificationReceiptWitness(
+    allocator: std.mem.Allocator,
+) !ReificationReceiptWitness {
+    const invariance = invarianceWitness();
+    const malformed_state_count = try malformedStateCaseCount(allocator);
+    return .{
+        .image_profile_invariance_passed = invariance.image_profile,
+        .metering_annotation_invariance_passed = invariance.metering_annotation,
+        .malformed_image_case_count = try malformedImageCaseCount(),
+        .malformed_state_case_count = malformed_state_count +
+            @intFromBool(try zeroFuelMalformedStateRejected(allocator)),
+        .machine_abi = machine_v2_profile_v1.machine_abi_version,
+        .state_format_version = machine_v2_profile_v1.state_format_version,
+    };
+}
+
 test "direct specialization consumes the exact Reified Program" {
     try std.testing.expect(Direct.reified_program == Reified);
     try std.testing.expect(CompatibilityDefinition.reified_program == Reified);
@@ -164,55 +352,9 @@ test "direct specialization consumes the exact Reified Program" {
 }
 
 test "BPI1 is invariant across Machine v2 profiles and metering annotations" {
-    const LowProfile = Program.machineV2Profile(.{
-        .maximum_frames = 2,
-        .maximum_state_bytes = 1024,
-        .maximum_machine_fuel = 8,
-    });
-    const HighProfile = Program.machineV2Profile(.{
-        .maximum_frames = 32,
-        .maximum_state_bytes = 1 << 20,
-        .maximum_machine_fuel = 1_000_000,
-    });
-    try std.testing.expectEqualSlices(u8, &Image.bytes, &Program.image().bytes);
-    try std.testing.expectEqualSlices(
-        u8,
-        &Image.program_transition_digest,
-        &Program.program_transition_digest,
-    );
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &LowProfile.bytes,
-        &HighProfile.bytes,
-    ));
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &LowProfile.machine_v2_contract_digest,
-        &HighProfile.machine_v2_contract_digest,
-    ));
-
-    const CheapProgram = program_v2.program("metering-invariant", MeteredBody(1));
-    const CostlyProgram = program_v2.program("metering-invariant", MeteredBody(9));
-    const CheapImage = CheapProgram.image();
-    const CostlyImage = CostlyProgram.image();
-    try std.testing.expectEqualSlices(u8, &CheapImage.bytes, &CostlyImage.bytes);
-    try std.testing.expectEqualSlices(
-        u8,
-        &CheapProgram.program_transition_digest,
-        &CostlyProgram.program_transition_digest,
-    );
-    const CheapProfile = CheapProgram.machineV2Profile(options);
-    const CostlyProfile = CostlyProgram.machineV2Profile(options);
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &CheapProfile.bytes,
-        &CostlyProfile.bytes,
-    ));
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &CheapProgram.machine_v2_semantic_digest,
-        &CostlyProgram.machine_v2_semantic_digest,
-    ));
+    const witness = invarianceWitness();
+    try std.testing.expect(witness.image_profile);
+    try std.testing.expect(witness.metering_annotation);
 }
 
 test "Program.image has no Machine options parameter" {
@@ -400,6 +542,115 @@ test "MachineV2Profile validation recomputes the v2 contract digest" {
     );
 }
 
+test "bound kernel certificate rejects backing mutation and reacquires workspace" {
+    var image_bytes = Image.bytes;
+    var profile_bytes = Profile.bytes;
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const parsed = try image_v1.validateImage(&image_bytes, &workspace);
+    const binding = try kernel_v1.bindMachineV2(
+        parsed,
+        &profile_bytes,
+        &workspace,
+    );
+    var args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &args, 29, .little);
+    var state: [4096]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        binding,
+        &args,
+        &state,
+        &workspace,
+    );
+    var predecessor: [4096]u8 = undefined;
+    @memcpy(predecessor[0..state_length], state[0..state_length]);
+
+    image_bytes[0] ^= 1;
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidImage,
+        kernel_v1.validateState(
+            binding,
+            state[0..state_length],
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        predecessor[0..state_length],
+        state[0..state_length],
+    );
+    image_bytes[0] ^= 1;
+
+    profile_bytes[0] ^= 1;
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidProfile,
+        kernel_v1.validateState(
+            binding,
+            state[0..state_length],
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        predecessor[0..state_length],
+        state[0..state_length],
+    );
+    profile_bytes[0] ^= 1;
+
+    workspace = .{};
+    var reacquired: [4096]u8 = undefined;
+    const reacquired_length = try kernel_v1.initial(
+        binding,
+        &args,
+        &reacquired,
+        &workspace,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        state[0..state_length],
+        reacquired[0..reacquired_length],
+    );
+}
+
+test "kernel rejects mutable outputs aliased with authenticated backing" {
+    var image_bytes = Image.bytes;
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const parsed = try image_v1.validateImage(&image_bytes, &workspace);
+    const binding = try kernel_v1.bindMachineV2(
+        parsed,
+        &Profile.bytes,
+        &workspace,
+    );
+    var args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &args, 29, .little);
+    const before = image_bytes;
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidBindings,
+        kernel_v1.initial(
+            binding,
+            &args,
+            &image_bytes,
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqualSlices(u8, &before, &image_bytes);
+}
+
+test "BPI validator rejects workspace aliased with image bytes" {
+    comptime std.debug.assert(
+        @sizeOf(image_v1.ValidationWorkspace) >= Image.bytes.len,
+    );
+    var storage: [@sizeOf(image_v1.ValidationWorkspace)]u8 align(@alignOf(image_v1.ValidationWorkspace)) = undefined;
+    @memcpy(storage[0..Image.bytes.len], &Image.bytes);
+    const workspace: *image_v1.ValidationWorkspace = @ptrCast(&storage);
+    try std.testing.expectError(
+        error.InvalidImage,
+        image_v1.validateImage(storage[0..Image.bytes.len], workspace),
+    );
+}
+
 test "MachineV2Profile binds segment costs to v2 semantic identity" {
     var malformed = Profile.bytes;
     const cost_offset = machine_v2_profile_v1.header_length;
@@ -531,92 +782,20 @@ test "BPI1 validation recomputes evaluator scratch requirements" {
 }
 
 test "BPI1 rejects 1000 deterministic mutations without trap" {
-    var malformed: [Image.bytes.len]u8 = undefined;
-    for (0..1000) |index| {
-        @memcpy(&malformed, &Image.bytes);
-        const offset = (index * 104729) % malformed.len;
-        malformed[offset] ^= @as(u8, 1) << @intCast(index % 8);
-        var workspace: image_v1.ValidationWorkspace = .{};
-        if (image_v1.validateImage(&malformed, &workspace)) |_| {
-            return error.MalformedImageAccepted;
-        } else |_| {}
-    }
+    try std.testing.expectEqual(@as(u32, 1000), try malformedImageCaseCount());
 }
 
 test "direct and kernel reject shared malformed State classes" {
-    const state = try ProgramMachine.initialState(std.testing.allocator, 29);
-    defer ProgramMachine.deinitState(state);
-    const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
-    defer std.testing.allocator.free(encoded);
-    var workspace: image_v1.ValidationWorkspace = .{};
-    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
-    var malformed: [4096]u8 = undefined;
-    for (0..12) |case| {
-        @memcpy(malformed[0..encoded.len], encoded);
-        var length = encoded.len;
-        switch (case) {
-            0 => malformed[0] ^= 0xff,
-            1 => std.mem.writeInt(u16, malformed[8..10], 2, .little),
-            2 => std.mem.writeInt(u16, malformed[10..12], 3, .little),
-            3 => malformed[12] ^= 0xff,
-            4 => std.mem.writeInt(u64, malformed[44..52], 1, .little),
-            5 => std.mem.writeInt(
-                u64,
-                malformed[52..60],
-                options.maximum_machine_fuel + 1,
-                .little,
-            ),
-            6 => std.mem.writeInt(u32, malformed[60..64], 0, .little),
-            7 => std.mem.writeInt(u32, malformed[64..68], 1, .little),
-            8 => std.mem.writeInt(u32, malformed[68..72], 0xffff, .little),
-            9 => std.mem.writeInt(u32, malformed[72..76], 0, .little),
-            10 => length -= 1,
-            11 => {
-                malformed[length] = 0;
-                length += 1;
-            },
-            else => unreachable,
-        }
-        const bytes = malformed[0..length];
-        if (ProgramMachine.decodeState(std.testing.allocator, bytes)) |decoded| {
-            ProgramMachine.deinitState(decoded);
-            return error.MalformedDirectStateAccepted;
-        } else |_| {}
-        if (kernel_v1.validateState(image, bytes, &workspace)) {
-            return error.MalformedKernelStateAccepted;
-        } else |_| {}
-    }
+    try std.testing.expectEqual(
+        @as(u32, 12),
+        try malformedStateCaseCount(std.testing.allocator),
+    );
 }
 
 test "zero caller fuel cannot launder a malformed State" {
-    var workspace: image_v1.ValidationWorkspace = .{};
-    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
-    const state = try ProgramMachine.initialState(std.testing.allocator, 29);
-    defer ProgramMachine.deinitState(state);
-    const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
-    defer std.testing.allocator.free(encoded);
-    const malformed = try std.testing.allocator.dupe(u8, encoded);
-    defer std.testing.allocator.free(malformed);
-    malformed[0] ^= 0xff;
-    var fuel: u64 = 0;
-    var output_state: [4096]u8 = undefined;
-    var output_value: [4096]u8 = undefined;
-    var scratch: [8192]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidState,
-        kernel_v1.step(
-            image,
-            malformed,
-            &fuel,
-            &output_state,
-            &output_value,
-            &scratch,
-            &workspace,
-        ),
+    try std.testing.expect(
+        try zeroFuelMalformedStateRejected(std.testing.allocator),
     );
-    try std.testing.expectEqual(@as(u64, 0), fuel);
 }
 
 test "maximum resume sizing rejects malformed State framing" {
@@ -632,7 +811,7 @@ test "maximum resume sizing rejects malformed State framing" {
     std.mem.writeInt(u32, malformed[60..64], 2, .little);
     try std.testing.expectError(
         error.InvalidState,
-        kernel_v1.maximumResumeStateSize(image, malformed),
+        kernel_v1.maximumResumeStateSize(image, malformed, &workspace),
     );
 }
 

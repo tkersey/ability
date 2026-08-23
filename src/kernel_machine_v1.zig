@@ -310,6 +310,7 @@ pub fn Machine(
             const maximum_resume_state = kernel_v1.maximumResumeStateSize(
                 image,
                 value.storage[0..value.length],
+                &workspace,
             ) catch return error.ProgramContractViolation;
             if (maximum_resume_state > options.maximum_state_bytes) {
                 return error.ProgramContractViolation;

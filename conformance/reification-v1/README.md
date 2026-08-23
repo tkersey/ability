@@ -24,6 +24,8 @@ a reduced graph with no Machine-v2 modules. BPI1 is the public canonical
 artifact; raw clause evaluation is not a public package API.
 
 Asset emission consumes the executed `boundary-reification-v1-proof.json`
-stamp produced only after the complete receipt gate succeeds. The receipt
-writer rejects a missing, failed, or mistyped proof stamp and derives its proof
-claims from that artifact rather than asserting them independently.
+artifact produced only after the complete receipt gate succeeds. Its writer
+derives baseline inventory, semantic invariance, malformed-corpus counts,
+generated comparisons, WASM imports, and source topology from their executed
+outputs. The receipt writer rejects a missing, failed, or mistyped proof and
+derives its claims from that artifact rather than asserting them independently.

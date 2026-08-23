@@ -66,19 +66,27 @@ pub const RequestView = struct {
 
 const Slot = reducer_clause_v1.Slot;
 
-/// One validated BPI1 program bound to one bounded Machine ABI v2 profile.
+/// Immutable binding certificate for one exact BPI1/profile byte pair.
+/// Execution reacquires a validated view in caller workspace on every command.
 pub const BoundProgram = struct {
+    image_bytes: []const u8,
+    profile_bytes: []const u8,
+    image_sha256: [32]u8,
+    profile_sha256: [32]u8,
+};
+
+const ValidatedProgram = struct {
     catalogs: image_v1.Catalogs,
     segment_count: u32,
     constructor_count: u32,
     profile: machine_v2_profile_v1.Validated,
 };
 
-pub fn bindMachineV2(
+fn bindValidatedMachineV2(
     image: image_v1.ValidatedImage,
     profile_bytes: []const u8,
     workspace: *image_v1.ValidationWorkspace,
-) Error!BoundProgram {
+) Error!ValidatedProgram {
     const profile = machine_v2_profile_v1.validate(
         profile_bytes,
         image.catalogs.envelope.header.program_transition_digest,
@@ -105,6 +113,91 @@ pub fn bindMachineV2(
         .constructor_count = profile.constructor_count,
         .profile = profile,
     };
+}
+
+pub fn bindMachineV2(
+    image: image_v1.ValidatedImage,
+    profile_bytes: []const u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!BoundProgram {
+    const image_bytes = image.catalogs.envelope.image;
+    try requireWorkspaceDisjoint(image_bytes, workspace);
+    try requireWorkspaceDisjoint(profile_bytes, workspace);
+    const refreshed_image = image_v1.validateImage(
+        image_bytes,
+        workspace,
+    ) catch return error.InvalidImage;
+    _ = try bindValidatedMachineV2(
+        refreshed_image,
+        profile_bytes,
+        workspace,
+    );
+    return .{
+        .image_bytes = image_bytes,
+        .profile_bytes = profile_bytes,
+        .image_sha256 = sha256(image_bytes),
+        .profile_sha256 = sha256(profile_bytes),
+    };
+}
+
+fn acquire(
+    binding: BoundProgram,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!ValidatedProgram {
+    try requireWorkspaceDisjoint(binding.image_bytes, workspace);
+    try requireWorkspaceDisjoint(binding.profile_bytes, workspace);
+    const image_sha256 = sha256(binding.image_bytes);
+    if (!std.mem.eql(u8, &image_sha256, &binding.image_sha256)) {
+        return error.InvalidImage;
+    }
+    const profile_sha256 = sha256(binding.profile_bytes);
+    if (!std.mem.eql(u8, &profile_sha256, &binding.profile_sha256)) {
+        return error.InvalidProfile;
+    }
+    const image = image_v1.validateImage(
+        binding.image_bytes,
+        workspace,
+    ) catch return error.InvalidImage;
+    return bindValidatedMachineV2(image, binding.profile_bytes, workspace);
+}
+
+fn sha256(bytes: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return digest;
+}
+
+fn requireWorkspaceDisjoint(
+    bytes: []const u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    if (rangesOverlap(bytes, std.mem.asBytes(workspace))) {
+        return error.InvalidBindings;
+    }
+}
+
+fn requireBindingDisjoint(
+    binding: BoundProgram,
+    bytes: []const u8,
+) Error!void {
+    if (rangesOverlap(binding.image_bytes, bytes) or
+        rangesOverlap(binding.profile_bytes, bytes))
+    {
+        return error.InvalidBindings;
+    }
+}
+
+fn requireDisjoint(left: []const u8, right: []const u8) Error!void {
+    if (rangesOverlap(left, right)) return error.InvalidBindings;
+}
+
+fn rangesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_start = @intFromPtr(left.ptr);
+    const right_start = @intFromPtr(right.ptr);
+    const left_end = std.math.add(usize, left_start, left.len) catch return true;
+    const right_end = std.math.add(usize, right_start, right.len) catch return true;
+    return left_start < right_end and right_start < left_end;
 }
 
 fn minimumInitialStateBytes(
@@ -145,7 +238,7 @@ fn minimumInitialStateBytes(
     return total;
 }
 
-fn programView(image: BoundProgram) image_v1.ValidatedImage {
+fn programView(image: ValidatedProgram) image_v1.ValidatedImage {
     return .{
         .catalogs = image.catalogs,
         .segment_count = image.segment_count,
@@ -153,9 +246,126 @@ fn programView(image: BoundProgram) image_v1.ValidatedImage {
     };
 }
 
-/// Construct the exact initial ABL_RNF2 State from canonical InitialArgs.
 pub fn initial(
-    image: BoundProgram,
+    binding: BoundProgram,
+    initial_args: []const u8,
+    output_state: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!usize {
+    try requireWorkspaceDisjoint(initial_args, workspace);
+    try requireWorkspaceDisjoint(output_state, workspace);
+    try requireBindingDisjoint(binding, output_state);
+    try requireDisjoint(initial_args, output_state);
+    const image = try acquire(binding, workspace);
+    return initialValidated(
+        image,
+        initial_args,
+        output_state,
+        workspace,
+    );
+}
+
+pub fn validateState(
+    binding: BoundProgram,
+    state: []const u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    try requireWorkspaceDisjoint(state, workspace);
+    const image = try acquire(binding, workspace);
+    return validateStateValidated(image, state, workspace);
+}
+
+pub fn current(
+    binding: BoundProgram,
+    state: []const u8,
+    output_payload: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!?RequestView {
+    try requireWorkspaceDisjoint(state, workspace);
+    try requireWorkspaceDisjoint(output_payload, workspace);
+    try requireBindingDisjoint(binding, output_payload);
+    try requireDisjoint(state, output_payload);
+    const image = try acquire(binding, workspace);
+    return currentValidated(
+        image,
+        state,
+        output_payload,
+        workspace,
+    );
+}
+
+pub fn @"resume"(
+    binding: BoundProgram,
+    state: []const u8,
+    identity: RequestIdentity,
+    response: []const u8,
+    output_state: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!usize {
+    try requireWorkspaceDisjoint(state, workspace);
+    try requireWorkspaceDisjoint(response, workspace);
+    try requireWorkspaceDisjoint(output_state, workspace);
+    try requireBindingDisjoint(binding, output_state);
+    try requireDisjoint(state, output_state);
+    try requireDisjoint(response, output_state);
+    const image = try acquire(binding, workspace);
+    return resumeValidated(
+        image,
+        state,
+        identity,
+        response,
+        output_state,
+        workspace,
+    );
+}
+
+pub fn step(
+    binding: BoundProgram,
+    state: []const u8,
+    caller_fuel: *u64,
+    output_state: []u8,
+    output_value: []u8,
+    scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!Outcome {
+    try requireWorkspaceDisjoint(state, workspace);
+    try requireWorkspaceDisjoint(output_state, workspace);
+    try requireWorkspaceDisjoint(output_value, workspace);
+    try requireWorkspaceDisjoint(scratch, workspace);
+    try requireBindingDisjoint(binding, output_state);
+    try requireBindingDisjoint(binding, output_value);
+    try requireBindingDisjoint(binding, scratch);
+    try requireDisjoint(state, output_state);
+    try requireDisjoint(state, output_value);
+    try requireDisjoint(state, scratch);
+    try requireDisjoint(output_state, output_value);
+    try requireDisjoint(output_state, scratch);
+    try requireDisjoint(output_value, scratch);
+    const image = try acquire(binding, workspace);
+    return stepValidated(
+        image,
+        state,
+        caller_fuel,
+        output_state,
+        output_value,
+        scratch,
+        workspace,
+    );
+}
+
+pub fn maximumResumeStateSize(
+    binding: BoundProgram,
+    state: []const u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!usize {
+    try requireWorkspaceDisjoint(state, workspace);
+    const image = try acquire(binding, workspace);
+    return maximumResumeStateSizeValidated(image, state);
+}
+
+/// Construct the exact initial ABL_RNF2 State from canonical InitialArgs.
+fn initialValidated(
+    image: ValidatedProgram,
     initial_args: []const u8,
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
@@ -231,13 +441,13 @@ pub fn initial(
         appendBytes(output_state, &cursor, initial_args);
     }
     if (cursor != required) return error.InvalidImage;
-    try validateState(image, output_state[0..required], workspace);
+    try validateStateValidated(image, output_state[0..required], workspace);
     return required;
 }
 
 /// Validate canonical State framing and every constructor environment value.
-pub fn validateState(
-    image: BoundProgram,
+fn validateStateValidated(
+    image: ValidatedProgram,
     state: []const u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
@@ -291,7 +501,7 @@ pub fn validateState(
 }
 
 fn validateStateEnvelope(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
 ) Error!void {
     if (state.len < state_header_length + frame_header_length or
@@ -341,7 +551,7 @@ fn validateStateEnvelope(
 }
 
 fn isAwaitCallConstructor(
-    image: BoundProgram,
+    image: ValidatedProgram,
     constructor: []const u8,
 ) bool {
     if (constructor.len < 24 or constructor[8] != 4 or constructor[9] != 2) {
@@ -356,7 +566,7 @@ fn isAwaitCallConstructor(
 }
 
 fn validateStackPair(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     parent_offset: usize,
     parent_constructor: []const u8,
@@ -455,14 +665,14 @@ fn constructorRetainsActivationValue(
     return false;
 }
 
-pub fn current(
-    image: BoundProgram,
+fn currentValidated(
+    image: ValidatedProgram,
     state: []const u8,
     output_payload: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!?RequestView {
     workspace.invariant_result = output_payload;
-    try validateState(image, state, workspace);
+    try validateStateValidated(image, state, workspace);
     const constructor_id = try topConstructorId(state);
     const constructor = try constructorRecord(image, constructor_id);
     if (constructor[8] != 3) return null;
@@ -504,15 +714,15 @@ pub fn current(
     };
 }
 
-pub fn @"resume"(
-    image: BoundProgram,
+fn resumeValidated(
+    image: ValidatedProgram,
     state: []const u8,
     identity: RequestIdentity,
     response: []const u8,
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
-    try validateState(image, state, workspace);
+    try validateStateValidated(image, state, workspace);
     const constructor_id = try topConstructorId(state);
     const constructor = try constructorRecord(image, constructor_id);
     if (constructor[8] != 3) return error.InvalidState;
@@ -585,12 +795,12 @@ pub fn @"resume"(
         readInt(u64, state, 52),
         output_state,
     );
-    try validateState(image, successor, workspace);
+    try validateStateValidated(image, successor, workspace);
     return successor.len;
 }
 
-pub fn step(
-    image: BoundProgram,
+fn stepValidated(
+    image: ValidatedProgram,
     state: []const u8,
     caller_fuel: *u64,
     output_state: []u8,
@@ -689,7 +899,7 @@ pub fn step(
 
 /// Execute one funded atomic segment under Machine ABI v2 policy.
 fn stepSegment(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     caller_fuel: *u64,
     output_state: []u8,
@@ -712,7 +922,7 @@ fn stepSegment(
     // top constructor before an unfunded segment. Environment and invariant
     // validation remains deferred until the caller funds the atomic segment.
     if (caller_fuel.* < minimum_cost) return .{ .yielded = state };
-    try validateState(image, state, workspace);
+    try validateStateValidated(image, state, workspace);
     const cumulative = readInt(u64, state, 52);
     var slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &slots);
@@ -776,7 +986,7 @@ fn stepSegment(
                 next_cumulative,
                 output_state,
             );
-            if (try maximumResumeStateSize(image, parked) >
+            if (try maximumResumeStateSizeValidated(image, parked) >
                 image.profile.maximum_state_bytes)
             {
                 return error.InvalidState;
@@ -860,8 +1070,8 @@ fn stepSegment(
     return outcome;
 }
 
-pub fn maximumResumeStateSize(
-    image: BoundProgram,
+fn maximumResumeStateSizeValidated(
+    image: ValidatedProgram,
     state: []const u8,
 ) Error!usize {
     try validateStateEnvelope(image, state);
@@ -932,7 +1142,7 @@ pub fn maximumResumeStateSize(
 }
 
 fn transitionState(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     source_segment: u16,
     edge_kind: u8,
@@ -985,7 +1195,7 @@ fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
 }
 
 fn encodeTopFrame(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     constructor_id: u32,
     slots: *const [1024]Slot,
@@ -1048,7 +1258,7 @@ fn encodeTopFrame(
 }
 
 fn transitionConstructor(
-    image: BoundProgram,
+    image: ValidatedProgram,
     source: u16,
     edge_kind: u8,
     target: u16,
@@ -1069,7 +1279,7 @@ fn transitionConstructor(
 }
 
 fn awaitingConstructor(
-    image: BoundProgram,
+    image: ValidatedProgram,
     source_segment: u16,
 ) Error!u32 {
     for (0..image.constructor_count) |id| {
@@ -1084,7 +1294,7 @@ fn awaitingConstructor(
 }
 
 fn awaitCallConstructor(
-    image: BoundProgram,
+    image: ValidatedProgram,
     source_segment: u16,
 ) Error!u32 {
     for (0..image.constructor_count) |id| {
@@ -1107,7 +1317,7 @@ fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
 }
 
 fn applyValueEdge(
-    image: BoundProgram,
+    image: ValidatedProgram,
     edge: []const u8,
     target_segment: u16,
     target_constructor: u32,
@@ -1129,7 +1339,7 @@ fn applyValueEdge(
 }
 
 fn appendFrame(
-    image: BoundProgram,
+    image: ValidatedProgram,
     parent: []const u8,
     constructor_id: u32,
     slots: *const [1024]Slot,
@@ -1172,7 +1382,7 @@ fn appendFrame(
 }
 
 fn returnToCaller(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     return_value: []const u8,
     cumulative_fuel: u64,
@@ -1251,7 +1461,7 @@ fn returnToCaller(
 }
 
 fn requestIdentity(
-    image: BoundProgram,
+    image: ValidatedProgram,
     parked_state: []const u8,
     constructor_id: u32,
     site_ordinal: u32,
@@ -1291,7 +1501,7 @@ fn requestIdentity(
 }
 
 fn effectOrdinalDigest(
-    image: BoundProgram,
+    image: ValidatedProgram,
     target: u32,
 ) Error![32]u8 {
     const bytes = image.catalogs.envelope.section(.effects);
@@ -1309,7 +1519,7 @@ fn effectOrdinalDigest(
 }
 
 fn effectResumeSchema(
-    image: BoundProgram,
+    image: ValidatedProgram,
     target: u32,
 ) Error!u32 {
     const bytes = image.catalogs.envelope.section(.effects);
@@ -1384,7 +1594,7 @@ fn frameOffset(state: []const u8, target: u32) Error!usize {
 }
 
 fn replaceFrameAndTruncate(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     frame_offset: usize,
     frame_count: u32,
@@ -1442,7 +1652,7 @@ fn replaceFrameAndTruncate(
 }
 
 fn loadTopEnvironment(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     constructor: []const u8,
     slots: *[1024]Slot,
@@ -1459,7 +1669,7 @@ fn loadTopEnvironment(
 }
 
 fn initializeZeroWidthSlots(
-    image: BoundProgram,
+    image: ValidatedProgram,
     slots: *[1024]Slot,
 ) Error!void {
     for (0..image.catalogs.value_count) |value| {
@@ -1474,7 +1684,7 @@ fn initializeZeroWidthSlots(
 }
 
 fn loadFrameEnvironment(
-    image: BoundProgram,
+    image: ValidatedProgram,
     state: []const u8,
     frame_offset: usize,
     constructor: []const u8,
@@ -1977,7 +2187,7 @@ fn algebraicCaseIndex(
 }
 
 fn constructorRecord(
-    image: BoundProgram,
+    image: ValidatedProgram,
     target: u32,
 ) Error![]const u8 {
     const mapped = image.profile.mappedConstructor(target) catch

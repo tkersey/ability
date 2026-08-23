@@ -62,4 +62,13 @@ for (const fixture of vectors.fixtures) {
 if (vectors.malformed_state_cases.some((entry) => entry.rejected !== true)) {
   throw new Error('malformed State baseline contains an accepted input');
 }
+process.stdout.write(`${JSON.stringify({
+  format: 'boundary-reification-baseline-proof/v1',
+  fixture_count: vectors.fixtures.length,
+  mismatch_count: 0,
+  malformed_state_case_count: vectors.malformed_state_cases.length,
+  machine_abi: vectors.fixtures[0].machine_abi,
+  state_format: vectors.fixtures[0].state_format,
+  state_format_version: vectors.fixtures[0].state_format_version,
+})}\n`);
 NODE

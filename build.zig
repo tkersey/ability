@@ -757,6 +757,9 @@ pub fn build(b: *std.Build) void {
     );
     reification_baseline_check.addArg(b.graph.zig_exe);
     reification_baseline_check.setCwd(b.path("."));
+    const reification_baseline_proof = reification_baseline_check.captureStdOut(.{
+        .basename = "boundary-reification-baseline-proof.json",
+    });
     const reification_baseline_step = b.step(
         "check-boundary-reification-baseline",
         "Verify the immutable Boundary v1.5.0 reification baseline.",
@@ -902,6 +905,26 @@ pub fn build(b: *std.Build) void {
         "reducer_clause_v1",
         host_core.reducer_clause_v1,
     );
+    const reification_receipt_witness_module = b.createModule(.{
+        .root_source_file = b.path("test/reification_receipt_witness.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    reification_receipt_witness_module.addImport(
+        "reified_program_fixture",
+        reified_program_test,
+    );
+    const reification_receipt_witness_executable = b.addExecutable(.{
+        .name = "boundary-reification-semantic-proof",
+        .root_module = reification_receipt_witness_module,
+    });
+    const run_reification_receipt_witness = b.addRunArtifact(
+        reification_receipt_witness_executable,
+    );
+    const reification_semantic_proof =
+        run_reification_receipt_witness.captureStdOut(.{
+            .basename = "boundary-reification-semantic-proof.json",
+        });
     const reification_generated_test = programTestModule(
         b,
         host_core,
@@ -2134,9 +2157,27 @@ pub fn build(b: *std.Build) void {
     }) |dependency| reification_receipt_step.dependOn(dependency);
     const reification_proof_stamp_command = b.addSystemCommand(&.{
         "node",
-        "-e",
-        "process.stdout.write(JSON.stringify({format:'boundary-reification-proof/v1',gate:'check-boundary-reification-receipt',status:'passed',machine_v2_kernel_wasm_import_count:0,image_profile_invariance_passed:true,metering_annotation_invariance_passed:true,baseline_digest_count:10,baseline_digest_mismatch_count:0,canonical_image_fixture_count:10,wasm_transition_comparison_count:1,malformed_image_case_count:1000,malformed_state_case_count:13,world_application_identity_match:false,world_frame_byte_match:false,agent_witness_passed:false,machine_abi_changed:false,state_format_changed:false,application_abi_changed:false,frame_format_changed:false,effect_protocol_changed:false,source_interpreter_present:false,runtime_definition_loader_present:false,callback_registry_present:false,public_clause_evaluator_present:false,pure_clause_machine_v2_dependency_present:false,proof_gate_required_before_emission:true})+'\\n')",
+        "scripts/write_reification_proof.mjs",
     });
+    reification_proof_stamp_command.addFileArg(
+        kernel_wasm_executable.getEmittedBin(),
+    );
+    reification_proof_stamp_command.addFileArg(reification_baseline_proof);
+    reification_proof_stamp_command.addFileArg(reification_semantic_proof);
+    reification_proof_stamp_command.addFileArg(reification_generated_proof);
+    reification_proof_stamp_command.addFileArg(kernel_vector_output);
+    reification_proof_stamp_command.addFileArg(b.path("src/root.zig"));
+    reification_proof_stamp_command.addFileArg(b.path("build.zig"));
+    reification_proof_stamp_command.addFileArg(
+        b.path("src/program_semantics_v1.zig"),
+    );
+    reification_proof_stamp_command.addFileArg(
+        b.path("src/reducer_clause_v1.zig"),
+    );
+    reification_proof_stamp_command.addFileArg(b.path("src/image_v1.zig"));
+    reification_proof_stamp_command.addFileArg(
+        b.path("src/reified_program_v1.zig"),
+    );
     reification_proof_stamp_command.step.dependOn(reification_receipt_step);
     const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
         .basename = "boundary-reification-v1-proof.json",

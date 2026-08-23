@@ -14,6 +14,7 @@ pub const header_length: u32 = fixed_prefix_length +
     section_count * section_descriptor_length;
 
 pub const Error = error{
+    InvalidImage,
     InvalidMagic,
     UnsupportedImageVersion,
     UnsupportedEvaluatorSemantics,
@@ -214,6 +215,9 @@ pub fn validateCatalogs(
     image: []const u8,
     workspace: *ValidationWorkspace,
 ) Error!Catalogs {
+    if (rangesOverlap(image, std.mem.asBytes(workspace))) {
+        return error.InvalidImage;
+    }
     const envelope = try validateEnvelope(image);
     const schemas = dynamic_value_v1.validateSchemaSection(
         envelope.section(.schemas),
@@ -2801,4 +2805,13 @@ fn allZero(bytes: []const u8) bool {
         if (byte != 0) return false;
     }
     return true;
+}
+
+fn rangesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_start = @intFromPtr(left.ptr);
+    const right_start = @intFromPtr(right.ptr);
+    const left_end = std.math.add(usize, left_start, left.len) catch return true;
+    const right_end = std.math.add(usize, right_start, right.len) catch return true;
+    return left_start < right_end and right_start < left_end;
 }

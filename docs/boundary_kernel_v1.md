@@ -15,6 +15,13 @@ transition constructor identities. Binding recomputes the frozen
 accepting the Machine contract. Changing a cost or checkpoint annotation
 without changing the v2 semantic and contract identities is rejected.
 
+Native `BoundProgram` values are binding certificates, not persistent validated
+views. The caller retains the exact BPI1 and profile byte storage for the
+certificate lifetime. Every command verifies both artifact hashes, rebuilds
+schema indexes in the supplied workspace, and repeats structural and semantic
+binding before execution. Post-bind artifact mutation, workspace reuse, and
+mutable output aliasing with authenticated backing fail closed.
+
 Native operations are `initial`, `validateState`, `current`, `step`, and
 `resume`. A funded segment executes atomically. Insufficient caller fuel yields
 before the segment, preserving State and fuel. Ordinary transitions remain
