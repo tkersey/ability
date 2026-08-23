@@ -817,6 +817,16 @@ pub fn build(b: *std.Build) void {
         false,
     );
     reification_generated_test.addImport("machine", host_core.machine);
+    const reification_generated_proof_executable = b.addExecutable(.{
+        .name = "boundary-reification-generated-proof",
+        .root_module = reification_generated_test,
+    });
+    const run_reification_generated_proof = b.addRunArtifact(
+        reification_generated_proof_executable,
+    );
+    const reification_generated_proof = run_reification_generated_proof.captureStdOut(.{
+        .basename = "boundary-reification-generated-proof.json",
+    });
     const reducer_semantics_test = b.createModule(.{
         .root_source_file = b.path("test/reducer_semantics_v1.zig"),
         .target = b.graph.host,
@@ -1211,6 +1221,9 @@ pub fn build(b: *std.Build) void {
     );
     reification_asset_receipt_command.addFileArg(
         b.path("test/program_constructor_invariants.zig"),
+    );
+    reification_asset_receipt_command.addFileArg(
+        reification_generated_proof,
     );
     const reification_receipt_file = reification_asset_receipt_command.captureStdOut(.{
         .basename = "boundary-reification-v1-receipt.json",

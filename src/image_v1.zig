@@ -117,7 +117,7 @@ pub const ValidationWorkspace = struct {
 
 pub const SchemaOrderTask = struct {
     schema_id: u32,
-    expanded: bool,
+    next_child: u32,
 };
 
 pub const Catalogs = struct {
@@ -441,79 +441,56 @@ fn visitCanonicalSchema(
     next_schema: *u32,
 ) Error!void {
     var stack_length: usize = 0;
-    try pushSchemaOrderTask(workspace, &stack_length, root, false);
+    try pushSchemaOrderTask(workspace, &stack_length, root);
     while (stack_length != 0) {
-        stack_length -= 1;
-        const task = workspace.canonical_schema_stack[stack_length];
-        if (workspace.canonical_schema_seen[task.schema_id]) continue;
-        const node = schemas.node(task.schema_id) catch return error.InvalidSchema;
-        if (task.expanded) {
-            if (task.schema_id != next_schema.*) return error.InvalidSchema;
-            workspace.canonical_schema_seen[task.schema_id] = true;
-            next_schema.* += 1;
+        const task = &workspace.canonical_schema_stack[stack_length - 1];
+        if (workspace.canonical_schema_seen[task.schema_id]) {
+            stack_length -= 1;
             continue;
         }
-        try pushSchemaOrderTask(
-            workspace,
-            &stack_length,
-            task.schema_id,
-            true,
-        );
-        switch (node.kind) {
-            .array, .vector => try pushSchemaOrderTask(
-                workspace,
-                &stack_length,
-                readInt(u32, node.payload, 4),
-                false,
-            ),
-            .optional => try pushSchemaOrderTask(
-                workspace,
-                &stack_length,
-                readInt(u32, node.payload, 0),
-                false,
-            ),
-            .product => {
-                const count = readInt(u32, node.payload, 0);
-                var index = count;
-                while (index != 0) {
-                    index -= 1;
-                    try pushSchemaOrderTask(
-                        workspace,
-                        &stack_length,
-                        readInt(u32, node.payload, 4 + @as(usize, index) * 4),
-                        false,
-                    );
-                }
-            },
-            .sum => {
-                const count = readInt(u32, node.payload, 4);
-                var index = count;
-                while (index != 0) {
-                    index -= 1;
-                    try pushSchemaOrderTask(
-                        workspace,
-                        &stack_length,
-                        readInt(u32, node.payload, 12 + @as(usize, index) * 8),
-                        false,
-                    );
-                }
-                try pushSchemaOrderTask(
-                    workspace,
-                    &stack_length,
-                    readInt(u32, node.payload, 0),
-                    false,
-                );
-            },
-            else => {},
+        const node = schemas.node(task.schema_id) catch return error.InvalidSchema;
+        const child_count = schemaChildCount(node);
+        if (task.next_child < child_count) {
+            const child = schemaChildId(node, task.next_child);
+            task.next_child += 1;
+            if (!workspace.canonical_schema_seen[child]) {
+                try pushSchemaOrderTask(workspace, &stack_length, child);
+            }
+            continue;
         }
+        if (task.schema_id != next_schema.*) return error.InvalidSchema;
+        workspace.canonical_schema_seen[task.schema_id] = true;
+        next_schema.* += 1;
+        stack_length -= 1;
     }
+}
+
+fn schemaChildCount(node: dynamic_value_v1.Node) u32 {
+    return switch (node.kind) {
+        .array, .vector, .optional => 1,
+        .product => readInt(u32, node.payload, 0),
+        .sum => 1 + readInt(u32, node.payload, 4),
+        else => 0,
+    };
+}
+
+fn schemaChildId(node: dynamic_value_v1.Node, index: u32) u32 {
+    return switch (node.kind) {
+        .array, .vector => readInt(u32, node.payload, 4),
+        .optional => readInt(u32, node.payload, 0),
+        .product => readInt(u32, node.payload, 4 + @as(usize, index) * 4),
+        .sum => if (index == 0)
+            readInt(u32, node.payload, 0)
+        else
+            readInt(u32, node.payload, 12 + @as(usize, index - 1) * 8),
+        else => unreachable,
+    };
 }
 
 fn pushSchemaOrderTask(
     workspace: *ValidationWorkspace,
     stack_length: *usize,
     schema_id: u32,
-    expanded: bool,
 ) Error!void {
     if (schema_id >= workspace.canonical_schema_seen.len or
         stack_length.* == workspace.canonical_schema_stack.len)
@@ -522,7 +499,7 @@ fn pushSchemaOrderTask(
     }
     workspace.canonical_schema_stack[stack_length.*] = .{
         .schema_id = schema_id,
-        .expanded = expanded,
+        .next_child = 0,
     };
     stack_length.* += 1;
 }
@@ -1792,6 +1769,27 @@ fn validateTransitions(
         {
             return error.InvalidTransition;
         }
+        const constructor_record = imageConstructorRecord(
+            catalogs,
+            constructor,
+        ) catch return error.InvalidTransition;
+        const expected_origin: u8 = if (edge == 3)
+            1
+        else if (edge == 4) blk: {
+            const source_segment = imageSegmentRecord(catalogs, source) catch
+                return error.InvalidTransition;
+            const terminator = imageSegmentTerminator(source_segment);
+            break :blk if (source_segment[terminator + 4] == 2 and
+                source_segment[terminator + 8] >= 2)
+                2
+            else
+                0;
+        } else 0;
+        if (constructor_record[9] != expected_origin or
+            readInt(u16, constructor_record, 12) != target)
+        {
+            return error.InvalidTransition;
+        }
         const key = [3]u32{ source, edge, target };
         if (previous) |prior| {
             if (!lexicographicallyLess(prior, key)) {
@@ -1800,6 +1798,120 @@ fn validateTransitions(
         }
         previous = key;
     }
+    try validateTransitionCompleteness(catalogs, bytes, count);
+}
+
+fn validateTransitionCompleteness(
+    catalogs: Catalogs,
+    transitions: []const u8,
+    transition_count: u32,
+) Error!void {
+    const segments = catalogs.envelope.section(.segments);
+    const segment_count = readInt(u32, segments, 0);
+    var required_count: u32 = 0;
+    for (0..segment_count) |source| {
+        const segment = imageSegmentRecord(catalogs, @intCast(source)) catch
+            return error.InvalidTransition;
+        const terminator = imageSegmentTerminator(segment);
+        const kind = segment[terminator + 4];
+        const payload = terminator + 8;
+        switch (kind) {
+            0 => try requireTransition(
+                transitions,
+                transition_count,
+                @intCast(source),
+                0,
+                readInt(u16, segment, payload),
+                &required_count,
+            ),
+            1 => {
+                const then_edge = payload + 4;
+                const else_edge = then_edge + imageEdgeLength(segment[then_edge..]);
+                try requireTransition(
+                    transitions,
+                    transition_count,
+                    @intCast(source),
+                    1,
+                    readInt(u16, segment, then_edge),
+                    &required_count,
+                );
+                try requireTransition(
+                    transitions,
+                    transition_count,
+                    @intCast(source),
+                    2,
+                    readInt(u16, segment, else_edge),
+                    &required_count,
+                );
+            },
+            2 => {
+                const request_count = readInt(u16, segment, payload + 10);
+                var edge_cursor = payload + 12 + @as(usize, request_count) * 2;
+                const callee_present = segment[edge_cursor] == 1;
+                edge_cursor += 4;
+                if (callee_present) {
+                    try requireTransition(
+                        transitions,
+                        transition_count,
+                        @intCast(source),
+                        3,
+                        readInt(u16, segment, edge_cursor),
+                        &required_count,
+                    );
+                    edge_cursor += imageEdgeLength(segment[edge_cursor..]);
+                }
+                try requireTransition(
+                    transitions,
+                    transition_count,
+                    @intCast(source),
+                    4,
+                    readInt(u16, segment, edge_cursor),
+                    &required_count,
+                );
+            },
+            else => {},
+        }
+    }
+    if (required_count != transition_count) return error.InvalidTransition;
+}
+
+fn requireTransition(
+    transitions: []const u8,
+    count: u32,
+    source: u16,
+    edge: u8,
+    target: u16,
+    required_count: *u32,
+) Error!void {
+    for (0..count) |index| {
+        const offset = 4 + index * 12;
+        if (readInt(u16, transitions, offset) == source and
+            transitions[offset + 2] == edge and
+            readInt(u16, transitions, offset + 4) == target)
+        {
+            required_count.* += 1;
+            return;
+        }
+    }
+    return error.InvalidTransition;
+}
+
+fn imageConstructorRecord(
+    catalogs: Catalogs,
+    target: u32,
+) Error![]const u8 {
+    const bytes = catalogs.envelope.section(.constructors);
+    var cursor: usize = 4;
+    for (0..readInt(u32, bytes, 0)) |constructor| {
+        const end = try recordEnd(bytes, cursor, 24);
+        if (constructor == target) return bytes[cursor..end];
+        cursor = end;
+    }
+    return error.InvalidTransition;
+}
+
+fn imageEdgeLength(edge: []const u8) usize {
+    return 4 + @as(usize, readInt(u16, edge, 2)) * 4;
 }
 
 fn valueSchema(catalogs: Catalogs, value: u16) u32 {

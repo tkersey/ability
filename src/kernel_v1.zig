@@ -494,12 +494,12 @@ fn stepSegment(
     const parameter_count = readInt(u16, segment, 10);
     const instruction_count = readInt(u32, segment, 12);
     cursor += @as(usize, parameter_count) * 2;
+    const instructions_start = cursor;
     for (0..instruction_count) |_| {
         const instruction_length = readInt(u32, segment, cursor);
         const operation = readInt(u16, segment, cursor + 6);
         const result = readInt(u16, segment, cursor + 8);
         const operand_count = readInt(u16, segment, cursor + 10);
-        const immediate = readInt(u32, segment, cursor + 12);
         for (0..operand_count) |operand_index| {
             const operand = readInt(u16, segment, cursor + 16 + operand_index * 2);
             try addDynamicCostSize(
@@ -509,6 +509,42 @@ fn stepSegment(
                 &cost,
             );
         }
+        preflight_sizes[result] = try preflightResultSize(
+            image,
+            segment,
+            cursor,
+            operation,
+            result,
+            operandsForInstruction(
+                segment[cursor .. cursor + instruction_length],
+            ),
+            &slots,
+            &preflight_sizes,
+            &initially_available,
+            workspace,
+        );
+        try addDynamicCostSize(
+            image,
+            result,
+            preflight_sizes[result],
+            &cost,
+        );
+        cursor += instruction_length;
+    }
+    if (caller_fuel.* < cost) return .{ .yielded = state };
+    const next_cumulative = std.math.add(u64, cumulative, cost) catch
+        return error.ExecutionBudgetExceeded;
+    if (next_cumulative > image.catalogs.envelope.header.maximum_machine_fuel) {
+        return error.ExecutionBudgetExceeded;
+    }
+
+    cursor = instructions_start;
+    for (0..instruction_count) |_| {
+        const instruction_length = readInt(u32, segment, cursor);
+        const operation = readInt(u16, segment, cursor + 6);
+        const result = readInt(u16, segment, cursor + 8);
+        const operand_count = readInt(u16, segment, cursor + 10);
+        const immediate = readInt(u32, segment, cursor + 12);
         const failure: ?u32 = switch (operation) {
             0 => blk: {
                 slots[result] = .{
@@ -543,48 +579,13 @@ fn stepSegment(
             ),
             else => return error.UnsupportedOperation,
         };
-        if (slots[result].initialized) {
-            preflight_sizes[result] = try preflightResultSize(
-                image,
-                segment,
-                cursor,
-                operation,
-                result,
-                operandsForInstruction(
-                    segment[cursor .. cursor + instruction_length],
-                ),
-                &slots,
-                &preflight_sizes,
-                &initially_available,
-            );
-            try addDynamicCostSize(
-                image,
-                result,
-                preflight_sizes[result],
-                &cost,
-            );
-        }
         if (failure) |failure_tag| {
-            if (caller_fuel.* < cost) return .{ .yielded = state };
-            const failure_cumulative = std.math.add(u64, cumulative, cost) catch
-                return error.ExecutionBudgetExceeded;
-            if (failure_cumulative >
-                image.catalogs.envelope.header.maximum_machine_fuel)
-            {
-                return error.ExecutionBudgetExceeded;
-            }
             if (output_value.len < 4) return error.OutputCapacity;
             std.mem.writeInt(u32, output_value[0..4], failure_tag, .little);
             caller_fuel.* -= cost;
             return .{ .failed = output_value[0..4] };
         }
         cursor += instruction_length;
-    }
-    if (caller_fuel.* < cost) return .{ .yielded = state };
-    const next_cumulative = std.math.add(u64, cumulative, cost) catch
-        return error.ExecutionBudgetExceeded;
-    if (next_cumulative > image.catalogs.envelope.header.maximum_machine_fuel) {
-        return error.ExecutionBudgetExceeded;
     }
     const terminator_kind = segment[cursor + 4];
     const payload = cursor + 8;
@@ -2217,6 +2218,7 @@ fn preflightResultSize(
     slots: *const [1024]Slot,
     sizes: *const [1024]usize,
     initially_available: *const [1024]bool,
+    workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
     const maximum: usize = @intCast((try valueNode(image, result)).maximum_encoded_size);
     const size = struct {
@@ -2225,7 +2227,13 @@ fn preflightResultSize(
         }
     }.get;
     return switch (operation) {
-        0, 1, 2...22, 28, 32, 34, 40, 47, 52, 53, 54, 57 => slots[result].bytes.len,
+        0 => (try constantBytes(
+            image,
+            readInt(u32, segment, instruction_offset + 12),
+        )).len,
+        1 => size(operand_bytes, 0, sizes),
+        2...22, 28, 32, 34, 47, 52, 53, 54, 57 => maximum,
+        40 => 4,
         23 => @max(size(operand_bytes, 1, sizes), size(operand_bytes, 2, sizes)),
         24 => blk: {
             var total: usize = 0;
@@ -2242,11 +2250,26 @@ fn preflightResultSize(
             readInt(u32, segment, instruction_offset + 12),
             sizes,
         ) orelse maximum),
-        35 => if (initially_available[readInt(u16, operand_bytes, 0)] and
-            initially_available[readInt(u16, operand_bytes, 2)])
-            slots[result].bytes.len
-        else
-            maximum,
+        35 => blk: {
+            const vector = readInt(u16, operand_bytes, 0);
+            const index = readInt(u16, operand_bytes, 2);
+            if (!initially_available[vector] or !initially_available[index]) {
+                break :blk maximum;
+            }
+            const raw_index = decodeInteger(
+                try valueKind(image, index),
+                slots[index].bytes,
+            ) catch break :blk maximum;
+            const target = std.math.cast(u32, raw_index.raw) orelse
+                break :blk maximum;
+            break :blk (vectorElement(
+                image,
+                vector,
+                slots[vector].bytes,
+                target,
+                workspace,
+            ) catch break :blk maximum).len;
+        },
         26, 29, 36, 38 => maximum,
         27 => @min(
             maximum,

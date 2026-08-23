@@ -633,7 +633,10 @@ fn validateSum(
     const tag_node = try priorNodeView(section, prior, tag_schema);
     if (tag_node.kind != .@"enum") return error.InvalidSchema;
     const count = readInt(u32, payload, 4);
-    if (count == 0 or payload.len != try recordArrayLength(8, count, 8)) {
+    if (count == 0 or
+        count != readInt(u32, tag_node.payload, 0) or
+        payload.len != try recordArrayLength(8, count, 8))
+    {
         return error.InvalidSchema;
     }
     var minimum: u64 = std.math.maxInt(u64);

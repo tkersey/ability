@@ -3,6 +3,9 @@ import fs from "node:fs";
 
 const [kernelPath, oneEffectPath, portableValuesPath, ...proofPaths] = process.argv.slice(2);
 const digest = (path) => crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");
+const generatedProofPath = proofPaths.find((path) => path.endsWith("boundary-reification-generated-proof.json"));
+if (!generatedProofPath) throw new Error("missing executed generated proof");
+const generatedProof = JSON.parse(fs.readFileSync(generatedProofPath, "utf8"));
 const receipt = {
   format: "boundary-reification-receipt/v1",
   boundary_version: "1.6.0",
@@ -25,13 +28,13 @@ const receipt = {
   baseline_digest_count: 10,
   baseline_digest_mismatch_count: 0,
   canonical_image_fixture_count: 10,
-  native_transition_comparison_count: 32145,
+  native_transition_comparison_count: generatedProof.native_transition_comparison_count,
   wasm_transition_comparison_count: 1,
-  engine_switch_count: 1002,
-  finite_state_count: 12,
-  generated_trace_count: 10000,
-  generated_trace_seed: "0x4245493100010000",
-  generated_trace_sha256: "3556af59d37abe12f4d33d4698766efc3e4b2ae4bf502f26110bd9ad22239f16",
+  engine_switch_count: generatedProof.engine_switch_count,
+  finite_state_count: generatedProof.finite_state_count,
+  generated_trace_count: generatedProof.generated_trace_count,
+  generated_trace_seed: generatedProof.generated_trace_seed,
+  generated_trace_sha256: generatedProof.generated_trace_sha256,
   malformed_image_case_count: 1000,
   malformed_state_case_count: 13,
   world_application_identity_match: false,

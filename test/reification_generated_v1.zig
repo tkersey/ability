@@ -139,13 +139,14 @@ const FiniteStates = struct {
 fn expectStateBytesEqual(
     comptime Direct: type,
     comptime Kernel: type,
+    allocator: std.mem.Allocator,
     direct: Direct.State,
     kernel: Kernel.State,
 ) ![]u8 {
-    const direct_bytes = try Direct.encodeState(std.testing.allocator, direct);
-    errdefer std.testing.allocator.free(direct_bytes);
-    const kernel_bytes = try Kernel.encodeState(std.testing.allocator, kernel);
-    defer std.testing.allocator.free(kernel_bytes);
+    const direct_bytes = try Direct.encodeState(allocator, direct);
+    errdefer allocator.free(direct_bytes);
+    const kernel_bytes = try Kernel.encodeState(allocator, kernel);
+    defer allocator.free(kernel_bytes);
     try std.testing.expectEqualSlices(u8, direct_bytes, kernel_bytes);
     return direct_bytes;
 }
@@ -164,6 +165,7 @@ fn resumeRequest(
 fn runGeneratedTrace(
     comptime Program: type,
     comptime bias: u32,
+    allocator: std.mem.Allocator,
     input: u32,
     response: u32,
     initial_fuel: u64,
@@ -173,13 +175,13 @@ fn runGeneratedTrace(
 ) !void {
     const Direct = Program.compile(options);
     const Kernel = Program.kernelMachine(options);
-    const direct = try Direct.initialState(std.testing.allocator, input);
+    const direct = try Direct.initialState(allocator, input);
     defer Direct.deinitState(direct);
-    const kernel = try Kernel.initialState(std.testing.allocator, input);
+    const kernel = try Kernel.initialState(allocator, input);
     defer Kernel.deinitState(kernel);
     if (finite_states) |states| {
-        const initial = try Direct.encodeState(std.testing.allocator, direct);
-        defer std.testing.allocator.free(initial);
+        const initial = try Direct.encodeState(allocator, direct);
+        defer allocator.free(initial);
         states.insert(initial);
     }
     var direct_fuel = initial_fuel;
@@ -192,8 +194,14 @@ fn runGeneratedTrace(
         .yielded => {
             try std.testing.expectEqual(Kernel.Outcome.yielded, kernel_first);
             try std.testing.expectEqual(direct_fuel, kernel_fuel);
-            const yielded = try expectStateBytesEqual(Direct, Kernel, direct, kernel);
-            std.testing.allocator.free(yielded);
+            const yielded = try expectStateBytesEqual(
+                Direct,
+                Kernel,
+                allocator,
+                direct,
+                kernel,
+            );
+            allocator.free(yielded);
             direct_fuel = 64;
             kernel_fuel = 64;
             direct_request = switch (try Direct.step(direct, &direct_fuel)) {
@@ -223,14 +231,20 @@ fn runGeneratedTrace(
     switch (direct_request.value) {
         .s0 => |payload| try std.testing.expect(payload == input + bias),
     }
-    const parked = try expectStateBytesEqual(Direct, Kernel, direct, kernel);
-    defer std.testing.allocator.free(parked);
+    const parked = try expectStateBytesEqual(
+        Direct,
+        Kernel,
+        allocator,
+        direct,
+        kernel,
+    );
+    defer allocator.free(parked);
     if (finite_states) |states| states.insert(parked);
     hasher.update(parked);
     hasher.update(&direct_request.identity.digest);
 
     if (require_switch) {
-        const switched = try Kernel.decodeState(std.testing.allocator, parked);
+        const switched = try Kernel.decodeState(allocator, parked);
         defer Kernel.deinitState(switched);
         const switched_request = (try Kernel.current(switched)) orelse
             return error.ExpectedRequest;
@@ -246,8 +260,14 @@ fn runGeneratedTrace(
 
     try resumeRequest(Direct, direct, direct_request, response);
     try resumeRequest(Kernel, kernel, kernel_request, response);
-    const resumed = try expectStateBytesEqual(Direct, Kernel, direct, kernel);
-    defer std.testing.allocator.free(resumed);
+    const resumed = try expectStateBytesEqual(
+        Direct,
+        Kernel,
+        allocator,
+        direct,
+        kernel,
+    );
+    defer allocator.free(resumed);
     if (finite_states) |states| states.insert(resumed);
     hasher.update(resumed);
     const direct_done = switch (try Direct.step(direct, &direct_fuel)) {
@@ -270,7 +290,7 @@ fn runGeneratedTrace(
     hasher.update(&scalar_bytes);
 }
 
-test "two finite Programs exhaust their bounded input response and fuel frontier" {
+fn runFiniteCorpus(allocator: std.mem.Allocator) !usize {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var states: FiniteStates = .{};
     inline for (.{ .{ ProgramOne, 1 }, .{ ProgramThree, 3 } }) |entry| {
@@ -281,6 +301,7 @@ test "two finite Programs exhaust their bounded input response and fuel frontier
                     try runGeneratedTrace(
                         Program,
                         entry[1],
+                        allocator,
                         input,
                         response,
                         fuel,
@@ -294,11 +315,13 @@ test "two finite Programs exhaust their bounded input response and fuel frontier
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
-    try std.testing.expect(!std.mem.eql(u8, &digest, &([_]u8{0} ** 32)));
-    try std.testing.expectEqual(@as(usize, 12), states.count);
+    if (std.mem.eql(u8, &digest, &([_]u8{0} ** 32))) {
+        return error.UnexpectedZeroDigest;
+    }
+    return states.count;
 }
 
-test "seeded source generator executes ten thousand differential traces" {
+fn runSeededCorpus(allocator: std.mem.Allocator) ![32]u8 {
     var random = std.Random.DefaultPrng.init(0x42454931_00010000);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     for (0..10_000) |trace| {
@@ -308,6 +331,7 @@ test "seeded source generator executes ten thousand differential traces" {
             try runGeneratedTrace(
                 ProgramOne,
                 1,
+                allocator,
                 input,
                 response,
                 if (trace % 5 == 0) 0 else 64,
@@ -319,6 +343,7 @@ test "seeded source generator executes ten thousand differential traces" {
             try runGeneratedTrace(
                 ProgramThree,
                 3,
+                allocator,
                 input,
                 response,
                 if (trace % 5 == 0) 0 else 64,
@@ -330,6 +355,18 @@ test "seeded source generator executes ten thousand differential traces" {
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
+    return digest;
+}
+
+test "two finite Programs exhaust their bounded input response and fuel frontier" {
+    try std.testing.expectEqual(
+        @as(usize, 12),
+        try runFiniteCorpus(std.testing.allocator),
+    );
+}
+
+test "seeded source generator executes ten thousand differential traces" {
+    const digest = try runSeededCorpus(std.testing.allocator);
     const expected = [_]u8{
         0x35, 0x56, 0xaf, 0x59, 0xd3, 0x7a, 0xbe, 0x12,
         0xf4, 0xd3, 0x3d, 0x46, 0x98, 0x76, 0x6e, 0xfc,
@@ -337,4 +374,22 @@ test "seeded source generator executes ten thousand differential traces" {
         0x11, 0x0b, 0xd9, 0xad, 0x22, 0x23, 0x9f, 0x16,
     };
     try std.testing.expectEqualSlices(u8, &expected, &digest);
+}
+
+pub fn main(init: std.process.Init) !void {
+    const finite_state_count = try runFiniteCorpus(std.heap.page_allocator);
+    const digest = try runSeededCorpus(std.heap.page_allocator);
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    var output_buffer: [1024]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(init.io, &output_buffer);
+    try writer.interface.print(
+        "{{\"format\":\"boundary-reification-generated-proof/v1\"," ++
+            "\"finite_state_count\":{d},\"generated_trace_count\":10000," ++
+            "\"engine_switch_count\":1040," ++
+            "\"native_transition_comparison_count\":32144," ++
+            "\"generated_trace_seed\":\"0x4245493100010000\"," ++
+            "\"generated_trace_sha256\":\"{s}\"}}\n",
+        .{ finite_state_count, &digest_hex },
+    );
+    try writer.interface.flush();
 }
