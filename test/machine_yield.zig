@@ -571,6 +571,38 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
             &workspace,
         ),
     );
+    workspace = .{};
+    const self_consistent_image = try image_v1.validateImage(
+        &MixedImage.bytes,
+        &workspace,
+    );
+    const provisional_profile = try machine_v2_profile_v1.validate(
+        &malformed_transition,
+        self_consistent_image.catalogs.envelope.header.program_transition_digest,
+    );
+    const forged_semantic_digest = try machine_v2_profile_v1.semanticDigestForImage(
+        self_consistent_image,
+        provisional_profile,
+        &workspace.schema_hash_tasks,
+    );
+    @memcpy(malformed_transition[64..96], &forged_semantic_digest);
+    const forged_contract_digest = machine_v2_profile_v1.machineV2ContractDigest(
+        forged_semantic_digest,
+        provisional_profile.maximum_frames,
+        provisional_profile.maximum_state_bytes,
+        provisional_profile.maximum_machine_fuel,
+    );
+    @memcpy(malformed_transition[96..128], &forged_contract_digest);
+    workspace = .{};
+    const forged_image = try image_v1.validateImage(&MixedImage.bytes, &workspace);
+    try std.testing.expectError(
+        error.InvalidProfile,
+        kernel_v1.bindMachineV2(
+            forged_image,
+            &malformed_transition,
+            &workspace,
+        ),
+    );
     var malformed_initial = MixedProfile.bytes;
     const initial_constructor = std.mem.readInt(
         u32,

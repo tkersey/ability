@@ -1064,6 +1064,12 @@ fn validateInstruction(
         operand_count,
         immediate,
     );
+    for (program_semantics_v1.failureRolesForWire(wire_operation)) |role| {
+        if (!failureNameExists(
+            catalogs,
+            program_semantics_v1.failureRoleName(role),
+        )) return error.InvalidFailureMap;
+    }
     available[result] = true;
     value_defined[result] = true;
     return end;
@@ -1449,6 +1455,20 @@ fn failureTagExists(catalogs: Catalogs, target: u32) bool {
         const length = readInt(u32, bytes, cursor + 4);
         if (tag == target) return true;
         cursor += 8 + length;
+    }
+    return false;
+}
+
+fn failureNameExists(catalogs: Catalogs, target: []const u8) bool {
+    const bytes = catalogs.envelope.section(.failures);
+    const count = readInt(u32, bytes, 0);
+    var cursor: usize = 4;
+    for (0..count) |_| {
+        cursor += 4;
+        const length = readInt(u32, bytes, cursor);
+        cursor += 4;
+        if (std.mem.eql(u8, bytes[cursor..][0..length], target)) return true;
+        cursor += length;
     }
     return false;
 }

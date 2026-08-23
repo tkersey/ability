@@ -136,6 +136,10 @@ pub fn wireIncomingEdge(kind: rnf.IncomingEdgeKind) WireIncomingEdge {
 }
 
 pub fn failureName(comptime role: FailureRole) []const u8 {
+    return failureRoleName(role);
+}
+
+pub fn failureRoleName(role: FailureRole) []const u8 {
     return @tagName(role);
 }
 
@@ -366,6 +370,10 @@ pub fn canonicalInstructionKind(
 pub fn failureRoles(
     comptime operation: control_ir.InstructionOperation,
 ) []const FailureRole {
+    return failureRolesForWire(wireOperation(operation));
+}
+
+pub fn failureRolesForWire(operation: WireOperation) []const FailureRole {
     return switch (operation) {
         .integer_add,
         .integer_subtract,
@@ -393,7 +401,44 @@ pub fn failureRoles(
         .bytes_copy,
         .bytes_join,
         => &.{.capacity_exceeded},
-        else => &.{},
+        .constant,
+        .copy,
+        .compare_eq_zero,
+        .integer_equal,
+        .integer_not_equal,
+        .integer_less_than,
+        .integer_less_equal,
+        .integer_greater_than,
+        .integer_greater_equal,
+        .integer_bit_not,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .boolean_not,
+        .boolean_and,
+        .boolean_or,
+        .select,
+        .product_construct,
+        .product_extract,
+        .product_replace,
+        .sum_construct,
+        .sum_tag_is,
+        .optional_none,
+        .optional_some,
+        .optional_is_some,
+        .vector_empty,
+        .vector_length,
+        .vector_pop,
+        .vector_truncate,
+        .vector_clear,
+        .text_empty,
+        .text_compare,
+        .bytes_empty,
+        .bytes_compare,
+        .text_length,
+        .bytes_length,
+        .enum_to_u32,
+        => &.{},
     };
 }
 

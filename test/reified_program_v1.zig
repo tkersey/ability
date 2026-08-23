@@ -1087,7 +1087,23 @@ test "fixed kernel scalar algebra matches direct success and failure" {
     const ScalarProfile = ScalarProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
     const parsed = try image_v1.validateImage(&ScalarImage.bytes, &workspace);
-    const validated = try kernel_v1.bindMachineV2(parsed, &ScalarProfile.bytes, &workspace);
+    var missing_failure_role = ScalarImage.bytes;
+    const failures_offset: usize = @intCast(
+        parsed.catalogs.envelope.sections[2].offset,
+    );
+    missing_failure_role[failures_offset + 12] = 'x';
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidFailureMap,
+        image_v1.validateImage(&missing_failure_role, &workspace),
+    );
+    workspace = .{};
+    const reparsed = try image_v1.validateImage(&ScalarImage.bytes, &workspace);
+    const validated = try kernel_v1.bindMachineV2(
+        reparsed,
+        &ScalarProfile.bytes,
+        &workspace,
+    );
 
     inline for (.{ @as(u32, 41), std.math.maxInt(u32) }) |input| {
         const direct_state = try ScalarMachine.initialState(

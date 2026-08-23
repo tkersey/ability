@@ -92,6 +92,8 @@ fn bindValidatedMachineV2(
         image.catalogs.envelope.header.program_transition_digest,
     ) catch return error.InvalidProfile;
     if (profile.segment_count != image.segment_count) return error.InvalidProfile;
+    machine_v2_profile_v1.validateProjection(image, profile) catch
+        return error.InvalidProfile;
     const semantic_digest = machine_v2_profile_v1.semanticDigestForImage(
         image,
         profile,

@@ -120,6 +120,8 @@ pub fn validate(
             return error.InvalidProfile,
     ) catch return error.InvalidProfile;
     if (bytes.len != expected_length or segment_count == 0 or
+        segment_count > 128 or constructor_count > 256 or
+        transition_count > 1024 or bpi_constructor_count > 256 or
         std.mem.readInt(u32, bytes[128..132], .little) == 0 or
         std.mem.readInt(u32, bytes[132..136], .little) < 76 or
         std.mem.readInt(u64, bytes[144..152], .little) != 16 or
@@ -194,6 +196,80 @@ pub fn validate(
         .initial_constructor_id = initial_constructor_id,
         .bpi_constructor_count = bpi_constructor_count,
     };
+}
+
+pub fn validateProjection(
+    image: image_v1.ValidatedImage,
+    profile: Validated,
+) (Error || image_v1.Error)!void {
+    const catalogs = image.catalogs;
+    const transitions = catalogs.envelope.section(.entry_transitions);
+    const bpi_transition_count = readInt(u32, transitions, 0);
+    if (profile.segment_count != image.segment_count or
+        profile.bpi_constructor_count != image.constructor_count or
+        profile.transition_count != bpi_transition_count)
+    {
+        return error.InvalidProfile;
+    }
+
+    var synthetic_constructor = [_]bool{false} ** 256;
+    for (0..bpi_transition_count) |transition| {
+        const offset = 4 + transition * 12;
+        const source = readInt(u16, transitions, offset);
+        const bpi_kind = transitions[offset + 2];
+        const bpi_constructor = readInt(u32, transitions, offset + 8);
+        const v2_constructor = try profile.transitionConstructor(
+            @intCast(transition),
+        );
+        if (try profile.mappedConstructor(v2_constructor) != bpi_constructor) {
+            return error.InvalidProfile;
+        }
+        const override = try profile.segmentTerminatorOverride(source);
+        const expected_kind: u8 = if (override == 1) blk: {
+            if (bpi_kind != 0) return error.InvalidProfile;
+            synthetic_constructor[v2_constructor] = true;
+            break :blk 4;
+        } else bpi_kind;
+        if (try profile.transitionKind(@intCast(transition)) != expected_kind) {
+            return error.InvalidProfile;
+        }
+    }
+
+    const constructors = catalogs.envelope.section(.constructors);
+    var ordinary_count = [_]u8{0} ** 256;
+    var mapping_count = [_]u8{0} ** 256;
+    for (0..profile.constructor_count) |constructor| {
+        const mapped = try profile.mappedConstructor(@intCast(constructor));
+        const record = try bpiConstructorRecord(constructors, mapped);
+        mapping_count[mapped] = std.math.add(
+            u8,
+            mapping_count[mapped],
+            1,
+        ) catch return error.InvalidProfile;
+        const origin = try profile.constructorOrigin(@intCast(constructor));
+        if (origin == record[9]) {
+            ordinary_count[mapped] = std.math.add(
+                u8,
+                ordinary_count[mapped],
+                1,
+            ) catch return error.InvalidProfile;
+            if (ordinary_count[mapped] != 1) return error.InvalidProfile;
+        } else if (origin != 2 or record[9] != 0 or
+            !synthetic_constructor[constructor])
+        {
+            return error.InvalidProfile;
+        }
+    }
+    for (mapping_count[0..image.constructor_count]) |count| {
+        if (count == 0) return error.InvalidProfile;
+    }
+
+    const mapped_initial = try profile.mappedConstructor(
+        profile.initial_constructor_id,
+    );
+    if (mapped_initial != catalogs.initial_constructor_id) {
+        return error.InvalidProfile;
+    }
 }
 
 /// Reconstruct the frozen current-v4 Machine semantic digest from BPI1 plus
