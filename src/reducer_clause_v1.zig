@@ -388,33 +388,38 @@ pub fn executeCompositeOperation(
     const operation = readInt(u16, instruction, 6);
     const operand_count = readInt(u16, instruction, 10);
     const immediate = readInt(u32, instruction, 12);
-    var operands: [1024]u16 = undefined;
+    if (operation == 24) {
+        var length: usize = 0;
+        for (0..operand_count) |index| {
+            const operand = readInt(u16, instruction, 16 + index * 2);
+            if (!slots[operand].initialized) return error.InvalidBindings;
+            length = std.math.add(
+                usize,
+                length,
+                slots[operand].bytes.len,
+            ) catch return error.ScratchCapacity;
+        }
+        const output = try allocateScratch(scratch, scratch_cursor, length);
+        var cursor: usize = 0;
+        for (0..operand_count) |index| {
+            const operand = readInt(u16, instruction, 16 + index * 2);
+            @memcpy(
+                output[cursor..][0..slots[operand].bytes.len],
+                slots[operand].bytes,
+            );
+            cursor += slots[operand].bytes.len;
+        }
+        slots[result] = .{ .bytes = output, .initialized = true };
+        return null;
+    }
+    var operands: [3]u16 = undefined;
     if (operand_count > operands.len) return error.InvalidImage;
     for (0..operand_count) |index| {
         operands[index] = readInt(u16, instruction, 16 + index * 2);
         if (!slots[operands[index]].initialized) return error.InvalidBindings;
     }
     switch (operation) {
-        24 => {
-            var length: usize = 0;
-            for (operands[0..operand_count]) |operand| {
-                length = std.math.add(
-                    usize,
-                    length,
-                    slots[operand].bytes.len,
-                ) catch return error.ScratchCapacity;
-            }
-            const output = try allocateScratch(scratch, scratch_cursor, length);
-            var cursor: usize = 0;
-            for (operands[0..operand_count]) |operand| {
-                @memcpy(
-                    output[cursor..][0..slots[operand].bytes.len],
-                    slots[operand].bytes,
-                );
-                cursor += slots[operand].bytes.len;
-            }
-            slots[result] = .{ .bytes = output, .initialized = true };
-        },
+        24 => unreachable,
         25 => {
             const field = try productField(
                 image,

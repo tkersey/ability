@@ -84,9 +84,10 @@ pub const ValueTask = union(enum) {
 
 pub const SchemaHashTask = union(enum) {
     schema: u32,
-    bytes: []const u8,
-    u32_value: u32,
-    u64_value: u64,
+    enum_fields: struct { schema: u32, index: u32 },
+    product_fields: struct { schema: u32, index: u32 },
+    sum_after_tag: u32,
+    sum_cases: struct { schema: u32, index: u32 },
 };
 
 /// Validate one complete BPI1 schema-section payload into caller-owned index
@@ -301,15 +302,63 @@ pub fn schemaDigest(
     while (count != 0) {
         count -= 1;
         switch (task_storage[count]) {
-            .bytes => |value| hashBytes(&hasher, value),
-            .u32_value => |value| hashU32(&hasher, value),
-            .u64_value => |value| hashU64(&hasher, value),
-            .schema => |id| try pushSchemaHashTasks(
+            .schema => |id| try hashSchemaNode(
                 table,
                 id,
+                &hasher,
                 task_storage,
                 &count,
             ),
+            .enum_fields => |fields| {
+                const node = try table.node(fields.schema);
+                const field_count = readInt(u32, node.payload, 0);
+                if (fields.index >= field_count) continue;
+                hashU32(
+                    &hasher,
+                    readInt(u32, node.payload, 4 + @as(usize, fields.index) * 4),
+                );
+                try pushHashTask(task_storage, &count, .{ .enum_fields = .{
+                    .schema = fields.schema,
+                    .index = fields.index + 1,
+                } });
+            },
+            .product_fields => |fields| {
+                const node = try table.node(fields.schema);
+                const field_count = readInt(u32, node.payload, 0);
+                if (fields.index >= field_count) continue;
+                try pushHashTask(task_storage, &count, .{ .product_fields = .{
+                    .schema = fields.schema,
+                    .index = fields.index + 1,
+                } });
+                try pushHashTask(task_storage, &count, .{ .schema = readInt(
+                    u32,
+                    node.payload,
+                    4 + @as(usize, fields.index) * 4,
+                ) });
+            },
+            .sum_after_tag => |sum_schema| {
+                const node = try table.node(sum_schema);
+                const case_count = readInt(u32, node.payload, 4);
+                hashU64(&hasher, case_count);
+                try pushHashTask(task_storage, &count, .{ .sum_cases = .{
+                    .schema = sum_schema,
+                    .index = 0,
+                } });
+            },
+            .sum_cases => |cases| {
+                const node = try table.node(cases.schema);
+                const case_count = readInt(u32, node.payload, 4);
+                if (cases.index >= case_count) continue;
+                const offset = 8 + @as(usize, cases.index) * 8;
+                hashU32(&hasher, readInt(u32, node.payload, offset));
+                try pushHashTask(task_storage, &count, .{ .sum_cases = .{
+                    .schema = cases.schema,
+                    .index = cases.index + 1,
+                } });
+                try pushHashTask(task_storage, &count, .{
+                    .schema = readInt(u32, node.payload, offset + 4),
+                });
+            },
         }
     }
     var digest: [32]u8 = undefined;
@@ -317,95 +366,69 @@ pub fn schemaDigest(
     return digest;
 }
 
-fn pushSchemaHashTasks(
+fn hashSchemaNode(
     table: Table,
     schema_id: u32,
+    hasher: anytype,
     storage: []SchemaHashTask,
     count: *usize,
 ) Error!void {
     const node = try table.node(schema_id);
     switch (node.kind) {
-        .unit => try pushHashTask(storage, count, .{ .bytes = "unit" }),
-        .bool => try pushHashTask(storage, count, .{ .bytes = "bool" }),
+        .unit => hashBytes(hasher, "unit"),
+        .bool => hashBytes(hasher, "bool"),
         .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => {
-            try pushHashTask(storage, count, .{
-                .bytes = if (@intFromEnum(node.kind) <= @intFromEnum(Kind.i64))
+            hashBytes(hasher, "int");
+            hashU32(hasher, integerBits(node.kind));
+            hashBytes(
+                hasher,
+                if (@intFromEnum(node.kind) <= @intFromEnum(Kind.i64))
                     "signed"
                 else
                     "unsigned",
-            });
-            try pushHashTask(storage, count, .{
-                .u32_value = integerBits(node.kind),
-            });
-            try pushHashTask(storage, count, .{ .bytes = "int" });
+            );
         },
         .bytes, .text => {
-            try pushHashTask(storage, count, .{
-                .u64_value = readInt(u32, node.payload, 0),
-            });
-            try pushHashTask(storage, count, .{
-                .bytes = if (node.kind == .bytes) "bytes" else "text",
-            });
+            hashBytes(hasher, if (node.kind == .bytes) "bytes" else "text");
+            hashU64(hasher, readInt(u32, node.payload, 0));
         },
         .array, .vector => {
+            hashBytes(hasher, if (node.kind == .array) "array" else "vector");
+            hashU64(hasher, readInt(u32, node.payload, 0));
             try pushHashTask(storage, count, .{
                 .schema = readInt(u32, node.payload, 4),
             });
-            try pushHashTask(storage, count, .{
-                .u64_value = readInt(u32, node.payload, 0),
-            });
-            try pushHashTask(storage, count, .{
-                .bytes = if (node.kind == .array) "array" else "vector",
-            });
         },
         .optional => {
+            hashBytes(hasher, "optional");
             try pushHashTask(storage, count, .{
                 .schema = readInt(u32, node.payload, 0),
             });
-            try pushHashTask(storage, count, .{ .bytes = "optional" });
         },
         .@"enum" => {
             const field_count = readInt(u32, node.payload, 0);
-            var index: usize = field_count;
-            while (index != 0) {
-                index -= 1;
-                try pushHashTask(storage, count, .{
-                    .u32_value = readInt(u32, node.payload, 4 + index * 4),
-                });
-            }
-            try pushHashTask(storage, count, .{ .u64_value = field_count });
-            try pushHashTask(storage, count, .{ .bytes = "enum" });
+            hashBytes(hasher, "enum");
+            hashU64(hasher, field_count);
+            try pushHashTask(storage, count, .{ .enum_fields = .{
+                .schema = schema_id,
+                .index = 0,
+            } });
         },
         .product => {
             const field_count = readInt(u32, node.payload, 0);
-            var index: usize = field_count;
-            while (index != 0) {
-                index -= 1;
-                try pushHashTask(storage, count, .{
-                    .schema = readInt(u32, node.payload, 4 + index * 4),
-                });
-            }
-            try pushHashTask(storage, count, .{ .u64_value = field_count });
-            try pushHashTask(storage, count, .{ .bytes = "product" });
+            hashBytes(hasher, "product");
+            hashU64(hasher, field_count);
+            try pushHashTask(storage, count, .{ .product_fields = .{
+                .schema = schema_id,
+                .index = 0,
+            } });
         },
         .sum => {
-            const case_count = readInt(u32, node.payload, 4);
-            var index: usize = case_count;
-            while (index != 0) {
-                index -= 1;
-                const offset = 8 + index * 8;
-                try pushHashTask(storage, count, .{
-                    .schema = readInt(u32, node.payload, offset + 4),
-                });
-                try pushHashTask(storage, count, .{
-                    .u32_value = readInt(u32, node.payload, offset),
-                });
-            }
-            try pushHashTask(storage, count, .{ .u64_value = case_count });
+            hashBytes(hasher, "sum");
+            try pushHashTask(storage, count, .{ .sum_after_tag = schema_id });
             try pushHashTask(storage, count, .{
                 .schema = readInt(u32, node.payload, 0),
             });
-            try pushHashTask(storage, count, .{ .bytes = "sum" });
         },
     }
 }
@@ -762,6 +785,35 @@ test "dynamic schema validation rejects duplicate structural nodes" {
         error.InvalidSchema,
         validateSchemaSection(&bytes, &storage),
     );
+}
+
+test "schema hashing streams wide product fields through bounded tasks" {
+    const field_count: u32 = 8191;
+    const product_length: u32 = 8 + 4 + field_count * 4;
+    var section: [4 + 8 + product_length]u8 = [_]u8{0} **
+        (4 + 8 + product_length);
+    std.mem.writeInt(u32, section[0..4], 2, .little);
+    std.mem.writeInt(u32, section[4..8], 8, .little);
+    section[8] = @intFromEnum(Kind.u8);
+    const product_start: usize = 12;
+    std.mem.writeInt(
+        u32,
+        section[product_start..][0..4],
+        product_length,
+        .little,
+    );
+    section[product_start + 4] = @intFromEnum(Kind.product);
+    std.mem.writeInt(
+        u32,
+        section[product_start + 8 ..][0..4],
+        field_count,
+        .little,
+    );
+    var nodes: [2]NodeIndex = undefined;
+    const table = try validateSchemaSection(&section, &nodes);
+    var tasks: [4]SchemaHashTask = undefined;
+    const digest = try schemaDigest(table, 1, &tasks);
+    try std.testing.expect(!std.mem.eql(u8, &digest, &([_]u8{0} ** 32)));
 }
 
 test "dynamic values reject noncanonical booleans and trailing bytes" {

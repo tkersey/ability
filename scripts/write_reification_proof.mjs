@@ -15,6 +15,13 @@ const baseline = readJson(baselinePath);
 const semantic = readJson(semanticPath);
 const generated = readJson(generatedPath);
 const wasmExecution = readJson(wasmExecutionPath);
+const positiveCount = (owner, name) => {
+  const value = owner[name];
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`invalid positive proof count: ${name}`);
+  }
+  return value;
+};
 
 if (
   baseline.format !== "boundary-reification-baseline-proof/v1" ||
@@ -30,9 +37,11 @@ if (
   semantic.metering_annotation_invariance_passed !== true ||
   wasmExecution.import_count !== 0 ||
   wasmExecution.abi !== 1 ||
-  wasmExecution.transition_comparison_count <= 0 ||
-  generated.generated_trace_count <= 0 ||
-  generated.native_transition_comparison_count <= 0
+  positiveCount(wasmExecution, "transition_comparison_count") <= 0 ||
+  positiveCount(generated, "generated_trace_count") <= 0 ||
+  positiveCount(generated, "native_transition_comparison_count") <= 0 ||
+  positiveCount(generated, "engine_switch_count") <= 0 ||
+  positiveCount(generated, "finite_state_count") <= 0
 ) {
   throw new Error("reification proof observation failed");
 }

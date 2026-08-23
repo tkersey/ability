@@ -55,7 +55,7 @@ try {
   const pure = path.join(temporary, "pure.zig");
   fs.writeFileSync(pure, "pub const Pure = void;\n");
   const proofPath = path.join(temporary, "boundary-reification-v1-proof.json");
-  const proof = JSON.parse(childProcess.execFileSync(process.execPath, [
+  const proofArgs = [
     proofScript,
     wasmExecution,
     baseline,
@@ -64,7 +64,12 @@ try {
     root,
     build,
     pure,
-  ], { encoding: "utf8" }));
+  ];
+  const proof = JSON.parse(childProcess.execFileSync(
+    process.execPath,
+    proofArgs,
+    { encoding: "utf8" },
+  ));
   fs.writeFileSync(proofPath, JSON.stringify(proof));
   const args = [script, artifact, artifact, artifact, artifact, artifact, generated, proofPath];
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
@@ -86,6 +91,16 @@ try {
   fs.writeFileSync(proofPath, JSON.stringify(proof));
   const mistyped = childProcess.spawnSync(process.execPath, args, { encoding: "utf8" });
   if (mistyped.status === 0) throw new Error("mistyped proof claim was accepted");
+
+  const incompleteGenerated = JSON.parse(fs.readFileSync(generated, "utf8"));
+  delete incompleteGenerated.engine_switch_count;
+  fs.writeFileSync(generated, JSON.stringify(incompleteGenerated));
+  const incomplete = childProcess.spawnSync(
+    process.execPath,
+    proofArgs,
+    { encoding: "utf8" },
+  );
+  if (incomplete.status === 0) throw new Error("incomplete generated proof was accepted");
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

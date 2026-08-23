@@ -2061,6 +2061,7 @@ pub fn build(b: *std.Build) void {
         "reducer_clause_v1",
         isolated_pure.reducer_clause_v1,
     );
+    isolated_clause_test.addImport("image_v1", isolated_pure.image_v1);
     const pure_topology_files = b.addWriteFiles();
     const pure_topology_receipt = pure_topology_files.add(
         "boundary-pure-module-topology.txt",
