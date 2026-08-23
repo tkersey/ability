@@ -282,13 +282,26 @@ fn preflightResultSize(
             }
             break :blk @min(maximum, total);
         },
-        25 => @intCast(preflightProductFieldSize(
-            segment,
-            instruction_offset,
-            readInt(u16, operand_bytes, 0),
-            readInt(u32, segment, instruction_offset + 12),
-            sizes,
-        ) orelse maximum),
+        25 => blk: {
+            const product = readInt(u16, operand_bytes, 0);
+            const field_index = readInt(u32, segment, instruction_offset + 12);
+            if (initially_available[product]) {
+                break :blk (reducer_clause_v1.productField(
+                    image,
+                    product,
+                    slots[product].bytes,
+                    field_index,
+                    workspace,
+                ) catch break :blk maximum).len;
+            }
+            break :blk @intCast(preflightProductFieldSize(
+                segment,
+                instruction_offset,
+                product,
+                field_index,
+                sizes,
+            ) orelse maximum);
+        },
         35 => blk: {
             const vector = readInt(u16, operand_bytes, 0);
             const index = readInt(u16, operand_bytes, 2);

@@ -234,10 +234,16 @@ const PairBody = struct {
         },
     };
 };
-const PairMachine = program_v2.program(
+const PairProgram = program_v2.program(
     "helper-product-exact-sizing",
     PairBody,
-).compile(.{
+);
+const PairMachine = PairProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 4096,
+});
+const PairKernelMachine = PairProgram.kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 4096,
@@ -427,6 +433,22 @@ test "helper activation exact sizing uses materialized product and vector values
         PairMachine,
         TextPair{ .left = long, .right = short },
         40,
+    );
+    try std.testing.expectEqual(
+        short_product_fuel,
+        try requiredHelperFuel(
+            PairKernelMachine,
+            TextPair{ .left = short, .right = long },
+            1,
+        ),
+    );
+    try std.testing.expectEqual(
+        long_product_fuel,
+        try requiredHelperFuel(
+            PairKernelMachine,
+            TextPair{ .left = long, .right = short },
+            40,
+        ),
     );
     try std.testing.expect(long_product_fuel > short_product_fuel);
 
