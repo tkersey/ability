@@ -51,7 +51,7 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
             MachineV2Lowering.machine_v2_semantic_digest;
         /// Static size proxy for the generated direct reducer.
         pub const generated_reducer_operation_count =
-            Reified.generated_reducer_operation_count;
+            Definition.generated_reducer_operation_count;
         /// Largest typed value carrier used by one generated direct segment.
         ///
         /// This excludes compiler- and optimizer-dependent native stack

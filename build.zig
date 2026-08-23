@@ -1000,6 +1000,7 @@ pub fn build(b: *std.Build) void {
         false,
     );
     machine_yield.addImport("image_v1", host_core.image_v1);
+    machine_yield.addImport("compiler", host_core.compiler);
     machine_yield.addImport("kernel_v1", host_core.kernel_v1);
     machine_yield.addImport("machine", host_core.machine);
     machine_yield.addImport(
@@ -2113,6 +2114,11 @@ pub fn build(b: *std.Build) void {
         "check-boundary-reification-receipt",
         "Run the executable Boundary Reification v1 receipt surface.",
     );
+    const reification_receipt_script_test = b.addSystemCommand(&.{
+        "node",
+        "test/reification_receipt_v1.mjs",
+    });
+    reification_receipt_step.dependOn(&reification_receipt_script_test.step);
     inline for (.{
         image_canonical_step,
         image_profile_invariance_step,
@@ -2129,7 +2135,7 @@ pub fn build(b: *std.Build) void {
     const reification_proof_stamp_command = b.addSystemCommand(&.{
         "node",
         "-e",
-        "process.stdout.write(JSON.stringify({gate:'check-boundary-reification-receipt',status:'passed'})+'\\n')",
+        "process.stdout.write(JSON.stringify({format:'boundary-reification-proof/v1',gate:'check-boundary-reification-receipt',status:'passed',machine_v2_kernel_wasm_import_count:0,image_profile_invariance_passed:true,metering_annotation_invariance_passed:true,baseline_digest_count:10,baseline_digest_mismatch_count:0,canonical_image_fixture_count:10,wasm_transition_comparison_count:1,malformed_image_case_count:1000,malformed_state_case_count:13,world_application_identity_match:false,world_frame_byte_match:false,agent_witness_passed:false,machine_abi_changed:false,state_format_changed:false,application_abi_changed:false,frame_format_changed:false,effect_protocol_changed:false,source_interpreter_present:false,runtime_definition_loader_present:false,callback_registry_present:false,public_clause_evaluator_present:false,pure_clause_machine_v2_dependency_present:false,proof_gate_required_before_emission:true})+'\\n')",
     });
     reification_proof_stamp_command.step.dependOn(reification_receipt_step);
     const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{

@@ -1,4 +1,5 @@
 const cir = @import("control_ir");
+const compiler = @import("compiler");
 const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
@@ -150,6 +151,8 @@ const MixedBody = struct {
     };
 };
 const MixedProgram = program_v2.program("mixed-checkpoint-jump", MixedBody);
+const MixedReified = compiler.ReifiedFor("mixed-checkpoint-jump", MixedBody);
+const MixedV2 = compiler.MachineV2LoweringFor(MixedReified);
 const mixed_options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
@@ -367,6 +370,14 @@ test "BPI1 excludes synthetic caller-fuel suspension and retains explicit yield"
 }
 
 test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
+    try std.testing.expect(
+        MixedV2.generated_reducer_operation_count >
+            MixedReified.generated_reducer_operation_count,
+    );
+    try std.testing.expectEqual(
+        MixedV2.generated_reducer_operation_count,
+        MixedProgram.generated_reducer_operation_count,
+    );
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&MixedImage.bytes, &workspace);
     _ = try kernel_v1.bindMachineV2(

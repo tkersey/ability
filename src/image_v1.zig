@@ -220,7 +220,7 @@ pub fn validateCatalogs(
         &workspace.schema_nodes,
     ) catch |err| return mapDynamicSchemaError(err);
     if (envelope.header.maximum_single_value_bytes !=
-        maximumSingleValueBytes(schemas))
+        try maximumSingleValueBytes(schemas))
     {
         return error.ScratchRequirementMismatch;
     }
@@ -2195,12 +2195,34 @@ fn mapDynamicSchemaError(err: dynamic_value_v1.Error) Error {
     };
 }
 
-fn maximumSingleValueBytes(schemas: dynamic_value_v1.Table) u32 {
+fn maximumSingleValueBytes(schemas: dynamic_value_v1.Table) Error!u32 {
     var maximum: u64 = 0;
     for (schemas.nodes) |node| {
         maximum = @max(maximum, node.maximum_encoded_size);
     }
-    return std.math.cast(u32, maximum) orelse std.math.maxInt(u32);
+    return std.math.cast(u32, maximum) orelse error.LimitExceeded;
+}
+
+test "BPI1 rejects a schema maximum that its u32 header cannot represent" {
+    var schema_bytes = [_]u8{0} ** 16;
+    std.mem.writeInt(u32, schema_bytes[0..4], 1, .little);
+    std.mem.writeInt(u32, schema_bytes[4..8], 12, .little);
+    schema_bytes[8] = @intFromEnum(dynamic_value_v1.Kind.bytes);
+    std.mem.writeInt(
+        u32,
+        schema_bytes[12..16],
+        std.math.maxInt(u32),
+        .little,
+    );
+    var nodes: [1]dynamic_value_v1.NodeIndex = undefined;
+    const schemas = try dynamic_value_v1.validateSchemaSection(
+        &schema_bytes,
+        &nodes,
+    );
+    try std.testing.expectError(
+        error.LimitExceeded,
+        maximumSingleValueBytes(schemas),
+    );
 }
 
 pub const SemanticHasher = std.crypto.hash.sha2.Sha256;

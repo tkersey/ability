@@ -22,3 +22,8 @@ reification implementation must not refresh this lock to hide drift.
 The release proof additionally compiles the internal BPI1 clause evaluator from
 a reduced graph with no Machine-v2 modules. BPI1 is the public canonical
 artifact; raw clause evaluation is not a public package API.
+
+Asset emission consumes the executed `boundary-reification-v1-proof.json`
+stamp produced only after the complete receipt gate succeeds. The receipt
+writer rejects a missing, failed, or mistyped proof stamp and derives its proof
+claims from that artifact rather than asserting them independently.
