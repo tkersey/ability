@@ -1507,7 +1507,7 @@ test "fixed kernel branches and yields at the next segment boundary" {
     );
     workspace = .{};
     try std.testing.expectError(
-        error.UnreachableEntry,
+        error.InvalidRoot,
         image_v1.validateImage(&unreachable_catalog, &workspace),
     );
 
@@ -1610,4 +1610,110 @@ test "fixed kernel branches and yields at the next segment boundary" {
     };
     try std.testing.expectEqual(direct_fuel, kernel_fuel);
     try std.testing.expectEqualSlices(u8, direct_bytes, yielded);
+}
+
+test "BPI1 rejects a path constructor with no executable role" {
+    const RoleInput = struct {
+        condition: bool,
+        value: u32,
+    };
+    const role_entry_instructions = [_]cir.Instruction{
+        .{
+            .kind = .pure,
+            .result = 1,
+            .operands = &.{0},
+            .operation = .{ .product_extract = 0 },
+        },
+        .{
+            .kind = .pure,
+            .result = 2,
+            .operands = &.{0},
+            .operation = .{ .product_extract = 1 },
+        },
+    };
+    const role_edge_arguments = [_]cir.EdgeArgument{
+        .{ .value = 1 },
+        .{ .value = 2 },
+    };
+    const role_join_instructions = [_]cir.Instruction{.{
+        .kind = .pure,
+        .result = 5,
+        .operands = &.{ 3, 4, 4 },
+        .operation = .select,
+    }};
+    const role_blocks = [_]cir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .instructions = &role_entry_instructions,
+            .terminator = .{ .branch = .{
+                .condition = 1,
+                .then_edge = .{ .target = 1, .arguments = &role_edge_arguments },
+                .else_edge = .{ .target = 1, .arguments = &role_edge_arguments },
+            } },
+        },
+        .{
+            .id = 1,
+            .parameters = &.{ 3, 4 },
+            .instructions = &role_join_instructions,
+            .terminator = .{ .return_value = 5 },
+        },
+    };
+    const RoleBody = struct {
+        pub const InitialArgs = RoleInput;
+        pub const Result = u32;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{RoleInput};
+        pub const control_ir: cir.Program = .{
+            .label = "constructor-role-proof",
+            .value_types = &.{
+                cir.ValueType{ .schema = 0 },
+                cir.ValueType{ .scalar = .boolean },
+                u32_type,
+                cir.ValueType{ .scalar = .boolean },
+                u32_type,
+                u32_type,
+            },
+            .blocks = &role_blocks,
+            .entry = 0,
+            .result_type = u32_type,
+        };
+    };
+    const RoleImage = program_v2.program(
+        "constructor-role-proof",
+        RoleBody,
+    ).image();
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const validated = try image_v1.validateImage(&RoleImage.bytes, &workspace);
+    const transitions_offset: usize = @intCast(
+        validated.catalogs.envelope.sections[9].offset,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        std.mem.readInt(u32, RoleImage.bytes[transitions_offset..][0..4], .little),
+    );
+    const first_constructor = std.mem.readInt(
+        u32,
+        RoleImage.bytes[transitions_offset + 12 ..][0..4],
+        .little,
+    );
+    const second_constructor = std.mem.readInt(
+        u32,
+        RoleImage.bytes[transitions_offset + 24 ..][0..4],
+        .little,
+    );
+    try std.testing.expect(first_constructor != second_constructor);
+    var malformed = RoleImage.bytes;
+    std.mem.writeInt(
+        u32,
+        malformed[transitions_offset + 24 ..][0..4],
+        first_constructor,
+        .little,
+    );
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidConstructor,
+        image_v1.validateImage(&malformed, &workspace),
+    );
 }

@@ -317,6 +317,9 @@ pub fn validateImage(
     {
         return error.UnreachableEntry;
     }
+    try validateInitialTuple(catalogs);
+    try validateConstructorExecution(catalogs, segment_count, constructor_count);
+    try validateConsumedParametersRetained(catalogs, segment_count);
     try validateSegmentReachability(catalogs, segment_count);
     const program_digest = try computeProgramTransitionDigest(
         catalogs,
@@ -1826,6 +1829,7 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
         const field_count = @as(u32, activation_count) + environment_count;
         var activation_seen = [_]bool{false} ** 1024;
         var environment_seen = [_]bool{false} ** 1024;
+        var retained = [_]bool{false} ** 1024;
         for (0..field_count) |index| {
             if (end - cursor < 8) return error.InvalidConstructor;
             const value = readInt(u16, bytes, cursor);
@@ -1841,10 +1845,17 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
                 return error.InvalidConstructor;
             }
             seen[value] = true;
+            retained[value] = true;
             cursor += 8;
         }
         for (0..invariant_count) |_| {
+            const invariant_start = cursor;
             cursor = try validateInvariant(catalogs, bytes, cursor, end);
+            try validateInvariantRetention(
+                catalogs,
+                bytes[invariant_start..cursor],
+                &retained,
+            );
         }
         if (cursor != end) return error.InvalidConstructor;
     }
@@ -2007,6 +2018,75 @@ fn validateInvariant(
     }
     try validateInvariantSchemas(catalogs, bytes[start..end]);
     return end;
+}
+
+fn validateInvariantRetention(
+    catalogs: Catalogs,
+    invariant: []const u8,
+    retained: *const [1024]bool,
+) Error!void {
+    const tag = invariant[4];
+    const payload = 8;
+    switch (tag) {
+        0, 6, 15, 19 => try requireRetainedInvariantValue(
+            catalogs,
+            retained,
+            readInt(u16, invariant, payload),
+        ),
+        1, 2, 5, 9, 10, 11, 12, 14, 16, 17, 20 => {
+            try requireRetainedInvariantValue(
+                catalogs,
+                retained,
+                readInt(u16, invariant, payload),
+            );
+            try requireRetainedInvariantValue(
+                catalogs,
+                retained,
+                readInt(u16, invariant, payload + 2),
+            );
+        },
+        3, 13, 18 => {
+            for (0..3) |index| try requireRetainedInvariantValue(
+                catalogs,
+                retained,
+                readInt(u16, invariant, payload + index * 2),
+            );
+        },
+        4, 7 => {
+            for (0..4) |index| try requireRetainedInvariantValue(
+                catalogs,
+                retained,
+                readInt(u16, invariant, payload + index * 2),
+            );
+        },
+        8 => {
+            try requireRetainedInvariantValue(
+                catalogs,
+                retained,
+                readInt(u16, invariant, payload),
+            );
+            const operand_count = readInt(u16, invariant, payload + 4);
+            for (0..operand_count) |index| try requireRetainedInvariantValue(
+                catalogs,
+                retained,
+                readInt(u16, invariant, payload + 8 + index * 2),
+            );
+        },
+        else => return error.InvalidInvariant,
+    }
+}
+
+fn requireRetainedInvariantValue(
+    catalogs: Catalogs,
+    retained: *const [1024]bool,
+    value: u16,
+) Error!void {
+    if (value >= catalogs.value_count) return error.InvalidInvariant;
+    const schema = catalogs.schemas.node(valueSchema(catalogs, value)) catch
+        return error.InvalidInvariant;
+    if (!retained[value] and schema.maximum_encoded_size != 0) {
+        return error.InvalidInvariant;
+    }
 }
 
 fn validateInvariantSchemas(
@@ -2421,6 +2501,454 @@ fn validateTransitionShape(catalogs: Catalogs) Error!u32 {
         return error.InvalidTransition;
     if (bytes.len != expected_length) return error.InvalidTransition;
     return count;
+}
+
+fn validateInitialTuple(catalogs: Catalogs) Error!void {
+    if (catalogs.function_count == 0 or
+        readInt(u16, catalogs.functions_section, 6) != catalogs.entry_segment_id)
+    {
+        return error.InvalidRoot;
+    }
+    const entry = imageSegmentRecord(catalogs, catalogs.entry_segment_id) catch
+        return error.InvalidRoot;
+    const parameter_count = readInt(u16, entry, 10);
+    if (parameter_count != catalogs.entry_parameter_count) {
+        return error.InvalidRoot;
+    }
+    if (parameter_count == 0) {
+        if (catalogs.entry_parameter_value_id != std.math.maxInt(u16)) {
+            return error.InvalidRoot;
+        }
+    } else if (readInt(u16, entry, segment_prefix_length) !=
+        catalogs.entry_parameter_value_id)
+    {
+        return error.InvalidRoot;
+    }
+
+    const constructor = imageConstructorRecord(
+        catalogs,
+        catalogs.initial_constructor_id,
+    ) catch return error.InvalidRoot;
+    if (constructor[8] != 0 or constructor[9] != 0 or
+        readInt(u16, constructor, 10) != 0 or
+        readInt(u16, constructor, 12) != catalogs.entry_segment_id or
+        readInt(u16, constructor, 14) != catalogs.entry_segment_id or
+        readInt(u16, constructor, 16) != 0)
+    {
+        return error.InvalidRoot;
+    }
+    const environment_count = readInt(u16, constructor, 18);
+    if (environment_count > parameter_count) return error.InvalidRoot;
+    var cursor: usize = 24;
+    for (0..environment_count) |_| {
+        if (readInt(u16, constructor, cursor) !=
+            catalogs.entry_parameter_value_id)
+        {
+            return error.InvalidRoot;
+        }
+        cursor += 8;
+    }
+}
+
+fn validateConstructorExecution(
+    catalogs: Catalogs,
+    segment_count: u32,
+    constructor_count: u32,
+) Error!void {
+    var transition_role = [_]bool{false} ** 256;
+    var suspension_role = [_]bool{false} ** 256;
+    const transitions = catalogs.envelope.section(.entry_transitions);
+    const transition_count = readInt(u32, transitions, 0);
+    for (0..transition_count) |index| {
+        const offset = 4 + index * 12;
+        const source = readInt(u16, transitions, offset);
+        const edge_kind = transitions[offset + 2];
+        const target = readInt(u16, transitions, offset + 4);
+        const constructor_id = readInt(u32, transitions, offset + 8);
+        transition_role[constructor_id] = true;
+        const constructor = imageConstructorRecord(
+            catalogs,
+            constructor_id,
+        ) catch return error.InvalidConstructor;
+        const edge = imageTransitionEdge(
+            catalogs,
+            source,
+            edge_kind,
+            target,
+        ) catch return error.InvalidTransition;
+        try validateTransitionConstructorFields(
+            catalogs,
+            constructor,
+            source,
+            target,
+            edge,
+        );
+    }
+
+    for (0..segment_count) |source| {
+        const segment = imageSegmentRecord(catalogs, @intCast(source)) catch
+            return error.InvalidSegment;
+        const terminator = imageSegmentTerminator(segment);
+        if (segment[terminator + 4] != 2) continue;
+        const suspension_kind = segment[terminator + 8];
+        const expected_kind: u8 = switch (suspension_kind) {
+            0 => 3,
+            1 => 4,
+            2 => continue,
+            else => return error.InvalidTerminator,
+        };
+        var matched: ?u32 = null;
+        for (0..constructor_count) |constructor_id| {
+            const constructor = imageConstructorRecord(
+                catalogs,
+                @intCast(constructor_id),
+            ) catch return error.InvalidConstructor;
+            if (constructor[8] != expected_kind or constructor[9] != 2 or
+                readInt(u16, constructor, 12) != source)
+            {
+                continue;
+            }
+            if (matched != null) return error.InvalidConstructor;
+            matched = @intCast(constructor_id);
+            try validateSuspensionConstructorFields(
+                catalogs,
+                constructor,
+                @intCast(source),
+            );
+        }
+        const constructor_id = matched orelse return error.InvalidConstructor;
+        suspension_role[constructor_id] = true;
+    }
+
+    for (0..constructor_count) |constructor_id| {
+        const is_initial = constructor_id == catalogs.initial_constructor_id;
+        const role_count = @intFromBool(is_initial) +
+            @intFromBool(transition_role[constructor_id]) +
+            @intFromBool(suspension_role[constructor_id]);
+        if (role_count != 1) return error.InvalidConstructor;
+    }
+}
+
+fn validateConsumedParametersRetained(
+    catalogs: Catalogs,
+    segment_count: u32,
+) Error!void {
+    for (0..segment_count) |segment_id| {
+        const segment = imageSegmentRecord(catalogs, @intCast(segment_id)) catch
+            return error.InvalidSegment;
+        var required = [_]bool{false} ** 1024;
+        const parameter_count = readInt(u16, segment, 10);
+        var cursor = segment_prefix_length + @as(usize, parameter_count) * 2;
+        for (0..readInt(u32, segment, 12)) |_| {
+            const end = recordEnd(segment, cursor, 16) catch
+                return error.InvalidInstruction;
+            const operand_count = readInt(u16, segment, cursor + 10);
+            for (0..operand_count) |index| {
+                required[readInt(u16, segment, cursor + 16 + index * 2)] = true;
+            }
+            cursor = end;
+        }
+        try markTerminatorConsumedValues(
+            catalogs,
+            @intCast(segment_id),
+            segment,
+            cursor,
+            &required,
+        );
+        var guaranteed = [_]bool{false} ** 1024;
+        try addGuaranteedConstructorValues(
+            catalogs,
+            @intCast(segment_id),
+            &guaranteed,
+        );
+        for (0..parameter_count) |index| {
+            const parameter = readInt(
+                u16,
+                segment,
+                segment_prefix_length + index * 2,
+            );
+            const schema = catalogs.schemas.node(
+                valueSchema(catalogs, parameter),
+            ) catch return error.InvalidSegment;
+            if (required[parameter] and !guaranteed[parameter] and
+                schema.maximum_encoded_size != 0)
+            {
+                return error.InvalidConstructor;
+            }
+        }
+    }
+}
+
+fn markTerminatorConsumedValues(
+    catalogs: Catalogs,
+    source: u16,
+    segment: []const u8,
+    terminator: usize,
+    required: *[1024]bool,
+) Error!void {
+    const kind = segment[terminator + 4];
+    const payload = terminator + 8;
+    switch (kind) {
+        0 => try markEdgeConsumedValues(
+            catalogs,
+            source,
+            0,
+            segment[payload..],
+            required,
+        ),
+        1 => {
+            required[readInt(u16, segment, payload)] = true;
+            const then_edge = payload + 4;
+            try markEdgeConsumedValues(
+                catalogs,
+                source,
+                1,
+                segment[then_edge..],
+                required,
+            );
+            const else_edge = then_edge + imageEdgeLength(segment[then_edge..]);
+            try markEdgeConsumedValues(
+                catalogs,
+                source,
+                2,
+                segment[else_edge..],
+                required,
+            );
+        },
+        2 => {
+            const request_count = readInt(u16, segment, payload + 10);
+            for (0..request_count) |index| {
+                required[readInt(u16, segment, payload + 12 + index * 2)] = true;
+            }
+            var edge_cursor = payload + 12 + @as(usize, request_count) * 2;
+            const callee_present = segment[edge_cursor] == 1;
+            edge_cursor += 4;
+            if (callee_present) {
+                try markEdgeConsumedValues(
+                    catalogs,
+                    source,
+                    3,
+                    segment[edge_cursor..],
+                    required,
+                );
+                edge_cursor += imageEdgeLength(segment[edge_cursor..]);
+            }
+            try markEdgeConsumedValues(
+                catalogs,
+                source,
+                4,
+                segment[edge_cursor..],
+                required,
+            );
+        },
+        3 => {
+            if (segment[payload] == 1) {
+                required[readInt(u16, segment, payload + 2)] = true;
+            }
+        },
+        4, 6 => {
+            required[readInt(u16, segment, payload)] = true;
+        },
+        5 => {},
+        else => return error.InvalidTerminator,
+    }
+}
+
+fn markEdgeConsumedValues(
+    catalogs: Catalogs,
+    source: u16,
+    edge_kind: u8,
+    edge: []const u8,
+    required: *[1024]bool,
+) Error!void {
+    const target = readInt(u16, edge, 0);
+    const constructor_id = transitionConstructorId(
+        catalogs,
+        source,
+        edge_kind,
+        target,
+    ) catch return error.InvalidTransition;
+    const constructor = imageConstructorRecord(catalogs, constructor_id) catch
+        return error.InvalidConstructor;
+    const target_segment = imageSegmentRecord(catalogs, target) catch
+        return error.InvalidTransition;
+    const argument_count = readInt(u16, edge, 2);
+    for (0..argument_count) |index| {
+        const argument = 4 + index * 4;
+        if (edge[argument] != 0) continue;
+        const target_parameter = readInt(
+            u16,
+            target_segment,
+            segment_prefix_length + index * 2,
+        );
+        if (!constructorRetainsField(constructor, target_parameter)) continue;
+        required[readInt(u16, edge, argument + 2)] = true;
+    }
+}
+
+fn transitionConstructorId(
+    catalogs: Catalogs,
+    source: u16,
+    edge_kind: u8,
+    target: u16,
+) Error!u32 {
+    const transitions = catalogs.envelope.section(.entry_transitions);
+    for (0..readInt(u32, transitions, 0)) |index| {
+        const offset = 4 + index * 12;
+        if (readInt(u16, transitions, offset) == source and
+            transitions[offset + 2] == edge_kind and
+            readInt(u16, transitions, offset + 4) == target)
+        {
+            return readInt(u32, transitions, offset + 8);
+        }
+    }
+    return error.InvalidTransition;
+}
+
+fn constructorRetainsField(constructor: []const u8, value: u16) bool {
+    var cursor: usize = 24;
+    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+        readInt(u16, constructor, 18);
+    for (0..field_count) |_| {
+        if (readInt(u16, constructor, cursor) == value) return true;
+        cursor += 8;
+    }
+    return false;
+}
+
+fn validateTransitionConstructorFields(
+    catalogs: Catalogs,
+    constructor: []const u8,
+    source: u16,
+    target: u16,
+    edge: []const u8,
+) Error!void {
+    const target_segment = imageSegmentRecord(catalogs, target) catch
+        return error.InvalidConstructor;
+    const parameter_count = readInt(u16, target_segment, 10);
+    if (readInt(u16, edge, 2) != parameter_count) {
+        return error.InvalidConstructor;
+    }
+    var cursor: usize = 24;
+    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+        readInt(u16, constructor, 18);
+    for (0..field_count) |_| {
+        const value = readInt(u16, constructor, cursor);
+        if (!try constructorFieldMaterializable(
+            catalogs,
+            source,
+            target_segment,
+            edge,
+            value,
+        )) return error.InvalidConstructor;
+        cursor += 8;
+    }
+}
+
+fn constructorFieldMaterializable(
+    catalogs: Catalogs,
+    source: u16,
+    target_segment: []const u8,
+    edge: []const u8,
+    value: u16,
+) Error!bool {
+    const schema = catalogs.schemas.node(valueSchema(catalogs, value)) catch
+        return error.InvalidConstructor;
+    if (schema.maximum_encoded_size == 0) return true;
+    const parameter_count = readInt(u16, target_segment, 10);
+    for (0..parameter_count) |index| {
+        if (readInt(
+            u16,
+            target_segment,
+            segment_prefix_length + index * 2,
+        ) != value) continue;
+        const argument = 4 + index * 4;
+        if (edge[argument] == 1) return true;
+        return segmentValueAvailableAtTerminator(
+            catalogs,
+            source,
+            readInt(u16, edge, argument + 2),
+        );
+    }
+    return segmentValueAvailableAtTerminator(catalogs, source, value);
+}
+
+fn validateSuspensionConstructorFields(
+    catalogs: Catalogs,
+    constructor: []const u8,
+    source: u16,
+) Error!void {
+    var cursor: usize = 24;
+    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+        readInt(u16, constructor, 18);
+    for (0..field_count) |_| {
+        const value = readInt(u16, constructor, cursor);
+        if (!try segmentValueAvailableAtTerminator(catalogs, source, value)) {
+            return error.InvalidConstructor;
+        }
+        cursor += 8;
+    }
+}
+
+fn segmentValueAvailableAtTerminator(
+    catalogs: Catalogs,
+    segment_id: u16,
+    value: u16,
+) Error!bool {
+    if (value >= catalogs.value_count) return false;
+    const schema = catalogs.schemas.node(valueSchema(catalogs, value)) catch
+        return error.InvalidConstructor;
+    if (schema.maximum_encoded_size == 0) return true;
+    var available = [_]bool{false} ** 1024;
+    try addGuaranteedConstructorValues(catalogs, segment_id, &available);
+    const segment = imageSegmentRecord(catalogs, segment_id) catch
+        return error.InvalidConstructor;
+    var cursor = segment_prefix_length +
+        @as(usize, readInt(u16, segment, 10)) * 2;
+    for (0..readInt(u32, segment, 12)) |_| {
+        const end = recordEnd(segment, cursor, 16) catch
+            return error.InvalidConstructor;
+        available[readInt(u16, segment, cursor + 8)] = true;
+        cursor = end;
+    }
+    return available[value];
+}
+
+fn imageTransitionEdge(
+    catalogs: Catalogs,
+    source: u16,
+    edge_kind: u8,
+    target: u16,
+) Error![]const u8 {
+    const segment = try imageSegmentRecord(catalogs, source);
+    const terminator = imageSegmentTerminator(segment);
+    const kind = segment[terminator + 4];
+    const payload = terminator + 8;
+    const edge = switch (edge_kind) {
+        0 => if (kind == 0) segment[payload..] else return error.InvalidTransition,
+        1 => if (kind == 1) segment[payload + 4 ..] else return error.InvalidTransition,
+        2 => blk: {
+            if (kind != 1) return error.InvalidTransition;
+            const then_edge = payload + 4;
+            break :blk segment[then_edge + imageEdgeLength(segment[then_edge..]) ..];
+        },
+        3, 4 => blk: {
+            if (kind != 2) return error.InvalidTransition;
+            const request_count = readInt(u16, segment, payload + 10);
+            var cursor = payload + 12 + @as(usize, request_count) * 2;
+            const callee_present = segment[cursor] == 1;
+            cursor += 4;
+            if (edge_kind == 3) {
+                if (!callee_present) return error.InvalidTransition;
+                break :blk segment[cursor..];
+            }
+            if (callee_present) cursor += imageEdgeLength(segment[cursor..]);
+            break :blk segment[cursor..];
+        },
+        else => return error.InvalidTransition,
+    };
+    if (readInt(u16, edge, 0) != target) return error.InvalidTransition;
+    return edge;
 }
 
 fn validateSegmentReachability(
