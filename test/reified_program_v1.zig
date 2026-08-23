@@ -410,6 +410,34 @@ test "zero caller fuel cannot launder a malformed State" {
     try std.testing.expectEqual(@as(u64, 0), fuel);
 }
 
+test "KernelMachine terminal owner OOM preserves State ownership" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const state = try KernelMachine.initialState(failing.allocator(), 29);
+    defer KernelMachine.deinitState(state);
+    const before = try KernelMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    var fuel: u64 = 8;
+    failing.fail_index = failing.allocations + 2;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        KernelMachine.step(state, &fuel),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+    const after = try KernelMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    const done = switch (try KernelMachine.step(state, &fuel)) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 29), done.value().*);
+}
+
 test "Reified constants emit in canonical first-use order" {
     const constant_instructions = [_]cir.Instruction{.{
         .kind = .constant,

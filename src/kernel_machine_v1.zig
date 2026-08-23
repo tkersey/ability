@@ -235,16 +235,17 @@ pub fn Machine(
                     break :blk .yielded;
                 },
                 .requested => |request| blk: {
+                    const typed = typedRequest(request) catch
+                        return error.ProgramContractViolation;
                     commitState(value, candidate, request.state.len);
-                    break :blk .{ .request = typedRequest(request) catch
-                        return error.ProgramContractViolation };
+                    break :blk .{ .request = typed };
                 },
                 .done => |bytes| blk: {
-                    value.allocator.free(candidate);
                     const result = portable_value.decodeExact(Result, bytes) catch
                         return error.ProgramContractViolation;
                     const owner = value.allocator.create(OwnedResultValue) catch
                         return error.OutOfMemory;
+                    value.allocator.free(candidate);
                     owner.* = .{
                         .allocator = value.allocator,
                         .state = state,
@@ -256,11 +257,11 @@ pub fn Machine(
                     break :blk .{ .done = public };
                 },
                 .failed => |bytes| blk: {
-                    value.allocator.free(candidate);
                     const authored = portable_value.decodeExact(
                         Definition.Failure,
                         bytes,
                     ) catch return error.ProgramContractViolation;
+                    value.allocator.free(candidate);
                     value.terminal = true;
                     break :blk .{ .failed = .{ .authored = authored } };
                 },

@@ -17,6 +17,7 @@
         "docs",
         "examples",
         "repo_zig_paths.txt",
+        "scripts",
         "src",
         "test",
     },

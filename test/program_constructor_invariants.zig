@@ -1713,6 +1713,44 @@ test "sum branches persist the source case and reject a forged local path" {
     );
 }
 
+test "unfunded kernel step defers deep environment validation" {
+    const state = try SumMachine.initialState(
+        std.testing.allocator,
+        .{ .left = 7 },
+    );
+    defer SumMachine.deinitState(state);
+    const encoded = try SumMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const malformed = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(malformed);
+    std.mem.writeInt(
+        u32,
+        malformed[first_environment_offset..][0..4],
+        2,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    var fuel: u64 = 0;
+    var output_state: [4096]u8 = undefined;
+    var output_value: [4096]u8 = undefined;
+    var scratch: [8192]u8 = undefined;
+    const yielded = switch (try kernel_v1.step(
+        image,
+        malformed,
+        &fuel,
+        &output_state,
+        &output_value,
+        &scratch,
+        &workspace,
+    )) {
+        .yielded => |bytes| bytes,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualSlices(u8, malformed, yielded);
+    try std.testing.expectEqual(@as(u64, 0), fuel);
+}
+
 test "public resume consumes only preallocated response authority" {
     try std.testing.expect(!@hasDecl(SumMachine, "commitPreparedResume"));
     const resume_info = @typeInfo(@TypeOf(SumMachine.@"resume")).@"fn";

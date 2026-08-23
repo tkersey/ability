@@ -492,6 +492,11 @@ fn validateEffects(
         cursor += 4;
         const identity_length = readInt(u32, bytes, cursor);
         cursor += 4;
+        if (identity_length > bytes.len - cursor or
+            bytes.len - cursor - identity_length < 76)
+        {
+            return error.InvalidEffect;
+        }
         const identity = takeCatalogSlice(
             bytes,
             &cursor,
@@ -660,7 +665,12 @@ fn validateFunctions(
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidFunction;
     const count = readInt(u32, bytes, 0);
-    if (count == 0 or bytes.len != 4 + @as(usize, count) * 8) {
+    if (count == 0 or count > 128) return error.InvalidFunction;
+    const records_length = std.math.mul(usize, count, 8) catch
+        return error.InvalidFunction;
+    const expected_length = std.math.add(usize, 4, records_length) catch
+        return error.InvalidFunction;
+    if (bytes.len != expected_length) {
         return error.InvalidFunction;
     }
     for (0..count) |index| {
@@ -734,6 +744,10 @@ fn validateInstruction(
     const result = readInt(u16, bytes, start + 8);
     const operand_count = readInt(u16, bytes, start + 10);
     const immediate = readInt(u32, bytes, start + 12);
+    const wire_operation = std.enums.fromInt(
+        reducer_semantics_v1.WireOperation,
+        operation,
+    ) orelse return error.InvalidInstruction;
     const expected_kind: u8 = if (operation <= 2) @intCast(operation) else 3;
     if (bytes[start + 5] != 0 or operation > 57 or kind != expected_kind or
         result >= catalogs.value_count or
@@ -753,7 +767,374 @@ fn validateInstruction(
         }
         cursor += 2;
     }
+    try validateInstructionSchemas(
+        catalogs,
+        wire_operation,
+        result,
+        bytes[start + 16 .. end],
+        operand_count,
+        immediate,
+    );
     return end;
+}
+
+fn validateInstructionSchemas(
+    catalogs: Catalogs,
+    operation: reducer_semantics_v1.WireOperation,
+    result: u16,
+    operand_bytes: []const u8,
+    operand_count: u16,
+    immediate: u32,
+) Error!void {
+    if (reducer_semantics_v1.fixedOperandCount(operation)) |expected| {
+        if (operand_count != expected) return error.InvalidInstruction;
+    }
+    const result_schema = valueSchema(catalogs, result);
+    const result_node = catalogs.schemas.node(result_schema) catch
+        return error.InvalidInstruction;
+    const Operand = struct {
+        fn id(bytes: []const u8, index: usize) u16 {
+            return readInt(u16, bytes, index * 2);
+        }
+        fn schema(c: Catalogs, bytes: []const u8, index: usize) u32 {
+            return valueSchema(c, id(bytes, index));
+        }
+        fn node(
+            c: Catalogs,
+            bytes: []const u8,
+            index: usize,
+        ) Error!dynamic_value_v1.Node {
+            return c.schemas.node(schema(c, bytes, index)) catch
+                error.InvalidInstruction;
+        }
+    };
+    const bool_schema = result_node.kind == .bool;
+    const u32_result = result_node.kind == .u32;
+    switch (operation) {
+        .constant => if (result_schema != try constantSchema(
+            catalogs,
+            immediate,
+        )) return error.InvalidInstruction,
+        .copy => if (result_schema != Operand.schema(
+            catalogs,
+            operand_bytes,
+            0,
+        )) return error.InvalidInstruction,
+        .compare_eq_zero => {
+            if (!isIntegerKind((try Operand.node(
+                catalogs,
+                operand_bytes,
+                0,
+            )).kind) or !bool_schema) return error.InvalidInstruction;
+        },
+        .integer_add,
+        .integer_subtract,
+        .integer_multiply,
+        .integer_divide,
+        .integer_remainder,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        => {
+            if (!isIntegerKind(result_node.kind) or
+                result_schema != Operand.schema(catalogs, operand_bytes, 0) or
+                result_schema != Operand.schema(catalogs, operand_bytes, 1))
+            {
+                return error.InvalidInstruction;
+            }
+        },
+        .integer_negate => {
+            if (!isSignedIntegerKind(result_node.kind) or
+                result_schema != Operand.schema(catalogs, operand_bytes, 0))
+            {
+                return error.InvalidInstruction;
+            }
+        },
+        .integer_equal,
+        .integer_not_equal,
+        .integer_less_than,
+        .integer_less_equal,
+        .integer_greater_than,
+        .integer_greater_equal,
+        => {
+            const left = Operand.schema(catalogs, operand_bytes, 0);
+            if (!bool_schema or left != Operand.schema(
+                catalogs,
+                operand_bytes,
+                1,
+            ) or !isIntegerKind((try catalogs.schemas.node(left)).kind)) {
+                return error.InvalidInstruction;
+            }
+        },
+        .integer_bit_not => {
+            if (!isIntegerKind(result_node.kind) or
+                result_schema != Operand.schema(catalogs, operand_bytes, 0))
+            {
+                return error.InvalidInstruction;
+            }
+        },
+        .integer_convert => if (!isIntegerKind(result_node.kind) or
+            !isIntegerKind((try Operand.node(
+                catalogs,
+                operand_bytes,
+                0,
+            )).kind)) return error.InvalidInstruction,
+        .boolean_not => if (!bool_schema or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .bool)
+            return error.InvalidInstruction,
+        .boolean_and, .boolean_or => if (!bool_schema or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .bool or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .bool)
+            return error.InvalidInstruction,
+        .select => if ((try Operand.node(
+            catalogs,
+            operand_bytes,
+            0,
+        )).kind != .bool or
+            result_schema != Operand.schema(catalogs, operand_bytes, 1) or
+            result_schema != Operand.schema(catalogs, operand_bytes, 2))
+            return error.InvalidInstruction,
+        .product_construct => {
+            if (result_node.kind != .product or
+                readInt(u32, result_node.payload, 0) != operand_count)
+            {
+                return error.InvalidInstruction;
+            }
+            for (0..operand_count) |index| {
+                if (readInt(u32, result_node.payload, 4 + index * 4) !=
+                    Operand.schema(catalogs, operand_bytes, index))
+                {
+                    return error.InvalidInstruction;
+                }
+            }
+        },
+        .product_extract, .product_replace => {
+            const product_schema = Operand.schema(catalogs, operand_bytes, 0);
+            const product = catalogs.schemas.node(product_schema) catch
+                return error.InvalidInstruction;
+            if (product.kind != .product or
+                immediate >= readInt(u32, product.payload, 0))
+            {
+                return error.InvalidInstruction;
+            }
+            const field_schema = readInt(
+                u32,
+                product.payload,
+                4 + @as(usize, immediate) * 4,
+            );
+            if (operation == .product_extract) {
+                if (result_schema != field_schema) return error.InvalidInstruction;
+            } else if (result_schema != product_schema or
+                Operand.schema(catalogs, operand_bytes, 1) != field_schema)
+            {
+                return error.InvalidInstruction;
+            }
+        },
+        .sum_construct => {
+            if (result_node.kind != .sum or
+                immediate >= readInt(u32, result_node.payload, 4))
+            {
+                return error.InvalidInstruction;
+            }
+            const payload_schema = readInt(
+                u32,
+                result_node.payload,
+                12 + @as(usize, immediate) * 8,
+            );
+            const payload_node = catalogs.schemas.node(payload_schema) catch
+                return error.InvalidInstruction;
+            const expected: u16 = if (payload_node.kind == .unit) 0 else 1;
+            if (operand_count != expected or (expected == 1 and
+                Operand.schema(catalogs, operand_bytes, 0) != payload_schema))
+            {
+                return error.InvalidInstruction;
+            }
+        },
+        .sum_tag_is, .sum_extract => {
+            const sum = try Operand.node(catalogs, operand_bytes, 0);
+            if (sum.kind != .sum or immediate >= readInt(u32, sum.payload, 4)) {
+                return error.InvalidInstruction;
+            }
+            if (operation == .sum_tag_is) {
+                if (!bool_schema) return error.InvalidInstruction;
+            } else if (result_schema != readInt(
+                u32,
+                sum.payload,
+                12 + @as(usize, immediate) * 8,
+            ) or result_node.kind == .unit) return error.InvalidInstruction;
+        },
+        .optional_none => if (result_node.kind != .optional)
+            return error.InvalidInstruction,
+        .optional_some => if (result_node.kind != .optional or
+            readInt(u32, result_node.payload, 0) != Operand.schema(
+                catalogs,
+                operand_bytes,
+                0,
+            )) return error.InvalidInstruction,
+        .optional_is_some => if (!bool_schema or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .optional)
+            return error.InvalidInstruction,
+        .vector_empty => if (result_node.kind != .vector)
+            return error.InvalidInstruction,
+        .vector_length => if (!u32_result or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .vector)
+            return error.InvalidInstruction,
+        .vector_get, .vector_set, .vector_push, .vector_truncate, .vector_clear => {
+            const vector_schema = Operand.schema(catalogs, operand_bytes, 0);
+            const vector = catalogs.schemas.node(vector_schema) catch
+                return error.InvalidInstruction;
+            if (vector.kind != .vector) return error.InvalidInstruction;
+            const element_schema = readInt(u32, vector.payload, 4);
+            switch (operation) {
+                .vector_get => if (result_schema != element_schema or
+                    (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32)
+                    return error.InvalidInstruction,
+                .vector_set => if (result_schema != vector_schema or
+                    (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32 or
+                    Operand.schema(catalogs, operand_bytes, 2) != element_schema)
+                    return error.InvalidInstruction,
+                .vector_push => if (result_schema != vector_schema or
+                    Operand.schema(catalogs, operand_bytes, 1) != element_schema)
+                    return error.InvalidInstruction,
+                .vector_truncate => if (result_schema != vector_schema or
+                    (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32)
+                    return error.InvalidInstruction,
+                .vector_clear => if (result_schema != vector_schema)
+                    return error.InvalidInstruction,
+                else => unreachable,
+            }
+        },
+        .vector_pop => {
+            const vector_schema = Operand.schema(catalogs, operand_bytes, 0);
+            const vector = catalogs.schemas.node(vector_schema) catch
+                return error.InvalidInstruction;
+            if (vector.kind != .vector or result_node.kind != .product or
+                readInt(u32, result_node.payload, 0) != 2 or
+                readInt(u32, result_node.payload, 4) != vector_schema)
+            {
+                return error.InvalidInstruction;
+            }
+            const optional_schema = readInt(u32, result_node.payload, 8);
+            const optional = catalogs.schemas.node(optional_schema) catch
+                return error.InvalidInstruction;
+            if (optional.kind != .optional or
+                readInt(u32, optional.payload, 0) !=
+                    readInt(u32, vector.payload, 4))
+            {
+                return error.InvalidInstruction;
+            }
+        },
+        .text_empty => if (result_node.kind != .text)
+            return error.InvalidInstruction,
+        .text_append => if (result_schema != Operand.schema(
+            catalogs,
+            operand_bytes,
+            0,
+        ) or (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .text)
+            return error.InvalidInstruction,
+        .text_append_scalar => if (result_schema != Operand.schema(
+            catalogs,
+            operand_bytes,
+            0,
+        ) or (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32)
+            return error.InvalidInstruction,
+        .text_append_unsigned, .text_append_signed => {
+            const integer = (try Operand.node(catalogs, operand_bytes, 1)).kind;
+            if (result_schema != Operand.schema(catalogs, operand_bytes, 0) or
+                (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+                !isIntegerKind(integer) or
+                (operation == .text_append_unsigned and
+                    isSignedIntegerKind(integer)) or
+                (operation == .text_append_signed and
+                    !isSignedIntegerKind(integer)))
+            {
+                return error.InvalidInstruction;
+            }
+        },
+        .text_copy => if (result_node.kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32 or
+            (try Operand.node(catalogs, operand_bytes, 2)).kind != .u32)
+            return error.InvalidInstruction,
+        .text_compare => if (result_node.kind != .i8 or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .text)
+            return error.InvalidInstruction,
+        .text_join => if (result_schema != Operand.schema(
+            catalogs,
+            operand_bytes,
+            0,
+        ) or (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 2)).kind != .text)
+            return error.InvalidInstruction,
+        .bytes_empty => if (result_node.kind != .bytes)
+            return error.InvalidInstruction,
+        .bytes_append => if (result_schema != Operand.schema(
+            catalogs,
+            operand_bytes,
+            0,
+        ) or (try Operand.node(catalogs, operand_bytes, 0)).kind != .bytes or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .bytes)
+            return error.InvalidInstruction,
+        .bytes_append_scalar => if (result_schema != Operand.schema(
+            catalogs,
+            operand_bytes,
+            0,
+        ) or (try Operand.node(catalogs, operand_bytes, 0)).kind != .bytes or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .u8)
+            return error.InvalidInstruction,
+        .bytes_copy => if (result_node.kind != .bytes or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .bytes or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32 or
+            (try Operand.node(catalogs, operand_bytes, 2)).kind != .u32)
+            return error.InvalidInstruction,
+        .bytes_compare => if (result_node.kind != .i8 or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .bytes or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .bytes)
+            return error.InvalidInstruction,
+        .bytes_join => if (result_schema != Operand.schema(
+            catalogs,
+            operand_bytes,
+            0,
+        ) or (try Operand.node(catalogs, operand_bytes, 0)).kind != .bytes or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .bytes or
+            (try Operand.node(catalogs, operand_bytes, 2)).kind != .bytes)
+            return error.InvalidInstruction,
+        .text_length => if (!u32_result or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .text)
+            return error.InvalidInstruction,
+        .bytes_length => if (!u32_result or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .bytes)
+            return error.InvalidInstruction,
+        .enum_to_u32 => if (!u32_result or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .@"enum")
+            return error.InvalidInstruction,
+    }
+}
+
+fn constantSchema(catalogs: Catalogs, target: u32) Error!u32 {
+    const bytes = catalogs.envelope.section(.constants);
+    var cursor: usize = 4;
+    for (0..catalogs.constant_count) |constant| {
+        const schema = readInt(u32, bytes, cursor);
+        const length = readInt(u32, bytes, cursor + 4);
+        cursor += 8;
+        if (constant == target) return schema;
+        cursor += length;
+    }
+    return error.InvalidInstruction;
+}
+
+fn isIntegerKind(kind: dynamic_value_v1.Kind) bool {
+    return @intFromEnum(kind) >= @intFromEnum(dynamic_value_v1.Kind.i8) and
+        @intFromEnum(kind) <= @intFromEnum(dynamic_value_v1.Kind.u64);
+}
+
+fn isSignedIntegerKind(kind: dynamic_value_v1.Kind) bool {
+    return kind == .i8 or kind == .i16 or kind == .i32 or kind == .i64;
 }
 
 fn validateTerminator(
@@ -1084,7 +1465,12 @@ fn validateTransitions(
     const bytes = catalogs.envelope.section(.entry_transitions);
     if (bytes.len < 4) return error.InvalidTransition;
     const count = readInt(u32, bytes, 0);
-    if (bytes.len != 4 + @as(usize, count) * 12) {
+    if (count > 1024) return error.InvalidTransition;
+    const records_length = std.math.mul(usize, count, 12) catch
+        return error.InvalidTransition;
+    const expected_length = std.math.add(usize, 4, records_length) catch
+        return error.InvalidTransition;
+    if (bytes.len != expected_length) {
         return error.InvalidTransition;
     }
     var previous: ?[3]u32 = null;

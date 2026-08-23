@@ -262,6 +262,7 @@ pub fn @"resume"(
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
+    try validateState(image, state, workspace);
     const constructor_id = try topConstructorId(state);
     const constructor = try constructorRecord(image, constructor_id);
     if (constructor[8] != 3) return error.InvalidState;
@@ -434,6 +435,9 @@ fn stepSegment(
     const segment = segmentRecord(image, segment_id) catch
         return error.InvalidImage;
     const minimum_cost = readInt(u64, segment, 16);
+    // BEI1 section 28.2 intentionally validates only the State envelope and
+    // top constructor before an unfunded segment. Environment and invariant
+    // validation remains deferred until the caller funds the atomic segment.
     if (caller_fuel.* < minimum_cost) return .{ .yielded = state };
     try validateState(image, state, workspace);
     const cumulative = readInt(u64, state, 52);

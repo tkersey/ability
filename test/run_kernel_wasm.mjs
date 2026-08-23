@@ -49,6 +49,26 @@ if (instance.exports.boundary_kernel_execute(wrapped.length) !== 1) {
   throw new Error("wrapped aggregate input lengths were accepted");
 }
 if (instance.exports.boundary_kernel_reset() !== 0) throw new Error("reset failed");
+const sectionOffset = (image, kind) => Number(image.readBigUInt64LE(144 + (kind - 1) * 24 + 8));
+for (const [name, mutate] of [
+  ["functions", (image) => image.writeUInt32LE(0x20000000, sectionOffset(image, 7))],
+  ["transitions", (image) => image.writeUInt32LE(0x20000000, sectionOffset(image, 10))],
+  ["effect identity tail", (image) => {
+    const offset = sectionOffset(image, 5);
+    image.writeUInt32LE(image.length - offset, offset + 8);
+  }],
+]) {
+  const malformed = Buffer.from(input.subarray(0, 40 + imageLength));
+  malformed.writeUInt16LE(0, 10);
+  malformed.writeUInt32LE(0, 28);
+  malformed.writeUInt32LE(0, 32);
+  mutate(malformed.subarray(40));
+  memory.set(malformed, inputPtr);
+  if (instance.exports.boundary_kernel_execute(malformed.length) !== 2) {
+    throw new Error(`malformed ${name} catalog was accepted`);
+  }
+  if (instance.exports.boundary_kernel_reset() !== 0) throw new Error("reset failed");
+}
 memory.set(input, inputPtr);
 if (instance.exports.boundary_kernel_execute(input.length) !== 0) {
   throw new Error("kernel semantic vector failed");

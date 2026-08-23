@@ -123,6 +123,27 @@ pub fn main(init: std.process.Init) !void {
         &Image.bytes,
         &image_workspace,
     );
+    var tail_malformed_image = Image.bytes;
+    const tail_malformed_envelope = try boundary.image.validateEnvelope(
+        &tail_malformed_image,
+    );
+    const tail_effects_offset: usize = @intCast(
+        tail_malformed_envelope.sections[4].offset,
+    );
+    std.mem.writeInt(
+        u32,
+        tail_malformed_image[tail_effects_offset + 8 ..][0..4],
+        @intCast(tail_malformed_image.len - tail_effects_offset),
+        .little,
+    );
+    var tail_malformed_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidEffect,
+        boundary.image.validateImage(
+            &tail_malformed_image,
+            &tail_malformed_workspace,
+        ),
+    );
     var malformed_image = Image.bytes;
     const envelope = try boundary.image.validateEnvelope(&malformed_image);
     const effects_offset: usize = envelope.sections[4].offset;
@@ -168,6 +189,32 @@ pub fn main(init: std.process.Init) !void {
         .requested => |request| request,
         else => return error.ExpectedEffectRequest,
     };
+    var malformed_parked: [4096]u8 = undefined;
+    @memcpy(
+        malformed_parked[0..kernel_request.state.len],
+        kernel_request.state,
+    );
+    std.mem.writeInt(
+        u32,
+        malformed_parked[72..76],
+        std.math.maxInt(u32),
+        .little,
+    );
+    var malformed_resume_output: [4096]u8 = undefined;
+    var malformed_resume_workspace: boundary.image.ValidationWorkspace = .{};
+    var malformed_resume_scratch: [4096]u8 = undefined;
+    malformed_resume_workspace.invariant_result = &malformed_resume_scratch;
+    try std.testing.expectError(
+        error.InvalidState,
+        boundary.kernel.@"resume"(
+            image,
+            malformed_parked[0..kernel_request.state.len],
+            kernel_request.identity,
+            &([_]u8{ 42, 0, 0, 0 }),
+            &malformed_resume_output,
+            &malformed_resume_workspace,
+        ),
+    );
     const typed_kernel_state = try KernelMachine.initialState(allocator, 21);
     defer KernelMachine.deinitState(typed_kernel_state);
     var typed_kernel_fuel: u64 = 8;
