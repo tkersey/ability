@@ -172,6 +172,7 @@ fn malformedStateCaseCount(allocator: std.mem.Allocator) !u32 {
         &Profile.bytes,
         &workspace,
     );
+    var invariant_scratch: [4096]u8 = undefined;
     var malformed: [4096]u8 = undefined;
     var rejected: u32 = 0;
     for (0..12) |case| {
@@ -206,7 +207,12 @@ fn malformedStateCaseCount(allocator: std.mem.Allocator) !u32 {
             return error.MalformedDirectStateAccepted;
         } else |_| {}
         workspace = .{};
-        if (kernel_v1.validateState(image, bytes, &workspace)) {
+        if (kernel_v1.validateState(
+            image,
+            bytes,
+            &invariant_scratch,
+            &workspace,
+        )) {
             return error.MalformedKernelStateAccepted;
         } else |_| {
             rejected += 1;
@@ -456,10 +462,12 @@ test "Reified Program preserves direct canonical State bytes" {
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 29, .little);
     var kernel_state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const kernel_length = try kernel_v1.initial(
         validated,
         &initial_args,
         &kernel_state,
+        &invariant_scratch,
         &workspace,
     );
     try std.testing.expectEqualSlices(
@@ -467,7 +475,12 @@ test "Reified Program preserves direct canonical State bytes" {
         compiled_bytes,
         kernel_state[0..kernel_length],
     );
-    try kernel_v1.validateState(validated, compiled_bytes, &workspace);
+    try kernel_v1.validateState(
+        validated,
+        compiled_bytes,
+        &invariant_scratch,
+        &workspace,
+    );
 
     const terminal_state = try ProgramMachine.initialState(
         std.testing.allocator,
@@ -555,10 +568,12 @@ test "bound kernel certificate rejects backing mutation and reacquires workspace
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 29, .little);
     var state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
         binding,
         &args,
         &state,
+        &invariant_scratch,
         &workspace,
     );
     var predecessor: [4096]u8 = undefined;
@@ -571,6 +586,7 @@ test "bound kernel certificate rejects backing mutation and reacquires workspace
         kernel_v1.validateState(
             binding,
             state[0..state_length],
+            &invariant_scratch,
             &workspace,
         ),
     );
@@ -588,6 +604,7 @@ test "bound kernel certificate rejects backing mutation and reacquires workspace
         kernel_v1.validateState(
             binding,
             state[0..state_length],
+            &invariant_scratch,
             &workspace,
         ),
     );
@@ -604,6 +621,7 @@ test "bound kernel certificate rejects backing mutation and reacquires workspace
         binding,
         &args,
         &reacquired,
+        &invariant_scratch,
         &workspace,
     );
     try std.testing.expectEqualSlices(
@@ -624,6 +642,7 @@ test "kernel rejects mutable outputs aliased with authenticated backing" {
     );
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 29, .little);
+    var invariant_scratch: [4096]u8 = undefined;
     const before = image_bytes;
     workspace = .{};
     try std.testing.expectError(
@@ -632,6 +651,7 @@ test "kernel rejects mutable outputs aliased with authenticated backing" {
             binding,
             &args,
             &image_bytes,
+            &invariant_scratch,
             &workspace,
         ),
     );
@@ -649,10 +669,12 @@ test "kernel rejects caller fuel aliased with mutable output" {
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 29, .little);
     var state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
         binding,
         &args,
         &state,
+        &invariant_scratch,
         &workspace,
     );
     var output_state: [4096]u8 = undefined;
@@ -688,21 +710,23 @@ test "kernel rejects invariant scratch aliased with State" {
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 29, .little);
     var state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
         binding,
         &args,
         &state,
+        &invariant_scratch,
         &workspace,
     );
     var before: [4096]u8 = undefined;
     @memcpy(before[0..state_length], state[0..state_length]);
     workspace = .{};
-    workspace.invariant_result = state[0..4];
     try std.testing.expectError(
         error.InvalidBindings,
         kernel_v1.validateState(
             binding,
             state[0..state_length],
+            state[0..4],
             &workspace,
         ),
     );
@@ -991,10 +1015,12 @@ test "Reified constants emit in canonical first-use order" {
         &workspace,
     );
     var state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
         validated,
         &.{},
         &state,
+        &invariant_scratch,
         &workspace,
     );
     var fuel: u64 = 8;
@@ -1075,10 +1101,12 @@ test "fixed kernel scalar algebra matches direct success and failure" {
         var args: [4]u8 = undefined;
         std.mem.writeInt(u32, &args, input, .little);
         var state: [4096]u8 = undefined;
+        var invariant_scratch: [4096]u8 = undefined;
         const state_length = try kernel_v1.initial(
             validated,
             &args,
             &state,
+            &invariant_scratch,
             &workspace,
         );
         var kernel_fuel: u64 = 8;
@@ -1509,10 +1537,12 @@ test "fixed kernel branches and yields at the next segment boundary" {
 
         const args = [_]u8{@intFromBool(condition)};
         var state: [4096]u8 = undefined;
+        var invariant_scratch: [4096]u8 = undefined;
         const state_length = try kernel_v1.initial(
             image,
             &args,
             &state,
+            &invariant_scratch,
             &workspace,
         );
         var kernel_fuel: u64 = 8;
@@ -1554,7 +1584,14 @@ test "fixed kernel branches and yields at the next segment boundary" {
     );
     defer std.testing.allocator.free(direct_bytes);
     var state: [4096]u8 = undefined;
-    const state_length = try kernel_v1.initial(image, &.{1}, &state, &workspace);
+    var invariant_scratch: [4096]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        image,
+        &.{1},
+        &state,
+        &invariant_scratch,
+        &workspace,
+    );
     var kernel_fuel: u64 = 1;
     var next_state: [4096]u8 = undefined;
     var output: [4]u8 = undefined;

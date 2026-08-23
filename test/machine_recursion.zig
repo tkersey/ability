@@ -1065,10 +1065,12 @@ test "compiled bounded recursive frames survive canonical round trip" {
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 3, .little);
     var kernel_initial: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const kernel_initial_length = try kernel_v1.initial(
         image,
         &args,
         &kernel_initial,
+        &invariant_scratch,
         &workspace,
     );
     var kernel_split_fuel: u64 = 3;
@@ -1656,9 +1658,10 @@ test "machine call stack rejects an authentic alternate call entry" {
         &Profile.bytes,
         &workspace,
     );
+    var invariant_scratch: [4096]u8 = undefined;
     try std.testing.expectError(
         error.InvalidState,
-        kernel_v1.validateState(bound, forged, &workspace),
+        kernel_v1.validateState(bound, forged, &invariant_scratch, &workspace),
     );
 }
 

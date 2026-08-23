@@ -90,6 +90,8 @@ const mixed_value_types = [_]cir.ValueType{
     u32_type,
     u32_type,
     u32_type,
+    u32_type,
+    u32_type,
 };
 const mixed_entry_instructions = [_]cir.Instruction{
     .{
@@ -105,29 +107,41 @@ const mixed_entry_instructions = [_]cir.Instruction{
         .operation = .{ .product_extract = 1 },
     },
 };
-const mixed_checkpoint_instructions = [_]cir.Instruction{.{
-    .kind = .constant,
-    .result = 6,
-    .operation = .{ .constant = 0 },
-}};
-const mixed_ordinary_instructions = [_]cir.Instruction{.{
-    .kind = .constant,
-    .result = 7,
-    .operation = .{ .constant = 0 },
-}};
-const mixed_join_instructions = [_]cir.Instruction{.{
-    .kind = .pure,
-    .result = 9,
-    .operands = &.{ 5, 8 },
-    .operation = .integer_add,
-}};
+const mixed_checkpoint_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 6,
+        .operation = .{ .constant = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 9,
+        .operands = &.{ 3, 6 },
+        .operation = .integer_add,
+    },
+};
+const mixed_ordinary_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 7,
+        .operation = .{ .constant = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 10,
+        .operands = &.{ 4, 7 },
+        .operation = .integer_add,
+    },
+};
 const mixed_checkpoint_arguments = [_]cir.EdgeArgument{
     .{ .value = 3 },
     .{ .value = 6 },
+    .{ .value = 9 },
 };
 const mixed_ordinary_arguments = [_]cir.EdgeArgument{
     .{ .value = 4 },
     .{ .value = 7 },
+    .{ .value = 10 },
 };
 const mixed_branch_arguments = [_]cir.EdgeArgument{.{ .value = 2 }};
 const mixed_blocks = [_]cir.Block{
@@ -164,9 +178,8 @@ const mixed_blocks = [_]cir.Block{
     },
     .{
         .id = 3,
-        .parameters = &.{ 5, 8 },
-        .instructions = &mixed_join_instructions,
-        .terminator = .{ .return_value = 9 },
+        .parameters = &.{ 5, 8, 11 },
+        .terminator = .{ .return_value = 11 },
     },
 };
 const MixedBody = struct {
@@ -301,10 +314,12 @@ test "fixed kernel preserves explicit and caller-fuel checkpoints" {
         var args: [4]u8 = undefined;
         std.mem.writeInt(u32, &args, input, .little);
         var state: [4096]u8 = undefined;
+        var invariant_scratch: [4096]u8 = undefined;
         const state_length = try kernel_v1.initial(
             image,
             &args,
             &state,
+            &invariant_scratch,
             &workspace,
         );
         var fuel = fixture[3];
@@ -416,6 +431,12 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
     for (MixedReified.rnf_value.constructorSlice()) |constructor| {
         if (constructor.source_block != 3) continue;
         try std.testing.expect(constructor.invariant_len > 0);
+        var has_computed_invariant = false;
+        for (constructor.invariantTerms()) |invariant| switch (invariant) {
+            .integer_binary_result => has_computed_invariant = true,
+            else => {},
+        };
+        try std.testing.expect(has_computed_invariant);
         pure_join_constructor_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), pure_join_constructor_count);
@@ -428,10 +449,49 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
     try std.testing.expect(v2_join_constructor_count > pure_join_constructor_count);
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&MixedImage.bytes, &workspace);
-    _ = try kernel_v1.bindMachineV2(
+    const bound = try kernel_v1.bindMachineV2(
         program_image,
         &MixedProfile.bytes,
         &workspace,
+    );
+    var invalid_target_parameter = MixedImage.bytes;
+    const segments_offset: usize = @intCast(
+        program_image.catalogs.envelope.sections[7].offset,
+    );
+    var join_segment = segments_offset + 4;
+    for (0..3) |_| {
+        join_segment += std.mem.readInt(
+            u32,
+            invalid_target_parameter[join_segment..][0..4],
+            .little,
+        );
+    }
+    std.mem.writeInt(
+        u16,
+        invalid_target_parameter[join_segment + image_v1.segment_prefix_length ..][0..2],
+        std.math.maxInt(u16),
+        .little,
+    );
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&invalid_target_parameter, &workspace),
+    );
+
+    var truncated_transitions = MixedImage.bytes;
+    const transitions_offset: usize = @intCast(
+        program_image.catalogs.envelope.sections[9].offset,
+    );
+    std.mem.writeInt(
+        u32,
+        truncated_transitions[transitions_offset..][0..4],
+        std.math.maxInt(u32),
+        .little,
+    );
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidTransition,
+        image_v1.validateImage(&truncated_transitions, &workspace),
     );
     const profile_segment_count = std.mem.readInt(
         u32,
@@ -598,8 +658,8 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
         defer std.testing.allocator.free(kernel_initial);
         try std.testing.expectEqualSlices(u8, direct_initial, kernel_initial);
 
-        var direct_fuel: u64 = 4;
-        var kernel_fuel: u64 = 4;
+        var direct_fuel: u64 = 6;
+        var kernel_fuel: u64 = 6;
         try std.testing.expectEqual(
             .yielded,
             std.meta.activeTag(try MixedDirect.step(direct, &direct_fuel)),
@@ -620,6 +680,19 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
         );
         defer std.testing.allocator.free(kernel_yielded);
         try std.testing.expectEqualSlices(u8, direct_yielded, kernel_yielded);
+        var raw_invariant_scratch: [4096]u8 = undefined;
+        workspace = .{};
+        try kernel_v1.validateState(
+            bound,
+            direct_yielded,
+            &raw_invariant_scratch,
+            &workspace,
+        );
+        workspace = .{};
+        try std.testing.expectError(
+            error.ScratchCapacity,
+            kernel_v1.validateState(bound, direct_yielded, &.{}, &workspace),
+        );
 
         var direct_completion_fuel: u64 = 8;
         var kernel_completion_fuel: u64 = 8;

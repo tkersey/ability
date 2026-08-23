@@ -258,8 +258,12 @@ pub fn initial(
     binding: BoundProgram,
     initial_args: []const u8,
     output_state: []u8,
+    invariant_scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = prior_invariant_result;
     try requireInvariantScratchDisjoint(binding, workspace);
     try requireWorkspaceDisjoint(initial_args, workspace);
     try requireWorkspaceDisjoint(output_state, workspace);
@@ -279,8 +283,12 @@ pub fn initial(
 pub fn validateState(
     binding: BoundProgram,
     state: []const u8,
+    invariant_scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = prior_invariant_result;
     try requireInvariantScratchDisjoint(binding, workspace);
     try requireWorkspaceDisjoint(state, workspace);
     try requireDisjoint(state, workspace.invariant_result);
@@ -292,11 +300,18 @@ pub fn current(
     binding: BoundProgram,
     state: []const u8,
     output_payload: []u8,
+    invariant_scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!?RequestView {
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = prior_invariant_result;
+    try requireInvariantScratchDisjoint(binding, workspace);
     try requireWorkspaceDisjoint(state, workspace);
     try requireWorkspaceDisjoint(output_payload, workspace);
     try requireBindingDisjoint(binding, output_payload);
+    try requireDisjoint(state, invariant_scratch);
+    try requireDisjoint(output_payload, invariant_scratch);
     try requireDisjoint(state, output_payload);
     const image = try acquire(binding, workspace);
     return currentValidated(
@@ -313,8 +328,12 @@ pub fn @"resume"(
     identity: RequestIdentity,
     response: []const u8,
     output_state: []u8,
+    invariant_scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = prior_invariant_result;
     try requireInvariantScratchDisjoint(binding, workspace);
     try requireWorkspaceDisjoint(state, workspace);
     try requireWorkspaceDisjoint(response, workspace);
@@ -366,6 +385,8 @@ pub fn step(
     try requireDisjoint(output_state, scratch);
     try requireDisjoint(output_value, scratch);
     const image = try acquire(binding, workspace);
+    const prior_invariant_result = workspace.invariant_result;
+    defer workspace.invariant_result = prior_invariant_result;
     return stepValidated(
         image,
         state,
@@ -495,7 +516,10 @@ fn validateStateValidated(
             constructor,
             state[cursor..environment_end],
             workspace,
-        ) catch return error.InvalidState;
+        ) catch |err| switch (err) {
+            error.ScratchCapacity => return error.ScratchCapacity,
+            else => return error.InvalidState,
+        };
         if (frame_index == 0) {
             const segment = try segmentRecord(
                 image,
@@ -695,7 +719,6 @@ fn currentValidated(
     output_payload: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!?RequestView {
-    workspace.invariant_result = output_payload;
     try validateStateValidated(image, state, workspace);
     const constructor_id = try topConstructorId(state);
     const constructor = try constructorRecord(image, constructor_id);

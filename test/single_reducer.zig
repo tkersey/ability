@@ -176,10 +176,12 @@ pub fn main(init: std.process.Init) !void {
     var kernel_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &kernel_args, 21, .little);
     var kernel_initial: [4096]u8 = undefined;
+    var kernel_invariant_scratch: [4096]u8 = undefined;
     const kernel_initial_length = try boundary.machine_v2.kernel.initial(
         image,
         &kernel_args,
         &kernel_initial,
+        &kernel_invariant_scratch,
         &image_workspace,
     );
     var kernel_fuel: u64 = 8;
@@ -212,7 +214,6 @@ pub fn main(init: std.process.Init) !void {
     var malformed_resume_output: [4096]u8 = undefined;
     var malformed_resume_workspace: boundary.image.ValidationWorkspace = .{};
     var malformed_resume_scratch: [4096]u8 = undefined;
-    malformed_resume_workspace.invariant_result = &malformed_resume_scratch;
     try std.testing.expectError(
         error.InvalidState,
         boundary.machine_v2.kernel.@"resume"(
@@ -221,6 +222,7 @@ pub fn main(init: std.process.Init) !void {
             kernel_request.identity,
             &([_]u8{ 42, 0, 0, 0 }),
             &malformed_resume_output,
+            &malformed_resume_scratch,
             &malformed_resume_workspace,
         ),
     );
@@ -391,6 +393,7 @@ pub fn main(init: std.process.Init) !void {
                     stale_identity,
                     &response,
                     &kernel_resumed,
+                    &kernel_invariant_scratch,
                     &image_workspace,
                 ),
             );
@@ -401,6 +404,7 @@ pub fn main(init: std.process.Init) !void {
                 kernel_request.identity,
                 &response,
                 &kernel_resumed,
+                &kernel_invariant_scratch,
                 &image_workspace,
             );
             try std.testing.expectEqualSlices(

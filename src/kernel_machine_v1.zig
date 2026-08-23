@@ -33,6 +33,7 @@ pub fn Machine(
             storage: []u8,
             length: usize,
             request_storage: []u8,
+            invariant_storage: []u8,
             prepared_active: bool = false,
             terminal: bool = false,
             terminal_result: ?*OwnedResult = null,
@@ -122,12 +123,12 @@ pub fn Machine(
             const state = try allocateState(allocator);
             errdefer destroyState(state);
             var workspace: image_v1.ValidationWorkspace = .{};
-            workspace.invariant_result = state.request_storage;
             const image = try validatedProgram(&workspace);
             state.length = kernel_v1.initial(
                 image,
                 args_storage[0..args_length],
                 state.storage,
+                state.invariant_storage,
                 &workspace,
             ) catch return error.ProgramContractViolation;
             return @ptrCast(state);
@@ -159,11 +160,11 @@ pub fn Machine(
             const value = storedConst(state);
             if (value.terminal) return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
-            workspace.invariant_result = value.request_storage;
             const image = try validatedProgram(&workspace);
             kernel_v1.validateState(
                 image,
                 value.storage[0..value.length],
+                value.invariant_storage,
                 &workspace,
             ) catch return error.ProgramContractViolation;
         }
@@ -200,12 +201,12 @@ pub fn Machine(
             const value = stored(state);
             try validateState(state);
             var workspace: image_v1.ValidationWorkspace = .{};
-            workspace.invariant_result = value.request_storage;
             const image = try validatedProgram(&workspace);
             const maybe_request = kernel_v1.current(
                 image,
                 value.storage[0..value.length],
                 value.request_storage,
+                value.invariant_storage,
                 &workspace,
             ) catch return error.ProgramContractViolation;
             const request = maybe_request orelse return null;
@@ -234,7 +235,6 @@ pub fn Machine(
             const scratch = value.allocator.alloc(u8, scratch_length) catch
                 return error.OutOfMemory;
             defer value.allocator.free(scratch);
-            workspace.invariant_result = scratch[options.maximum_state_bytes..];
             const outcome = kernel_v1.step(
                 image,
                 value.storage[0..value.length],
@@ -306,7 +306,6 @@ pub fn Machine(
                 return error.ProgramContractViolation;
             if (!requestEql(expected, request)) return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
-            workspace.invariant_result = value.request_storage;
             const image = try validatedProgram(&workspace);
             const maximum_resume_state = kernel_v1.maximumResumeStateSize(
                 image,
@@ -368,7 +367,6 @@ pub fn Machine(
                 value.response_storage,
             ) catch return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
-            workspace.invariant_result = state.request_storage;
             const image = try validatedProgram(&workspace);
             const next_length = kernel_v1.@"resume"(
                 image,
@@ -376,6 +374,7 @@ pub fn Machine(
                 kernelIdentity(value.request.identity),
                 value.response_storage[0..response_length],
                 value.candidate,
+                state.invariant_storage,
                 &workspace,
             ) catch return error.ProgramContractViolation;
             state.allocator.free(state.storage);
@@ -395,11 +394,17 @@ pub fn Machine(
                 u8,
                 @max(1, Image.maximum_single_value_bytes),
             ) catch return error.OutOfMemory;
+            errdefer allocator.free(request_storage);
+            const invariant_storage = allocator.alloc(
+                u8,
+                @max(1, Image.maximum_single_value_bytes),
+            ) catch return error.OutOfMemory;
             value.* = .{
                 .allocator = allocator,
                 .storage = storage,
                 .length = 0,
                 .request_storage = request_storage,
+                .invariant_storage = invariant_storage,
             };
             return value;
         }
@@ -408,6 +413,7 @@ pub fn Machine(
             const allocator = value.allocator;
             allocator.free(value.storage);
             allocator.free(value.request_storage);
+            allocator.free(value.invariant_storage);
             allocator.destroy(value);
         }
 

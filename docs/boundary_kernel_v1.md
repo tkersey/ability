@@ -23,9 +23,13 @@ binding before execution. Post-bind artifact mutation, workspace reuse, and
 mutable output aliasing with authenticated backing fail closed.
 
 Native operations are `initial`, `validateState`, `current`, `step`, and
-`resume`. A funded segment executes atomically. Insufficient caller fuel yields
-before the segment, preserving State and fuel. Ordinary transitions remain
-internal to one call; external effect requests park a canonical await
+`resume`. Every raw operation that may validate a computed constructor
+invariant receives an explicit caller-owned invariant scratch slice; a default
+`ValidationWorkspace` carries no hidden evaluator capacity. The typed adapter
+owns bounded scratch sized from BPI1, and the WASM adapter supplies its fixed
+value workspace. A funded segment executes atomically. Insufficient caller
+fuel yields before the segment, preserving State and fuel. Ordinary transitions
+remain internal to one call; external effect requests park a canonical await
 constructor and include RequestIdentity v2.
 
 `boundary-machine-v2-kernel-v1.wasm` targets `wasm32-freestanding`, imports nothing,

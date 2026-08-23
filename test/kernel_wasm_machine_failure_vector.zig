@@ -44,10 +44,12 @@ pub fn main(init: std.process.Init) !void {
     const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
     const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
     var state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
         image,
         &.{},
         &state,
+        &invariant_scratch,
         &workspace,
     );
     var input: [48 + Image.bytes.len + Profile.bytes.len + 4096]u8 = undefined;

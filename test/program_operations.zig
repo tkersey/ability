@@ -174,10 +174,12 @@ test "compiled pure operations construct products vectors and text" {
     const program_image = try image_v1.validateImage(&PureImage.bytes, &workspace);
     const image = try kernel_v1.bindMachineV2(program_image, &PureProfile.bytes, &workspace);
     var kernel_state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
     const kernel_state_length = try kernel_v1.initial(
         image,
         &.{},
         &kernel_state,
+        &invariant_scratch,
         &workspace,
     );
     var scratch: [8192]u8 = undefined;

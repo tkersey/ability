@@ -302,10 +302,12 @@ test "compiled products sums optionals vectors text and bytes are first order" {
     const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
     const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
     var kernel_state: [8192]u8 = undefined;
+    var invariant_scratch: [8192]u8 = undefined;
     const kernel_state_length = try kernel_v1.initial(
         image,
         &.{},
         &kernel_state,
+        &invariant_scratch,
         &workspace,
     );
     var kernel_fuel: u64 = 512;

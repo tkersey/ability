@@ -1879,9 +1879,10 @@ test "sum branches persist the source case and reject a forged local path" {
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&SumImage.bytes, &workspace);
     const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes, &workspace);
+    var invariant_scratch: [4096]u8 = undefined;
     try std.testing.expectError(
         error.InvalidState,
-        kernel_v1.validateState(image, forged, &workspace),
+        kernel_v1.validateState(image, forged, &invariant_scratch, &workspace),
     );
 }
 

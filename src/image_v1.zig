@@ -1733,6 +1733,9 @@ fn validateEdge(
             target_segment,
             segment_prefix_length + index * 2,
         );
+        if (target_value >= catalogs.value_count) {
+            return error.InvalidTerminator;
+        }
         if (bytes[cursor.*] == 0) {
             if (valueSchema(catalogs, value) !=
                 valueSchema(catalogs, target_value))
@@ -1784,6 +1787,7 @@ fn validateFunctionEntries(catalogs: Catalogs, segment_count: u32) Error!void {
 }
 
 fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
+    _ = try validateTransitionShape(catalogs);
     const bytes = catalogs.envelope.section(.constructors);
     if (bytes.len < 4) return error.InvalidConstructor;
     const count = readInt(u32, bytes, 0);
@@ -2359,16 +2363,7 @@ fn validateTransitions(
     constructor_count: u32,
 ) Error!void {
     const bytes = catalogs.envelope.section(.entry_transitions);
-    if (bytes.len < 4) return error.InvalidTransition;
-    const count = readInt(u32, bytes, 0);
-    if (count > 1024) return error.InvalidTransition;
-    const records_length = std.math.mul(usize, count, 12) catch
-        return error.InvalidTransition;
-    const expected_length = std.math.add(usize, 4, records_length) catch
-        return error.InvalidTransition;
-    if (bytes.len != expected_length) {
-        return error.InvalidTransition;
-    }
+    const count = try validateTransitionShape(catalogs);
     var previous: ?[3]u32 = null;
     for (0..count) |index| {
         const offset = 4 + index * 12;
@@ -2413,6 +2408,19 @@ fn validateTransitions(
         previous = key;
     }
     try validateTransitionCompleteness(catalogs, bytes, count);
+}
+
+fn validateTransitionShape(catalogs: Catalogs) Error!u32 {
+    const bytes = catalogs.envelope.section(.entry_transitions);
+    if (bytes.len < 4) return error.InvalidTransition;
+    const count = readInt(u32, bytes, 0);
+    if (count > 1024) return error.InvalidTransition;
+    const records_length = std.math.mul(usize, count, 12) catch
+        return error.InvalidTransition;
+    const expected_length = std.math.add(usize, 4, records_length) catch
+        return error.InvalidTransition;
+    if (bytes.len != expected_length) return error.InvalidTransition;
+    return count;
 }
 
 fn validateSegmentReachability(

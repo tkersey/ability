@@ -82,7 +82,6 @@ const ExecuteError = image_v1.Error || kernel_v1.Error || error{
 };
 
 fn execute(input: []const u8) ExecuteError!u32 {
-    validation_workspace.invariant_result = &value_storage;
     if (input.len < input_header_length or
         !std.mem.eql(u8, input[0..8], "ABL_KIN1") or
         readInt(u16, input, 8) != 1 or
@@ -143,6 +142,7 @@ fn execute(input: []const u8) ExecuteError!u32 {
                 image,
                 auxiliary,
                 &state_storage,
+                &scratch_storage,
                 &validation_workspace,
             );
             break :blk try writeOutput(
@@ -158,6 +158,7 @@ fn execute(input: []const u8) ExecuteError!u32 {
             try kernel_v1.validateState(
                 image,
                 state_bytes,
+                &scratch_storage,
                 &validation_workspace,
             );
             break :blk try writeOutput(command, 0, caller_fuel, &.{}, &.{}, &.{});
@@ -179,6 +180,7 @@ fn executeCurrent(
         image,
         state,
         &value_storage,
+        &scratch_storage,
         &validation_workspace,
     ) orelse return writeOutput(command, 2, caller_fuel, &.{}, &.{}, &.{});
     var identity: [176]u8 = undefined;
@@ -280,6 +282,7 @@ fn executeResume(
         decodeIdentity(auxiliary[0..176]),
         auxiliary[184..],
         &state_storage,
+        &scratch_storage,
         &validation_workspace,
     );
     return writeOutput(
