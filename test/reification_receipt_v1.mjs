@@ -20,6 +20,12 @@ try {
     import_count: 0,
     abi: 1,
     transition_comparison_count: 3,
+    release_asset_sha256: {
+      one_effect_image: crypto.createHash("sha256").update("artifact").digest("hex"),
+      portable_values_image: crypto.createHash("sha256").update("artifact").digest("hex"),
+      one_effect_profile: crypto.createHash("sha256").update("artifact").digest("hex"),
+      portable_values_profile: crypto.createHash("sha256").update("artifact").digest("hex"),
+    },
   }));
   const baseline = path.join(temporary, "baseline.json");
   fs.writeFileSync(baseline, JSON.stringify({
@@ -182,6 +188,14 @@ try {
   );
   if (substitutedKernel.status === 0) {
     throw new Error("substituted kernel artifact was accepted");
+  }
+  const substitutedAsset = childProcess.spawnSync(
+    process.execPath,
+    [script, artifact, replacementKernel, ...args.slice(3)],
+    { encoding: "utf8" },
+  );
+  if (substitutedAsset.status === 0) {
+    throw new Error("substituted release asset was accepted");
   }
 
   fs.appendFileSync(pure, "pub const Changed = void;\n");

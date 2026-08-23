@@ -1517,6 +1517,11 @@ pub fn build(b: *std.Build) void {
     run_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
     run_kernel_wasm.addFileArg(kernel_vector_output);
     run_kernel_wasm.addFileArg(kernel_failure_vector_output);
+    run_kernel_wasm.addArg("--release-assets");
+    run_kernel_wasm.addFileArg(one_effect_image);
+    run_kernel_wasm.addFileArg(portable_values_image);
+    run_kernel_wasm.addFileArg(one_effect_profile);
+    run_kernel_wasm.addFileArg(portable_values_profile);
     const kernel_wasm_proof = run_kernel_wasm.captureStdOut(.{
         .basename = "boundary-machine-v2-kernel-wasm-proof.json",
     });

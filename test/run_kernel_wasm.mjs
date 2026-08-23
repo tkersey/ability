@@ -2,7 +2,13 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 
 const bytes = fs.readFileSync(process.argv[2]);
-const vectors = process.argv.slice(3).map((path) => fs.readFileSync(path));
+const inputs = process.argv.slice(3);
+const releaseAssetDelimiter = inputs.indexOf("--release-assets");
+if (releaseAssetDelimiter < 0 || inputs.length - releaseAssetDelimiter !== 5) {
+  throw new Error("missing release asset pairs");
+}
+const vectors = inputs.slice(0, releaseAssetDelimiter).map((path) => fs.readFileSync(path));
+const releaseAssets = inputs.slice(releaseAssetDelimiter + 1).map((path) => fs.readFileSync(path));
 if (bytes.length > 2 * 1024 * 1024) throw new Error("kernel WASM exceeds 2 MiB");
 const module = await WebAssembly.compile(bytes);
 if (WebAssembly.Module.imports(module).length !== 0) {
@@ -208,6 +214,26 @@ for (const semanticVector of vectors.slice(1)) {
   }
   transitionComparisonCount += 1;
 }
+for (const [image, profile] of [
+  [releaseAssets[0], releaseAssets[2]],
+  [releaseAssets[1], releaseAssets[3]],
+]) {
+  const validation = Buffer.alloc(48 + image.length + profile.length);
+  validation.write("ABL_KIN1", 0, "ascii");
+  validation.writeUInt16LE(1, 8);
+  validation.writeUInt16LE(0, 10);
+  validation.writeUInt32LE(image.length, 24);
+  validation.writeUInt32LE(profile.length, 28);
+  image.copy(validation, 48);
+  profile.copy(validation, 48 + image.length);
+  memory.set(validation, inputPtr);
+  if (instance.exports.boundary_machine_v2_kernel_execute(validation.length) !== 0) {
+    throw new Error("release image/profile pair failed fixed-kernel validation");
+  }
+  if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) {
+    throw new Error("reset failed after release asset validation");
+  }
+}
 process.stdout.write(`${JSON.stringify({
   format: "boundary-machine-v2-kernel-wasm-proof/v1",
   kernel_wasm_bytes: bytes.length,
@@ -215,4 +241,10 @@ process.stdout.write(`${JSON.stringify({
   import_count: WebAssembly.Module.imports(module).length,
   abi: instance.exports.boundary_machine_v2_kernel_abi_version(),
   transition_comparison_count: transitionComparisonCount,
+  release_asset_sha256: {
+    one_effect_image: crypto.createHash("sha256").update(releaseAssets[0]).digest("hex"),
+    portable_values_image: crypto.createHash("sha256").update(releaseAssets[1]).digest("hex"),
+    one_effect_profile: crypto.createHash("sha256").update(releaseAssets[2]).digest("hex"),
+    portable_values_profile: crypto.createHash("sha256").update(releaseAssets[3]).digest("hex"),
+  },
 })}\n`);

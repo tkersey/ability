@@ -63,6 +63,10 @@ if (
   wasmExecution.abi !== 1 ||
   positiveCount(wasmExecution, "kernel_wasm_bytes") <= 0 ||
   !/^[0-9a-f]{64}$/.test(wasmExecution.kernel_wasm_sha256) ||
+  Object.keys(wasmExecution.release_asset_sha256 ?? {}).length !== 4 ||
+  !Object.values(wasmExecution.release_asset_sha256 ?? {}).every(
+    (value) => /^[0-9a-f]{64}$/.test(value),
+  ) ||
   positiveCount(wasmExecution, "transition_comparison_count") <= 0 ||
   positiveCount(generated, "generated_trace_count") <= 0 ||
   positiveCount(generated, "native_transition_comparison_count") <= 0 ||
@@ -91,6 +95,7 @@ const proof = {
   machine_v2_kernel_wasm_import_count: wasmExecution.import_count,
   machine_v2_kernel_wasm_bytes: wasmExecution.kernel_wasm_bytes,
   machine_v2_kernel_wasm_sha256: wasmExecution.kernel_wasm_sha256,
+  release_asset_sha256: wasmExecution.release_asset_sha256,
   image_profile_invariance_passed: semantic.image_profile_invariance_passed,
   metering_annotation_invariance_passed: semantic.metering_annotation_invariance_passed,
   baseline_digest_count: baseline.fixture_count,

@@ -43,6 +43,15 @@ const receiptSourceSha256 = Object.fromEntries(
 if (!isDeepStrictEqual(proofStamp.receipt_source_sha256, receiptSourceSha256)) {
   throw new Error("receipt sources are not bound to the executed proof stamp");
 }
+const releaseAssetSha256 = {
+  one_effect_image: digest(oneEffectPath),
+  portable_values_image: digest(portableValuesPath),
+  one_effect_profile: digest(oneEffectProfilePath),
+  portable_values_profile: digest(portableValuesProfilePath),
+};
+if (!isDeepStrictEqual(proofStamp.release_asset_sha256, releaseAssetSha256)) {
+  throw new Error("release assets are not bound to fixed-kernel validation");
+}
 const proofBoolean = (name) => {
   if (typeof proofStamp[name] !== "boolean") throw new Error(`invalid proof boolean: ${name}`);
   return proofStamp[name];
@@ -73,12 +82,12 @@ const receipt = {
   image_profile_invariance_passed: proofBoolean("image_profile_invariance_passed"),
   metering_annotation_invariance_passed: proofBoolean("metering_annotation_invariance_passed"),
   image_examples: {
-    one_effect_sha256: digest(oneEffectPath),
-    portable_values_sha256: digest(portableValuesPath),
+    one_effect_sha256: releaseAssetSha256.one_effect_image,
+    portable_values_sha256: releaseAssetSha256.portable_values_image,
   },
   machine_v2_profile_examples: {
-    one_effect_sha256: digest(oneEffectProfilePath),
-    portable_values_sha256: digest(portableValuesProfilePath),
+    one_effect_sha256: releaseAssetSha256.one_effect_profile,
+    portable_values_sha256: releaseAssetSha256.portable_values_profile,
   },
   baseline_digest_count: proofCount("baseline_digest_count"),
   baseline_digest_mismatch_count: proofCount("baseline_digest_mismatch_count"),
