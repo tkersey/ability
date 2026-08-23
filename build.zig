@@ -393,13 +393,18 @@ fn addReificationReceiptSources(
         if (source_path.len != 0) command.addFileArg(b.path(source_path));
     }
     inline for (.{
+        "conformance/reification-v1/baseline.lock.json",
+        "conformance/reification-v1/baseline/vectors.json",
         "conformance/reification-v1/check_baseline.sh",
+        "conformance/reification-v1/v1.5.0-baseline-fixture.patch",
         "conformance/rnf-v1/check_performance.sh",
         "conformance/rnf-v1/measure_wasm.mjs",
+        "conformance/rnf-v1/v0.7.0-performance.patch",
         "scripts/write_reification_proof.mjs",
         "scripts/write_reification_receipt.mjs",
         "test/reification_receipt_v1.mjs",
         "test/run_kernel_wasm.mjs",
+        "test/run_machine_wasm.mjs",
     }) |source_path| command.addFileArg(b.path(source_path));
 }
 
