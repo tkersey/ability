@@ -36,7 +36,6 @@ pub const machine_v2 = struct {
         pub const current = kernel_v1.current;
         pub const @"resume" = kernel_v1.@"resume";
         pub const step = kernel_v1.step;
-        pub const maximumResumeStateSize = kernel_v1.maximumResumeStateSize;
     };
 };
 /// Public canonical portable-value and codec namespace.
@@ -74,6 +73,10 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(@hasDecl(@This(), "machine_v2"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "preflightStep"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "StepAdmission"));
+    try std.testing.expect(!@hasDecl(
+        machine_v2.kernel,
+        "maximumResumeStateSize",
+    ));
     try std.testing.expect(!@hasDecl(@This(), "kernel"));
     try std.testing.expect(@hasDecl(@This(), "schema"));
     try std.testing.expect(@hasDecl(@This(), "ir"));

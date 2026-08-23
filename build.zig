@@ -380,6 +380,29 @@ fn addExpectedCompileFailure(
     step.dependOn(&compilation.step);
 }
 
+fn addReificationReceiptSources(
+    b: *std.Build,
+    command: *std.Build.Step.Run,
+) void {
+    var zig_paths = std.mem.splitScalar(
+        u8,
+        @embedFile("repo_zig_paths.txt"),
+        '\n',
+    );
+    while (zig_paths.next()) |source_path| {
+        if (source_path.len != 0) command.addFileArg(b.path(source_path));
+    }
+    inline for (.{
+        "conformance/reification-v1/check_baseline.sh",
+        "conformance/rnf-v1/check_performance.sh",
+        "conformance/rnf-v1/measure_wasm.mjs",
+        "scripts/write_reification_proof.mjs",
+        "scripts/write_reification_receipt.mjs",
+        "test/reification_receipt_v1.mjs",
+        "test/run_kernel_wasm.mjs",
+    }) |source_path| command.addFileArg(b.path(source_path));
+}
+
 const PureProgramModules = struct {
     control_ir: *std.Build.Module,
     portable_value: *std.Build.Module,
@@ -1426,15 +1449,7 @@ pub fn build(b: *std.Build) void {
     reification_asset_receipt_command.addFileArg(portable_values_image);
     reification_asset_receipt_command.addFileArg(one_effect_profile);
     reification_asset_receipt_command.addFileArg(portable_values_profile);
-    reification_asset_receipt_command.addFileArg(
-        b.path("test/reification_generated_v1.zig"),
-    );
-    reification_asset_receipt_command.addFileArg(
-        b.path("test/reified_program_v1.zig"),
-    );
-    reification_asset_receipt_command.addFileArg(
-        b.path("test/program_constructor_invariants.zig"),
-    );
+    addReificationReceiptSources(b, reification_asset_receipt_command);
     reification_asset_receipt_command.addFileArg(
         reification_generated_proof,
     );
@@ -2224,15 +2239,7 @@ pub fn build(b: *std.Build) void {
         reification_proof_stamp_command.addFileArg(b.path(source_path));
     }
     reification_proof_stamp_command.addArg("--receipt-sources");
-    reification_proof_stamp_command.addFileArg(
-        b.path("test/reification_generated_v1.zig"),
-    );
-    reification_proof_stamp_command.addFileArg(
-        b.path("test/reified_program_v1.zig"),
-    );
-    reification_proof_stamp_command.addFileArg(
-        b.path("test/program_constructor_invariants.zig"),
-    );
+    addReificationReceiptSources(b, reification_proof_stamp_command);
     const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
         .basename = "boundary-reification-v1-proof.json",
     });

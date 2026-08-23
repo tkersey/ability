@@ -70,6 +70,8 @@ try {
   );
   const pure = path.join(temporary, "pure.zig");
   fs.writeFileSync(pure, "pub const Pure = void;\n");
+  const executor = path.join(temporary, "proof-executor.mjs");
+  fs.writeFileSync(executor, "export const proof = true;\n");
   const proofPath = path.join(temporary, "boundary-reification-v1-proof.json");
   const proofArgs = [
     proofScript,
@@ -85,6 +87,7 @@ try {
     pure,
     "--receipt-sources",
     pure,
+    executor,
   ];
   const proof = JSON.parse(childProcess.execFileSync(
     process.execPath,
@@ -169,7 +172,18 @@ try {
   }
   fs.writeFileSync(semantic, JSON.stringify(forgedSemantic));
 
-  const args = [script, artifact, artifact, artifact, artifact, artifact, pure, generated, proofPath];
+  const args = [
+    script,
+    artifact,
+    artifact,
+    artifact,
+    artifact,
+    artifact,
+    pure,
+    executor,
+    generated,
+    proofPath,
+  ];
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
   if (
     receipt.image_profile_invariance_passed !== true ||
@@ -208,6 +222,17 @@ try {
     throw new Error("post-proof source substitution was accepted");
   }
   fs.writeFileSync(pure, "pub const Pure = void;\n");
+
+  fs.appendFileSync(executor, "export const changed = true;\n");
+  const substitutedExecutor = childProcess.spawnSync(
+    process.execPath,
+    args,
+    { encoding: "utf8" },
+  );
+  if (substitutedExecutor.status === 0) {
+    throw new Error("post-proof executor substitution was accepted");
+  }
+  fs.writeFileSync(executor, "export const proof = true;\n");
 
   const substitutedGenerated = JSON.parse(fs.readFileSync(generated, "utf8"));
   substitutedGenerated.generated_trace_count += 1;

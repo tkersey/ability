@@ -29,6 +29,7 @@ if (receiptSourcePaths.length === 0) throw new Error("empty receipt source inven
 
 const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
 const digest = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+const sourceKey = (file) => path.relative(process.cwd(), file).split(path.sep).join("/");
 const baseline = readJson(baselinePath);
 const semantic = readJson(semanticPath);
 const generated = readJson(generatedPath);
@@ -119,7 +120,7 @@ const proof = {
   pure_clause_machine_v2_dependency_present: pureClauseMachineV2DependencyPresent,
   proof_gate_required_before_emission: proofGateRequiredBeforeEmission,
   receipt_source_sha256: Object.fromEntries(
-    receiptSourcePaths.map((source) => [path.basename(source), digest(source)]),
+    receiptSourcePaths.map((source) => [sourceKey(source), digest(source)]),
   ),
   observations: {
     baseline,

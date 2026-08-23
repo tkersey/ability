@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 const [
@@ -11,6 +12,7 @@ const [
   ...proofPaths
 ] = process.argv.slice(2);
 const digest = (path) => crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");
+const sourceKey = (file) => path.relative(process.cwd(), file).split(path.sep).join("/");
 const generatedProofPath = proofPaths.find((path) => path.endsWith("boundary-reification-generated-proof.json"));
 if (!generatedProofPath) throw new Error("missing executed generated proof");
 const generatedProof = JSON.parse(fs.readFileSync(generatedProofPath, "utf8"));
@@ -38,7 +40,7 @@ if (
   throw new Error("kernel artifact is not bound to the executed WASM proof");
 }
 const receiptSourceSha256 = Object.fromEntries(
-  receiptSourcePaths.map((source) => [source.split("/").at(-1), digest(source)]),
+  receiptSourcePaths.map((source) => [sourceKey(source), digest(source)]),
 );
 if (!isDeepStrictEqual(proofStamp.receipt_source_sha256, receiptSourceSha256)) {
   throw new Error("receipt sources are not bound to the executed proof stamp");
