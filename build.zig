@@ -1497,6 +1497,9 @@ pub fn build(b: *std.Build) void {
     run_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
     run_kernel_wasm.addFileArg(kernel_vector_output);
     run_kernel_wasm.addFileArg(kernel_failure_vector_output);
+    const kernel_wasm_proof = run_kernel_wasm.captureStdOut(.{
+        .basename = "boundary-machine-v2-kernel-wasm-proof.json",
+    });
     const kernel_wasm_step = b.step(
         "check-boundary-machine-v2-kernel-wasm",
         "Check fixed import-free Boundary Kernel WASM ABI and profile.",
@@ -2159,13 +2162,10 @@ pub fn build(b: *std.Build) void {
         "node",
         "scripts/write_reification_proof.mjs",
     });
-    reification_proof_stamp_command.addFileArg(
-        kernel_wasm_executable.getEmittedBin(),
-    );
+    reification_proof_stamp_command.addFileArg(kernel_wasm_proof);
     reification_proof_stamp_command.addFileArg(reification_baseline_proof);
     reification_proof_stamp_command.addFileArg(reification_semantic_proof);
     reification_proof_stamp_command.addFileArg(reification_generated_proof);
-    reification_proof_stamp_command.addFileArg(kernel_vector_output);
     reification_proof_stamp_command.addFileArg(b.path("src/root.zig"));
     reification_proof_stamp_command.addFileArg(b.path("build.zig"));
     reification_proof_stamp_command.addFileArg(
@@ -2178,11 +2178,11 @@ pub fn build(b: *std.Build) void {
     reification_proof_stamp_command.addFileArg(
         b.path("src/reified_program_v1.zig"),
     );
-    reification_proof_stamp_command.step.dependOn(reification_receipt_step);
     const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
         .basename = "boundary-reification-v1-proof.json",
     });
     reification_asset_receipt_command.addFileArg(reification_proof_stamp);
+    reification_receipt_step.dependOn(&reification_asset_receipt_command.step);
     emit_reification_assets_step.dependOn(reification_receipt_step);
 
     const receipt_falsifier_step = b.step(

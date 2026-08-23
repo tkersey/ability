@@ -11,8 +11,14 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "boundary-reification-re
 try {
   const artifact = path.join(temporary, "artifact.bin");
   fs.writeFileSync(artifact, "artifact");
-  const kernel = path.join(temporary, "kernel.wasm");
-  fs.writeFileSync(kernel, Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
+  const wasmExecution = path.join(temporary, "wasm-execution.json");
+  fs.writeFileSync(wasmExecution, JSON.stringify({
+    format: "boundary-machine-v2-kernel-wasm-proof/v1",
+    kernel_wasm_bytes: 8,
+    import_count: 0,
+    abi: 1,
+    transition_comparison_count: 3,
+  }));
   const baseline = path.join(temporary, "baseline.json");
   fs.writeFileSync(baseline, JSON.stringify({
     format: "boundary-reification-baseline-proof/v1",
@@ -42,8 +48,6 @@ try {
     generated_trace_seed: "seed",
     generated_trace_sha256: "digest",
   }));
-  const vector = path.join(temporary, "vector.bin");
-  fs.writeFileSync(vector, Buffer.alloc(8));
   const root = path.join(temporary, "root.zig");
   fs.writeFileSync(root, "pub const program = void;\n");
   const build = path.join(temporary, "build.zig");
@@ -53,11 +57,10 @@ try {
   const proofPath = path.join(temporary, "boundary-reification-v1-proof.json");
   const proof = JSON.parse(childProcess.execFileSync(process.execPath, [
     proofScript,
-    kernel,
+    wasmExecution,
     baseline,
     semantic,
     generated,
-    vector,
     root,
     build,
     pure,

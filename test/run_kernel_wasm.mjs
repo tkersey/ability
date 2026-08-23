@@ -8,6 +8,7 @@ if (WebAssembly.Module.imports(module).length !== 0) {
   throw new Error("kernel WASM must have zero imports");
 }
 const instance = await WebAssembly.instantiate(module, {});
+let transitionComparisonCount = 0;
 const expected = [
   "memory",
   "boundary_machine_v2_kernel_abi_version",
@@ -114,6 +115,7 @@ const actualOutput = memory.slice(outputPtr, outputPtr + outputLength);
 if (!Buffer.from(actualOutput).equals(expectedOutput)) {
   throw new Error("native/WASM kernel output mismatch");
 }
+transitionComparisonCount += 1;
 for (const semanticVector of vectors.slice(1)) {
   if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
   const semanticInputLength = semanticVector.readUInt32LE(0);
@@ -134,5 +136,12 @@ for (const semanticVector of vectors.slice(1)) {
   if (!Buffer.from(semanticOutput).equals(semanticExpected)) {
     throw new Error("native/WASM Machine failure mismatch");
   }
+  transitionComparisonCount += 1;
 }
-process.stdout.write(`kernel_wasm_bytes=${bytes.length} imports=0 abi=1\n`);
+process.stdout.write(`${JSON.stringify({
+  format: "boundary-machine-v2-kernel-wasm-proof/v1",
+  kernel_wasm_bytes: bytes.length,
+  import_count: WebAssembly.Module.imports(module).length,
+  abi: instance.exports.boundary_machine_v2_kernel_abi_version(),
+  transition_comparison_count: transitionComparisonCount,
+})}\n`);

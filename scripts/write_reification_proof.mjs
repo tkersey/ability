@@ -1,11 +1,10 @@
 import fs from "node:fs";
 
 const [
-  kernelPath,
+  wasmExecutionPath,
   baselinePath,
   semanticPath,
   generatedPath,
-  wasmVectorPath,
   rootPath,
   buildPath,
   ...purePaths
@@ -15,14 +14,13 @@ const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
 const baseline = readJson(baselinePath);
 const semantic = readJson(semanticPath);
 const generated = readJson(generatedPath);
-const kernel = new WebAssembly.Module(fs.readFileSync(kernelPath));
-const wasmImportCount = WebAssembly.Module.imports(kernel).length;
-const wasmVector = fs.readFileSync(wasmVectorPath);
+const wasmExecution = readJson(wasmExecutionPath);
 
 if (
   baseline.format !== "boundary-reification-baseline-proof/v1" ||
   semantic.format !== "boundary-reification-semantic-proof/v1" ||
-  generated.format !== "boundary-reification-generated-proof/v1"
+  generated.format !== "boundary-reification-generated-proof/v1" ||
+  wasmExecution.format !== "boundary-machine-v2-kernel-wasm-proof/v1"
 ) {
   throw new Error("invalid reification proof input format");
 }
@@ -30,20 +28,14 @@ if (
   baseline.mismatch_count !== 0 ||
   semantic.image_profile_invariance_passed !== true ||
   semantic.metering_annotation_invariance_passed !== true ||
-  wasmImportCount !== 0 ||
+  wasmExecution.import_count !== 0 ||
+  wasmExecution.abi !== 1 ||
+  wasmExecution.transition_comparison_count <= 0 ||
   generated.generated_trace_count <= 0 ||
   generated.native_transition_comparison_count <= 0
 ) {
   throw new Error("reification proof observation failed");
 }
-if (wasmVector.length < 8) throw new Error("truncated WASM transition vector");
-const wasmInputLength = wasmVector.readUInt32LE(0);
-const wasmOutputLength = wasmVector.readUInt32LE(4);
-if (wasmVector.length !== 8 + wasmInputLength + wasmOutputLength) {
-  throw new Error("noncanonical WASM transition vector");
-}
-const wasmTransitionComparisonCount = 1;
-
 const root = fs.readFileSync(rootPath, "utf8");
 const build = fs.readFileSync(buildPath, "utf8");
 const pureSources = purePaths.map((path) => fs.readFileSync(path, "utf8")).join("\n");
@@ -56,13 +48,13 @@ const proof = {
   format: "boundary-reification-proof/v1",
   gate: "check-boundary-reification-receipt",
   status: "passed",
-  machine_v2_kernel_wasm_import_count: wasmImportCount,
+  machine_v2_kernel_wasm_import_count: wasmExecution.import_count,
   image_profile_invariance_passed: semantic.image_profile_invariance_passed,
   metering_annotation_invariance_passed: semantic.metering_annotation_invariance_passed,
   baseline_digest_count: baseline.fixture_count,
   baseline_digest_mismatch_count: baseline.mismatch_count,
   canonical_image_fixture_count: baseline.fixture_count,
-  wasm_transition_comparison_count: wasmTransitionComparisonCount,
+  wasm_transition_comparison_count: wasmExecution.transition_comparison_count,
   malformed_image_case_count: semantic.malformed_image_case_count,
   malformed_state_case_count: semantic.malformed_state_case_count,
   world_application_identity_match: false,
@@ -83,7 +75,7 @@ const proof = {
     baseline,
     semantic,
     generated,
-    wasm_vector_count: wasmTransitionComparisonCount,
+    wasm_execution: wasmExecution,
   },
 };
 
