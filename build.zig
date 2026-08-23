@@ -372,6 +372,7 @@ fn addExpectedCompileFailure(
     });
     module.addImport("control_ir", core.control_ir);
     module.addImport("driver", core.driver);
+    module.addImport("image_emit_v1", core.image_emit_v1);
     module.addImport("portable_value", core.portable_value);
     module.addImport("program_v2", core.program_v2);
     const compilation = b.addTest(.{ .root_module = module });
@@ -1842,6 +1843,10 @@ pub fn build(b: *std.Build) void {
         .{
             "test/compile_fail/image_failure_variant_limit.zig",
             "BPI1 failure variants exceed validator capacity",
+        },
+        .{
+            "test/compile_fail/image_schema_member_limit.zig",
+            "BPI1 schema members exceed validator capacity",
         },
         .{
             "test/compile_fail/oversized_machine_state.zig",

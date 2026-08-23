@@ -8,6 +8,12 @@ const maximum_nodes = 1024;
 const maximum_bytes = 1 << 20;
 const maximum_image_bytes = 16 << 20;
 
+pub fn assertSchemaMemberCount(comptime count: usize) void {
+    if (count > dynamic_value_v1.maximum_schema_members) {
+        @compileError("BPI1 schema members exceed validator capacity");
+    }
+}
+
 fn hasDeclSafe(comptime T: type, comptime name: []const u8) bool {
     return switch (@typeInfo(T)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, name),
@@ -160,6 +166,7 @@ const Builder = struct {
                 break :blk self.appendRecord(.optional, &.{child});
             },
             .@"enum" => |info| blk: {
+                assertSchemaMemberCount(info.fields.len);
                 var words: [1 + info.fields.len]u32 = undefined;
                 words[0] = castU32(info.fields.len);
                 inline for (info.fields, 0..) |field, index| {
@@ -169,6 +176,7 @@ const Builder = struct {
                 break :blk self.appendRecord(.@"enum", &words);
             },
             .@"struct" => |info| blk: {
+                assertSchemaMemberCount(info.fields.len);
                 var words: [1 + info.fields.len]u32 = undefined;
                 words[0] = castU32(info.fields.len);
                 inline for (info.fields, 0..) |field, index| {
@@ -177,6 +185,7 @@ const Builder = struct {
                 break :blk self.appendRecord(.product, &words);
             },
             .@"union" => |info| blk: {
+                assertSchemaMemberCount(info.fields.len);
                 const Tag = info.tag_type.?;
                 var words: [2 + info.fields.len * 2]u32 = undefined;
                 words[0] = self.intern(Tag);

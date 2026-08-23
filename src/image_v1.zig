@@ -497,7 +497,10 @@ pub fn reencodeValidated(
 ) Error!usize {
     const source = image.catalogs.envelope.image;
     if (output.len < source.len) return error.LengthMismatch;
-    @memcpy(output[0..source.len], source);
+    const target = output[0..source.len];
+    if (source.ptr == target.ptr) return source.len;
+    if (rangesOverlap(source, target)) return error.InvalidImage;
+    @memcpy(target, source);
     return source.len;
 }
 

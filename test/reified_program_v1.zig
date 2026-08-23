@@ -904,6 +904,33 @@ test "BPI1 validation recomputes evaluator scratch requirements" {
     );
 }
 
+test "BPI1 re-encoding handles exact alias and rejects partial overlap" {
+    const exact = try std.testing.allocator.dupe(u8, &Image.bytes);
+    defer std.testing.allocator.free(exact);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const exact_image = try image_v1.validateImage(exact, &workspace);
+    try std.testing.expectEqual(
+        exact.len,
+        try image_v1.reencodeValidated(exact_image, exact),
+    );
+
+    const overlapping = try std.testing.allocator.alloc(u8, Image.bytes.len + 1);
+    defer std.testing.allocator.free(overlapping);
+    @memcpy(overlapping[1..], &Image.bytes);
+    workspace = .{};
+    const overlapping_image = try image_v1.validateImage(
+        overlapping[1..],
+        &workspace,
+    );
+    try std.testing.expectError(
+        error.InvalidImage,
+        image_v1.reencodeValidated(
+            overlapping_image,
+            overlapping[0..Image.bytes.len],
+        ),
+    );
+}
+
 test "BPI1 scratch sizing includes retained zero-capacity child schemas" {
     const ZeroCapacity = [0][64]u8;
     const ZeroCapacityBody = struct {

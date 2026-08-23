@@ -38,7 +38,7 @@ pub const NodeIndex = struct {
     structural_digest: [32]u8,
 };
 
-const maximum_schema_members: usize = 8192;
+pub const maximum_schema_members: usize = 8192;
 
 pub const Table = struct {
     bytes: []const u8,
