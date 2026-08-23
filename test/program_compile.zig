@@ -263,7 +263,7 @@ const LargeResponseMachine = program_v2.program(
 const LargeResponseKernelMachine = program_v2.program(
     "large-response-state-preflight",
     LargeResponseBody,
-).kernelMachine(.{
+).kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 128,
     .maximum_machine_fuel = 32,
@@ -982,7 +982,7 @@ const DeadResponseJumpProgram = program_v2.program(
     DeadResponseJumpBody,
 );
 const DeadResponseJumpDirect = DeadResponseJumpProgram.compile(.{});
-const DeadResponseJumpKernel = DeadResponseJumpProgram.kernelMachine(.{});
+const DeadResponseJumpKernel = DeadResponseJumpProgram.kernelMachineV2(.{});
 
 test "entry initialization stores only live arguments but validates every input" {
     const valid = try Text4.fromSlice("ok");

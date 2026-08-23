@@ -2,11 +2,9 @@ const dynamic_value_v1 = @import("dynamic_value_v1");
 const reducer_semantics_v1 = @import("reducer_semantics_v1");
 const std = @import("std");
 
-pub const magic = "ABL_BEI1".*;
+pub const magic = "ABL_BPI1".*;
 pub const image_format_version: u16 = 1;
-pub const machine_abi_version: u16 = 2;
-pub const state_format_version: u16 = 1;
-pub const kernel_semantics_version: u16 = 1;
+pub const evaluator_semantics_version: u16 = 1;
 pub const fixed_prefix_length: u32 = 144;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
@@ -16,9 +14,7 @@ pub const header_length: u32 = fixed_prefix_length +
 pub const Error = error{
     InvalidMagic,
     UnsupportedImageVersion,
-    UnsupportedMachineAbi,
-    UnsupportedStateFormat,
-    UnsupportedKernelSemantics,
+    UnsupportedEvaluatorSemantics,
     UnknownFlags,
     InvalidHeaderLength,
     LengthOverflow,
@@ -48,10 +44,9 @@ pub const Error = error{
     InvalidInvariant,
     InvalidTransition,
     UnreachableEntry,
-    MachineContractDigestMismatch,
     ScratchRequirementMismatch,
     DigestMismatch,
-    ProgramSemanticDigestMismatch,
+    ProgramTransitionDigestMismatch,
 };
 
 pub const SectionKind = enum(u16) {
@@ -81,11 +76,7 @@ pub const Section = struct {
 
 pub const Header = struct {
     total_length: u64,
-    program_semantic_digest: [32]u8,
-    machine_contract_digest: [32]u8,
-    maximum_frames: u32,
-    maximum_state_bytes: u32,
-    maximum_machine_fuel: u64,
+    program_transition_digest: [32]u8,
     maximum_kernel_scratch_bytes: u64,
     maximum_single_value_bytes: u32,
 };
@@ -157,16 +148,10 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (readInt(u16, image, 8) != image_format_version) {
         return error.UnsupportedImageVersion;
     }
-    if (readInt(u16, image, 10) != machine_abi_version) {
-        return error.UnsupportedMachineAbi;
+    if (readInt(u16, image, 10) != evaluator_semantics_version) {
+        return error.UnsupportedEvaluatorSemantics;
     }
-    if (readInt(u16, image, 12) != state_format_version) {
-        return error.UnsupportedStateFormat;
-    }
-    if (readInt(u16, image, 14) != kernel_semantics_version) {
-        return error.UnsupportedKernelSemantics;
-    }
-    if (readInt(u32, image, 16) != 0) return error.UnknownFlags;
+    if (!allZero(image[12..20])) return error.UnknownFlags;
     if (readInt(u32, image, 20) != header_length) {
         return error.InvalidHeaderLength;
     }
@@ -179,7 +164,9 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (readInt(u32, image, 32) != section_count) {
         return error.InvalidSectionCount;
     }
-    if (!allZero(image[36..40]) or !allZero(image[132..144])) {
+    if (!allZero(image[36..40]) or !allZero(image[72..120]) or
+        !allZero(image[132..144]))
+    {
         return error.UnknownFlags;
     }
 
@@ -216,11 +203,7 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
         .image = image,
         .header = .{
             .total_length = declared_total,
-            .program_semantic_digest = image[40..72].*,
-            .machine_contract_digest = image[72..104].*,
-            .maximum_frames = readInt(u32, image, 104),
-            .maximum_state_bytes = readInt(u32, image, 108),
-            .maximum_machine_fuel = readInt(u64, image, 112),
+            .program_transition_digest = image[40..72].*,
             .maximum_kernel_scratch_bytes = readInt(u64, image, 120),
             .maximum_single_value_bytes = readInt(u32, image, 128),
         },
@@ -228,7 +211,7 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     };
 }
 
-/// Validate the BEI1 type and static catalog frontier before executable graph
+/// Validate the BPI1 type and static catalog frontier before executable graph
 /// validation. No image instruction or effect is evaluated.
 pub fn validateCatalogs(
     image: []const u8,
@@ -243,15 +226,6 @@ pub fn validateCatalogs(
         maximumSingleValueBytes(schemas))
     {
         return error.ScratchRequirementMismatch;
-    }
-    const machine_digest = computeMachineContractDigest(envelope.header) catch
-        return error.MachineContractDigestMismatch;
-    if (!std.mem.eql(
-        u8,
-        &machine_digest,
-        &envelope.header.machine_contract_digest,
-    )) {
-        return error.MachineContractDigestMismatch;
     }
     const roots = try validateRoots(envelope.section(.roots), schemas);
     try validateFailures(
@@ -336,16 +310,16 @@ pub fn validateImage(
     {
         return error.UnreachableEntry;
     }
-    const program_digest = try computeProgramSemanticDigest(
+    const program_digest = try computeProgramTransitionDigest(
         catalogs,
         &workspace.schema_hash_tasks,
     );
     if (!std.mem.eql(
         u8,
         &program_digest,
-        &catalogs.envelope.header.program_semantic_digest,
+        &catalogs.envelope.header.program_transition_digest,
     )) {
-        return error.ProgramSemanticDigestMismatch;
+        return error.ProgramTransitionDigestMismatch;
     }
     return .{
         .catalogs = catalogs,
@@ -899,7 +873,7 @@ fn validateSegments(
         if (readInt(u16, bytes, cursor + 4) != segment_id or
             readInt(u16, bytes, cursor + 6) >= catalogs.function_count or
             bytes[cursor + 8] > 4 or bytes[cursor + 9] != 0 or
-            readInt(u64, bytes, cursor + 16) == 0)
+            !allZero(bytes[cursor + 16 .. cursor + 24]))
         {
             return error.InvalidSegment;
         }
@@ -1423,7 +1397,7 @@ fn validateSuspension(
 ) Error!void {
     if (end - cursor.* < 20) return error.InvalidTerminator;
     const kind = bytes[cursor.*];
-    if (kind > 3 or bytes[cursor.* + 1] != 0 or
+    if (kind > 2 or bytes[cursor.* + 1] != 0 or
         readInt(u16, bytes, cursor.* + 2) != 0)
     {
         return error.InvalidTerminator;
@@ -1965,20 +1939,12 @@ fn maximumSingleValueBytes(schemas: dynamic_value_v1.Table) u32 {
 
 const SemanticHasher = std.crypto.hash.sha2.Sha256;
 
-fn computeProgramSemanticDigest(
+fn computeProgramTransitionDigest(
     catalogs: Catalogs,
     schema_tasks: []dynamic_value_v1.SchemaHashTask,
 ) Error![32]u8 {
     var hasher = SemanticHasher.init(.{});
-    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
-    semanticHashBytes(
-        &hasher,
-        reducer_semantics_v1.segment_fuel_semantic_domain,
-    );
-    semanticHashU64(
-        &hasher,
-        reducer_semantics_v1.dynamic_fuel_quantum_bytes,
-    );
+    semanticHashBytes(&hasher, "boundary-program-transition-v1");
     try semanticHashSchema(
         &hasher,
         catalogs,
@@ -2035,8 +2001,6 @@ fn computeProgramSemanticDigest(
         );
     }
     try hashSegments(&hasher, catalogs, schema_tasks);
-    semanticHashBytes(&hasher, "await-effect-cost");
-    semanticHashU64(&hasher, reducer_semantics_v1.await_effect_cost);
     try hashConstructors(&hasher, catalogs, schema_tasks);
     hashTransitions(&hasher, catalogs.envelope.section(.entry_transitions));
     semanticHashU32(&hasher, 0);
@@ -2097,7 +2061,6 @@ fn hashSegments(
     semanticHashU32(hasher, count);
     var cursor: usize = 4;
     for (0..count) |_| {
-        const segment_start = cursor;
         const end = try recordEnd(bytes, cursor, 24);
         semanticHashU16(hasher, readInt(u16, bytes, cursor + 4));
         semanticHashU16(hasher, readInt(u16, bytes, cursor + 6));
@@ -2126,7 +2089,6 @@ fn hashSegments(
             bytes,
             cursor,
         );
-        semanticHashU64(hasher, readInt(u64, bytes, segment_start + 16));
         if (cursor != end) return error.InvalidSegment;
     }
 }
@@ -2505,35 +2467,6 @@ fn hashTransitions(hasher: *SemanticHasher, bytes: []const u8) void {
         semanticHashU16(hasher, readInt(u16, bytes, offset + 4));
         semanticHashU32(hasher, readInt(u32, bytes, offset + 8));
     }
-}
-
-fn computeMachineContractDigest(header: Header) Error![32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(&header.program_semantic_digest);
-    hasher.update("\x00boundary-machine-abi=2");
-    hasher.update("\x00state=rnf-v1");
-    var buffer: [32]u8 = undefined;
-    hasher.update("\x00frames=");
-    hasher.update(std.fmt.bufPrint(
-        &buffer,
-        "{d}",
-        .{header.maximum_frames},
-    ) catch return error.MachineContractDigestMismatch);
-    hasher.update("\x00state-bytes=");
-    hasher.update(std.fmt.bufPrint(
-        &buffer,
-        "{d}",
-        .{header.maximum_state_bytes},
-    ) catch return error.MachineContractDigestMismatch);
-    hasher.update("\x00fuel=");
-    hasher.update(std.fmt.bufPrint(
-        &buffer,
-        "{d}",
-        .{header.maximum_machine_fuel},
-    ) catch return error.MachineContractDigestMismatch);
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
 }
 
 fn semanticHashU32(hasher: anytype, value: u32) void {

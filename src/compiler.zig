@@ -1,5 +1,6 @@
 const control_ir = @import("control_ir");
 const machine = @import("machine");
+const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const portable_value = @import("portable_value");
 const reducer_semantics_v1 = @import("reducer_semantics_v1");
 const reified_program_v1 = @import("reified_program_v1");
@@ -693,6 +694,52 @@ fn NormalizedProgram(
             .entry = source.entry,
             .result_type = source.result_type,
             .functions = source.functions,
+            .instruction_definitions = &instruction_definitions,
+        };
+    };
+}
+
+/// Remove Machine-v2-only caller-fuel checkpoints from program meaning.
+/// Every checkpoint continuation is already an ordinary semantic edge; the
+/// bounded v2 scheduler retains the original checkpointed projection below.
+fn SemanticProgram(comptime normalized: control_ir.Program) type {
+    return struct {
+        const blocks = blk: {
+            var result: [normalized.blocks.len]control_ir.Block = undefined;
+            for (normalized.blocks, 0..) |block, block_index| {
+                result[block_index] = block;
+                switch (block.terminator) {
+                    .@"suspend" => |suspension| {
+                        if (suspension.kind == .caller_fuel) {
+                            result[block_index].terminator = .{
+                                .jump = suspension.continuation,
+                            };
+                        }
+                    },
+                    else => {},
+                }
+            }
+            break :blk result;
+        };
+
+        const instruction_definitions = blk: {
+            var result = [_]?control_ir.Instruction{null} **
+                normalized.value_types.len;
+            for (blocks) |block| {
+                for (block.instructions) |instruction| {
+                    result[@intCast(instruction.result)] = instruction;
+                }
+            }
+            break :blk result;
+        };
+
+        pub const value: control_ir.Program = .{
+            .label = normalized.label,
+            .value_types = normalized.value_types,
+            .blocks = &blocks,
+            .entry = normalized.entry,
+            .result_type = normalized.result_type,
+            .functions = normalized.functions,
             .instruction_definitions = &instruction_definitions,
         };
     };
@@ -1984,24 +2031,29 @@ fn invariantValueMatches(value: anytype, expected: rnf.InvariantValue) bool {
     };
 }
 
-fn compilerSemanticDigest(
+fn transitionDigest(
     comptime Body: type,
     program: control_ir.Program,
     normal_form: anytype,
     comptime residual_effects: anytype,
     reachability: anytype,
     canonical: anytype,
+    comptime machine_v2_metering: bool,
 ) [32]u8 {
     var hasher = SemanticHasher.init(.{});
-    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
-    semanticHashBytes(
-        &hasher,
-        reducer_semantics_v1.segment_fuel_semantic_domain,
-    );
-    semanticHashU64(
-        &hasher,
-        reducer_semantics_v1.dynamic_fuel_quantum_bytes,
-    );
+    if (machine_v2_metering) {
+        semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
+        semanticHashBytes(
+            &hasher,
+            reducer_semantics_v1.segment_fuel_semantic_domain,
+        );
+        semanticHashU64(
+            &hasher,
+            reducer_semantics_v1.dynamic_fuel_quantum_bytes,
+        );
+    } else {
+        semanticHashBytes(&hasher, "boundary-program-transition-v1");
+    }
     semanticHashSchema(Body.InitialArgs, &hasher);
     semanticHashSchema(Body.Result, &hasher);
     semanticHashSchema(Body.Failure, &hasher);
@@ -2076,14 +2128,18 @@ fn compilerSemanticDigest(
             residual_effects,
             canonical,
         );
-        const block_cost: u64 = if (comptime hasDeclSafe(Body, "block_costs"))
-            Body.block_costs[block.id]
-        else
-            minimumBlockCost(block);
-        semanticHashU64(&hasher, block_cost);
+        if (machine_v2_metering) {
+            const block_cost: u64 = if (comptime hasDeclSafe(Body, "block_costs"))
+                Body.block_costs[block.id]
+            else
+                minimumBlockCost(block);
+            semanticHashU64(&hasher, block_cost);
+        }
     }
-    semanticHashBytes(&hasher, "await-effect-cost");
-    semanticHashU64(&hasher, reducer_semantics_v1.await_effect_cost);
+    if (machine_v2_metering) {
+        semanticHashBytes(&hasher, "await-effect-cost");
+        semanticHashU64(&hasher, reducer_semantics_v1.await_effect_cost);
+    }
 
     semanticHashU32(
         &hasher,
@@ -2201,7 +2257,8 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
     const source_program: control_ir.Program = Body.control_ir;
     const limits = comptime compilerLimitsFor(Body);
     comptime validateBody(Body, source_program, limits);
-    const program = NormalizedProgram(Body, source_program).value;
+    const normalized_program = NormalizedProgram(Body, source_program).value;
+    const program = SemanticProgram(normalized_program).value;
     comptime control_ir.validate(
         limits.maximum_values,
         limits.maximum_blocks,
@@ -2253,24 +2310,14 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         program,
         normal_form,
     );
-    const effective_block_costs = comptime blk: {
-        var costs: [program.blocks.len]u64 = undefined;
-        for (program.blocks, 0..) |_, block_id| {
-            costs[block_id] = minimumSourceBlockCost(
-                Body,
-                program,
-                @intCast(block_id),
-            );
-        }
-        break :blk costs;
-    };
-    const generated_semantic_digest = comptime compilerSemanticDigest(
+    const program_transition_digest = comptime transitionDigest(
         Body,
         program,
         normal_form,
         residual_effects,
         reachability,
         semantic_canonicalization,
+        false,
     );
     return reified_program_v1.Program(
         label,
@@ -2283,28 +2330,118 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         invariant_constants,
         normal_form,
         initial_constructor_id,
-        effective_block_costs,
         generated_operation_count,
-        generated_semantic_digest,
+        program_transition_digest,
     );
 }
 
-/// Generate one program-specific direct reducer from one Reified Program.
-pub fn DirectDefinitionFor(comptime Reified: type) type {
+/// Project one pure Reified Program into the exact legacy Machine ABI v2
+/// checkpointing and metering semantics.
+pub fn MachineV2LoweringFor(comptime Reified: type) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
     comptime reified_program_v1.require(Reified);
-    const label = Reified.program_label;
     const Body = Reified.Body;
     const limits = Reified.compiler_limits;
-    const program = Reified.control;
-    const reachability = Reified.reachability;
-    const semantic_canonicalization = Reified.semantic_canonicalization;
-    const residual_effects = Reified.residual_effects;
-    const normal_form = Reified.rnf_value;
+    const program = NormalizedProgram(Body, Body.control_ir).value;
+    const reachability = comptime control_ir.Reachability(
+        limits.maximum_blocks,
+    ).analyze(program) catch |err| @compileError(
+        "Boundary v2 reachability analysis failed: " ++ @errorName(err),
+    );
+    const semantic_canonicalization = comptime SemanticCanonicalization(
+        limits.maximum_values,
+        limits.maximum_blocks,
+    ).analyze(program, reachability);
+    const residual_effects = comptime analyzeResidualEffects(
+        Body,
+        program,
+        reachability,
+    );
+    const invariant_constants = comptime invariantConstantValues(
+        Body,
+        program,
+        limits.maximum_values,
+    );
+    const normal_form = comptime rnf.NormalForm(
+        limits.maximum_values,
+        limits.maximum_blocks,
+        limits.maximum_constructors,
+        limits.maximum_environment_fields,
+        limits.maximum_invariant_terms,
+    ).synthesizeReachableWithConstants(
+        program,
+        reachability,
+        &invariant_constants,
+    ) catch |err| @compileError(
+        "Boundary Machine v2 RNF synthesis failed: " ++ @errorName(err),
+    );
+    const generated_operation_count = comptime generatedReducerOperationCount(
+        program,
+        normal_form,
+        limits,
+    ) catch |err| @compileError(
+        "Boundary Machine v2 compiler blocked program: " ++ @errorName(err),
+    );
+    const initial_constructor_id = comptime initialConstructorId(
+        program,
+        normal_form,
+    );
+    const effective_block_costs = comptime blk: {
+        var costs: [program.blocks.len]u64 = undefined;
+        for (program.blocks, 0..) |_, block_id| {
+            costs[block_id] = minimumSourceBlockCost(
+                Body,
+                program,
+                @intCast(block_id),
+            );
+        }
+        break :blk costs;
+    };
+    const machine_v2_semantic_digest = comptime transitionDigest(
+        Body,
+        program,
+        normal_form,
+        residual_effects,
+        reachability,
+        semantic_canonicalization,
+        true,
+    );
+    return machine_v2_profile_v1.Lowering(
+        Reified,
+        program,
+        reachability,
+        semantic_canonicalization,
+        residual_effects,
+        invariant_constants,
+        normal_form,
+        initial_constructor_id,
+        effective_block_costs,
+        generated_operation_count,
+        machine_v2_semantic_digest,
+    );
+}
+
+/// Generate one program-specific direct reducer from the Machine v2 lowering.
+pub fn DirectDefinitionFor(comptime Input: type) type {
+    const V2 = if (@hasDecl(Input, "machine_v2_semantic_digest"))
+        Input
+    else
+        MachineV2LoweringFor(Input);
+    comptime machine_v2_profile_v1.requireLowering(V2);
+    const Reified = V2.reified_program;
+    const label = V2.program_label;
+    const Body = V2.Body;
+    const limits = V2.compiler_limits;
+    const program = V2.control;
+    const reachability = V2.reachability;
+    const semantic_canonicalization = V2.semantic_canonicalization;
+    const residual_effects = V2.residual_effects;
+    const normal_form = V2.rnf_value;
     const generated_operation_count =
-        Reified.generated_reducer_operation_count;
-    const generated_semantic_digest = Reified.semantic_digest;
+        V2.generated_reducer_operation_count;
+    const generated_semantic_digest = V2.machine_v2_semantic_digest;
     const FrameType = frameType(Body, program, normal_form);
-    const initial_constructor_index = Reified.initial_constructor_id;
+    const initial_constructor_index = V2.initial_constructor_id;
     const InitialEnvironment = @FieldType(
         FrameType,
         constructorName(initial_constructor_index),
@@ -3049,7 +3186,7 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
         fn baseCostForConstructor(comptime constructor_id: usize) u64 {
             const constructor = comptime normal_form.constructors[constructor_id];
             if (constructor.kind == .await_effect) return 1;
-            return Reified.effective_block_costs[constructor.source_block];
+            return V2.effective_block_costs[constructor.source_block];
         }
 
         fn preflightCostConstructor(
@@ -3310,6 +3447,19 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
                     environment,
                     accepted_cost,
                 ),
+            };
+        }
+
+        /// Evaluate exactly one typed reducer clause without Machine v2
+        /// metering. Machine adapters apply costs and lifetime limits around
+        /// this program-owned transition.
+        pub fn reduceClause(frame: Frame) Transition {
+            return switch (frame) {
+                inline else => |environment, tag| planConstructor(
+                    comptime @intFromEnum(tag),
+                    environment,
+                    0,
+                ).transition,
             };
         }
 
@@ -3972,5 +4122,6 @@ pub fn DirectDefinitionFor(comptime Reified: type) type {
 
 /// Compile one source Body through the canonical Reified Program boundary.
 pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
-    return DirectDefinitionFor(ReifiedFor(label, Body));
+    const Reified = ReifiedFor(label, Body);
+    return DirectDefinitionFor(MachineV2LoweringFor(Reified));
 }

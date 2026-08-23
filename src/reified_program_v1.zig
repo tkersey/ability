@@ -11,9 +11,8 @@ pub fn Program(
     comptime invariant_constants_value: anytype,
     comptime normal_form_value: anytype,
     comptime initial_constructor_id_value: u32,
-    comptime effective_block_costs_value: anytype,
     comptime generated_operation_count_value: usize,
-    comptime semantic_digest_value: [32]u8,
+    comptime program_transition_digest_value: [32]u8,
 ) type {
     return struct {
         pub const program_label = label;
@@ -27,11 +26,9 @@ pub fn Program(
         pub const invariant_constants = invariant_constants_value;
         pub const rnf_value = normal_form_value;
         pub const initial_constructor_id = initial_constructor_id_value;
-        pub const effective_block_costs = effective_block_costs_value;
         pub const generated_reducer_operation_count =
             generated_operation_count_value;
-        pub const semantic_digest = semantic_digest_value;
-        pub const contract_bytes = semantic_digest[0..];
+        pub const program_transition_digest = program_transition_digest_value;
 
         pub fn portableType(comptime value_type: anytype) type {
             return switch (value_type) {
@@ -67,10 +64,8 @@ pub fn require(comptime Reified: type) void {
         "invariant_constants",
         "rnf_value",
         "initial_constructor_id",
-        "effective_block_costs",
         "generated_reducer_operation_count",
-        "semantic_digest",
-        "contract_bytes",
+        "program_transition_digest",
         "portableType",
     }) |name| {
         if (!@hasDecl(Reified, name)) {

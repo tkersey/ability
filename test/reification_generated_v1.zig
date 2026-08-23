@@ -174,7 +174,7 @@ fn runGeneratedTrace(
     hasher: *std.crypto.hash.sha2.Sha256,
 ) !void {
     const Direct = Program.compile(options);
-    const Kernel = Program.kernelMachine(options);
+    const Kernel = Program.kernelMachineV2(options);
     const direct = try Direct.initialState(allocator, input);
     defer Direct.deinitState(direct);
     const kernel = try Kernel.initialState(allocator, input);

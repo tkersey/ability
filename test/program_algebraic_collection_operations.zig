@@ -241,7 +241,8 @@ const options: machine.Options = .{
     .maximum_machine_fuel = 512,
 };
 const Machine = Program.compile(options);
-const Image = Program.image(options);
+const Image = Program.image();
+const Profile = Program.machineV2Profile(options);
 
 test "compiled products sums optionals vectors text and bytes are first order" {
     const state = try Machine.initialState(std.testing.allocator, {});
@@ -298,7 +299,8 @@ test "compiled products sums optionals vectors text and bytes are first order" {
     }
 
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
     var kernel_state: [8192]u8 = undefined;
     const kernel_state_length = try kernel_v1.initial(
         image,

@@ -62,14 +62,16 @@ const options: machine.Options = .{
     .maximum_machine_fuel = 32,
 };
 const ExplicitMachine = ExplicitProgram.compile(options);
-const ExplicitImage = ExplicitProgram.image(options);
+const ExplicitImage = ExplicitProgram.image();
+const ExplicitProfile = ExplicitProgram.machineV2Profile(options);
 
 const CheckpointProgram = program_v2.program(
     "caller-fuel-checkpoint",
     YieldBody(.caller_fuel),
 );
 const CheckpointMachine = CheckpointProgram.compile(options);
-const CheckpointImage = CheckpointProgram.image(options);
+const CheckpointImage = CheckpointProgram.image();
+const CheckpointProfile = CheckpointProgram.machineV2Profile(options);
 
 test "explicit yield persists the continuation before returning to the caller" {
     try std.testing.expectEqual(
@@ -163,13 +165,15 @@ test "caller-fuel checkpoint yields only when the next segment is unfunded" {
 
 test "fixed kernel preserves explicit and caller-fuel checkpoints" {
     inline for (.{
-        .{ ExplicitImage, @as(u32, 11), @as(u64, 4), true },
-        .{ CheckpointImage, @as(u32, 19), @as(u64, 1), false },
+        .{ ExplicitImage, ExplicitProfile, @as(u32, 11), @as(u64, 4), true },
+        .{ CheckpointImage, CheckpointProfile, @as(u32, 19), @as(u64, 1), false },
     }) |fixture| {
         const Image = fixture[0];
-        const input = fixture[1];
+        const Profile = fixture[1];
+        const input = fixture[2];
         var workspace: image_v1.ValidationWorkspace = .{};
-        const image = try image_v1.validateImage(&Image.bytes, &workspace);
+        const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+        const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
         var args: [4]u8 = undefined;
         std.mem.writeInt(u32, &args, input, .little);
         var state: [4096]u8 = undefined;
@@ -179,7 +183,7 @@ test "fixed kernel preserves explicit and caller-fuel checkpoints" {
             &state,
             &workspace,
         );
-        var fuel = fixture[2];
+        var fuel = fixture[3];
         var next_state: [4096]u8 = undefined;
         var output: [4]u8 = undefined;
         var scratch: [12 * 1024]u8 = undefined;
@@ -196,7 +200,7 @@ test "fixed kernel preserves explicit and caller-fuel checkpoints" {
             else => return error.TestUnexpectedResult,
         };
         try std.testing.expectEqual(
-            if (fixture[3]) @as(u64, 3) else 0,
+            if (fixture[4]) @as(u64, 3) else 0,
             fuel,
         );
         var resume_fuel: u64 = 1;
@@ -221,6 +225,38 @@ test "fixed kernel preserves explicit and caller-fuel checkpoints" {
     }
 }
 
+test "BPI1 excludes synthetic caller-fuel suspension and retains explicit yield" {
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const explicit = try image_v1.validateImage(&ExplicitImage.bytes, &workspace);
+    const explicit_segments = explicit.catalogs.envelope.section(.segments);
+    const explicit_terminator = 4 + 24 +
+        @as(usize, std.mem.readInt(u16, explicit_segments[14..16], .little)) * 2;
+    try std.testing.expectEqual(
+        @as(u8, 2),
+        explicit_segments[explicit_terminator + 4],
+    );
+
+    workspace = .{};
+    const checkpoint = try image_v1.validateImage(
+        &CheckpointImage.bytes,
+        &workspace,
+    );
+    const checkpoint_segments = checkpoint.catalogs.envelope.section(.segments);
+    const checkpoint_terminator = 4 + 24 +
+        @as(usize, std.mem.readInt(u16, checkpoint_segments[14..16], .little)) * 2;
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        checkpoint_segments[checkpoint_terminator + 4],
+    );
+    const constructors = checkpoint.catalogs.envelope.section(.constructors);
+    var cursor: usize = 4;
+    for (0..std.mem.readInt(u32, constructors[0..4], .little)) |_| {
+        try std.testing.expect(constructors[cursor + 8] != 6);
+        cursor += std.mem.readInt(u32, constructors[cursor..][0..4], .little);
+    }
+    try std.testing.expectEqual(constructors.len, cursor);
+}
+
 test "KernelMachine preserves terminal execution-budget failure and prior charges" {
     const budget_options: machine.Options = .{
         .maximum_frames = 4,
@@ -228,7 +264,7 @@ test "KernelMachine preserves terminal execution-budget failure and prior charge
         .maximum_machine_fuel = 1,
     };
     const Direct = CheckpointProgram.compile(budget_options);
-    const Kernel = CheckpointProgram.kernelMachine(budget_options);
+    const Kernel = CheckpointProgram.kernelMachineV2(budget_options);
     const direct = try Direct.initialState(std.testing.allocator, 19);
     defer Direct.deinitState(direct);
     const kernel = try Kernel.initialState(std.testing.allocator, 19);

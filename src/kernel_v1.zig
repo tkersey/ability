@@ -1,5 +1,6 @@
 const dynamic_value_v1 = @import("dynamic_value_v1");
 const image_v1 = @import("image_v1");
+const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const std = @import("std");
 
 pub const Error = error{
@@ -59,14 +60,58 @@ pub const RequestView = struct {
     identity: RequestIdentity,
 };
 
-const Slot = struct {
+pub const Slot = struct {
     bytes: []const u8 = &.{},
     initialized: bool = false,
 };
 
+/// One finite program-owned reducer-clause result before Machine policy.
+pub const ClauseOutcome = union(enum) {
+    progressed: struct { edge_kind: u8, edge: []const u8 },
+    call: []const u8,
+    return_to_caller: []const u8,
+    requested: struct { site_ordinal: u32, payload: []const u8 },
+    explicit_yield: []const u8,
+    completed: []const u8,
+    authored_failure: []const u8,
+};
+
+/// One validated BPI1 program bound to one bounded Machine ABI v2 profile.
+pub const BoundProgram = struct {
+    catalogs: image_v1.Catalogs,
+    segment_count: u32,
+    constructor_count: u32,
+    profile: machine_v2_profile_v1.Validated,
+};
+
+pub fn bindMachineV2(
+    image: image_v1.ValidatedImage,
+    profile_bytes: []const u8,
+) Error!BoundProgram {
+    const profile = machine_v2_profile_v1.validate(
+        profile_bytes,
+        image.catalogs.envelope.header.program_transition_digest,
+    ) catch return error.InvalidImage;
+    if (profile.segment_count != image.segment_count) return error.InvalidImage;
+    return .{
+        .catalogs = image.catalogs,
+        .segment_count = image.segment_count,
+        .constructor_count = image.constructor_count,
+        .profile = profile,
+    };
+}
+
+fn programView(image: BoundProgram) image_v1.ValidatedImage {
+    return .{
+        .catalogs = image.catalogs,
+        .segment_count = image.segment_count,
+        .constructor_count = image.constructor_count,
+    };
+}
+
 /// Construct the exact initial ABL_RNF2 State from canonical InitialArgs.
 pub fn initial(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     initial_args: []const u8,
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
@@ -104,18 +149,28 @@ pub fn initial(
     }
     const required = state_header_length + frame_header_length +
         environment_length;
-    if (required > image.catalogs.envelope.header.maximum_state_bytes) {
+    if (required > image.profile.maximum_state_bytes) {
         return error.InvalidImage;
     }
     if (output_state.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
     appendBytes(output_state, &cursor, &state_magic);
-    appendInt(u16, output_state, &cursor, image_v1.state_format_version);
-    appendInt(u16, output_state, &cursor, image_v1.machine_abi_version);
+    appendInt(
+        u16,
+        output_state,
+        &cursor,
+        machine_v2_profile_v1.state_format_version,
+    );
+    appendInt(
+        u16,
+        output_state,
+        &cursor,
+        machine_v2_profile_v1.machine_abi_version,
+    );
     appendBytes(
         output_state,
         &cursor,
-        &image.catalogs.envelope.header.machine_contract_digest,
+        &image.profile.machine_v2_contract_digest,
     );
     appendInt(u64, output_state, &cursor, 0);
     appendInt(u64, output_state, &cursor, 0);
@@ -138,7 +193,7 @@ pub fn initial(
 
 /// Validate canonical State framing and every constructor environment value.
 pub fn validateState(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
@@ -166,18 +221,18 @@ pub fn validateState(
 }
 
 fn validateStateEnvelope(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
 ) Error!void {
     if (state.len < state_header_length + frame_header_length or
-        state.len > image.catalogs.envelope.header.maximum_state_bytes or
+        state.len > image.profile.maximum_state_bytes or
         !std.mem.eql(u8, state[0..8], &state_magic) or
-        readInt(u16, state, 8) != image_v1.state_format_version or
-        readInt(u16, state, 10) != image_v1.machine_abi_version or
+        readInt(u16, state, 8) != machine_v2_profile_v1.state_format_version or
+        readInt(u16, state, 10) != machine_v2_profile_v1.machine_abi_version or
         !std.mem.eql(
             u8,
             state[12..44],
-            &image.catalogs.envelope.header.machine_contract_digest,
+            &image.profile.machine_v2_contract_digest,
         ))
     {
         return error.InvalidState;
@@ -186,8 +241,8 @@ fn validateStateEnvelope(
     const cumulative_fuel = readInt(u64, state, 52);
     const frame_count = readInt(u32, state, 60);
     if (readInt(u32, state, 64) != 0 or frame_count == 0 or
-        frame_count > image.catalogs.envelope.header.maximum_frames or
-        cumulative_fuel > image.catalogs.envelope.header.maximum_machine_fuel or
+        frame_count > image.profile.maximum_frames or
+        cumulative_fuel > image.profile.maximum_machine_fuel or
         sequence > cumulative_fuel)
     {
         return error.InvalidState;
@@ -216,7 +271,7 @@ fn validateStateEnvelope(
 }
 
 pub fn current(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     output_payload: []u8,
     workspace: *image_v1.ValidationWorkspace,
@@ -265,7 +320,7 @@ pub fn current(
 }
 
 pub fn @"resume"(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     identity: RequestIdentity,
     response: []const u8,
@@ -350,7 +405,7 @@ pub fn @"resume"(
 }
 
 pub fn step(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     caller_fuel: *u64,
     output_state: []u8,
@@ -358,7 +413,7 @@ pub fn step(
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
-    const maximum_state: usize = image.catalogs.envelope.header.maximum_state_bytes;
+    const maximum_state: usize = image.profile.maximum_state_bytes;
     if (scratch.len < maximum_state) return error.ScratchCapacity;
     const temporary_state = scratch[0..maximum_state];
     const value_scratch = scratch[maximum_state..];
@@ -447,9 +502,153 @@ pub fn step(
     }
 }
 
-/// Execute one funded atomic segment.
-fn stepSegment(
+/// Evaluate exactly one finite BPI1 reducer clause without Machine v2 policy.
+/// Callers supply the constructor bindings; the result contains only program
+/// structure and authored value/failure data.
+pub fn evaluateClause(
     image: image_v1.ValidatedImage,
+    segment_id: u16,
+    slots: *[1024]Slot,
+    output_value: []u8,
+    scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!ClauseOutcome {
+    const segment = segmentRecord(image, segment_id) catch
+        return error.InvalidImage;
+    var cursor: usize = 24 +
+        @as(usize, readInt(u16, segment, 10)) * 2;
+    const instruction_count = readInt(u32, segment, 12);
+    var scratch_cursor: usize = 0;
+    for (0..instruction_count) |_| {
+        const instruction_length = readInt(u32, segment, cursor);
+        const operation = readInt(u16, segment, cursor + 6);
+        const result = readInt(u16, segment, cursor + 8);
+        const operand_count = readInt(u16, segment, cursor + 10);
+        const immediate = readInt(u32, segment, cursor + 12);
+        const failure: ?u32 = switch (operation) {
+            0 => blk: {
+                slots[result] = .{
+                    .bytes = try constantBytes(image, immediate),
+                    .initialized = true,
+                };
+                break :blk null;
+            },
+            1 => blk: {
+                if (operand_count != 1) return error.InvalidImage;
+                const operand = readInt(u16, segment, cursor + 16);
+                if (!slots[operand].initialized) return error.InvalidState;
+                slots[result] = slots[operand];
+                break :blk null;
+            },
+            2...23, 57 => try executeScalarOperation(
+                image,
+                segment[cursor .. cursor + instruction_length],
+                result,
+                slots,
+                scratch,
+                &scratch_cursor,
+            ),
+            24...56 => try executeCompositeOperation(
+                image,
+                segment[cursor .. cursor + instruction_length],
+                result,
+                slots,
+                scratch,
+                &scratch_cursor,
+                workspace,
+            ),
+            else => return error.UnsupportedOperation,
+        };
+        if (failure) |failure_tag| {
+            if (output_value.len < 4) return error.OutputCapacity;
+            std.mem.writeInt(u32, output_value[0..4], failure_tag, .little);
+            return .{ .authored_failure = output_value[0..4] };
+        }
+        cursor += instruction_length;
+    }
+    const terminator_kind = segment[cursor + 4];
+    const payload = cursor + 8;
+    return switch (terminator_kind) {
+        0 => .{ .progressed = .{
+            .edge_kind = 0,
+            .edge = segment[payload..],
+        } },
+        1 => blk: {
+            const condition = readInt(u16, segment, payload);
+            if (!slots[condition].initialized or slots[condition].bytes.len != 1) {
+                return error.InvalidState;
+            }
+            const then_edge = payload + 4;
+            const else_edge = then_edge + edgeLength(segment[then_edge..]);
+            break :blk .{ .progressed = if (slots[condition].bytes[0] == 1)
+                .{ .edge_kind = 1, .edge = segment[then_edge..] }
+            else
+                .{ .edge_kind = 2, .edge = segment[else_edge..] } };
+        },
+        2 => blk: {
+            const suspension_kind = segment[payload];
+            if (suspension_kind == 0) {
+                const request_count = readInt(u16, segment, payload + 10);
+                if (request_count != 1) return error.InvalidImage;
+                const request_value = readInt(u16, segment, payload + 12);
+                if (!slots[request_value].initialized) return error.InvalidState;
+                const bytes = slots[request_value].bytes;
+                if (output_value.len < bytes.len) return error.OutputCapacity;
+                @memcpy(output_value[0..bytes.len], bytes);
+                break :blk .{ .requested = .{
+                    .site_ordinal = readInt(u32, segment, payload + 4),
+                    .payload = output_value[0..bytes.len],
+                } };
+            }
+            if (suspension_kind == 1) {
+                break :blk .{ .call = suspensionCallee(segment, cursor) };
+            }
+            if (suspension_kind != 2) return error.InvalidImage;
+            const request_count = readInt(u16, segment, payload + 10);
+            var continuation = payload + 12 + @as(usize, request_count) * 2;
+            if (segment[continuation] != 0) return error.InvalidImage;
+            continuation += 4;
+            break :blk .{ .explicit_yield = segment[continuation..] };
+        },
+        3 => blk: {
+            if (segment[payload] == 0) break :blk .{ .completed = &.{} };
+            const value = readInt(u16, segment, payload + 2);
+            if (!slots[value].initialized) return error.InvalidState;
+            const bytes = slots[value].bytes;
+            if (output_value.len < bytes.len) return error.OutputCapacity;
+            @memcpy(output_value[0..bytes.len], bytes);
+            break :blk .{ .completed = output_value[0..bytes.len] };
+        },
+        4 => blk: {
+            const value = readInt(u16, segment, payload);
+            if (!slots[value].initialized) return error.InvalidState;
+            break :blk .{ .return_to_caller = slots[value].bytes };
+        },
+        5 => blk: {
+            if (output_value.len < 4) return error.OutputCapacity;
+            std.mem.writeInt(
+                u32,
+                output_value[0..4],
+                readInt(u32, segment, payload),
+                .little,
+            );
+            break :blk .{ .authored_failure = output_value[0..4] };
+        },
+        6 => blk: {
+            const value = readInt(u16, segment, payload);
+            if (!slots[value].initialized) return error.InvalidState;
+            const bytes = slots[value].bytes;
+            if (output_value.len < bytes.len) return error.OutputCapacity;
+            @memcpy(output_value[0..bytes.len], bytes);
+            break :blk .{ .authored_failure = output_value[0..bytes.len] };
+        },
+        else => error.UnsupportedOperation,
+    };
+}
+
+/// Execute one funded atomic segment under Machine ABI v2 policy.
+fn stepSegment(
+    image: BoundProgram,
     state: []const u8,
     caller_fuel: *u64,
     output_state: []u8,
@@ -466,8 +665,9 @@ fn stepSegment(
     const segment_id = readInt(u16, constructor, 12);
     const segment = segmentRecord(image, segment_id) catch
         return error.InvalidImage;
-    const minimum_cost = readInt(u64, segment, 16);
-    // BEI1 section 28.2 intentionally validates only the State envelope and
+    const minimum_cost = image.profile.segmentCost(segment_id) catch
+        return error.InvalidImage;
+    // BPI1 section 28.2 intentionally validates only the State envelope and
     // top constructor before an unfunded segment. Environment and invariant
     // validation remains deferred until the caller funds the atomic segment.
     if (caller_fuel.* < minimum_cost) return .{ .yielded = state };
@@ -476,7 +676,6 @@ fn stepSegment(
     var slots = [_]Slot{.{}} ** 1024;
     var preflight_sizes = [_]usize{0} ** 1024;
     var initially_available = [_]bool{false} ** 1024;
-    var scratch_cursor: usize = 0;
     try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     var cost = minimum_cost;
@@ -494,7 +693,6 @@ fn stepSegment(
     const parameter_count = readInt(u16, segment, 10);
     const instruction_count = readInt(u32, segment, 12);
     cursor += @as(usize, parameter_count) * 2;
-    const instructions_start = cursor;
     for (0..instruction_count) |_| {
         const instruction_length = readInt(u32, segment, cursor);
         const operation = readInt(u16, segment, cursor + 6);
@@ -534,251 +732,134 @@ fn stepSegment(
     if (caller_fuel.* < cost) return .{ .yielded = state };
     const next_cumulative = std.math.add(u64, cumulative, cost) catch
         return error.ExecutionBudgetExceeded;
-    if (next_cumulative > image.catalogs.envelope.header.maximum_machine_fuel) {
+    if (next_cumulative > image.profile.maximum_machine_fuel) {
         return error.ExecutionBudgetExceeded;
     }
 
-    cursor = instructions_start;
-    for (0..instruction_count) |_| {
-        const instruction_length = readInt(u32, segment, cursor);
-        const operation = readInt(u16, segment, cursor + 6);
-        const result = readInt(u16, segment, cursor + 8);
-        const operand_count = readInt(u16, segment, cursor + 10);
-        const immediate = readInt(u32, segment, cursor + 12);
-        const failure: ?u32 = switch (operation) {
-            0 => blk: {
-                slots[result] = .{
-                    .bytes = try constantBytes(image, immediate),
-                    .initialized = true,
-                };
-                break :blk null;
-            },
-            1 => blk: {
-                if (operand_count != 1) return error.InvalidImage;
-                const operand = readInt(u16, segment, cursor + 16);
-                if (!slots[operand].initialized) return error.InvalidState;
-                slots[result] = slots[operand];
-                break :blk null;
-            },
-            2...23, 57 => try executeScalarOperation(
-                image,
-                segment[cursor .. cursor + instruction_length],
-                result,
-                &slots,
-                scratch,
-                &scratch_cursor,
-            ),
-            24...56 => try executeCompositeOperation(
-                image,
-                segment[cursor .. cursor + instruction_length],
-                result,
-                &slots,
-                scratch,
-                &scratch_cursor,
-                workspace,
-            ),
-            else => return error.UnsupportedOperation,
-        };
-        if (failure) |failure_tag| {
-            if (output_value.len < 4) return error.OutputCapacity;
-            std.mem.writeInt(u32, output_value[0..4], failure_tag, .little);
-            caller_fuel.* -= cost;
-            return .{ .failed = output_value[0..4] };
-        }
-        cursor += instruction_length;
-    }
-    const terminator_kind = segment[cursor + 4];
-    const payload = cursor + 8;
-    const outcome: SegmentOutcome = switch (terminator_kind) {
-        0 => .{ .next = try transitionState(
+    const clause = try evaluateClause(
+        programView(image),
+        segment_id,
+        &slots,
+        output_value,
+        scratch,
+        workspace,
+    );
+    const outcome: SegmentOutcome = switch (clause) {
+        .progressed => |progressed| .{ .next = try transitionState(
             image,
             state,
             segment_id,
-            0,
-            segment[payload..],
+            progressed.edge_kind,
+            progressed.edge,
             &slots,
             next_cumulative,
             output_state,
         ) },
-        1 => blk: {
-            const condition = readInt(u16, segment, payload);
-            if (!slots[condition].initialized or slots[condition].bytes.len != 1) {
-                return error.InvalidState;
-            }
-            const then_edge = payload + 4;
-            const else_edge = then_edge + edgeLength(segment[then_edge..]);
-            const selected = if (slots[condition].bytes[0] == 1)
-                .{ @as(u8, 1), segment[then_edge..] }
-            else
-                .{ @as(u8, 2), segment[else_edge..] };
-            break :blk .{ .next = try transitionState(
+        .requested => |request| blk: {
+            const sequence = std.math.add(
+                u64,
+                readInt(u64, state, 44),
+                1,
+            ) catch return error.InvalidState;
+            const await_constructor = try awaitingConstructor(
+                image,
+                segment_id,
+            );
+            const parked = try encodeTopFrame(
                 image,
                 state,
-                segment_id,
-                selected[0],
-                selected[1],
+                await_constructor,
                 &slots,
+                sequence,
                 next_cumulative,
+                output_state,
+            );
+            if (try maximumResumeStateSize(image, parked) >
+                image.profile.maximum_state_bytes)
+            {
+                return error.InvalidState;
+            }
+            break :blk .{ .requested = .{
+                .state = parked,
+                .payload = request.payload,
+                .identity = try requestIdentity(
+                    image,
+                    parked,
+                    await_constructor,
+                    request.site_ordinal,
+                    request.payload,
+                    sequence,
+                ),
+            } };
+        },
+        .call => |callee| blk: {
+            const return_constructor = try awaitCallConstructor(
+                image,
+                segment_id,
+            );
+            const parent = try encodeTopFrame(
+                image,
+                state,
+                return_constructor,
+                &slots,
+                readInt(u64, state, 44),
+                next_cumulative,
+                output_state,
+            );
+            const target_segment = readInt(u16, callee, 0);
+            const child_constructor = try transitionConstructor(
+                image,
+                segment_id,
+                3,
+                target_segment,
+            );
+            try applyValueEdge(
+                image,
+                callee,
+                target_segment,
+                child_constructor,
+                &slots,
+            );
+            break :blk .{ .next = try appendFrame(
+                image,
+                parent,
+                child_constructor,
+                &slots,
                 output_state,
             ) };
         },
-        2 => blk: {
-            const suspension_kind = segment[payload];
-            if (suspension_kind == 0) {
-                const site_ordinal = readInt(u32, segment, payload + 4);
-                const request_count = readInt(u16, segment, payload + 10);
-                if (request_count != 1) return error.InvalidImage;
-                const request_value = readInt(u16, segment, payload + 12);
-                if (!slots[request_value].initialized) return error.InvalidState;
-                const request_payload = slots[request_value].bytes;
-                if (output_value.len < request_payload.len) {
-                    return error.OutputCapacity;
-                }
-                const sequence = std.math.add(
-                    u64,
-                    readInt(u64, state, 44),
-                    1,
-                ) catch return error.InvalidState;
-                const await_constructor = try awaitingConstructor(
-                    image,
-                    segment_id,
-                );
-                const parked = try encodeTopFrame(
-                    image,
-                    state,
-                    await_constructor,
-                    &slots,
-                    sequence,
-                    next_cumulative,
-                    output_state,
-                );
-                if (try maximumResumeStateSize(image, parked) >
-                    image.catalogs.envelope.header.maximum_state_bytes)
-                {
-                    return error.InvalidState;
-                }
-                @memcpy(output_value[0..request_payload.len], request_payload);
-                const canonical_payload = output_value[0..request_payload.len];
-                break :blk .{ .requested = .{
-                    .state = parked,
-                    .payload = canonical_payload,
-                    .identity = try requestIdentity(
-                        image,
-                        parked,
-                        await_constructor,
-                        site_ordinal,
-                        canonical_payload,
-                        sequence,
-                    ),
-                } };
-            }
-            if (suspension_kind == 1) {
-                const callee = suspensionCallee(segment, cursor);
-                const return_constructor = try awaitCallConstructor(
-                    image,
-                    segment_id,
-                );
-                const parent = try encodeTopFrame(
-                    image,
-                    state,
-                    return_constructor,
-                    &slots,
-                    readInt(u64, state, 44),
-                    next_cumulative,
-                    output_state,
-                );
-                const target_segment = readInt(u16, callee, 0);
-                const child_constructor = try transitionConstructor(
-                    image,
-                    segment_id,
-                    3,
-                    target_segment,
-                );
-                try applyValueEdge(
-                    image,
-                    callee,
-                    target_segment,
-                    child_constructor,
-                    &slots,
-                );
-                break :blk .{ .next = try appendFrame(
-                    image,
-                    parent,
-                    child_constructor,
-                    &slots,
-                    output_state,
-                ) };
-            }
-            if (suspension_kind != 2 and suspension_kind != 3) {
-                return error.UnsupportedOperation;
-            }
-            const request_count = readInt(u16, segment, payload + 10);
-            var continuation = payload + 12 + @as(usize, request_count) * 2;
-            if (segment[continuation] != 0) return error.InvalidImage;
-            continuation += 4;
+        .explicit_yield => |continuation| blk: {
             const next = try transitionState(
                 image,
                 state,
                 segment_id,
                 4,
-                segment[continuation..],
+                continuation,
                 &slots,
                 next_cumulative,
                 output_state,
             );
-            break :blk if (suspension_kind == 2)
-                .{ .yielded = next }
-            else
-                .{ .next = next };
+            break :blk .{ .yielded = next };
         },
-        4 => blk: {
-            const return_value = readInt(u16, segment, payload);
-            if (!slots[return_value].initialized) return error.InvalidState;
+        .return_to_caller => |return_value| blk: {
             break :blk .{ .next = try returnToCaller(
                 image,
                 state,
-                slots[return_value].bytes,
+                return_value,
                 next_cumulative,
                 output_state,
                 workspace,
             ) };
         },
-        3 => blk: {
-            const present = segment[payload] == 1;
-            const value = readInt(u16, segment, payload + 2);
-            const result = if (present) slots[value].bytes else &.{};
-            if (present and !slots[value].initialized) return error.InvalidState;
-            if (output_value.len < result.len) return error.OutputCapacity;
-            @memcpy(output_value[0..result.len], result);
-            break :blk .{ .done = output_value[0..result.len] };
-        },
-        5 => blk: {
-            if (output_value.len < 4) return error.OutputCapacity;
-            std.mem.writeInt(
-                u32,
-                output_value[0..4],
-                readInt(u32, segment, payload),
-                .little,
-            );
-            break :blk .{ .failed = output_value[0..4] };
-        },
-        6 => blk: {
-            const value = readInt(u16, segment, payload);
-            if (!slots[value].initialized) return error.InvalidState;
-            if (output_value.len < slots[value].bytes.len) {
-                return error.OutputCapacity;
-            }
-            @memcpy(output_value[0..slots[value].bytes.len], slots[value].bytes);
-            break :blk .{ .failed = output_value[0..slots[value].bytes.len] };
-        },
-        else => return error.UnsupportedOperation,
+        .completed => |result| .{ .done = result },
+        .authored_failure => |failure| .{ .failed = failure },
     };
     caller_fuel.* -= cost;
     return outcome;
 }
 
 pub fn maximumResumeStateSize(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
 ) Error!usize {
     try validateStateEnvelope(image, state);
@@ -849,7 +930,7 @@ pub fn maximumResumeStateSize(
 }
 
 fn transitionState(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     source_segment: u16,
     edge_kind: u8,
@@ -902,7 +983,7 @@ fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
 }
 
 fn encodeTopFrame(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     constructor_id: u32,
     slots: *const [1024]Slot,
@@ -944,7 +1025,7 @@ fn encodeTopFrame(
     }
     const required = top_offset + frame_header_length + environment_length;
     if (required > output.len or
-        required > image.catalogs.envelope.header.maximum_state_bytes)
+        required > image.profile.maximum_state_bytes)
     {
         return error.OutputCapacity;
     }
@@ -965,7 +1046,7 @@ fn encodeTopFrame(
 }
 
 fn transitionConstructor(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     source: u16,
     edge_kind: u8,
     target: u16,
@@ -985,7 +1066,7 @@ fn transitionConstructor(
 }
 
 fn awaitingConstructor(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     source_segment: u16,
 ) Error!u32 {
     const bytes = image.catalogs.envelope.section(.constructors);
@@ -1003,7 +1084,7 @@ fn awaitingConstructor(
 }
 
 fn awaitCallConstructor(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     source_segment: u16,
 ) Error!u32 {
     const bytes = image.catalogs.envelope.section(.constructors);
@@ -1029,7 +1110,7 @@ fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
 }
 
 fn applyValueEdge(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     edge: []const u8,
     target_segment: u16,
     target_constructor: u32,
@@ -1051,14 +1132,14 @@ fn applyValueEdge(
 }
 
 fn appendFrame(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     parent: []const u8,
     constructor_id: u32,
     slots: *const [1024]Slot,
     output: []u8,
 ) Error![]const u8 {
     const frame_count = readInt(u32, parent, 60);
-    if (frame_count >= image.catalogs.envelope.header.maximum_frames) {
+    if (frame_count >= image.profile.maximum_frames) {
         return error.FrameDepthExceeded;
     }
     const constructor = try constructorRecord(image, constructor_id);
@@ -1075,7 +1156,7 @@ fn appendFrame(
     }
     const required = parent.len + frame_header_length + environment_length;
     if (required > output.len or
-        required > image.catalogs.envelope.header.maximum_state_bytes)
+        required > image.profile.maximum_state_bytes)
     {
         return error.OutputCapacity;
     }
@@ -1094,7 +1175,7 @@ fn appendFrame(
 }
 
 fn returnToCaller(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     return_value: []const u8,
     cumulative_fuel: u64,
@@ -1173,7 +1254,7 @@ fn returnToCaller(
 }
 
 fn requestIdentity(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     parked_state: []const u8,
     constructor_id: u32,
     site_ordinal: u32,
@@ -1191,7 +1272,7 @@ fn requestIdentity(
     );
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update("boundary-request-identity-v2\x00");
-    hasher.update(&image.catalogs.envelope.header.machine_contract_digest);
+    hasher.update(&image.profile.machine_v2_contract_digest);
     hashInt(&hasher, u64, sequence);
     hashInt(&hasher, u32, constructor_id);
     hashInt(&hasher, u32, site_ordinal);
@@ -1201,7 +1282,7 @@ fn requestIdentity(
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return .{
-        .machine_contract_digest = image.catalogs.envelope.header.machine_contract_digest,
+        .machine_contract_digest = image.profile.machine_v2_contract_digest,
         .sequence = sequence,
         .constructor_id = constructor_id,
         .site_ordinal = site_ordinal,
@@ -1213,7 +1294,7 @@ fn requestIdentity(
 }
 
 fn effectOrdinalDigest(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     target: u32,
 ) Error![32]u8 {
     const bytes = image.catalogs.envelope.section(.effects);
@@ -1231,7 +1312,7 @@ fn effectOrdinalDigest(
 }
 
 fn effectResumeSchema(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     target: u32,
 ) Error!u32 {
     const bytes = image.catalogs.envelope.section(.effects);
@@ -1306,7 +1387,7 @@ fn frameOffset(state: []const u8, target: u32) Error!usize {
 }
 
 fn replaceFrameAndTruncate(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     frame_offset: usize,
     frame_count: u32,
@@ -1343,7 +1424,7 @@ fn replaceFrameAndTruncate(
     }
     const required = frame_offset + frame_header_length + environment_length;
     if (required > output.len or
-        required > image.catalogs.envelope.header.maximum_state_bytes)
+        required > image.profile.maximum_state_bytes)
     {
         return error.OutputCapacity;
     }
@@ -1364,7 +1445,7 @@ fn replaceFrameAndTruncate(
 }
 
 fn loadTopEnvironment(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     constructor: []const u8,
     slots: *[1024]Slot,
@@ -1381,7 +1462,7 @@ fn loadTopEnvironment(
 }
 
 fn initializeZeroWidthSlots(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     slots: *[1024]Slot,
 ) Error!void {
     for (0..image.catalogs.value_count) |value| {
@@ -1396,7 +1477,7 @@ fn initializeZeroWidthSlots(
 }
 
 fn loadFrameEnvironment(
-    image: image_v1.ValidatedImage,
+    image: BoundProgram,
     state: []const u8,
     frame_offset: usize,
     constructor: []const u8,
@@ -1444,7 +1525,7 @@ fn topConstructorId(state: []const u8) Error!u32 {
 }
 
 fn segmentRecord(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     target: u16,
 ) Error![]const u8 {
     const bytes = image.catalogs.envelope.section(.segments);
@@ -1477,7 +1558,7 @@ fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
 }
 
 fn constantBytes(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     target: u32,
 ) Error![]const u8 {
     const bytes = image.catalogs.envelope.section(.constants);
@@ -1493,7 +1574,7 @@ fn constantBytes(
 }
 
 fn executeScalarOperation(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     instruction: []const u8,
     result: u16,
     slots: *[1024]Slot,
@@ -1630,7 +1711,7 @@ fn executeScalarOperation(
 }
 
 fn executeCompositeOperation(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     instruction: []const u8,
     result: u16,
     slots: *[1024]Slot,
@@ -2082,7 +2163,7 @@ fn executeCompositeOperation(
 }
 
 fn appendSequence(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     result_value: u16,
     prefix: []const u8,
     suffixes: []const []const u8,
@@ -2119,7 +2200,7 @@ fn sequencePayload(value: []const u8) []const u8 {
 }
 
 fn productField(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     product_value: u16,
     product: []const u8,
     field_index: u32,
@@ -2150,7 +2231,7 @@ fn productField(
 }
 
 fn vectorElement(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     vector_value: u16,
     vector: []const u8,
     target: u32,
@@ -2180,7 +2261,7 @@ fn vectorElement(
 }
 
 fn addDynamicCost(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     value: u16,
     slot: Slot,
     cost: *u64,
@@ -2190,7 +2271,7 @@ fn addDynamicCost(
 }
 
 fn addDynamicCostSize(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     value: u16,
     encoded_size: u64,
     cost: *u64,
@@ -2209,7 +2290,7 @@ fn operandsForInstruction(instruction: []const u8) []const u8 {
 }
 
 fn preflightResultSize(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     segment: []const u8,
     instruction_offset: usize,
     operation: u16,
@@ -2348,7 +2429,7 @@ fn preflightProductFieldSize(
 }
 
 fn valueNode(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     value: u16,
 ) Error!dynamic_value_v1.Node {
     const schema_id = image.catalogs.valueSchemaId(value) catch
@@ -2376,7 +2457,7 @@ const Integer = struct {
 };
 
 fn valueKind(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     value: u16,
 ) Error!dynamic_value_v1.Kind {
     const schema_id = image.catalogs.valueSchemaId(value) catch
@@ -2559,7 +2640,7 @@ fn writeRaw(
     return result;
 }
 
-fn failureTag(image: image_v1.ValidatedImage, name: []const u8) Error!u32 {
+fn failureTag(image: anytype, name: []const u8) Error!u32 {
     const bytes = image.catalogs.envelope.section(.failures);
     const count = readInt(u32, bytes, 0);
     var cursor: usize = 4;
@@ -2576,7 +2657,7 @@ fn failureTag(image: image_v1.ValidatedImage, name: []const u8) Error!u32 {
 }
 
 fn validateEnvironment(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     constructor: []const u8,
     environment: []const u8,
     workspace: *image_v1.ValidationWorkspace,
@@ -2616,7 +2697,7 @@ fn validateEnvironment(
 }
 
 fn validatePathInvariants(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     constructor: []const u8,
     slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
@@ -2857,7 +2938,7 @@ fn validatePathInvariants(
 }
 
 fn definingInstruction(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     definition: u16,
 ) Error![]const u8 {
     for (0..image.segment_count) |segment_id| {
@@ -2875,7 +2956,7 @@ fn definingInstruction(
 }
 
 fn validateComputedResult(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     result: u16,
     operation: u16,
     immediate: u32,
@@ -2942,7 +3023,7 @@ fn validateComputedResult(
 }
 
 fn validateInvariantConstant(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     result: u16,
     kind: u8,
     payload: u64,
@@ -2976,7 +3057,7 @@ fn validateInvariantConstant(
 }
 
 fn algebraicCaseIndex(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     value: u16,
     bytes: []const u8,
 ) Error!u16 {
@@ -2998,7 +3079,7 @@ fn algebraicCaseIndex(
 }
 
 fn constructorRecord(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     target: u32,
 ) Error![]const u8 {
     const bytes = image.catalogs.envelope.section(.constructors);

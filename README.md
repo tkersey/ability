@@ -1,16 +1,20 @@
 # Boundary
 
 Boundary is a Zig compiler for portable, defunctionalized algebraic effects.
-It compiles a typed source program into one canonical meaning with two engines:
+It separates one canonical program meaning from bounded Machine ABI v2 policy:
 
 ```text
-typed source -> Control IR -> Reified Program -> direct reducer
-                                            \-> BEI1 -> fixed kernel
+typed source -> Control IR -> semantic RNF -> Reified Program -> BPI1
+                                         |                     |
+                                         + MachineV2Profile    + MachineV2Profile
+                                         v                     v
+                                      direct v2             kernel v2
 ```
 
-The direct reducer remains the default specialized engine. `Program.image`
-emits the same meaning as a canonical Boundary Executable Image, and
-`Program.kernelMachine` exposes the fixed kernel through Machine ABI v2.
+The direct reducer remains the default specialized engine. `Program.image()`
+emits the canonical Boundary Program Image without execution options.
+`Program.kernelMachineV2(options)` combines that image with the separately
+identified bounded compatibility profile.
 Its canonical
 `ABL_RNF2` state contains a bounded stack of program-specific continuation
 constructors and their exact future-live environments. It contains no generic
@@ -23,8 +27,8 @@ native callback.
 - `boundary.schema` exposes canonical portable-value codecs.
 - `boundary.ir` exposes advanced typed source/control authoring.
 - `boundary.program` declares a source program.
-- `boundary.image` validates canonical BEI1 bytes.
-- `boundary.kernel` executes validated images without callbacks or authority.
+- `boundary.image` validates canonical BPI1 bytes.
+- `boundary.machine_v2.kernel` executes BPI1 plus a MachineV2Profile.
 - `boundary.Driver` drives the compiled Machine locally.
 - `boundary.Agent` is an optional profile over the same compiler.
 - `boundary.Bytes`, `boundary.Text`, and `boundary.Vector` are bounded portable
@@ -44,13 +48,14 @@ const machine_options: boundary.MachineOptions = .{
 };
 
 const Machine = Program.compile(machine_options);
-const Image = Program.image(machine_options);
-const KernelMachine = Program.kernelMachine(machine_options);
+const Image = Program.image();
+const Profile = Program.machineV2Profile(machine_options);
+const KernelMachine = Program.kernelMachineV2(machine_options);
 ```
 
-`Machine` exposes ABI version 2, typed arguments/results/effects, deterministic
-fuel semantics, transactional step and resume operations, and canonical state
-encoding. Local execution and World execution both drive this same Machine.
+Fuel, frame ceilings, State-byte ceilings, caller checkpoints, and cumulative
+budgets belong to `Profile` and Machine ABI v2. They are not Program Image
+semantics. Reification v1 does not yet provide the later open Process ABI.
 
 ## Portable language
 
@@ -75,8 +80,8 @@ authority crosses the Machine boundary.
 - [Effects](docs/effects.md)
 - [World integration](docs/world_integration.md)
 - [Boundary Reification](docs/reification.md)
-- [Boundary Executable Image v1](docs/boundary_executable_image_v1.md)
-- [Boundary Kernel v1](docs/boundary_kernel_v1.md)
+- [Boundary Program Image v1](docs/boundary_executable_image_v1.md)
+- [Machine v2 Kernel v1](docs/boundary_kernel_v1.md)
 - [Specialization equivalence](docs/specialization_equivalence.md)
 - [Migration to Boundary 1.6](docs/migration_to_1_6.md)
 - [Migration from Boundary 0.7](docs/migration_from_0_7.md)

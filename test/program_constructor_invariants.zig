@@ -11,7 +11,7 @@ const state_header_length: usize = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
 const frame_header_length: usize = 4 + 4;
 const first_environment_offset = state_header_length + frame_header_length;
 
-test "BEI1 emits the admitted constructor invariant families" {
+test "BPI1 emits the admitted constructor invariant families" {
     inline for (.{
         SumBody,
         OptionalBody,
@@ -29,15 +29,14 @@ test "BEI1 emits the admitted constructor invariant families" {
         LocalTextBody,
     }) |Body| {
         const Reified = compiler.ReifiedFor(Body.control_ir.label, Body);
-        const Direct = compiler.DirectDefinitionFor(Reified);
-        const Schemas = image_emit_v1.ProgramSchemaSet(Reified, Direct);
+        const Schemas = image_emit_v1.ProgramSchemaSet(Reified);
         const Constructors = image_emit_v1.ProgramConstructors(
             Reified,
             Schemas,
         );
         try std.testing.expect(Constructors.bytes.len > 4);
         const Program = program_v2.program(Body.control_ir.label, Body);
-        const Image = Program.image(.{});
+        const Image = Program.image();
         var workspace: image_v1.ValidationWorkspace = .{};
         _ = try image_v1.validateImage(&Image.bytes, &workspace);
     }
@@ -149,7 +148,8 @@ const SumMachine = SumProgram.compile(.{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
 });
-const SumImage = SumProgram.image(.{
+const SumImage = SumProgram.image();
+const SumProfile = SumProgram.machineV2Profile(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
@@ -456,7 +456,7 @@ const ClosedExpressionMachine = ClosedExpressionProgram.compile(.{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
 });
-const ClosedExpressionKernelMachine = ClosedExpressionProgram.kernelMachine(.{
+const ClosedExpressionKernelMachine = ClosedExpressionProgram.kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
@@ -715,7 +715,7 @@ const WideProductMachine = WideProductProgram.compile(.{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 64,
 });
-const WideProductKernelMachine = WideProductProgram.kernelMachine(.{
+const WideProductKernelMachine = WideProductProgram.kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 64,
@@ -1706,7 +1706,8 @@ test "sum branches persist the source case and reject a forged local path" {
         SumMachine.decodeState(std.testing.allocator, forged),
     );
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes);
     try std.testing.expectError(
         error.InvalidState,
         kernel_v1.validateState(image, forged, &workspace),
@@ -1730,7 +1731,8 @@ test "unfunded kernel step defers deep environment validation" {
         .little,
     );
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes);
     var fuel: u64 = 0;
     var output_state: [4096]u8 = undefined;
     var output_value: [4096]u8 = undefined;

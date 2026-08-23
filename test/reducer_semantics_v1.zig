@@ -64,7 +64,7 @@ const operations = [_]control_ir.InstructionOperation{
     .enum_to_u32,
 };
 
-test "BEI1 operation tags are exhaustive and independent of current enum tags" {
+test "BPI1 operation tags are exhaustive and independent of current enum tags" {
     try std.testing.expectEqual(@as(usize, 58), operations.len);
     inline for (operations, 0..) |operation, expected_tag| {
         try std.testing.expectEqual(
@@ -125,7 +125,7 @@ test "operation failure roles and dynamic fuel have one owner" {
     try std.testing.expectEqual(@as(u64, 2), reducer.dynamicBytesCost(true, 17));
 }
 
-test "BEI1 control and RNF wire tags are pinned" {
+test "BPI1 control and RNF wire tags are pinned" {
     const jump = control_ir.Terminator{ .jump = .{ .target = 0 } };
     try std.testing.expectEqual(
         @as(u8, 0),

@@ -36,11 +36,13 @@ const options: machine.Options = .{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
 };
-const Image = Program.image(options);
+const Image = Program.image();
+const Profile = Program.machineV2Profile(options);
 
 pub fn main(init: std.process.Init) !void {
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
     var state: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
         image,
@@ -48,17 +50,19 @@ pub fn main(init: std.process.Init) !void {
         &state,
         &workspace,
     );
-    var input: [40 + Image.bytes.len + 4096]u8 = undefined;
-    @memset(input[0..40], 0);
+    var input: [48 + Image.bytes.len + Profile.bytes.len + 4096]u8 = undefined;
+    @memset(input[0..48], 0);
     @memcpy(input[0..8], "ABL_KIN1");
     writeInt(u16, &input, 8, 1);
     writeInt(u16, &input, 10, 4);
     writeInt(u64, &input, 16, 8);
     writeInt(u32, &input, 24, Image.bytes.len);
-    writeInt(u32, &input, 28, state_length);
-    @memcpy(input[40..][0..Image.bytes.len], &Image.bytes);
-    @memcpy(input[40 + Image.bytes.len ..][0..state_length], state[0..state_length]);
-    const input_length = 40 + Image.bytes.len + state_length;
+    writeInt(u32, &input, 28, Profile.bytes.len);
+    writeInt(u32, &input, 32, state_length);
+    @memcpy(input[48..][0..Image.bytes.len], &Image.bytes);
+    @memcpy(input[48 + Image.bytes.len ..][0..Profile.bytes.len], &Profile.bytes);
+    @memcpy(input[48 + Image.bytes.len + Profile.bytes.len ..][0..state_length], state[0..state_length]);
+    const input_length = 48 + Image.bytes.len + Profile.bytes.len + state_length;
 
     var fuel: u64 = 8;
     var next_state: [4096]u8 = undefined;

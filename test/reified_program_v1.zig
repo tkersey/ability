@@ -1,7 +1,10 @@
 const cir = @import("control_ir");
 const compiler = @import("compiler");
 const image_emit_v1 = @import("image_emit_v1");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
+const program_evaluator_v1 = @import("program_evaluator_v1");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
@@ -27,7 +30,20 @@ const Body = struct {
     };
 };
 
+fn MeteredBody(comptime block_cost: u64) type {
+    return struct {
+        pub const InitialArgs = Body.InitialArgs;
+        pub const Result = Body.Result;
+        pub const Failure = Body.Failure;
+        pub const effect_sites = Body.effect_sites;
+        pub const schema_types = Body.schema_types;
+        pub const control_ir = Body.control_ir;
+        pub const block_costs = [_]u64{block_cost};
+    };
+}
+
 const Reified = compiler.ReifiedFor("reified-program-proof", Body);
+const MachineV2Lowering = compiler.MachineV2LoweringFor(Reified);
 const Direct = compiler.DirectDefinitionFor(Reified);
 const CompatibilityDefinition = compiler.DefinitionFor(
     "reified-program-proof",
@@ -41,12 +57,13 @@ const options: machine.Options = .{
 };
 const DirectMachine = machine.Machine(Direct, options);
 const ProgramMachine = Program.compile(options);
-const KernelMachine = Program.kernelMachine(options);
-const Image = Program.image(options);
-const ProgramSchemas = image_emit_v1.ProgramSchemaSet(Reified, Direct);
+const KernelMachine = Program.kernelMachineV2(options);
+const Image = Program.image();
+const Profile = Program.machineV2Profile(options);
+const ProgramSchemas = image_emit_v1.ProgramSchemaSet(Reified);
 const ProgramRoots = image_emit_v1.ProgramRoots(Reified, ProgramSchemas);
 const ProgramFailures = image_emit_v1.ProgramFailures(Reified);
-const ProgramEffects = image_emit_v1.ProgramEffects(Direct, ProgramSchemas);
+const ProgramEffects = image_emit_v1.ProgramEffects(Reified, ProgramSchemas);
 const ProgramConstants = image_emit_v1.ProgramConstants(Reified, ProgramSchemas);
 const ProgramValues = image_emit_v1.ProgramValues(Reified, ProgramSchemas);
 const ProgramFunctions = image_emit_v1.ProgramFunctions(Reified, ProgramSchemas);
@@ -67,8 +84,8 @@ test "direct specialization consumes the exact Reified Program" {
     try std.testing.expect(DirectMachine == ProgramMachine);
     try std.testing.expectEqualSlices(
         u8,
-        &Reified.semantic_digest,
-        &Program.semantic_digest,
+        &Reified.program_transition_digest,
+        &Program.program_transition_digest,
     );
     try std.testing.expectEqualSlices(
         u8,
@@ -85,7 +102,10 @@ test "direct specialization consumes the exact Reified Program" {
         Program.rnf.constructor_count,
     );
     try std.testing.expectEqual(@as(u32, 0), Reified.initial_constructor_id);
-    try std.testing.expectEqual(@as(u64, 1), Reified.effective_block_costs[0]);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        MachineV2Lowering.effective_block_costs[0],
+    );
     try std.testing.expectEqual(@as(u32, 2), ProgramSchemas.node_count);
     try std.testing.expectEqual(
         ProgramSchemas.root_ids[0],
@@ -112,34 +132,122 @@ test "direct specialization consumes the exact Reified Program" {
     try std.testing.expectEqual(@as(u8, 0), ProgramConstructors.bytes[12]);
     try std.testing.expectEqualSlices(
         u8,
-        &Program.semantic_digest,
-        &Image.program_semantic_digest,
+        &Program.program_transition_digest,
+        &Image.program_transition_digest,
     );
     try std.testing.expectEqualSlices(
         u8,
         &ProgramMachine.Manifest.machine_contract_digest,
-        &Image.machine_contract_digest,
+        &Profile.machine_v2_contract_digest,
     );
-    const image_v1 = @import("image_v1");
     var workspace: image_v1.ValidationWorkspace = .{};
-    const validated = try image_v1.validateImage(&Image.bytes, &workspace);
-    const catalogs = validated.catalogs;
+    const parsed = try image_v1.validateImage(&Image.bytes, &workspace);
+    const catalogs = parsed.catalogs;
     try std.testing.expectEqual(
         Image.byte_length,
         catalogs.envelope.header.total_length,
     );
     try std.testing.expectEqual(@as(u32, 1), catalogs.value_count);
-    try std.testing.expectEqual(@as(u32, 1), validated.segment_count);
-    try std.testing.expectEqual(@as(u32, 1), validated.constructor_count);
+    try std.testing.expectEqual(@as(u32, 1), parsed.segment_count);
+    try std.testing.expectEqual(@as(u32, 1), parsed.constructor_count);
     var reencoded: [Image.bytes.len]u8 = undefined;
     const reencoded_length = try image_v1.reencodeValidated(
-        validated,
+        parsed,
         &reencoded,
     );
     try std.testing.expectEqualSlices(
         u8,
         &Image.bytes,
         reencoded[0..reencoded_length],
+    );
+}
+
+test "BPI1 is invariant across Machine v2 profiles and metering annotations" {
+    const LowProfile = Program.machineV2Profile(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 1024,
+        .maximum_machine_fuel = 8,
+    });
+    const HighProfile = Program.machineV2Profile(.{
+        .maximum_frames = 32,
+        .maximum_state_bytes = 1 << 20,
+        .maximum_machine_fuel = 1_000_000,
+    });
+    try std.testing.expectEqualSlices(u8, &Image.bytes, &Program.image().bytes);
+    try std.testing.expectEqualSlices(
+        u8,
+        &Image.program_transition_digest,
+        &Program.program_transition_digest,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &LowProfile.bytes,
+        &HighProfile.bytes,
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &LowProfile.machine_v2_contract_digest,
+        &HighProfile.machine_v2_contract_digest,
+    ));
+
+    const CheapProgram = program_v2.program("metering-invariant", MeteredBody(1));
+    const CostlyProgram = program_v2.program("metering-invariant", MeteredBody(9));
+    const CheapImage = CheapProgram.image();
+    const CostlyImage = CostlyProgram.image();
+    try std.testing.expectEqualSlices(u8, &CheapImage.bytes, &CostlyImage.bytes);
+    try std.testing.expectEqualSlices(
+        u8,
+        &CheapProgram.program_transition_digest,
+        &CostlyProgram.program_transition_digest,
+    );
+    const CheapProfile = CheapProgram.machineV2Profile(options);
+    const CostlyProfile = CostlyProgram.machineV2Profile(options);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &CheapProfile.bytes,
+        &CostlyProfile.bytes,
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &CheapProgram.machine_v2_semantic_digest,
+        &CostlyProgram.machine_v2_semantic_digest,
+    ));
+}
+
+test "Program.image has no Machine options parameter" {
+    const info = @typeInfo(@TypeOf(Program.image)).@"fn";
+    try std.testing.expectEqual(@as(usize, 0), info.params.len);
+}
+
+test "direct unmetered clause and BPI1 evaluator have one transition meaning" {
+    const direct = Direct.reduceClause(Direct.initial(77));
+    const direct_result = switch (direct) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    var args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &args, 77, .little);
+    var slots = [_]program_evaluator_v1.Slot{.{}} ** 1024;
+    slots[0] = .{ .bytes = &args, .initialized = true };
+    var output: [4]u8 = undefined;
+    var scratch: [8192]u8 = undefined;
+    const evaluated = try program_evaluator_v1.evaluate(
+        image,
+        image.catalogs.entry_segment_id,
+        &slots,
+        &output,
+        &scratch,
+        &workspace,
+    );
+    const bytes = switch (evaluated) {
+        .completed => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        direct_result,
+        std.mem.readInt(u32, bytes[0..4], .little),
     );
 }
 
@@ -199,10 +307,9 @@ test "Reified Program preserves direct canonical State bytes" {
     try std.testing.expectEqual(@as(u32, 29), typed_kernel_done.value().*);
     try std.testing.expectEqual(@as(u64, 7), typed_kernel_fuel);
 
-    const image_v1 = @import("image_v1");
-    const kernel_v1 = @import("kernel_v1");
     var workspace: image_v1.ValidationWorkspace = .{};
-    const validated = try image_v1.validateImage(&Image.bytes, &workspace);
+    const parsed = try image_v1.validateImage(&Image.bytes, &workspace);
+    const validated = try kernel_v1.bindMachineV2(parsed, &Profile.bytes);
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 29, .little);
     var kernel_state: [4096]u8 = undefined;
@@ -257,8 +364,7 @@ test "Reified Program preserves direct canonical State bytes" {
     );
 }
 
-test "BEI1 catalog validation fails closed on forged roots" {
-    const image_v1 = @import("image_v1");
+test "BPI1 catalog validation fails closed on forged roots" {
     var malformed = Image.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);
     const root_offset: usize = envelope.sections[0].offset;
@@ -270,8 +376,7 @@ test "BEI1 catalog validation fails closed on forged roots" {
     );
 }
 
-test "BEI1 executable validation rejects a forged terminator" {
-    const image_v1 = @import("image_v1");
+test "BPI1 executable validation rejects a forged terminator" {
     var malformed = Image.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segment_offset: usize = envelope.sections[7].offset;
@@ -283,32 +388,28 @@ test "BEI1 executable validation rejects a forged terminator" {
     );
 }
 
-test "BEI1 validation recomputes the Machine contract digest" {
-    const image_v1 = @import("image_v1");
+test "MachineV2Profile validation recomputes the v2 contract digest" {
+    var malformed = Profile.bytes;
+    malformed[96] ^= 0xff;
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    try std.testing.expectError(
+        error.InvalidImage,
+        kernel_v1.bindMachineV2(image, &malformed),
+    );
+}
+
+test "BPI1 validation recomputes the Program transition digest" {
     var malformed = Image.bytes;
-    malformed[72] ^= 0xff;
+    malformed[40] ^= 0x01;
     var workspace: image_v1.ValidationWorkspace = .{};
     try std.testing.expectError(
-        error.MachineContractDigestMismatch,
+        error.ProgramTransitionDigestMismatch,
         image_v1.validateImage(&malformed, &workspace),
     );
 }
 
-test "BEI1 validation recomputes the Program semantic digest" {
-    const image_v1 = @import("image_v1");
-    var malformed = Image.bytes;
-    const envelope = try image_v1.validateEnvelope(&malformed);
-    const segment_offset: usize = envelope.sections[7].offset;
-    malformed[segment_offset + 21] ^= 0x01;
-    var workspace: image_v1.ValidationWorkspace = .{};
-    try std.testing.expectError(
-        error.ProgramSemanticDigestMismatch,
-        image_v1.validateImage(&malformed, &workspace),
-    );
-}
-
-test "BEI1 validation recomputes kernel scratch requirements" {
-    const image_v1 = @import("image_v1");
+test "BPI1 validation recomputes evaluator scratch requirements" {
     var malformed = Image.bytes;
     malformed[120] ^= 0x01;
     var workspace: image_v1.ValidationWorkspace = .{};
@@ -318,8 +419,7 @@ test "BEI1 validation recomputes kernel scratch requirements" {
     );
 }
 
-test "BEI1 rejects 1000 deterministic mutations without trap" {
-    const image_v1 = @import("image_v1");
+test "BPI1 rejects 1000 deterministic mutations without trap" {
     var malformed: [Image.bytes.len]u8 = undefined;
     for (0..1000) |index| {
         @memcpy(&malformed, &Image.bytes);
@@ -337,10 +437,9 @@ test "direct and kernel reject shared malformed State classes" {
     defer ProgramMachine.deinitState(state);
     const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(encoded);
-    const image_v1 = @import("image_v1");
-    const kernel_v1 = @import("kernel_v1");
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
     var malformed: [4096]u8 = undefined;
     for (0..12) |case| {
         @memcpy(malformed[0..encoded.len], encoded);
@@ -380,10 +479,9 @@ test "direct and kernel reject shared malformed State classes" {
 }
 
 test "zero caller fuel cannot launder a malformed State" {
-    const image_v1 = @import("image_v1");
-    const kernel_v1 = @import("kernel_v1");
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
     const state = try ProgramMachine.initialState(std.testing.allocator, 29);
     defer ProgramMachine.deinitState(state);
     const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
@@ -411,10 +509,9 @@ test "zero caller fuel cannot launder a malformed State" {
 }
 
 test "maximum resume sizing rejects malformed State framing" {
-    const image_v1 = @import("image_v1");
-    const kernel_v1 = @import("kernel_v1");
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
     const state = try ProgramMachine.initialState(std.testing.allocator, 29);
     defer ProgramMachine.deinitState(state);
     const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
@@ -459,7 +556,7 @@ test "KernelMachine terminal owner OOM preserves State ownership" {
 }
 
 test "KernelMachine debug metadata matches its inherited Manifest" {
-    const DebugKernel = Program.kernelMachine(.{
+    const DebugKernel = Program.kernelMachineV2(.{
         .maximum_frames = 4,
         .maximum_state_bytes = 4096,
         .maximum_machine_fuel = 32,
@@ -501,11 +598,7 @@ test "Reified constants emit in canonical first-use order" {
         "constant-image-proof",
         ConstantBody,
     );
-    const ConstantDirect = compiler.DirectDefinitionFor(ConstantReified);
-    const Schemas = image_emit_v1.ProgramSchemaSet(
-        ConstantReified,
-        ConstantDirect,
-    );
+    const Schemas = image_emit_v1.ProgramSchemaSet(ConstantReified);
     const Constants = image_emit_v1.ProgramConstants(
         ConstantReified,
         Schemas,
@@ -520,13 +613,16 @@ test "Reified constants emit in canonical first-use order" {
         "constant-image-proof",
         ConstantBody,
     );
-    const ConstantImage = ConstantProgram.image(options);
-    const image_v1 = @import("image_v1");
-    const kernel_v1 = @import("kernel_v1");
+    const ConstantImage = ConstantProgram.image();
+    const ConstantProfile = ConstantProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
-    const validated = try image_v1.validateImage(
+    const parsed = try image_v1.validateImage(
         &ConstantImage.bytes,
         &workspace,
+    );
+    const validated = try kernel_v1.bindMachineV2(
+        parsed,
+        &ConstantProfile.bytes,
     );
     var state: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
@@ -595,11 +691,11 @@ test "fixed kernel scalar algebra matches direct success and failure" {
     };
     const ScalarProgram = program_v2.program("kernel-scalar-proof", ScalarBody);
     const ScalarMachine = ScalarProgram.compile(options);
-    const ScalarImage = ScalarProgram.image(options);
-    const image_v1 = @import("image_v1");
-    const kernel_v1 = @import("kernel_v1");
+    const ScalarImage = ScalarProgram.image();
+    const ScalarProfile = ScalarProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
-    const validated = try image_v1.validateImage(&ScalarImage.bytes, &workspace);
+    const parsed = try image_v1.validateImage(&ScalarImage.bytes, &workspace);
+    const validated = try kernel_v1.bindMachineV2(parsed, &ScalarProfile.bytes);
 
     inline for (.{ @as(u32, 41), std.math.maxInt(u32) }) |input| {
         const direct_state = try ScalarMachine.initialState(
@@ -715,11 +811,11 @@ test "fixed kernel branches and yields at the next segment boundary" {
     };
     const BranchProgram = program_v2.program("kernel-branch-proof", BranchBody);
     const BranchMachine = BranchProgram.compile(options);
-    const BranchImage = BranchProgram.image(options);
-    const image_v1 = @import("image_v1");
-    const kernel_v1 = @import("kernel_v1");
+    const BranchImage = BranchProgram.image();
+    const BranchProfile = BranchProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&BranchImage.bytes, &workspace);
+    const parsed = try image_v1.validateImage(&BranchImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(parsed, &BranchProfile.bytes);
 
     inline for (.{ true, false }) |condition| {
         const direct_state = try BranchMachine.initialState(

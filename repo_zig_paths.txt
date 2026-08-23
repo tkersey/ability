@@ -12,7 +12,9 @@ src/kernel_machine_v1.zig
 src/kernel_v1.zig
 src/kernel_wasm_v1.zig
 src/machine.zig
+src/machine_v2_profile_v1.zig
 src/portable_value.zig
+src/program_evaluator_v1.zig
 src/program_v2.zig
 src/reducer_semantics_v1.zig
 src/reified_program_v1.zig
@@ -43,7 +45,9 @@ test/compile_fail/portable_usize.zig
 test/compile_fail/undersized_machine_state.zig
 test/compile_fail/vector_uninhabited_element.zig
 test/emit_one_effect_image.zig
+test/emit_one_effect_profile.zig
 test/emit_portable_values_image.zig
+test/emit_portable_values_profile.zig
 test/image_v1.zig
 test/kernel_wasm_machine_failure_vector.zig
 test/kernel_wasm_vector.zig

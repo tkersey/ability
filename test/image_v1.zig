@@ -5,9 +5,7 @@ fn canonicalEmptyEnvelope() [image_v1.header_length]u8 {
     var bytes = [_]u8{0} ** image_v1.header_length;
     @memcpy(bytes[0..image_v1.magic.len], &image_v1.magic);
     writeInt(u16, &bytes, 8, image_v1.image_format_version);
-    writeInt(u16, &bytes, 10, image_v1.machine_abi_version);
-    writeInt(u16, &bytes, 12, image_v1.state_format_version);
-    writeInt(u16, &bytes, 14, image_v1.kernel_semantics_version);
+    writeInt(u16, &bytes, 10, image_v1.evaluator_semantics_version);
     writeInt(u32, &bytes, 20, image_v1.header_length);
     writeInt(u64, &bytes, 24, image_v1.header_length);
     writeInt(u32, &bytes, 32, image_v1.section_count);
@@ -30,7 +28,7 @@ fn writeInt(
     std.mem.writeInt(T, bytes[offset..][0..@sizeOf(T)], value, .little);
 }
 
-test "BEI1 envelope validates exact fixed header and section directory" {
+test "BPI1 envelope validates exact fixed header and section directory" {
     const bytes = canonicalEmptyEnvelope();
     const envelope = try image_v1.validateEnvelope(&bytes);
     try std.testing.expectEqual(@as(u64, 384), envelope.header.total_length);
@@ -41,7 +39,7 @@ test "BEI1 envelope validates exact fixed header and section directory" {
     );
 }
 
-test "BEI1 envelope rejects noncanonical structure" {
+test "BPI1 envelope rejects noncanonical structure" {
     var bytes = canonicalEmptyEnvelope();
     bytes[0] = 'X';
     try std.testing.expectError(

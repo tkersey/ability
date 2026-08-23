@@ -129,7 +129,8 @@ const pure_options: machine.Options = .{
     .maximum_machine_fuel = 128,
 };
 const PureMachine = Program.compile(pure_options);
-const PureImage = Program.image(pure_options);
+const PureImage = Program.image();
+const PureProfile = Program.machineV2Profile(pure_options);
 
 pub const ReificationBaselineBody = Body;
 pub const ReificationBaselineProgram = Program;
@@ -170,7 +171,8 @@ test "compiled pure operations construct products vectors and text" {
     try std.testing.expectEqual(@as(u32, 8), result.total);
 
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&PureImage.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&PureImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &PureProfile.bytes);
     var kernel_state: [4096]u8 = undefined;
     const kernel_state_length = try kernel_v1.initial(
         image,
@@ -231,7 +233,7 @@ test "compiled pure operations construct products vectors and text" {
     );
 }
 
-test "BEI1 rejects schema-invalid operation substitutions before execution" {
+test "BPI1 rejects schema-invalid operation substitutions before execution" {
     var malformed = PureImage.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segment_offset: usize = @intCast(envelope.sections[7].offset);
@@ -277,7 +279,7 @@ test "BEI1 rejects schema-invalid operation substitutions before execution" {
     );
 }
 
-test "BEI1 rejects constants made unreachable by instruction mutation" {
+test "BPI1 rejects constants made unreachable by instruction mutation" {
     var malformed = PureImage.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);
     const segment_offset: usize = @intCast(envelope.sections[7].offset);

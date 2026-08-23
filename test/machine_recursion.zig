@@ -1030,7 +1030,8 @@ test "compiled bounded recursive frames survive canonical round trip" {
     try std.testing.expectEqual(@as(usize, 2), call_return_count);
 
     const RecursiveMachine = Program.compile(reification_options);
-    const Image = Program.image(reification_options);
+    const Image = Program.image();
+    const Profile = Program.machineV2Profile(reification_options);
     const state = try RecursiveMachine.initialState(std.testing.allocator, 3);
     defer RecursiveMachine.deinitState(state);
 
@@ -1059,7 +1060,8 @@ test "compiled bounded recursive frames survive canonical round trip" {
     try std.testing.expectEqual(@as(u64, 7), completion_fuel);
 
     var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 3, .little);
     var kernel_initial: [4096]u8 = undefined;
@@ -1967,7 +1969,7 @@ test "compiled frame-depth failure preserves state and caller fuel" {
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
 
-    const ShallowKernel = Program.kernelMachine(.{
+    const ShallowKernel = Program.kernelMachineV2(.{
         .maximum_frames = 3,
         .maximum_state_bytes = 4096,
         .maximum_machine_fuel = 64,

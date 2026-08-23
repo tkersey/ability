@@ -15,7 +15,9 @@ const CoreModules = struct {
     kernel_machine_v1: *std.Build.Module,
     kernel_wasm_v1: *std.Build.Module,
     machine: *std.Build.Module,
+    machine_v2_profile_v1: *std.Build.Module,
     portable_value: *std.Build.Module,
+    program_evaluator_v1: *std.Build.Module,
     program_v2: *std.Build.Module,
     reified_program_v1: *std.Build.Module,
     reducer_semantics_v1: *std.Build.Module,
@@ -35,7 +37,9 @@ const CoreModuleId = enum {
     kernel_machine_v1,
     kernel_wasm_v1,
     machine,
+    machine_v2_profile_v1,
     portable_value,
+    program_evaluator_v1,
     program_v2,
     reified_program_v1,
     reducer_semantics_v1,
@@ -62,7 +66,9 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .kernel_machine_v1 => "src/kernel_machine_v1.zig",
         .kernel_wasm_v1 => "src/kernel_wasm_v1.zig",
         .machine => "src/machine.zig",
+        .machine_v2_profile_v1 => "src/machine_v2_profile_v1.zig",
         .portable_value => "src/portable_value.zig",
+        .program_evaluator_v1 => "src/program_evaluator_v1.zig",
         .program_v2 => "src/program_v2.zig",
         .reified_program_v1 => "src/reified_program_v1.zig",
         .reducer_semantics_v1 => "src/reducer_semantics_v1.zig",
@@ -78,6 +84,8 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .kernel_v1,
         .kernel_machine_v1,
         .kernel_wasm_v1,
+        .machine_v2_profile_v1,
+        .program_evaluator_v1,
         => .image_runtime_semantics,
         .agent_profile,
         .control_ir,
@@ -387,6 +395,11 @@ fn addCoreModules(
         .optimize = optimize,
     });
     machine.addImport("portable_value", portable_value);
+    const machine_v2_profile_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.machine_v2_profile_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
     const dynamic_value_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.dynamic_value_v1)),
         .target = target,
@@ -405,6 +418,7 @@ fn addCoreModules(
     });
     kernel_v1.addImport("dynamic_value_v1", dynamic_value_v1);
     kernel_v1.addImport("image_v1", image_v1);
+    kernel_v1.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
     const kernel_machine_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.kernel_machine_v1)),
         .target = target,
@@ -414,6 +428,13 @@ fn addCoreModules(
     kernel_machine_v1.addImport("kernel_v1", kernel_v1);
     kernel_machine_v1.addImport("machine", machine);
     kernel_machine_v1.addImport("portable_value", portable_value);
+    const program_evaluator_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.program_evaluator_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    program_evaluator_v1.addImport("image_v1", image_v1);
+    program_evaluator_v1.addImport("reducer_clause_impl", kernel_v1);
     const kernel_wasm_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.kernel_wasm_v1)),
         .target = target,
@@ -457,6 +478,7 @@ fn addCoreModules(
     });
     compiler.addImport("control_ir", control_ir);
     compiler.addImport("machine", machine);
+    compiler.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
     compiler.addImport("portable_value", portable_value);
     compiler.addImport("reified_program_v1", reified_program_v1);
     compiler.addImport("reducer_semantics_v1", reducer_semantics_v1);
@@ -470,6 +492,7 @@ fn addCoreModules(
     program_v2.addImport("image_emit_v1", image_emit_v1);
     program_v2.addImport("kernel_machine_v1", kernel_machine_v1);
     program_v2.addImport("machine", machine);
+    program_v2.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
     const driver = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.driver)),
         .target = target,
@@ -500,7 +523,9 @@ fn addCoreModules(
         .kernel_machine_v1 = kernel_machine_v1,
         .kernel_wasm_v1 = kernel_wasm_v1,
         .machine = machine,
+        .machine_v2_profile_v1 = machine_v2_profile_v1,
         .portable_value = portable_value,
+        .program_evaluator_v1 = program_evaluator_v1,
         .program_v2 = program_v2,
         .reified_program_v1 = reified_program_v1,
         .reducer_semantics_v1 = reducer_semantics_v1,
@@ -516,7 +541,9 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("image_v1", core.image_v1);
     module.addImport("kernel_v1", core.kernel_v1);
     module.addImport("machine", core.machine);
+    module.addImport("machine_v2_profile_v1", core.machine_v2_profile_v1);
     module.addImport("portable_value", core.portable_value);
+    module.addImport("program_evaluator_v1", core.program_evaluator_v1);
     module.addImport("program_v2", core.program_v2);
 }
 
@@ -807,6 +834,10 @@ pub fn build(b: *std.Build) void {
     reified_program_test.addImport("image_v1", host_core.image_v1);
     reified_program_test.addImport("kernel_v1", host_core.kernel_v1);
     reified_program_test.addImport("machine", host_core.machine);
+    reified_program_test.addImport(
+        "program_evaluator_v1",
+        host_core.program_evaluator_v1,
+    );
     const reification_generated_test = programTestModule(
         b,
         host_core,
@@ -947,7 +978,7 @@ pub fn build(b: *std.Build) void {
 
     const image_step = b.step(
         "check-boundary-image",
-        "Validate the canonical BEI1 envelope and section directory.",
+        "Validate the canonical BPI1 envelope and section directory.",
     );
     addTestArtifact(b, image_step, host_core.dynamic_value_v1);
     addTestArtifact(b, image_step, host_core.image_emit_v1);
@@ -1083,7 +1114,7 @@ pub fn build(b: *std.Build) void {
 
     const wasm_core = addCoreModules(b, wasm_target, .ReleaseSmall);
     const kernel_wasm_executable = b.addExecutable(.{
-        .name = "boundary-kernel-v1",
+        .name = "boundary-machine-v2-kernel-v1",
         .root_module = wasm_core.kernel_wasm_v1,
     });
     kernel_wasm_executable.entry = .disabled;
@@ -1092,7 +1123,7 @@ pub fn build(b: *std.Build) void {
     kernel_wasm_executable.max_memory = 128 << 20;
     const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
     const kernel_wasm_reproducible = b.addExecutable(.{
-        .name = "boundary-kernel-v1-reproducible",
+        .name = "boundary-machine-v2-kernel-v1-reproducible",
         .root_module = wasm_repro_core.kernel_wasm_v1,
     });
     kernel_wasm_reproducible.entry = .disabled;
@@ -1147,12 +1178,29 @@ pub fn build(b: *std.Build) void {
     });
     one_effect_image_module.addImport("boundary", host_boundary);
     const one_effect_image_executable = b.addExecutable(.{
-        .name = "emit-one-effect-boundary-image",
+        .name = "emit-one-effect-boundary-program-image",
         .root_module = one_effect_image_module,
     });
     const run_one_effect_image = b.addRunArtifact(one_effect_image_executable);
     const one_effect_image = run_one_effect_image.captureStdOut(.{
-        .basename = "one-effect.boundary-image",
+        .basename = "one-effect.boundary-program-image",
+    });
+    const one_effect_profile_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_one_effect_profile.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    one_effect_profile_module.addImport(
+        "image_fixture",
+        one_effect_image_module,
+    );
+    const one_effect_profile_executable = b.addExecutable(.{
+        .name = "emit-one-effect-machine-v2-profile",
+        .root_module = one_effect_profile_module,
+    });
+    const run_one_effect_profile = b.addRunArtifact(one_effect_profile_executable);
+    const one_effect_profile = run_one_effect_profile.captureStdOut(.{
+        .basename = "one-effect.machine-v2-profile",
     });
     const portable_values_image_module = b.createModule(.{
         .root_source_file = b.path("test/emit_portable_values_image.zig"),
@@ -1165,14 +1213,33 @@ pub fn build(b: *std.Build) void {
         reification_operations_fixture,
     );
     const portable_values_image_executable = b.addExecutable(.{
-        .name = "emit-portable-values-boundary-image",
+        .name = "emit-portable-values-boundary-program-image",
         .root_module = portable_values_image_module,
     });
     const run_portable_values_image = b.addRunArtifact(
         portable_values_image_executable,
     );
     const portable_values_image = run_portable_values_image.captureStdOut(.{
-        .basename = "portable-values.boundary-image",
+        .basename = "portable-values.boundary-program-image",
+    });
+    const portable_values_profile_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_portable_values_profile.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    portable_values_profile_module.addImport(
+        "operations_fixture",
+        reification_operations_fixture,
+    );
+    const portable_values_profile_executable = b.addExecutable(.{
+        .name = "emit-portable-values-machine-v2-profile",
+        .root_module = portable_values_profile_module,
+    });
+    const run_portable_values_profile = b.addRunArtifact(
+        portable_values_profile_executable,
+    );
+    const portable_values_profile = run_portable_values_profile.captureStdOut(.{
+        .basename = "portable-values.machine-v2-profile",
     });
     const kernel_sha_command = b.addSystemCommand(&.{
         "sh",
@@ -1182,7 +1249,7 @@ pub fn build(b: *std.Build) void {
     });
     kernel_sha_command.addFileArg(kernel_wasm_executable.getEmittedBin());
     const kernel_sha = kernel_sha_command.captureStdOut(.{
-        .basename = "boundary-kernel-v1.wasm.sha256",
+        .basename = "boundary-machine-v2-kernel-v1.wasm.sha256",
     });
     const one_effect_sha_command = b.addSystemCommand(&.{
         "sh",
@@ -1192,7 +1259,7 @@ pub fn build(b: *std.Build) void {
     });
     one_effect_sha_command.addFileArg(one_effect_image);
     const one_effect_sha = one_effect_sha_command.captureStdOut(.{
-        .basename = "one-effect.boundary-image.sha256",
+        .basename = "one-effect.boundary-program-image.sha256",
     });
     const portable_values_sha_command = b.addSystemCommand(&.{
         "sh",
@@ -1202,7 +1269,27 @@ pub fn build(b: *std.Build) void {
     });
     portable_values_sha_command.addFileArg(portable_values_image);
     const portable_values_sha = portable_values_sha_command.captureStdOut(.{
-        .basename = "portable-values.boundary-image.sha256",
+        .basename = "portable-values.boundary-program-image.sha256",
+    });
+    const one_effect_profile_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    one_effect_profile_sha_command.addFileArg(one_effect_profile);
+    const one_effect_profile_sha = one_effect_profile_sha_command.captureStdOut(.{
+        .basename = "one-effect.machine-v2-profile.sha256",
+    });
+    const portable_values_profile_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    portable_values_profile_sha_command.addFileArg(portable_values_profile);
+    const portable_values_profile_sha = portable_values_profile_sha_command.captureStdOut(.{
+        .basename = "portable-values.machine-v2-profile.sha256",
     });
     const reification_asset_receipt_command = b.addSystemCommand(&.{
         "node",
@@ -1213,6 +1300,8 @@ pub fn build(b: *std.Build) void {
     );
     reification_asset_receipt_command.addFileArg(one_effect_image);
     reification_asset_receipt_command.addFileArg(portable_values_image);
+    reification_asset_receipt_command.addFileArg(one_effect_profile);
+    reification_asset_receipt_command.addFileArg(portable_values_profile);
     reification_asset_receipt_command.addFileArg(
         b.path("test/reification_generated_v1.zig"),
     );
@@ -1231,32 +1320,52 @@ pub fn build(b: *std.Build) void {
     const install_kernel = b.addInstallFileWithDir(
         kernel_wasm_executable.getEmittedBin(),
         .prefix,
-        "boundary-kernel-v1.wasm",
+        "boundary-machine-v2-kernel-v1.wasm",
     );
     const install_kernel_sha = b.addInstallFileWithDir(
         kernel_sha,
         .prefix,
-        "boundary-kernel-v1.wasm.sha256",
+        "boundary-machine-v2-kernel-v1.wasm.sha256",
     );
     const install_one_effect = b.addInstallFileWithDir(
         one_effect_image,
         .prefix,
-        "one-effect.boundary-image",
+        "one-effect.boundary-program-image",
     );
     const install_one_effect_sha = b.addInstallFileWithDir(
         one_effect_sha,
         .prefix,
-        "one-effect.boundary-image.sha256",
+        "one-effect.boundary-program-image.sha256",
     );
     const install_portable_values = b.addInstallFileWithDir(
         portable_values_image,
         .prefix,
-        "portable-values.boundary-image",
+        "portable-values.boundary-program-image",
     );
     const install_portable_values_sha = b.addInstallFileWithDir(
         portable_values_sha,
         .prefix,
-        "portable-values.boundary-image.sha256",
+        "portable-values.boundary-program-image.sha256",
+    );
+    const install_one_effect_profile = b.addInstallFileWithDir(
+        one_effect_profile,
+        .prefix,
+        "one-effect.machine-v2-profile",
+    );
+    const install_one_effect_profile_sha = b.addInstallFileWithDir(
+        one_effect_profile_sha,
+        .prefix,
+        "one-effect.machine-v2-profile.sha256",
+    );
+    const install_portable_values_profile = b.addInstallFileWithDir(
+        portable_values_profile,
+        .prefix,
+        "portable-values.machine-v2-profile",
+    );
+    const install_portable_values_profile_sha = b.addInstallFileWithDir(
+        portable_values_profile_sha,
+        .prefix,
+        "portable-values.machine-v2-profile.sha256",
     );
     const install_reification_receipt = b.addInstallFileWithDir(
         reification_receipt_file,
@@ -1265,7 +1374,7 @@ pub fn build(b: *std.Build) void {
     );
     const emit_reification_assets_step = b.step(
         "emit-boundary-reification-assets",
-        "Emit BEI1 examples, fixed kernel, checksums, and receipt.",
+        "Emit BPI1 examples, fixed kernel, checksums, and receipt.",
     );
     inline for (.{
         install_kernel,
@@ -1274,6 +1383,10 @@ pub fn build(b: *std.Build) void {
         install_one_effect_sha,
         install_portable_values,
         install_portable_values_sha,
+        install_one_effect_profile,
+        install_one_effect_profile_sha,
+        install_portable_values_profile,
+        install_portable_values_profile_sha,
         install_reification_receipt,
     }) |installation| emit_reification_assets_step.dependOn(&installation.step);
     const run_kernel_wasm = b.addSystemCommand(&.{"node"});
@@ -1282,7 +1395,7 @@ pub fn build(b: *std.Build) void {
     run_kernel_wasm.addFileArg(kernel_vector_output);
     run_kernel_wasm.addFileArg(kernel_failure_vector_output);
     const kernel_wasm_step = b.step(
-        "check-boundary-kernel-wasm",
+        "check-boundary-machine-v2-kernel-wasm",
         "Check fixed import-free Boundary Kernel WASM ABI and profile.",
     );
     kernel_wasm_step.dependOn(&run_kernel_wasm.step);
@@ -1416,7 +1529,9 @@ pub fn build(b: *std.Build) void {
                 "source_module kernel_machine_v1 image_runtime_semantics src/kernel_machine_v1.zig\n" ++
                 "source_module kernel_wasm_v1 image_runtime_semantics src/kernel_wasm_v1.zig\n" ++
                 "source_module machine {s} {s}\n" ++
+                "source_module machine_v2_profile_v1 image_runtime_semantics src/machine_v2_profile_v1.zig\n" ++
                 "source_module portable_value {s} {s}\n" ++
+                "source_module program_evaluator_v1 image_runtime_semantics src/program_evaluator_v1.zig\n" ++
                 "source_module program_v2 {s} {s}\n" ++
                 "source_module reified_program_v1 {s} {s}\n" ++
                 "source_module reducer_semantics_v1 {s} {s}\n" ++
@@ -1804,30 +1919,46 @@ pub fn build(b: *std.Build) void {
 
     const image_canonical_step = b.step(
         "check-boundary-image-canonical",
-        "Check canonical BEI1 emission, validation, and exact re-encoding.",
+        "Check canonical BPI1 emission, validation, and exact re-encoding.",
     );
     image_canonical_step.dependOn(image_step);
     image_canonical_step.dependOn(reified_core_step);
+    const image_profile_invariance_step = b.step(
+        "check-boundary-image-profile-invariance",
+        "Prove BPI1 bytes ignore Machine v2 profiles and metering annotations.",
+    );
+    image_profile_invariance_step.dependOn(reified_core_step);
+    const pure_evaluator_surface_guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "if rg -n 'machine\\.zig|MachineOptions|caller_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded' src/image_v1.zig src/image_emit_v1.zig src/reified_program_v1.zig src/program_evaluator_v1.zig; then exit 1; fi",
+    });
+    const pure_evaluator_step = b.step(
+        "check-boundary-pure-evaluator",
+        "Check one finite BPI1 reducer clause without Machine v2 policy.",
+    );
+    pure_evaluator_step.dependOn(reified_core_step);
+    pure_evaluator_step.dependOn(&pure_evaluator_surface_guard.step);
     const image_malformed_step = b.step(
         "check-boundary-image-malformed",
-        "Reject deterministic malformed BEI1 and ABL_RNF2 corpora.",
+        "Reject deterministic malformed BPI1 and ABL_RNF2 corpora.",
     );
     image_malformed_step.dependOn(reified_core_step);
     image_malformed_step.dependOn(malformed_step);
     const image_digest_step = b.step(
         "check-boundary-image-digest",
-        "Reconstruct Program, Machine, schema, and effect digests from BEI1.",
+        "Reconstruct Program, Machine, schema, and effect digests from BPI1.",
     );
     image_digest_step.dependOn(reified_core_step);
     const kernel_native_step = b.step(
-        "check-boundary-kernel-native",
+        "check-boundary-machine-v2-kernel-native",
         "Check fixed native kernel execution across the admitted algebra.",
     );
     kernel_native_step.dependOn(reified_core_step);
     kernel_native_step.dependOn(values_step);
     kernel_native_step.dependOn(recursion_step);
     const kernel_machine_step = b.step(
-        "check-boundary-kernel-machine",
+        "check-boundary-machine-v2-kernel-adapter",
         "Check typed KernelMachine ABI and ownership parity.",
     );
     kernel_machine_step.dependOn(reified_core_step);
@@ -1863,8 +1994,10 @@ pub fn build(b: *std.Build) void {
     );
     inline for (.{
         image_canonical_step,
+        image_profile_invariance_step,
         image_malformed_step,
         image_digest_step,
+        pure_evaluator_step,
         specialization_equivalence_step,
         engine_switch_step,
         reification_generated_step,

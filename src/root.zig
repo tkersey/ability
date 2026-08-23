@@ -5,7 +5,9 @@ const effect_v2 = @import("effect_v2");
 const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
+const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const portable_value = @import("portable_value");
+const program_evaluator_v1 = @import("program_evaluator_v1");
 const program_v2 = @import("program_v2");
 
 /// Published Boundary package identity.
@@ -13,10 +15,16 @@ pub const package_version = "1.6.0";
 
 /// Public typed residual-effect authoring namespace.
 pub const effect = effect_v2;
-/// Canonical Boundary Executable Image v1 wire format and validation.
+/// Canonical Boundary Program Image v1 wire format and validation.
 pub const image = image_v1;
-/// Fixed image-neutral Boundary Kernel v1.
-pub const kernel = kernel_v1;
+/// One finite profile-independent BPI1 reducer-clause evaluator.
+pub const evaluator = program_evaluator_v1;
+/// Bounded Machine ABI v2 compatibility surfaces.
+pub const machine_v2 = struct {
+    pub const Options = machine.Options;
+    pub const profile = machine_v2_profile_v1;
+    pub const kernel = kernel_v1;
+};
 /// Public canonical portable-value and codec namespace.
 pub const schema = portable_value;
 /// Advanced typed source/control authoring namespace.
@@ -44,7 +52,9 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(@hasDecl(@This(), "Agent"));
     try std.testing.expect(@hasDecl(@This(), "effect"));
     try std.testing.expect(@hasDecl(@This(), "image"));
-    try std.testing.expect(@hasDecl(@This(), "kernel"));
+    try std.testing.expect(@hasDecl(@This(), "evaluator"));
+    try std.testing.expect(@hasDecl(@This(), "machine_v2"));
+    try std.testing.expect(!@hasDecl(@This(), "kernel"));
     try std.testing.expect(@hasDecl(@This(), "schema"));
     try std.testing.expect(@hasDecl(@This(), "ir"));
     try std.testing.expect(!@hasDecl(@This(), "Runtime"));

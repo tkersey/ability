@@ -39,11 +39,8 @@ const Body = struct {
         .result_type = u32_type,
     };
 };
-const Image = boundary.program("one-effect-image", Body).image(.{
-    .maximum_frames = 4,
-    .maximum_state_bytes = 4096,
-    .maximum_machine_fuel = 32,
-});
+pub const Program = boundary.program("one-effect-image", Body);
+const Image = Program.image();
 
 pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;

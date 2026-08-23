@@ -89,7 +89,7 @@ pub const SchemaHashTask = union(enum) {
     u64_value: u64,
 };
 
-/// Validate one complete BEI1 schema-section payload into caller-owned index
+/// Validate one complete BPI1 schema-section payload into caller-owned index
 /// storage. Children must precede parents, making the structural DAG finite.
 pub fn validateSchemaSection(
     bytes: []const u8,

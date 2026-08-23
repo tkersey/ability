@@ -54,8 +54,9 @@ const options: boundary.MachineOptions = .{
     .maximum_machine_fuel = 32,
 };
 const Machine = Program.compile(options);
-const KernelMachine = Program.kernelMachine(options);
-const Image = Program.image(options);
+const KernelMachine = Program.kernelMachineV2(options);
+const Image = Program.image();
+const Profile = Program.machineV2Profile(options);
 const Reducer = fn (Machine.State, *u64) Machine.Error!Machine.Outcome;
 
 fn reducerDeclarationCount(comptime Owner: type) comptime_int {
@@ -92,9 +93,12 @@ comptime {
         @compileError("compiled Boundary Machine exposes more than one ABI-shaped reducer");
     }
     if (!@hasDecl(Program, "compile") or
+        !@hasDecl(Program, "compileV2") or
         !@hasDecl(Program, "image") or
-        !@hasDecl(Program, "kernelMachine") or
-        functionDeclarationCount(Program) != 3)
+        !@hasDecl(Program, "machineV2Profile") or
+        !@hasDecl(Program, "kernelMachineV2") or
+        @hasDecl(Program, "kernelMachine") or
+        functionDeclarationCount(Program) != 5)
     {
         @compileError("Boundary Program exposes a competing compilation route");
     }
@@ -119,9 +123,13 @@ comptime {
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
     var image_workspace: boundary.image.ValidationWorkspace = .{};
-    const image = try boundary.image.validateImage(
+    const program_image = try boundary.image.validateImage(
         &Image.bytes,
         &image_workspace,
+    );
+    const image = try boundary.machine_v2.kernel.bindMachineV2(
+        program_image,
+        &Profile.bytes,
     );
     var tail_malformed_image = Image.bytes;
     const tail_malformed_envelope = try boundary.image.validateEnvelope(
@@ -167,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
     var kernel_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &kernel_args, 21, .little);
     var kernel_initial: [4096]u8 = undefined;
-    const kernel_initial_length = try boundary.kernel.initial(
+    const kernel_initial_length = try boundary.machine_v2.kernel.initial(
         image,
         &kernel_args,
         &kernel_initial,
@@ -177,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
     var kernel_state: [4096]u8 = undefined;
     var kernel_payload: [4]u8 = undefined;
     var kernel_scratch: [12 * 1024]u8 = undefined;
-    const kernel_request = switch (try boundary.kernel.step(
+    const kernel_request = switch (try boundary.machine_v2.kernel.step(
         image,
         kernel_initial[0..kernel_initial_length],
         &kernel_fuel,
@@ -206,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
     malformed_resume_workspace.invariant_result = &malformed_resume_scratch;
     try std.testing.expectError(
         error.InvalidState,
-        boundary.kernel.@"resume"(
+        boundary.machine_v2.kernel.@"resume"(
             image,
             malformed_parked[0..kernel_request.state.len],
             kernel_request.identity,
@@ -352,7 +360,7 @@ pub fn main(init: std.process.Init) !void {
             stale_identity.sequence += 1;
             try std.testing.expectError(
                 error.InvalidState,
-                boundary.kernel.@"resume"(
+                boundary.machine_v2.kernel.@"resume"(
                     image,
                     kernel_request.state,
                     stale_identity,
@@ -362,7 +370,7 @@ pub fn main(init: std.process.Init) !void {
                 ),
             );
             try std.testing.expectEqual(@as(u8, 0xa5), kernel_resumed[0]);
-            const kernel_resumed_length = try boundary.kernel.@"resume"(
+            const kernel_resumed_length = try boundary.machine_v2.kernel.@"resume"(
                 image,
                 kernel_request.state,
                 kernel_request.identity,
@@ -384,7 +392,7 @@ pub fn main(init: std.process.Init) !void {
             };
             defer direct_done.deinit();
             var kernel_terminal_state: [4096]u8 = undefined;
-            const kernel_done = switch (try boundary.kernel.step(
+            const kernel_done = switch (try boundary.machine_v2.kernel.step(
                 image,
                 kernel_resumed[0..kernel_resumed_length],
                 &kernel_fuel,

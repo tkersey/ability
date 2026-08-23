@@ -1,13 +1,14 @@
-# Boundary Executable Image v1
+# Boundary Program Image v1
 
-BEI1 is the canonical, target-neutral serialization of one Reified Program and
-one Machine execution envelope. Executable truth is owned by
+BPI1 is the canonical, target-neutral serialization of one Reified Program.
+Executable truth is owned by
 `src/image_v1.zig`, `src/image_emit_v1.zig`, and the conformance vectors.
 
-The fixed header is 144 bytes. It contains `ABL_BEI1`, image version 1, Machine
-ABI 2, State format 1, kernel semantics 1, exact total length, existing Program
-and Machine digests, Machine limits, and derived scratch/value maxima. A
-240-byte directory follows.
+The fixed header is 144 bytes. It contains `ABL_BPI1`, image version 1,
+program-evaluator semantics version 1, exact total length,
+`program_transition_digest`, and derived schema/evaluator scratch maxima. Bytes
+reserved from the unreleased predecessor are canonical zero. A 240-byte
+directory follows.
 
 Exactly ten contiguous sections occur in this order:
 
@@ -27,7 +28,13 @@ zero; there is no padding or trailing data. Schemas are structurally interned
 in depth-first postorder. Constants are interned by schema and canonical bytes.
 All program identities are dense semantic identities, not source ordinals.
 
+Segment records reserve their former cost word as zero. Synthetic caller-fuel
+suspensions are normalized to semantic edges; explicit authored yields remain.
+
 Validation checks the complete structure, dynamic values, graph references,
-constructor laws, effect/schema/Program/Machine digests, scratch requirements,
+constructor laws, effect/schema/program-transition digests, scratch requirements,
 and exact canonical re-encoding before execution. Image validity never grants
 effect authority.
+
+BPI1 contains no Machine ABI, State-format binding, Machine contract digest,
+fuel law, segment cost, frame limit, State-byte limit, or lifetime budget.

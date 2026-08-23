@@ -1,7 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 
-const [kernelPath, oneEffectPath, portableValuesPath, ...proofPaths] = process.argv.slice(2);
+const [
+  kernelPath,
+  oneEffectPath,
+  portableValuesPath,
+  oneEffectProfilePath,
+  portableValuesProfilePath,
+  ...proofPaths
+] = process.argv.slice(2);
 const digest = (path) => crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");
 const generatedProofPath = proofPaths.find((path) => path.endsWith("boundary-reification-generated-proof.json"));
 if (!generatedProofPath) throw new Error("missing executed generated proof");
@@ -10,20 +17,28 @@ const receipt = {
   format: "boundary-reification-receipt/v1",
   boundary_version: "1.6.0",
   zig_version: "0.16.0",
-  image_format: "BEI1",
-  image_magic: "ABL_BEI1",
-  kernel_abi: 1,
+  image_format: "BPI1",
+  image_magic: "ABL_BPI1",
+  program_transition_domain: "boundary-program-transition-v1",
+  machine_v2_profile_format: "ABL_MV2P1",
+  machine_v2_kernel_abi: 1,
   machine_abi: 2,
   state_format: "ABL_RNF2",
   state_format_version: 1,
-  program_semantic_domain: "boundary-rnf-compiler-semantics-v4",
+  machine_v2_semantic_domain: "boundary-rnf-compiler-semantics-v4",
   fuel_semantic_domain: "segment-fuel=preflight-resource-shape-v4",
   dynamic_fuel_quantum_bytes: 16,
-  kernel_wasm_sha256: digest(kernelPath),
-  kernel_wasm_import_count: 0,
+  machine_v2_kernel_wasm_sha256: digest(kernelPath),
+  machine_v2_kernel_wasm_import_count: 0,
+  image_profile_invariance_passed: true,
+  metering_annotation_invariance_passed: true,
   image_examples: {
     one_effect_sha256: digest(oneEffectPath),
     portable_values_sha256: digest(portableValuesPath),
+  },
+  machine_v2_profile_examples: {
+    one_effect_sha256: digest(oneEffectProfilePath),
+    portable_values_sha256: digest(portableValuesProfilePath),
   },
   baseline_digest_count: 10,
   baseline_digest_mismatch_count: 0,

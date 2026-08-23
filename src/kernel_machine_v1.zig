@@ -7,6 +7,7 @@ const std = @import("std");
 pub fn Machine(
     comptime Definition: type,
     comptime Image: type,
+    comptime Profile: type,
     comptime options: machine.Options,
 ) type {
     const Direct = machine.Machine(Definition, options);
@@ -80,6 +81,15 @@ pub fn Machine(
             failed: Failure,
         };
 
+        fn validatedProgram(
+            workspace: *image_v1.ValidationWorkspace,
+        ) Error!kernel_v1.BoundProgram {
+            const image = image_v1.validateImage(&Image.bytes, workspace) catch
+                return error.ProgramContractViolation;
+            return kernel_v1.bindMachineV2(image, &Profile.bytes) catch
+                return error.ProgramContractViolation;
+        }
+
         const PreparedResumeValue = struct {
             allocator: std.mem.Allocator,
             state: State,
@@ -108,8 +118,7 @@ pub fn Machine(
             errdefer destroyState(state);
             var workspace: image_v1.ValidationWorkspace = .{};
             workspace.invariant_result = state.request_storage;
-            const image = image_v1.validateImage(&Image.bytes, &workspace) catch
-                return error.ProgramContractViolation;
+            const image = try validatedProgram(&workspace);
             state.length = kernel_v1.initial(
                 image,
                 args_storage[0..args_length],
@@ -146,8 +155,7 @@ pub fn Machine(
             if (value.terminal) return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
             workspace.invariant_result = value.request_storage;
-            const image = image_v1.validateImage(&Image.bytes, &workspace) catch
-                return error.ProgramContractViolation;
+            const image = try validatedProgram(&workspace);
             kernel_v1.validateState(
                 image,
                 value.storage[0..value.length],
@@ -188,8 +196,7 @@ pub fn Machine(
             try validateState(state);
             var workspace: image_v1.ValidationWorkspace = .{};
             workspace.invariant_result = value.request_storage;
-            const image = image_v1.validateImage(&Image.bytes, &workspace) catch
-                return error.ProgramContractViolation;
+            const image = try validatedProgram(&workspace);
             const maybe_request = kernel_v1.current(
                 image,
                 value.storage[0..value.length],
@@ -208,8 +215,7 @@ pub fn Machine(
             const original_caller_fuel = caller_fuel.*;
             errdefer caller_fuel.* = original_caller_fuel;
             var workspace: image_v1.ValidationWorkspace = .{};
-            const image = image_v1.validateImage(&Image.bytes, &workspace) catch
-                return error.ProgramContractViolation;
+            const image = try validatedProgram(&workspace);
             const candidate = value.allocator.alloc(
                 u8,
                 options.maximum_state_bytes,
@@ -296,8 +302,7 @@ pub fn Machine(
             if (!requestEql(expected, request)) return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
             workspace.invariant_result = value.request_storage;
-            const image = image_v1.validateImage(&Image.bytes, &workspace) catch
-                return error.ProgramContractViolation;
+            const image = try validatedProgram(&workspace);
             const maximum_resume_state = kernel_v1.maximumResumeStateSize(
                 image,
                 value.storage[0..value.length],
@@ -356,8 +361,7 @@ pub fn Machine(
             ) catch return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
             workspace.invariant_result = state.request_storage;
-            const image = image_v1.validateImage(&Image.bytes, &workspace) catch
-                return error.ProgramContractViolation;
+            const image = try validatedProgram(&workspace);
             const next_length = kernel_v1.@"resume"(
                 image,
                 state.storage[0..state.length],

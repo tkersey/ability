@@ -8,17 +8,63 @@ const maximum_nodes = 1024;
 const maximum_bytes = 1 << 20;
 const maximum_image_bytes = 16 << 20;
 
+fn hasDeclSafe(comptime T: type, comptime name: []const u8) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, name),
+        else => false,
+    };
+}
+
+fn residualSite(comptime Reified: type, comptime ordinal: usize) type {
+    const source = Reified.residual_effects.residual_to_source[ordinal];
+    if (hasDeclSafe(Reified.Body, "effect_morphisms")) {
+        inline for (Reified.Body.effect_morphisms) |Morphism| {
+            if (Morphism.source_id == source) return Morphism.Target;
+        }
+    }
+    return Reified.Body.effect_sites[source];
+}
+
+fn hashBytes(hasher: anytype, bytes: []const u8) void {
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, bytes.len, .little);
+    hasher.update(&length);
+    hasher.update(bytes);
+}
+
+fn effectDigest(
+    comptime Site: type,
+    comptime ordinal: ?usize,
+) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashBytes(
+        &hasher,
+        if (ordinal == null)
+            "boundary-effect-site-semantic-contract-v1"
+        else
+            "boundary-effect-site-contract-v1",
+    );
+    if (ordinal) |value| {
+        var encoded: [4]u8 = undefined;
+        std.mem.writeInt(u32, &encoded, value, .little);
+        hasher.update(&encoded);
+    }
+    hashBytes(&hasher, Site.semantic_identity);
+    hasher.update(&portable_value.schemaDigest(Site.Payload));
+    hasher.update(&portable_value.schemaDigest(Site.Resume));
+    hashBytes(&hasher, "single-resume");
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
 pub const EnvelopeOptions = struct {
-    program_semantic_digest: [32]u8,
-    machine_contract_digest: [32]u8,
-    maximum_frames: u32,
-    maximum_state_bytes: u32,
-    maximum_machine_fuel: u64,
+    program_transition_digest: [32]u8,
     maximum_kernel_scratch_bytes: u64,
     maximum_single_value_bytes: u32,
 };
 
-/// Compose ten canonical section payloads into the exact BEI1 container.
+/// Compose ten canonical section payloads into the exact BPI1 container.
 pub fn Envelope(
     comptime options: EnvelopeOptions,
     comptime sections: [image_v1.section_count][]const u8,
@@ -27,7 +73,7 @@ pub fn Envelope(
         var total: usize = image_v1.header_length;
         for (sections) |section| total += section.len;
         if (total > maximum_image_bytes) {
-            @compileError("BEI1 image exceeds the default 16 MiB profile");
+            @compileError("BPI1 image exceeds the default 16 MiB profile");
         }
         break :blk total;
     };
@@ -35,17 +81,11 @@ pub fn Envelope(
         var bytes: [total_length]u8 = [_]u8{0} ** total_length;
         @memcpy(bytes[0..image_v1.magic.len], &image_v1.magic);
         writeAt(u16, &bytes, 8, image_v1.image_format_version);
-        writeAt(u16, &bytes, 10, image_v1.machine_abi_version);
-        writeAt(u16, &bytes, 12, image_v1.state_format_version);
-        writeAt(u16, &bytes, 14, image_v1.kernel_semantics_version);
+        writeAt(u16, &bytes, 10, image_v1.evaluator_semantics_version);
         writeAt(u32, &bytes, 20, image_v1.header_length);
         writeAt(u64, &bytes, 24, total_length);
         writeAt(u32, &bytes, 32, image_v1.section_count);
-        @memcpy(bytes[40..72], &options.program_semantic_digest);
-        @memcpy(bytes[72..104], &options.machine_contract_digest);
-        writeAt(u32, &bytes, 104, options.maximum_frames);
-        writeAt(u32, &bytes, 108, options.maximum_state_bytes);
-        writeAt(u64, &bytes, 112, options.maximum_machine_fuel);
+        @memcpy(bytes[40..72], &options.program_transition_digest);
         writeAt(u64, &bytes, 120, options.maximum_kernel_scratch_bytes);
         writeAt(u32, &bytes, 128, options.maximum_single_value_bytes);
         var payload_offset: usize = image_v1.header_length;
@@ -182,7 +222,7 @@ const Builder = struct {
             }
         }
         if (self.node_count == maximum_nodes) {
-            @compileError("BEI1 schema node count exceeds implementation limit");
+            @compileError("BPI1 schema node count exceeds implementation limit");
         }
         self.offsets[self.node_count] = @intCast(start);
         self.lengths[self.node_count] = @intCast(record_length);
@@ -212,7 +252,7 @@ const Builder = struct {
 
     fn requireBytes(self: Builder, additional: usize) void {
         if (additional > maximum_bytes - self.length) {
-            @compileError("BEI1 schema section exceeds implementation limit");
+            @compileError("BPI1 schema section exceeds implementation limit");
         }
     }
 };
@@ -237,10 +277,10 @@ pub fn SchemaSet(comptime RootTypes: anytype) type {
     };
 }
 
-/// Emit all schemas in the normative BEI1 root traversal order for one
-/// Reified Program and its shared direct definition contract.
-pub fn ProgramSchemaSet(comptime Reified: type, comptime Definition: type) type {
-    const effect_count = Definition.EffectRow.operation_site_count;
+/// Emit all schemas in the normative BPI1 root traversal order for one
+/// Reified Program.
+pub fn ProgramSchemaSet(comptime Reified: type) type {
+    const effect_count = Reified.residual_effects.residual_count;
     const value_count = Reified.semantic_canonicalization.value_count;
     const function_count = Reified.semantic_canonicalization.function_count;
     const root_count = 3 + effect_count * 2 + value_count + function_count;
@@ -254,7 +294,7 @@ pub fn ProgramSchemaSet(comptime Reified: type, comptime Definition: type) type 
         result[index] = Reified.Body.Failure;
         index += 1;
         for (0..effect_count) |ordinal| {
-            const Site = Definition.EffectRow.site(ordinal);
+            const Site = residualSite(Reified, ordinal);
             result[index] = Site.Payload;
             index += 1;
             result[index] = Site.Resume;
@@ -311,21 +351,19 @@ pub fn ProgramSchemaSet(comptime Reified: type, comptime Definition: type) type 
                     return root_ids[value_root_start + dense_value];
                 }
             }
-            @compileError("BEI1 schema roots omit a reachable value type");
+            @compileError("BPI1 schema roots omit a reachable value type");
         }
     };
 }
 
 pub fn ProgramImage(
     comptime Reified: type,
-    comptime Definition: type,
-    comptime Machine: type,
 ) type {
-    const Schemas = ProgramSchemaSet(Reified, Definition);
+    const Schemas = ProgramSchemaSet(Reified);
     const Roots = ProgramRoots(Reified, Schemas);
     const Failures = ProgramFailures(Reified);
     const Constants = ProgramConstants(Reified, Schemas);
-    const Effects = ProgramEffects(Definition, Schemas);
+    const Effects = ProgramEffects(Reified, Schemas);
     const Values = ProgramValues(Reified, Schemas);
     const Functions = ProgramFunctions(Reified, Schemas);
     const Segments = ProgramSegments(Reified, Schemas, Constants);
@@ -345,11 +383,7 @@ pub fn ProgramImage(
     };
     const scratch = comptime conservativeKernelScratch(Reified, Schemas);
     const Encoded = Envelope(.{
-        .program_semantic_digest = Reified.semantic_digest,
-        .machine_contract_digest = Machine.Manifest.machine_contract_digest,
-        .maximum_frames = castU32(Machine.Manifest.maximum_frames),
-        .maximum_state_bytes = castU32(Machine.Manifest.maximum_state_bytes),
-        .maximum_machine_fuel = Machine.Manifest.maximum_machine_fuel,
+        .program_transition_digest = Reified.program_transition_digest,
         .maximum_kernel_scratch_bytes = scratch,
         .maximum_single_value_bytes = Schemas.maximum_single_value_bytes,
     }, sections);
@@ -357,12 +391,11 @@ pub fn ProgramImage(
         pub const format_version = image_v1.image_format_version;
         pub const bytes = Encoded.bytes;
         pub const byte_length = Encoded.byte_length;
-        pub const program_semantic_digest = Reified.semantic_digest;
-        pub const machine_contract_digest = Machine.Manifest.machine_contract_digest;
+        pub const program_transition_digest =
+            Reified.program_transition_digest;
         pub const artifact_sha256 = Encoded.artifact_sha256;
         pub const maximum_kernel_scratch_bytes = scratch;
         pub const maximum_single_value_bytes = Schemas.maximum_single_value_bytes;
-        pub const Manifest = Machine.Manifest;
     };
 }
 
@@ -378,28 +411,28 @@ fn conservativeKernelScratch(comptime Reified: type, comptime Schemas: type) u64
             u64,
             value_bytes,
             portable_value.maximumEncodedSize(Value),
-        ) catch @compileError("BEI1 scratch requirement overflows u64");
+        ) catch @compileError("BPI1 scratch requirement overflows u64");
     }
     const value_metadata = std.math.mul(
         u64,
         Reified.semantic_canonicalization.value_count,
         16,
-    ) catch @compileError("BEI1 scratch requirement overflows u64");
+    ) catch @compileError("BPI1 scratch requirement overflows u64");
     const schema_stack = std.math.mul(u64, Schemas.node_count, 16) catch
-        @compileError("BEI1 scratch requirement overflows u64");
+        @compileError("BPI1 scratch requirement overflows u64");
     const framing = std.math.add(
         u64,
         std.math.mul(
             u64,
             Schemas.maximum_single_value_bytes,
             3,
-        ) catch @compileError("BEI1 scratch requirement overflows u64"),
+        ) catch @compileError("BPI1 scratch requirement overflows u64"),
         176,
-    ) catch @compileError("BEI1 scratch requirement overflows u64");
+    ) catch @compileError("BPI1 scratch requirement overflows u64");
     return value_bytes +| value_metadata +| schema_stack +| framing;
 }
 
-/// Emit the exact BEI1 roots section for one Reified Program.
+/// Emit the exact BPI1 roots section for one Reified Program.
 pub fn ProgramRoots(comptime Reified: type, comptime Schemas: type) type {
     const entry = Reified.control.blocks[Reified.control.entry];
     const encoded = comptime blk: {
@@ -476,14 +509,14 @@ pub fn ProgramFailures(comptime Reified: type) type {
 }
 
 pub fn ProgramEffects(
-    comptime Definition: type,
+    comptime Reified: type,
     comptime Schemas: type,
 ) type {
-    const count = Definition.EffectRow.operation_site_count;
+    const count = Reified.residual_effects.residual_count;
     const length = comptime blk: {
         var total: usize = 4;
         for (0..count) |ordinal| {
-            total += 84 + Definition.EffectRow.site(ordinal).semantic_identity.len;
+            total += 84 + residualSite(Reified, ordinal).semantic_identity.len;
         }
         break :blk total;
     };
@@ -492,7 +525,7 @@ pub fn ProgramEffects(
         writeAt(u32, &bytes, 0, count);
         var cursor: usize = 4;
         for (0..count) |ordinal| {
-            const Site = Definition.EffectRow.site(ordinal);
+            const Site = residualSite(Reified, ordinal);
             writeAt(u32, &bytes, cursor, ordinal);
             cursor += 4;
             writeAt(u32, &bytes, cursor, Site.semantic_identity.len);
@@ -518,9 +551,15 @@ pub fn ProgramEffects(
             cursor += 4;
             bytes[cursor] = 0;
             cursor += 4;
-            @memcpy(bytes[cursor..][0..32], &Site.semantic_contract_digest);
+            @memcpy(
+                bytes[cursor..][0..32],
+                &effectDigest(Site, null),
+            );
             cursor += 32;
-            @memcpy(bytes[cursor..][0..32], &Site.contract_digest);
+            @memcpy(
+                bytes[cursor..][0..32],
+                &effectDigest(Site, ordinal),
+            );
             cursor += 32;
         }
         break :blk bytes;
@@ -593,7 +632,7 @@ pub fn ProgramConstants(comptime Reified: type, comptime Schemas: type) type {
                     continue;
                 }
                 if (cursor + 8 + value_length > bytes.len) {
-                    @compileError("BEI1 constants exceed implementation limit");
+                    @compileError("BPI1 constants exceed implementation limit");
                 }
                 writeAt(u32, &bytes, cursor, schema_id);
                 cursor += 4;
@@ -720,7 +759,7 @@ pub fn ProgramSegments(
                 u64,
                 &bytes,
                 &cursor,
-                Reified.effective_block_costs[source_block_id],
+                0,
             );
             for (block.parameters) |parameter| {
                 appendInt(
@@ -1351,7 +1390,7 @@ fn appendInt(
     value: anytype,
 ) void {
     if (cursor.* > bytes.len - @sizeOf(T)) {
-        @compileError("BEI1 section exceeds implementation limit");
+        @compileError("BPI1 section exceeds implementation limit");
     }
     writeAt(T, bytes, cursor.*, value);
     cursor.* += @sizeOf(T);
@@ -1457,7 +1496,7 @@ test "typed canonical encoding validates through emitted dynamic schemas" {
     );
 }
 
-test "BEI1 envelope composition is exact and digest-bound" {
+test "BPI1 envelope composition is exact and digest-bound" {
     const Schemas = SchemaSet(.{u32});
     const empty = "";
     const sections = [image_v1.section_count][]const u8{
@@ -1473,11 +1512,7 @@ test "BEI1 envelope composition is exact and digest-bound" {
         empty,
     };
     const Image = Envelope(.{
-        .program_semantic_digest = [_]u8{1} ** 32,
-        .machine_contract_digest = [_]u8{2} ** 32,
-        .maximum_frames = 8,
-        .maximum_state_bytes = 4096,
-        .maximum_machine_fuel = 1000,
+        .program_transition_digest = [_]u8{1} ** 32,
         .maximum_kernel_scratch_bytes = 512,
         .maximum_single_value_bytes = 4,
     }, sections);

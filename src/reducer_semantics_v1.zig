@@ -65,7 +65,7 @@ pub const WireConstructorKind = enum(u8) {
     await_effect = 3,
     call_return = 4,
     after_handler = 5,
-    caller_fuel_yield = 6,
+    explicit_yield = 6,
     terminal_handoff = 7,
 };
 
@@ -138,7 +138,7 @@ pub fn wireConstructorKind(kind: rnf.ConstructorKind) WireConstructorKind {
         .await_effect => .await_effect,
         .call_return => .call_return,
         .after_handler => .after_handler,
-        .caller_fuel_yield => .caller_fuel_yield,
+        .caller_fuel_yield => .explicit_yield,
         .terminal_handoff => .terminal_handoff,
     };
 }
@@ -228,7 +228,7 @@ pub const WireOperation = enum(u16) {
     enum_to_u32 = 57,
 };
 
-/// Canonical fixed arity for BEI1 operation tags. Product and sum
+/// Canonical fixed arity for BPI1 operation tags. Product and sum
 /// construction derive their arity from the result schema.
 pub fn fixedOperandCount(operation: WireOperation) ?u16 {
     return switch (operation) {
@@ -374,7 +374,7 @@ pub fn currentSemanticTag(
     return @intCast(@intFromEnum(std.meta.activeTag(operation)));
 }
 
-/// Map a BEI1 operation tag back to the frozen current-v4 semantic tag.
+/// Map a BPI1 operation tag back to the frozen current-v4 semantic tag.
 pub fn currentSemanticTagForWire(operation: WireOperation) u8 {
     return @intCast(@intFromEnum(operation) + 1);
 }

@@ -9,7 +9,7 @@ const state_capacity = 4 << 20;
 const value_capacity = 2 << 20;
 const scratch_capacity = 68 << 20;
 const error_capacity = 4 << 10;
-const input_header_length = 40;
+const input_header_length = 48;
 const output_header_length = 40;
 
 var input_storage: [input_capacity]u8 align(16) = undefined;
@@ -22,35 +22,35 @@ var validation_workspace: image_v1.ValidationWorkspace = .{};
 var output_length: u32 = 0;
 var error_length: u32 = 0;
 
-pub export fn boundary_kernel_abi_version() u32 {
+pub export fn boundary_machine_v2_kernel_abi_version() u32 {
     return abi_version;
 }
 
-pub export fn boundary_kernel_input_ptr() u32 {
+pub export fn boundary_machine_v2_kernel_input_ptr() u32 {
     return @intCast(@intFromPtr(&input_storage));
 }
 
-pub export fn boundary_kernel_input_capacity() u32 {
+pub export fn boundary_machine_v2_kernel_input_capacity() u32 {
     return input_capacity;
 }
 
-pub export fn boundary_kernel_output_ptr() u32 {
+pub export fn boundary_machine_v2_kernel_output_ptr() u32 {
     return @intCast(@intFromPtr(&output_storage));
 }
 
-pub export fn boundary_kernel_output_len() u32 {
+pub export fn boundary_machine_v2_kernel_output_len() u32 {
     return output_length;
 }
 
-pub export fn boundary_kernel_error_ptr() u32 {
+pub export fn boundary_machine_v2_kernel_error_ptr() u32 {
     return @intCast(@intFromPtr(&error_storage));
 }
 
-pub export fn boundary_kernel_error_len() u32 {
+pub export fn boundary_machine_v2_kernel_error_len() u32 {
     return error_length;
 }
 
-pub export fn boundary_kernel_execute(input_length: u32) u32 {
+pub export fn boundary_machine_v2_kernel_execute(input_length: u32) u32 {
     output_length = 0;
     error_length = 0;
     if (input_length > input_storage.len) {
@@ -63,7 +63,7 @@ pub export fn boundary_kernel_execute(input_length: u32) u32 {
     };
 }
 
-pub export fn boundary_kernel_reset() u32 {
+pub export fn boundary_machine_v2_kernel_reset() u32 {
     @memset(&input_storage, 0);
     @memset(&output_storage, 0);
     @memset(&state_storage, 0);
@@ -87,16 +87,18 @@ fn execute(input: []const u8) ExecuteError!u32 {
         !std.mem.eql(u8, input[0..8], "ABL_KIN1") or
         readInt(u16, input, 8) != 1 or
         readInt(u32, input, 12) != 0 or
-        readInt(u32, input, 36) != 0)
+        !allZero(input[40..48]))
     {
         return error.MalformedKernelInput;
     }
     const command = readInt(u16, input, 10);
     const caller_fuel = readInt(u64, input, 16);
     const image_length = readInt(u32, input, 24);
-    const state_length = readInt(u32, input, 28);
-    const auxiliary_length = readInt(u32, input, 32);
+    const profile_length = readInt(u32, input, 28);
+    const state_length = readInt(u32, input, 32);
+    const auxiliary_length = readInt(u32, input, 36);
     if (image_length > 16 << 20 or
+        profile_length > 1 << 20 or
         state_length > 4 << 20 or
         auxiliary_length > 2 << 20)
     {
@@ -109,21 +111,27 @@ fn execute(input: []const u8) ExecuteError!u32 {
     ) catch return error.MalformedKernelInput;
     expected = std.math.add(usize, expected, state_length) catch
         return error.MalformedKernelInput;
+    expected = std.math.add(usize, expected, profile_length) catch
+        return error.MalformedKernelInput;
     expected = std.math.add(usize, expected, auxiliary_length) catch
         return error.MalformedKernelInput;
     if (expected != input.len) return error.MalformedKernelInput;
     const image_start = input_header_length;
-    const state_start = std.math.add(usize, image_start, image_length) catch
+    const profile_start = std.math.add(usize, image_start, image_length) catch
+        return error.MalformedKernelInput;
+    const state_start = std.math.add(usize, profile_start, profile_length) catch
         return error.MalformedKernelInput;
     const auxiliary_start = std.math.add(usize, state_start, state_length) catch
         return error.MalformedKernelInput;
-    const image_bytes = input[image_start..state_start];
+    const image_bytes = input[image_start..profile_start];
+    const profile_bytes = input[profile_start..state_start];
     const state_bytes = input[state_start..auxiliary_start];
     const auxiliary = input[auxiliary_start..];
-    const image = try image_v1.validateImage(
+    const program_image = try image_v1.validateImage(
         image_bytes,
         &validation_workspace,
     );
+    const image = try kernel_v1.bindMachineV2(program_image, profile_bytes);
     return switch (command) {
         0 => try writeOutput(command, 0, caller_fuel, &.{}, &.{}, &.{}),
         1 => blk: {
@@ -158,7 +166,7 @@ fn execute(input: []const u8) ExecuteError!u32 {
 }
 
 fn executeCurrent(
-    image: image_v1.ValidatedImage,
+    image: kernel_v1.BoundProgram,
     command: u16,
     caller_fuel: u64,
     state: []const u8,
@@ -182,7 +190,7 @@ fn executeCurrent(
 }
 
 fn executeStep(
-    image: image_v1.ValidatedImage,
+    image: kernel_v1.BoundProgram,
     command: u16,
     fuel: u64,
     state: []const u8,
@@ -249,7 +257,7 @@ fn executeStep(
 }
 
 fn executeResume(
-    image: image_v1.ValidatedImage,
+    image: kernel_v1.BoundProgram,
     command: u16,
     caller_fuel: u64,
     state: []const u8,
@@ -338,9 +346,7 @@ fn errorCode(err: ExecuteError) u32 {
         error.MalformedKernelInput => 1,
         error.InvalidMagic,
         error.UnsupportedImageVersion,
-        error.UnsupportedMachineAbi,
-        error.UnsupportedStateFormat,
-        error.UnsupportedKernelSemantics,
+        error.UnsupportedEvaluatorSemantics,
         error.UnknownFlags,
         error.InvalidHeaderLength,
         error.InvalidSectionCount,
@@ -361,8 +367,7 @@ fn errorCode(err: ExecuteError) u32 {
         error.InvalidInvariant,
         error.InvalidTransition,
         error.UnreachableEntry,
-        error.MachineContractDigestMismatch,
-        error.ProgramSemanticDigestMismatch,
+        error.ProgramTransitionDigestMismatch,
         error.DigestMismatch,
         error.ScratchRequirementMismatch,
         error.DuplicateFailureName,
@@ -396,6 +401,11 @@ fn setError(message: []const u8) void {
 
 fn readInt(comptime T: type, bytes: []const u8, offset: usize) T {
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
+}
+
+fn allZero(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0) return false;
+    return true;
 }
 
 fn writeInt(
