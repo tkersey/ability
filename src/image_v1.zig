@@ -111,6 +111,13 @@ pub const ValidationWorkspace = struct {
     catalog_offsets: [1024]u32 = undefined,
     catalog_lengths: [1024]u32 = undefined,
     constant_used: [1024]bool = undefined,
+    canonical_schema_seen: [1024]bool = undefined,
+    canonical_schema_stack: [2048]SchemaOrderTask = undefined,
+};
+
+pub const SchemaOrderTask = struct {
+    schema_id: u32,
+    expanded: bool,
 };
 
 pub const Catalogs = struct {
@@ -307,10 +314,13 @@ pub fn validateImage(
     workspace: *ValidationWorkspace,
 ) Error!ValidatedImage {
     const catalogs = try validateCatalogs(image, workspace);
+    try validateCanonicalSchemaOrder(catalogs, workspace);
     @memset(workspace.constant_used[0..catalogs.constant_count], false);
+    var next_constant: u32 = 0;
     const segment_count = try validateSegments(
         catalogs,
         &workspace.constant_used,
+        &next_constant,
     );
     for (workspace.constant_used[0..catalogs.constant_count]) |used| {
         if (!used) return error.InvalidConstant;
@@ -342,6 +352,179 @@ pub fn validateImage(
         .segment_count = segment_count,
         .constructor_count = constructor_count,
     };
+}
+
+fn validateCanonicalSchemaOrder(
+    catalogs: Catalogs,
+    workspace: *ValidationWorkspace,
+) Error!void {
+    @memset(
+        workspace.canonical_schema_seen[0..catalogs.schemas.count()],
+        false,
+    );
+    var next_schema: u32 = 0;
+    try visitCanonicalSchema(
+        catalogs.schemas,
+        catalogs.initial_args_schema_id,
+        workspace,
+        &next_schema,
+    );
+    try visitCanonicalSchema(
+        catalogs.schemas,
+        catalogs.result_schema_id,
+        workspace,
+        &next_schema,
+    );
+    try visitCanonicalSchema(
+        catalogs.schemas,
+        catalogs.failure_schema_id,
+        workspace,
+        &next_schema,
+    );
+
+    const effects = catalogs.envelope.section(.effects);
+    var effect_cursor: usize = 4;
+    for (0..catalogs.effect_count) |_| {
+        effect_cursor += 4;
+        const identity_length = readInt(u32, effects, effect_cursor);
+        effect_cursor += 4 + identity_length;
+        try visitCanonicalSchema(
+            catalogs.schemas,
+            readInt(u32, effects, effect_cursor),
+            workspace,
+            &next_schema,
+        );
+        try visitCanonicalSchema(
+            catalogs.schemas,
+            readInt(u32, effects, effect_cursor + 4),
+            workspace,
+            &next_schema,
+        );
+        effect_cursor += 8 + 4 + 64;
+    }
+    for (0..catalogs.value_count) |value| {
+        try visitCanonicalSchema(
+            catalogs.schemas,
+            try catalogs.valueSchemaId(@intCast(value)),
+            workspace,
+            &next_schema,
+        );
+    }
+    const functions = catalogs.functions_section;
+    for (0..catalogs.function_count) |function| {
+        try visitCanonicalSchema(
+            catalogs.schemas,
+            readInt(u32, functions, 4 + function * 8 + 4),
+            workspace,
+            &next_schema,
+        );
+    }
+    const constants = catalogs.envelope.section(.constants);
+    var constant_cursor: usize = 4;
+    for (0..catalogs.constant_count) |_| {
+        try visitCanonicalSchema(
+            catalogs.schemas,
+            readInt(u32, constants, constant_cursor),
+            workspace,
+            &next_schema,
+        );
+        const length = readInt(u32, constants, constant_cursor + 4);
+        constant_cursor += 8 + length;
+    }
+    if (next_schema != catalogs.schemas.count()) return error.InvalidSchema;
+}
+
+fn visitCanonicalSchema(
+    schemas: dynamic_value_v1.Table,
+    root: u32,
+    workspace: *ValidationWorkspace,
+    next_schema: *u32,
+) Error!void {
+    var stack_length: usize = 0;
+    try pushSchemaOrderTask(workspace, &stack_length, root, false);
+    while (stack_length != 0) {
+        stack_length -= 1;
+        const task = workspace.canonical_schema_stack[stack_length];
+        if (workspace.canonical_schema_seen[task.schema_id]) continue;
+        const node = schemas.node(task.schema_id) catch return error.InvalidSchema;
+        if (task.expanded) {
+            if (task.schema_id != next_schema.*) return error.InvalidSchema;
+            workspace.canonical_schema_seen[task.schema_id] = true;
+            next_schema.* += 1;
+            continue;
+        }
+        try pushSchemaOrderTask(
+            workspace,
+            &stack_length,
+            task.schema_id,
+            true,
+        );
+        switch (node.kind) {
+            .array, .vector => try pushSchemaOrderTask(
+                workspace,
+                &stack_length,
+                readInt(u32, node.payload, 4),
+                false,
+            ),
+            .optional => try pushSchemaOrderTask(
+                workspace,
+                &stack_length,
+                readInt(u32, node.payload, 0),
+                false,
+            ),
+            .product => {
+                const count = readInt(u32, node.payload, 0);
+                var index = count;
+                while (index != 0) {
+                    index -= 1;
+                    try pushSchemaOrderTask(
+                        workspace,
+                        &stack_length,
+                        readInt(u32, node.payload, 4 + @as(usize, index) * 4),
+                        false,
+                    );
+                }
+            },
+            .sum => {
+                const count = readInt(u32, node.payload, 4);
+                var index = count;
+                while (index != 0) {
+                    index -= 1;
+                    try pushSchemaOrderTask(
+                        workspace,
+                        &stack_length,
+                        readInt(u32, node.payload, 12 + @as(usize, index) * 8),
+                        false,
+                    );
+                }
+                try pushSchemaOrderTask(
+                    workspace,
+                    &stack_length,
+                    readInt(u32, node.payload, 0),
+                    false,
+                );
+            },
+            else => {},
+        }
+    }
+}
+
+fn pushSchemaOrderTask(
+    workspace: *ValidationWorkspace,
+    stack_length: *usize,
+    schema_id: u32,
+    expanded: bool,
+) Error!void {
+    if (schema_id >= workspace.canonical_schema_seen.len or
+        stack_length.* == workspace.canonical_schema_stack.len)
+    {
+        return error.InvalidSchema;
+    }
+    workspace.canonical_schema_stack[stack_length.*] = .{
+        .schema_id = schema_id,
+        .expanded = expanded,
+    };
+    stack_length.* += 1;
 }
 
 /// Re-encode a fully validated canonical image into caller-owned storage.
@@ -725,6 +908,7 @@ fn validateFunctions(
 fn validateSegments(
     catalogs: Catalogs,
     constant_used: *[1024]bool,
+    next_constant: *u32,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
     if (bytes.len < 4) return error.InvalidSegment;
@@ -767,6 +951,7 @@ fn validateSegments(
                 cursor,
                 end,
                 constant_used,
+                next_constant,
             );
         }
         cursor = try validateTerminator(catalogs, bytes, cursor, end);
@@ -782,6 +967,7 @@ fn validateInstruction(
     start: usize,
     segment_end: usize,
     constant_used: *[1024]bool,
+    next_constant: *u32,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
     const end = recordEnd(bytes, start, 16) catch
@@ -805,6 +991,10 @@ fn validateInstruction(
     }
     if (operation == 0) {
         if (immediate >= catalogs.constant_count) return error.InvalidInstruction;
+        if (!constant_used[immediate]) {
+            if (immediate != next_constant.*) return error.InvalidConstant;
+            next_constant.* += 1;
+        }
         constant_used[immediate] = true;
     } else if (operation < 25 or operation > 29) {
         if (immediate != 0) return error.InvalidInstruction;
