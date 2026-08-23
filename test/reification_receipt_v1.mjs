@@ -55,7 +55,11 @@ try {
   const root = path.join(temporary, "root.zig");
   fs.writeFileSync(root, "pub const program = void;\n");
   const build = path.join(temporary, "build.zig");
-  fs.writeFileSync(build, "emit_reification_assets_step.dependOn(reification_receipt_step);\n");
+  fs.writeFileSync(
+    build,
+    "installation.step.dependOn(reification_receipt_step);\n" +
+      "emit_reification_assets_step.dependOn(reification_receipt_step);\n",
+  );
   const pure = path.join(temporary, "pure.zig");
   fs.writeFileSync(pure, "pub const Pure = void;\n");
   const proofPath = path.join(temporary, "boundary-reification-v1-proof.json");
@@ -88,6 +92,23 @@ try {
   if (forgedSource.status === 0) {
     throw new Error("runtime loader outside the package root was missed");
   }
+  fs.writeFileSync(
+    build,
+    "emit_reification_assets_step.dependOn(reification_receipt_step);\n",
+  );
+  const unorderedInstall = childProcess.spawnSync(
+    process.execPath,
+    proofArgs,
+    { encoding: "utf8" },
+  );
+  if (unorderedInstall.status === 0) {
+    throw new Error("asset installation without proof dependency was accepted");
+  }
+  fs.writeFileSync(
+    build,
+    "installation.step.dependOn(reification_receipt_step);\n" +
+      "emit_reification_assets_step.dependOn(reification_receipt_step);\n",
+  );
 
   const forgedBaseline = JSON.parse(fs.readFileSync(baseline, "utf8"));
   forgedBaseline.oracle_mismatch_count = 1;

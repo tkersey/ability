@@ -1282,7 +1282,16 @@ fn encodeTopFrame(
         ) catch return error.InvalidState;
         field_cursor += 8;
     }
-    const required = top_offset + frame_header_length + environment_length;
+    const frame_length = std.math.add(
+        usize,
+        frame_header_length,
+        environment_length,
+    ) catch return error.OutputCapacity;
+    const required = std.math.add(
+        usize,
+        top_offset,
+        frame_length,
+    ) catch return error.OutputCapacity;
     if (required > output.len or
         required > image.profile.maximum_state_bytes)
     {
@@ -1405,10 +1414,23 @@ fn appendFrame(
     for (0..@as(u32, activation_count) + environment_count) |_| {
         const value = readInt(u16, constructor, field_cursor);
         if (!slots[value].initialized) return error.InvalidState;
-        environment_length += slots[value].bytes.len;
+        environment_length = std.math.add(
+            usize,
+            environment_length,
+            slots[value].bytes.len,
+        ) catch return error.OutputCapacity;
         field_cursor += 8;
     }
-    const required = parent.len + frame_header_length + environment_length;
+    const frame_length = std.math.add(
+        usize,
+        frame_header_length,
+        environment_length,
+    ) catch return error.OutputCapacity;
+    const required = std.math.add(
+        usize,
+        parent.len,
+        frame_length,
+    ) catch return error.OutputCapacity;
     if (required > output.len or
         required > image.profile.maximum_state_bytes)
     {

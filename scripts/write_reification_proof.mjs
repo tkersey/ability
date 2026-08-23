@@ -65,7 +65,9 @@ const allSources = allSourcePaths.map((path) => fs.readFileSync(path, "utf8")).j
 const publicClauseEvaluatorPresent = /pub const (evaluator|reducer|clause|program_evaluator|internal_evaluator)\b/.test(root);
 const pureClauseMachineV2DependencyPresent = /@import\("(?:machine|machine_v2|kernel)/.test(pureSources) ||
   /\b(?:MachineOptions|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|ABL_RNF2)\b/.test(pureSources);
-const proofGateRequiredBeforeEmission = /emit_reification_assets_step\.dependOn\(reification_receipt_step\)/.test(build);
+const proofGateRequiredBeforeEmission =
+  /installation\.step\.dependOn\(reification_receipt_step\)/.test(build) &&
+  /emit_reification_assets_step\.dependOn\(reification_receipt_step\)/.test(build);
 
 const proof = {
   format: "boundary-reification-proof/v1",

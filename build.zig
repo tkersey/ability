@@ -2216,6 +2216,19 @@ pub fn build(b: *std.Build) void {
     });
     reification_asset_receipt_command.addFileArg(reification_proof_stamp);
     reification_receipt_step.dependOn(&reification_asset_receipt_command.step);
+    inline for (.{
+        install_kernel,
+        install_kernel_sha,
+        install_one_effect,
+        install_one_effect_sha,
+        install_portable_values,
+        install_portable_values_sha,
+        install_one_effect_profile,
+        install_one_effect_profile_sha,
+        install_portable_values_profile,
+        install_portable_values_profile_sha,
+        install_reification_receipt,
+    }) |installation| installation.step.dependOn(reification_receipt_step);
     emit_reification_assets_step.dependOn(reification_receipt_step);
 
     const receipt_falsifier_step = b.step(
