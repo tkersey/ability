@@ -328,13 +328,20 @@ pub fn step(
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    const fuel_bytes = std.mem.asBytes(caller_fuel);
     try requireWorkspaceDisjoint(state, workspace);
+    try requireWorkspaceDisjoint(fuel_bytes, workspace);
     try requireWorkspaceDisjoint(output_state, workspace);
     try requireWorkspaceDisjoint(output_value, workspace);
     try requireWorkspaceDisjoint(scratch, workspace);
     try requireBindingDisjoint(binding, output_state);
     try requireBindingDisjoint(binding, output_value);
     try requireBindingDisjoint(binding, scratch);
+    try requireBindingDisjoint(binding, fuel_bytes);
+    try requireDisjoint(state, fuel_bytes);
+    try requireDisjoint(fuel_bytes, output_state);
+    try requireDisjoint(fuel_bytes, output_value);
+    try requireDisjoint(fuel_bytes, scratch);
     try requireDisjoint(state, output_state);
     try requireDisjoint(state, output_value);
     try requireDisjoint(state, scratch);

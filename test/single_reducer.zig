@@ -317,6 +317,30 @@ pub fn main(init: std.process.Init) !void {
     };
     defer typed_kernel_done.deinit();
     try std.testing.expectEqual(@as(u32, 42), typed_kernel_done.value().*);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const preflight_state = try KernelMachine.initialState(
+        failing.allocator(),
+        21,
+    );
+    defer KernelMachine.deinitState(preflight_state);
+    var preflight_fuel: u64 = 8;
+    const preflight_request = switch (try KernelMachine.step(
+        preflight_state,
+        &preflight_fuel,
+    )) {
+        .request => |request| request,
+        else => return error.ExpectedEffectRequest,
+    };
+    const preflight_prepared = try KernelMachine.prepareResume(
+        preflight_state,
+        preflight_request,
+    );
+    defer KernelMachine.deinitPreparedResume(preflight_prepared);
+    failing.fail_index = failing.allocations;
+    try KernelMachine.@"resume"(preflight_prepared, @as(u32, 42));
+    try std.testing.expect(!failing.has_induced_failure);
+
     const state = try Machine.initialState(allocator, 21);
     defer Machine.deinitState(state);
     var caller_fuel: u64 = 8;

@@ -99,6 +99,7 @@ pub fn Machine(
             state: State,
             request: Request,
             candidate: []u8,
+            response_storage: []u8,
             consumed: bool = false,
         };
         const PreparedResumeStorage = opaque {};
@@ -322,11 +323,17 @@ pub fn Machine(
                 u8,
                 options.maximum_state_bytes,
             ) catch return error.OutOfMemory;
+            errdefer value.allocator.free(candidate);
+            const response_storage = value.allocator.alloc(
+                u8,
+                try maximumResponseBytes(request),
+            ) catch return error.OutOfMemory;
             prepared.* = .{
                 .allocator = value.allocator,
                 .state = state,
                 .request = request,
                 .candidate = candidate,
+                .response_storage = response_storage,
             };
             value.prepared_active = true;
             return @ptrCast(prepared);
@@ -336,6 +343,7 @@ pub fn Machine(
             const value = preparedValue(prepared);
             const state = stored(value.state);
             if (!value.consumed) value.allocator.free(value.candidate);
+            value.allocator.free(value.response_storage);
             const allocator = value.allocator;
             allocator.destroy(value);
             state.prepared_active = false;
@@ -354,15 +362,10 @@ pub fn Machine(
             if (!responseTypeMatches(value.request, @TypeOf(response))) {
                 return error.ProgramContractViolation;
             }
-            const response_bytes = value.allocator.alloc(
-                u8,
-                portable_value.maximumEncodedSize(@TypeOf(response)),
-            ) catch return error.OutOfMemory;
-            defer value.allocator.free(response_bytes);
             const response_length = portable_value.encode(
                 @TypeOf(response),
                 response,
-                response_bytes,
+                value.response_storage,
             ) catch return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
             workspace.invariant_result = state.request_storage;
@@ -371,7 +374,7 @@ pub fn Machine(
                 image,
                 state.storage[0..state.length],
                 kernelIdentity(value.request.identity),
-                response_bytes[0..response_length],
+                value.response_storage[0..response_length],
                 value.candidate,
                 &workspace,
             ) catch return error.ProgramContractViolation;
@@ -537,6 +540,17 @@ pub fn Machine(
                 }
             }
             return false;
+        }
+
+        fn maximumResponseBytes(request: Request) Error!usize {
+            inline for (0..EffectRow.operation_site_count) |ordinal| {
+                if (request.identity.site_ordinal == ordinal) {
+                    return portable_value.maximumEncodedSize(
+                        EffectRow.site(ordinal).Resume,
+                    );
+                }
+            }
+            return error.ProgramContractViolation;
         }
     };
 }

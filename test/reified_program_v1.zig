@@ -638,6 +638,45 @@ test "kernel rejects mutable outputs aliased with authenticated backing" {
     try std.testing.expectEqualSlices(u8, &before, &image_bytes);
 }
 
+test "kernel rejects caller fuel aliased with mutable output" {
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const parsed = try image_v1.validateImage(&Image.bytes, &workspace);
+    const binding = try kernel_v1.bindMachineV2(
+        parsed,
+        &Profile.bytes,
+        &workspace,
+    );
+    var args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &args, 29, .little);
+    var state: [4096]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        binding,
+        &args,
+        &state,
+        &workspace,
+    );
+    var output_state: [4096]u8 = undefined;
+    var output_value: [16]u8 align(8) = [_]u8{0xa5} ** 16;
+    const caller_fuel: *u64 = @ptrCast(&output_value);
+    caller_fuel.* = 8;
+    const before = output_value;
+    var scratch: [8192]u8 = undefined;
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidBindings,
+        kernel_v1.step(
+            binding,
+            state[0..state_length],
+            caller_fuel,
+            &output_state,
+            &output_value,
+            &scratch,
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqualSlices(u8, &before, &output_value);
+}
+
 test "BPI validator rejects workspace aliased with image bytes" {
     comptime std.debug.assert(
         @sizeOf(image_v1.ValidationWorkspace) >= Image.bytes.len,
