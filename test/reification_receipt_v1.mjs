@@ -81,6 +81,14 @@ try {
     throw new Error("receipt did not derive claims from the executed proof stamp");
   }
 
+  const substitutedGenerated = JSON.parse(fs.readFileSync(generated, "utf8"));
+  substitutedGenerated.generated_trace_count += 1;
+  fs.writeFileSync(generated, JSON.stringify(substitutedGenerated));
+  const substituted = childProcess.spawnSync(process.execPath, args, { encoding: "utf8" });
+  if (substituted.status === 0) throw new Error("substituted generated proof was accepted");
+  substitutedGenerated.generated_trace_count -= 1;
+  fs.writeFileSync(generated, JSON.stringify(substitutedGenerated));
+
   proof.status = "failed";
   fs.writeFileSync(proofPath, JSON.stringify(proof));
   const rejected = childProcess.spawnSync(process.execPath, args, { encoding: "utf8" });

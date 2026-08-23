@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 
 const [
   kernelPath,
@@ -22,6 +23,9 @@ if (
   proofStamp.status !== "passed"
 ) {
   throw new Error("invalid executed reification proof stamp");
+}
+if (!isDeepStrictEqual(proofStamp.observations?.generated, generatedProof)) {
+  throw new Error("generated proof is not bound to the executed proof stamp");
 }
 const proofBoolean = (name) => {
   if (typeof proofStamp[name] !== "boolean") throw new Error(`invalid proof boolean: ${name}`);

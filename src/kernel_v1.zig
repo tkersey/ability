@@ -187,6 +187,14 @@ fn requireBindingDisjoint(
     }
 }
 
+fn requireInvariantScratchDisjoint(
+    binding: BoundProgram,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    try requireWorkspaceDisjoint(workspace.invariant_result, workspace);
+    try requireBindingDisjoint(binding, workspace.invariant_result);
+}
+
 fn requireDisjoint(left: []const u8, right: []const u8) Error!void {
     if (rangesOverlap(left, right)) return error.InvalidBindings;
 }
@@ -252,9 +260,12 @@ pub fn initial(
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
+    try requireInvariantScratchDisjoint(binding, workspace);
     try requireWorkspaceDisjoint(initial_args, workspace);
     try requireWorkspaceDisjoint(output_state, workspace);
     try requireBindingDisjoint(binding, output_state);
+    try requireDisjoint(initial_args, workspace.invariant_result);
+    try requireDisjoint(output_state, workspace.invariant_result);
     try requireDisjoint(initial_args, output_state);
     const image = try acquire(binding, workspace);
     return initialValidated(
@@ -270,7 +281,9 @@ pub fn validateState(
     state: []const u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
+    try requireInvariantScratchDisjoint(binding, workspace);
     try requireWorkspaceDisjoint(state, workspace);
+    try requireDisjoint(state, workspace.invariant_result);
     const image = try acquire(binding, workspace);
     return validateStateValidated(image, state, workspace);
 }
@@ -302,10 +315,14 @@ pub fn @"resume"(
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
+    try requireInvariantScratchDisjoint(binding, workspace);
     try requireWorkspaceDisjoint(state, workspace);
     try requireWorkspaceDisjoint(response, workspace);
     try requireWorkspaceDisjoint(output_state, workspace);
     try requireBindingDisjoint(binding, output_state);
+    try requireDisjoint(state, workspace.invariant_result);
+    try requireDisjoint(response, workspace.invariant_result);
+    try requireDisjoint(output_state, workspace.invariant_result);
     try requireDisjoint(state, output_state);
     try requireDisjoint(response, output_state);
     const image = try acquire(binding, workspace);

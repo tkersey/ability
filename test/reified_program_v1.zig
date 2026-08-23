@@ -677,6 +677,42 @@ test "kernel rejects caller fuel aliased with mutable output" {
     try std.testing.expectEqualSlices(u8, &before, &output_value);
 }
 
+test "kernel rejects invariant scratch aliased with State" {
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const parsed = try image_v1.validateImage(&Image.bytes, &workspace);
+    const binding = try kernel_v1.bindMachineV2(
+        parsed,
+        &Profile.bytes,
+        &workspace,
+    );
+    var args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &args, 29, .little);
+    var state: [4096]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        binding,
+        &args,
+        &state,
+        &workspace,
+    );
+    var before: [4096]u8 = undefined;
+    @memcpy(before[0..state_length], state[0..state_length]);
+    workspace = .{};
+    workspace.invariant_result = state[0..4];
+    try std.testing.expectError(
+        error.InvalidBindings,
+        kernel_v1.validateState(
+            binding,
+            state[0..state_length],
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        before[0..state_length],
+        state[0..state_length],
+    );
+}
+
 test "BPI validator rejects workspace aliased with image bytes" {
     comptime std.debug.assert(
         @sizeOf(image_v1.ValidationWorkspace) >= Image.bytes.len,
