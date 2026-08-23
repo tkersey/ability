@@ -990,6 +990,70 @@ test "BPI1 type-checks branch and terminal values" {
     );
 }
 
+test "BPI1 enforces one resume marker for effect continuations" {
+    const Site = struct {
+        pub const id: u32 = 0;
+        pub const semantic_identity = "test.resume-shape.v1";
+        pub const Payload = u32;
+        pub const Resume = u32;
+    };
+    const resume_arguments = [_]cir.EdgeArgument{.@"resume"};
+    const effect_blocks = [_]cir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .terminator = .{ .@"suspend" = .{
+                .kind = .effect,
+                .site_id = 0,
+                .request_values = &.{0},
+                .continuation = .{
+                    .target = 1,
+                    .arguments = &resume_arguments,
+                },
+                .resume_type = u32_type,
+            } },
+        },
+        .{ .id = 1, .parameters = &.{1}, .terminator = .{ .return_value = 1 } },
+    };
+    const EffectBody = struct {
+        pub const InitialArgs = u32;
+        pub const Result = u32;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{Site};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "resume-shape-image-proof",
+            .value_types = &.{ u32_type, u32_type },
+            .blocks = &effect_blocks,
+            .entry = 0,
+            .result_type = u32_type,
+        };
+    };
+    const EffectImage = program_v2.program(
+        "resume-shape-image-proof",
+        EffectBody,
+    ).image();
+    var malformed = EffectImage.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segments_offset: usize = @intCast(envelope.sections[7].offset);
+    const record = segments_offset + 4;
+    const terminator = record + 24 + 2;
+    const payload = terminator + 8;
+    const request_count = std.mem.readInt(
+        u16,
+        malformed[payload + 10 ..][0..2],
+        .little,
+    );
+    const continuation = payload + 12 + @as(usize, request_count) * 2 + 4;
+    malformed[continuation + 4] = 0;
+    std.mem.writeInt(u16, malformed[continuation + 6 ..][0..2], 0, .little);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
 test "fixed kernel branches and yields at the next segment boundary" {
     const branch_blocks = [_]cir.Block{
         .{

@@ -1110,6 +1110,70 @@ test "compiled bounded recursive frames survive canonical round trip" {
     try std.testing.expectEqual(completion_fuel, kernel_completion_fuel);
 }
 
+test "BPI1 rejects call edges outside the declared callee function" {
+    const Image = Program.image();
+    var malformed = Image.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segments_offset: usize = @intCast(envelope.sections[7].offset);
+    const segments = malformed[segments_offset..];
+    var cursor: usize = 4;
+    var mutated = false;
+    for (0..std.mem.readInt(u32, segments[0..4], .little)) |_| {
+        const record_length = std.mem.readInt(
+            u32,
+            malformed[segments_offset + cursor ..][0..4],
+            .little,
+        );
+        var terminator = segments_offset + cursor + 24 +
+            @as(
+                usize,
+                std.mem.readInt(
+                    u16,
+                    malformed[segments_offset + cursor + 10 ..][0..2],
+                    .little,
+                ),
+            ) * 2;
+        for (0..std.mem.readInt(
+            u32,
+            malformed[segments_offset + cursor + 12 ..][0..4],
+            .little,
+        )) |_| {
+            terminator += std.mem.readInt(
+                u32,
+                malformed[terminator..][0..4],
+                .little,
+            );
+        }
+        if (malformed[terminator + 4] == 2 and
+            malformed[terminator + 8] == 1)
+        {
+            const payload = terminator + 8;
+            const request_count = std.mem.readInt(
+                u16,
+                malformed[payload + 10 ..][0..2],
+                .little,
+            );
+            const callee_edge = payload + 12 +
+                @as(usize, request_count) * 2 + 4;
+            std.mem.writeInt(
+                u16,
+                malformed[callee_edge..][0..2],
+                0,
+                .little,
+            );
+            mutated = true;
+            break;
+        }
+        cursor += record_length;
+    }
+    try std.testing.expect(mutated);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
 test "helper entry backedges rebind future state without overwriting activation context" {
     for (HelperBackedgeProgram.rnf.constructorSlice()) |constructor| {
         try std.testing.expect(

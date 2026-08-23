@@ -235,6 +235,28 @@ test "BPI1 excludes synthetic caller-fuel suspension and retains explicit yield"
         @as(u8, 2),
         explicit_segments[explicit_terminator + 4],
     );
+    var malformed_explicit = ExplicitImage.bytes;
+    const explicit_section_offset: usize = @intCast(
+        explicit.catalogs.envelope.sections[7].offset,
+    );
+    const explicit_terminator_absolute = explicit_section_offset +
+        explicit_terminator;
+    const explicit_terminator_length = std.mem.readInt(
+        u32,
+        malformed_explicit[explicit_terminator_absolute..][0..4],
+        .little,
+    );
+    std.mem.writeInt(
+        u32,
+        malformed_explicit[explicit_terminator_absolute + explicit_terminator_length - 4 ..][0..4],
+        explicit.catalogs.initial_args_schema_id,
+        .little,
+    );
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&malformed_explicit, &workspace),
+    );
 
     workspace = .{};
     const checkpoint = try image_v1.validateImage(
