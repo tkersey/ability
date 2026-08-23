@@ -756,6 +756,24 @@ pub fn build(b: *std.Build) void {
         reification_baseline_executable.getEmittedBin(),
     );
     reification_baseline_check.addArg(b.graph.zig_exe);
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/baseline.lock.json"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/baseline/vectors.json"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/v1.5.0-baseline-fixture.patch"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("test/reification_baseline.zig"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/rnf-v1/check_performance.sh"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/rnf-v1/v0.7.0-performance.patch"),
+    );
     reification_baseline_check.setCwd(b.path("."));
     const reification_baseline_proof = reification_baseline_check.captureStdOut(.{
         .basename = "boundary-reification-baseline-proof.json",

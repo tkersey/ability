@@ -1,8 +1,8 @@
 # Boundary Reification v1 baseline
 
-`baseline.lock.json` binds the exact Boundary v1.5.0 source fixture, generated
-vectors, Zig toolchain, and retained performance proof inputs before the
-reification compiler refactor.
+`baseline.lock.json` binds the exact Boundary v1.5.0 commit, a minimal fixture
+patch, generated vectors, Zig toolchain, and retained performance proof inputs
+before the reification compiler refactor.
 
 `baseline/vectors.json` records semantic and Machine contract digests, Machine
 options, canonical `ABL_RNF2` States, request identities and payloads, terminal
@@ -15,9 +15,13 @@ Run:
 zig build check-boundary-reification-baseline --summary all
 ```
 
-The verifier rebuilds every vector and byte-compares it with the committed
-baseline. Any intended semantic change must be specified separately; the
-reification implementation must not refresh this lock to hide drift.
+The verifier first compares the current implementation with the committed
+vectors. It then archives the locked v1.5.0 commit, verifies and applies only
+`v1.5.0-baseline-fixture.patch`, rebuilds the same vectors from that independent
+oracle, and byte-compares them again. The fixture patch adds only the emitter,
+four fixture exports, and build wiring; it contains no reification code. Any
+intended semantic change must be specified separately; the implementation must
+not refresh the lock, patch, and vectors together to hide drift.
 
 The release proof additionally compiles the internal BPI1 clause evaluator from
 a reduced graph with no Machine-v2 modules. BPI1 is the public canonical

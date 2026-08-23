@@ -22,8 +22,12 @@ try {
   const baseline = path.join(temporary, "baseline.json");
   fs.writeFileSync(baseline, JSON.stringify({
     format: "boundary-reification-baseline-proof/v1",
+    oracle_boundary_commit: "ed4956b6229e039c72f3080dd60ddb94f58a56fc",
+    oracle_fixture_patch_sha256: "a".repeat(64),
     fixture_count: 7,
     mismatch_count: 0,
+    current_mismatch_count: 0,
+    oracle_mismatch_count: 0,
     machine_abi: 2,
     state_format: "ABL_RNF2",
     state_format_version: 1,
@@ -71,6 +75,20 @@ try {
     { encoding: "utf8" },
   ));
   fs.writeFileSync(proofPath, JSON.stringify(proof));
+  const forgedBaseline = JSON.parse(fs.readFileSync(baseline, "utf8"));
+  forgedBaseline.oracle_mismatch_count = 1;
+  fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));
+  const forgedOracle = childProcess.spawnSync(
+    process.execPath,
+    proofArgs,
+    { encoding: "utf8" },
+  );
+  if (forgedOracle.status === 0) {
+    throw new Error("forged locked-source oracle result was accepted");
+  }
+  forgedBaseline.oracle_mismatch_count = 0;
+  fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));
+
   const args = [script, artifact, artifact, artifact, artifact, artifact, generated, proofPath];
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
   if (

@@ -33,6 +33,10 @@ if (
 }
 if (
   baseline.mismatch_count !== 0 ||
+  baseline.current_mismatch_count !== 0 ||
+  baseline.oracle_mismatch_count !== 0 ||
+  baseline.oracle_boundary_commit !== "ed4956b6229e039c72f3080dd60ddb94f58a56fc" ||
+  !/^[0-9a-f]{64}$/.test(baseline.oracle_fixture_patch_sha256) ||
   semantic.image_profile_invariance_passed !== true ||
   semantic.metering_annotation_invariance_passed !== true ||
   wasmExecution.import_count !== 0 ||
