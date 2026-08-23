@@ -80,6 +80,7 @@ const ValidatedProgram = struct {
     catalogs: image_v1.Catalogs,
     segment_count: u32,
     constructor_count: u32,
+    artifact_sha256: [32]u8,
     profile: machine_v2_profile_v1.Validated,
 };
 
@@ -114,6 +115,7 @@ fn bindValidatedMachineV2(
         .catalogs = image.catalogs,
         .segment_count = image.segment_count,
         .constructor_count = profile.constructor_count,
+        .artifact_sha256 = image.artifact_sha256,
         .profile = profile,
     };
 }
@@ -255,6 +257,7 @@ fn programView(image: ValidatedProgram) image_v1.ValidatedImage {
         .catalogs = image.catalogs,
         .segment_count = image.segment_count,
         .constructor_count = image.constructor_count,
+        .artifact_sha256 = image.artifact_sha256,
     };
 }
 

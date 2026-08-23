@@ -17,6 +17,9 @@ const generatedProof = JSON.parse(fs.readFileSync(generatedProofPath, "utf8"));
 const proofStampPath = proofPaths.find((path) => path.endsWith("boundary-reification-v1-proof.json"));
 if (!proofStampPath) throw new Error("missing executed reification proof stamp");
 const proofStamp = JSON.parse(fs.readFileSync(proofStampPath, "utf8"));
+const receiptSourcePaths = proofPaths.filter(
+  (path) => path !== generatedProofPath && path !== proofStampPath,
+);
 if (
   proofStamp.format !== "boundary-reification-proof/v1" ||
   proofStamp.gate !== "check-boundary-reification-receipt" ||
@@ -26,6 +29,19 @@ if (
 }
 if (!isDeepStrictEqual(proofStamp.observations?.generated, generatedProof)) {
   throw new Error("generated proof is not bound to the executed proof stamp");
+}
+const kernelDigest = digest(kernelPath);
+if (
+  proofStamp.machine_v2_kernel_wasm_sha256 !== kernelDigest ||
+  proofStamp.machine_v2_kernel_wasm_bytes !== fs.statSync(kernelPath).size
+) {
+  throw new Error("kernel artifact is not bound to the executed WASM proof");
+}
+const receiptSourceSha256 = Object.fromEntries(
+  receiptSourcePaths.map((source) => [source.split("/").at(-1), digest(source)]),
+);
+if (!isDeepStrictEqual(proofStamp.receipt_source_sha256, receiptSourceSha256)) {
+  throw new Error("receipt sources are not bound to the executed proof stamp");
 }
 const proofBoolean = (name) => {
   if (typeof proofStamp[name] !== "boolean") throw new Error(`invalid proof boolean: ${name}`);
@@ -52,7 +68,7 @@ const receipt = {
   machine_v2_semantic_domain: "boundary-rnf-compiler-semantics-v4",
   fuel_semantic_domain: "segment-fuel=preflight-resource-shape-v4",
   dynamic_fuel_quantum_bytes: 16,
-  machine_v2_kernel_wasm_sha256: digest(kernelPath),
+  machine_v2_kernel_wasm_sha256: kernelDigest,
   machine_v2_kernel_wasm_import_count: proofCount("machine_v2_kernel_wasm_import_count"),
   image_profile_invariance_passed: proofBoolean("image_profile_invariance_passed"),
   metering_annotation_invariance_passed: proofBoolean("metering_annotation_invariance_passed"),
@@ -91,8 +107,6 @@ const receipt = {
   pure_clause_machine_v2_dependency_present: proofBoolean("pure_clause_machine_v2_dependency_present"),
   proof_gate: "check-boundary-reification-receipt",
   proof_gate_required_before_emission: proofBoolean("proof_gate_required_before_emission"),
-  proof_source_sha256: Object.fromEntries(
-    proofPaths.map((path) => [path.split("/").at(-1), digest(path)]),
-  ),
+  proof_source_sha256: receiptSourceSha256,
 };
 process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);

@@ -2217,6 +2217,16 @@ pub fn build(b: *std.Build) void {
         }
         reification_proof_stamp_command.addFileArg(b.path(source_path));
     }
+    reification_proof_stamp_command.addArg("--receipt-sources");
+    reification_proof_stamp_command.addFileArg(
+        b.path("test/reification_generated_v1.zig"),
+    );
+    reification_proof_stamp_command.addFileArg(
+        b.path("test/reified_program_v1.zig"),
+    );
+    reification_proof_stamp_command.addFileArg(
+        b.path("test/program_constructor_invariants.zig"),
+    );
     const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
         .basename = "boundary-reification-v1-proof.json",
     });

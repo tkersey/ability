@@ -142,6 +142,7 @@ pub const ValidatedImage = struct {
     catalogs: Catalogs,
     segment_count: u32,
     constructor_count: u32,
+    artifact_sha256: [32]u8,
 };
 
 pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
@@ -339,6 +340,7 @@ pub fn validateImage(
         .catalogs = catalogs,
         .segment_count = segment_count,
         .constructor_count = constructor_count,
+        .artifact_sha256 = imageArtifactDigest(image),
     };
 }
 
@@ -500,11 +502,22 @@ pub fn reencodeValidated(
 ) Error!usize {
     const source = image.catalogs.envelope.image;
     if (output.len < source.len) return error.LengthMismatch;
+    if (!std.mem.eql(
+        u8,
+        &image.artifact_sha256,
+        &imageArtifactDigest(source),
+    )) return error.InvalidImage;
     const target = output[0..source.len];
     if (source.ptr == target.ptr) return source.len;
     if (rangesOverlap(source, target)) return error.InvalidImage;
     @memcpy(target, source);
     return source.len;
+}
+
+fn imageArtifactDigest(bytes: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return digest;
 }
 
 const Roots = struct {

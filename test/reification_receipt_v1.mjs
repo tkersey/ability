@@ -1,4 +1,5 @@
 import childProcess from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +16,7 @@ try {
   fs.writeFileSync(wasmExecution, JSON.stringify({
     format: "boundary-machine-v2-kernel-wasm-proof/v1",
     kernel_wasm_bytes: 8,
+    kernel_wasm_sha256: crypto.createHash("sha256").update("artifact").digest("hex"),
     import_count: 0,
     abi: 1,
     transition_comparison_count: 3,
@@ -75,6 +77,8 @@ try {
     "--all-sources",
     root,
     pure,
+    "--receipt-sources",
+    pure,
   ];
   const proof = JSON.parse(childProcess.execFileSync(
     process.execPath,
@@ -84,9 +88,14 @@ try {
   fs.writeFileSync(proofPath, JSON.stringify(proof));
   const loaderSource = path.join(temporary, "loader.zig");
   fs.writeFileSync(loaderSource, "pub const DefinitionLoader = void;\n");
+  const receiptSourceDelimiter = proofArgs.indexOf("--receipt-sources");
   const forgedSource = childProcess.spawnSync(
     process.execPath,
-    [...proofArgs, loaderSource],
+    [
+      ...proofArgs.slice(0, receiptSourceDelimiter),
+      loaderSource,
+      ...proofArgs.slice(receiptSourceDelimiter),
+    ],
     { encoding: "utf8" },
   );
   if (forgedSource.status === 0) {
@@ -154,7 +163,7 @@ try {
   }
   fs.writeFileSync(semantic, JSON.stringify(forgedSemantic));
 
-  const args = [script, artifact, artifact, artifact, artifact, artifact, generated, proofPath];
+  const args = [script, artifact, artifact, artifact, artifact, artifact, pure, generated, proofPath];
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
   if (
     receipt.image_profile_invariance_passed !== true ||
@@ -163,6 +172,28 @@ try {
   ) {
     throw new Error("receipt did not derive claims from the executed proof stamp");
   }
+
+  const replacementKernel = path.join(temporary, "replacement-kernel.bin");
+  fs.writeFileSync(replacementKernel, "replacement");
+  const substitutedKernel = childProcess.spawnSync(
+    process.execPath,
+    [script, replacementKernel, ...args.slice(2)],
+    { encoding: "utf8" },
+  );
+  if (substitutedKernel.status === 0) {
+    throw new Error("substituted kernel artifact was accepted");
+  }
+
+  fs.appendFileSync(pure, "pub const Changed = void;\n");
+  const substitutedSource = childProcess.spawnSync(
+    process.execPath,
+    args,
+    { encoding: "utf8" },
+  );
+  if (substitutedSource.status === 0) {
+    throw new Error("post-proof source substitution was accepted");
+  }
+  fs.writeFileSync(pure, "pub const Pure = void;\n");
 
   const substitutedGenerated = JSON.parse(fs.readFileSync(generated, "utf8"));
   substitutedGenerated.generated_trace_count += 1;

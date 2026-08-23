@@ -913,6 +913,12 @@ test "BPI1 re-encoding handles exact alias and rejects partial overlap" {
         exact.len,
         try image_v1.reencodeValidated(exact_image, exact),
     );
+    exact[0] ^= 1;
+    try std.testing.expectError(
+        error.InvalidImage,
+        image_v1.reencodeValidated(exact_image, exact),
+    );
+    exact[0] ^= 1;
 
     const overlapping = try std.testing.allocator.alloc(u8, Image.bytes.len + 1);
     defer std.testing.allocator.free(overlapping);

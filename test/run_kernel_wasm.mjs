@@ -211,6 +211,7 @@ for (const semanticVector of vectors.slice(1)) {
 process.stdout.write(`${JSON.stringify({
   format: "boundary-machine-v2-kernel-wasm-proof/v1",
   kernel_wasm_bytes: bytes.length,
+  kernel_wasm_sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
   import_count: WebAssembly.Module.imports(module).length,
   abi: instance.exports.boundary_machine_v2_kernel_abi_version(),
   transition_comparison_count: transitionComparisonCount,

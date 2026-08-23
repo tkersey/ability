@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 const [
   wasmExecutionPath,
@@ -14,12 +16,19 @@ if (sourceDelimiter < 0) {
   throw new Error("missing complete source inventory delimiter");
 }
 const purePaths = sourcePaths.slice(0, sourceDelimiter);
-const allSourcePaths = sourcePaths.slice(sourceDelimiter + 1);
+const receiptSourceDelimiter = sourcePaths.indexOf("--receipt-sources");
+if (receiptSourceDelimiter < sourceDelimiter) {
+  throw new Error("missing receipt source inventory delimiter");
+}
+const allSourcePaths = sourcePaths.slice(sourceDelimiter + 1, receiptSourceDelimiter);
+const receiptSourcePaths = sourcePaths.slice(receiptSourceDelimiter + 1);
 if (allSourcePaths.length === 0) {
   throw new Error("empty complete source inventory");
 }
+if (receiptSourcePaths.length === 0) throw new Error("empty receipt source inventory");
 
 const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
+const digest = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const baseline = readJson(baselinePath);
 const semantic = readJson(semanticPath);
 const generated = readJson(generatedPath);
@@ -52,6 +61,8 @@ if (
   positiveCount(semantic, "malformed_state_case_count") <= 0 ||
   wasmExecution.import_count !== 0 ||
   wasmExecution.abi !== 1 ||
+  positiveCount(wasmExecution, "kernel_wasm_bytes") <= 0 ||
+  !/^[0-9a-f]{64}$/.test(wasmExecution.kernel_wasm_sha256) ||
   positiveCount(wasmExecution, "transition_comparison_count") <= 0 ||
   positiveCount(generated, "generated_trace_count") <= 0 ||
   positiveCount(generated, "native_transition_comparison_count") <= 0 ||
@@ -78,6 +89,8 @@ const proof = {
   gate: "check-boundary-reification-receipt",
   status: "passed",
   machine_v2_kernel_wasm_import_count: wasmExecution.import_count,
+  machine_v2_kernel_wasm_bytes: wasmExecution.kernel_wasm_bytes,
+  machine_v2_kernel_wasm_sha256: wasmExecution.kernel_wasm_sha256,
   image_profile_invariance_passed: semantic.image_profile_invariance_passed,
   metering_annotation_invariance_passed: semantic.metering_annotation_invariance_passed,
   baseline_digest_count: baseline.fixture_count,
@@ -100,6 +113,9 @@ const proof = {
   public_clause_evaluator_present: publicClauseEvaluatorPresent,
   pure_clause_machine_v2_dependency_present: pureClauseMachineV2DependencyPresent,
   proof_gate_required_before_emission: proofGateRequiredBeforeEmission,
+  receipt_source_sha256: Object.fromEntries(
+    receiptSourcePaths.map((source) => [path.basename(source), digest(source)]),
+  ),
   observations: {
     baseline,
     semantic,
