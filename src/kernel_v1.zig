@@ -1714,8 +1714,14 @@ fn loadFrameEnvironment(
             environment[value_cursor..],
             &workspace.value_tasks,
         ) catch return error.InvalidState;
+        const encoded = environment[value_cursor .. value_cursor + consumed];
+        if (slots[value].initialized and
+            !std.mem.eql(u8, slots[value].bytes, encoded))
+        {
+            return error.InvalidState;
+        }
         slots[value] = .{
-            .bytes = environment[value_cursor .. value_cursor + consumed],
+            .bytes = encoded,
             .initialized = true,
         };
         value_cursor += consumed;

@@ -958,14 +958,24 @@ fn addGuaranteedConstructorValues(
         if (readInt(u16, bytes, cursor + 12) == segment_id and
             kind != 3 and !(kind == 4 and origin == 2))
         {
+            var activation_seen = [_]bool{false} ** 1024;
+            var environment_seen = [_]bool{false} ** 1024;
             var retained = [_]bool{false} ** 1024;
             const activation_count = readInt(u16, bytes, cursor + 16);
             const environment_count = readInt(u16, bytes, cursor + 18);
             var field_cursor = cursor + 24;
-            for (0..@as(u32, activation_count) + environment_count) |_| {
+            for (0..@as(u32, activation_count) + environment_count) |index| {
                 if (end - field_cursor < 8) return error.InvalidConstructor;
                 const value = readInt(u16, bytes, field_cursor);
-                if (value >= catalogs.value_count) return error.InvalidConstructor;
+                if (value >= catalogs.value_count) {
+                    return error.InvalidConstructor;
+                }
+                const seen = if (index < activation_count)
+                    &activation_seen
+                else
+                    &environment_seen;
+                if (seen[value]) return error.InvalidConstructor;
+                seen[value] = true;
                 retained[value] = true;
                 field_cursor += 8;
             }
@@ -1802,15 +1812,23 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
         const invariant_count = readInt(u16, bytes, cursor + 20);
         cursor += 24;
         const field_count = @as(u32, activation_count) + environment_count;
-        for (0..field_count) |_| {
+        var activation_seen = [_]bool{false} ** 1024;
+        var environment_seen = [_]bool{false} ** 1024;
+        for (0..field_count) |index| {
             if (end - cursor < 8) return error.InvalidConstructor;
             const value = readInt(u16, bytes, cursor);
+            const seen = if (index < activation_count)
+                &activation_seen
+            else
+                &environment_seen;
             if (value >= catalogs.value_count or
+                seen[value] or
                 readInt(u16, bytes, cursor + 2) != 0 or
                 readInt(u32, bytes, cursor + 4) != valueSchema(catalogs, value))
             {
                 return error.InvalidConstructor;
             }
+            seen[value] = true;
             cursor += 8;
         }
         for (0..invariant_count) |_| {
@@ -1975,7 +1993,351 @@ fn validateInvariant(
             return error.InvalidInvariant,
         else => {},
     }
+    try validateInvariantSchemas(catalogs, bytes[start..end]);
     return end;
+}
+
+fn validateInvariantSchemas(
+    catalogs: Catalogs,
+    invariant: []const u8,
+) Error!void {
+    const tag = invariant[4];
+    const payload = 8;
+    const result = readInt(u16, invariant, payload);
+    switch (tag) {
+        0 => try requireInvariantKind(catalogs, result, .bool),
+        1 => {
+            try requireInvariantKind(catalogs, result, .bool);
+            try validateInvariantOperation(
+                catalogs,
+                1,
+                result,
+                0,
+                &.{readInt(u16, invariant, payload + 2)},
+            );
+        },
+        2 => try validateInvariantOperation(
+            catalogs,
+            20,
+            result,
+            0,
+            &.{readInt(u16, invariant, payload + 2)},
+        ),
+        3 => try validateInvariantOperation(
+            catalogs,
+            21 + invariant[payload + 6],
+            result,
+            0,
+            &.{
+                readInt(u16, invariant, payload + 2),
+                readInt(u16, invariant, payload + 4),
+            },
+        ),
+        4 => {
+            try requireInvariantKind(catalogs, result, .bool);
+            try validateInvariantOperation(
+                catalogs,
+                23,
+                result,
+                0,
+                &.{
+                    readInt(u16, invariant, payload + 2),
+                    readInt(u16, invariant, payload + 4),
+                    readInt(u16, invariant, payload + 6),
+                },
+            );
+        },
+        5 => try validateInvariantOperation(
+            catalogs,
+            1,
+            result,
+            0,
+            &.{readInt(u16, invariant, payload + 2)},
+        ),
+        6 => try validateInvariantConstantSchema(
+            catalogs,
+            result,
+            invariant[payload + 4],
+            readInt(u64, invariant, payload + 12),
+        ),
+        7 => try validateInvariantOperation(
+            catalogs,
+            23,
+            result,
+            0,
+            &.{
+                readInt(u16, invariant, payload + 2),
+                readInt(u16, invariant, payload + 4),
+                readInt(u16, invariant, payload + 6),
+            },
+        ),
+        8 => try validateInstructionResultInvariant(catalogs, invariant),
+        9 => try validateInvariantOperation(
+            catalogs,
+            25,
+            result,
+            readInt(u16, invariant, payload + 4),
+            &.{readInt(u16, invariant, payload + 2)},
+        ),
+        10 => try validateInvariantOperation(
+            catalogs,
+            29,
+            result,
+            readInt(u16, invariant, payload + 4),
+            &.{readInt(u16, invariant, payload + 2)},
+        ),
+        11 => {
+            const bounded = readInt(u16, invariant, payload + 2);
+            const operation: u16 = switch (try invariantKind(catalogs, bounded)) {
+                .vector => 34,
+                .text => 53,
+                .bytes => 54,
+                else => return error.InvalidInvariant,
+            };
+            try validateInvariantOperation(
+                catalogs,
+                operation,
+                result,
+                0,
+                &.{bounded},
+            );
+        },
+        12 => {
+            const operand = readInt(u16, invariant, payload + 2);
+            const scalar_tag = invariant[payload + 5];
+            try requireInvariantScalarTag(catalogs, result, scalar_tag);
+            try requireInvariantScalarTag(catalogs, operand, scalar_tag);
+            try validateInvariantOperation(
+                catalogs,
+                if (invariant[payload + 4] == 0) 8 else 15,
+                result,
+                0,
+                &.{operand},
+            );
+        },
+        13 => {
+            const left = readInt(u16, invariant, payload + 2);
+            const right = readInt(u16, invariant, payload + 4);
+            const scalar_tag = invariant[payload + 7];
+            try requireInvariantScalarTag(catalogs, result, scalar_tag);
+            try requireInvariantScalarTag(catalogs, left, scalar_tag);
+            try requireInvariantScalarTag(catalogs, right, scalar_tag);
+            const operations = [_]u16{ 3, 4, 5, 6, 7, 16, 17, 18 };
+            try validateInvariantOperation(
+                catalogs,
+                operations[invariant[payload + 6]],
+                result,
+                0,
+                &.{ left, right },
+            );
+        },
+        14 => {
+            const operand = readInt(u16, invariant, payload + 2);
+            try requireInvariantScalarTag(
+                catalogs,
+                result,
+                invariant[payload + 4],
+            );
+            if (!isIntegerKind(try invariantKind(catalogs, operand))) {
+                return error.InvalidInvariant;
+            }
+            try validateInvariantOperation(
+                catalogs,
+                19,
+                result,
+                0,
+                &.{operand},
+            );
+        },
+        15 => if (!isIntegerKind(try invariantKind(catalogs, result)))
+            return error.InvalidInvariant,
+        16 => try validateInvariantOperation(
+            catalogs,
+            2,
+            result,
+            0,
+            &.{readInt(u16, invariant, payload + 2)},
+        ),
+        17 => {
+            const right = readInt(u16, invariant, payload + 2);
+            if (valueSchema(catalogs, result) != valueSchema(catalogs, right) or
+                !isIntegerKind(try invariantKind(catalogs, result)))
+            {
+                return error.InvalidInvariant;
+            }
+        },
+        18 => try validateInvariantOperation(
+            catalogs,
+            9 + invariant[payload + 6],
+            result,
+            0,
+            &.{
+                readInt(u16, invariant, payload + 2),
+                readInt(u16, invariant, payload + 4),
+            },
+        ),
+        19 => try requireInvariantSumCase(
+            catalogs,
+            result,
+            readInt(u16, invariant, payload + 2),
+        ),
+        20 => try validateInvariantOperation(
+            catalogs,
+            28,
+            result,
+            readInt(u16, invariant, payload + 4),
+            &.{readInt(u16, invariant, payload + 2)},
+        ),
+        else => return error.InvalidInvariant,
+    }
+}
+
+fn validateInstructionResultInvariant(
+    catalogs: Catalogs,
+    invariant: []const u8,
+) Error!void {
+    const payload = 8;
+    const result = readInt(u16, invariant, payload);
+    const definition = readInt(u16, invariant, payload + 2);
+    const operand_count = readInt(u16, invariant, payload + 4);
+    const instruction = try imageDefiningInstruction(catalogs, definition);
+    if (valueSchema(catalogs, result) != valueSchema(catalogs, definition) or
+        operand_count != readInt(u16, instruction, 10))
+    {
+        return error.InvalidInvariant;
+    }
+    var operands: [1024]u16 = undefined;
+    for (0..operand_count) |index| {
+        const operand = readInt(u16, invariant, payload + 8 + index * 2);
+        const definition_operand = readInt(u16, instruction, 16 + index * 2);
+        if (valueSchema(catalogs, operand) !=
+            valueSchema(catalogs, definition_operand))
+        {
+            return error.InvalidInvariant;
+        }
+        operands[index] = operand;
+    }
+    try validateInvariantOperation(
+        catalogs,
+        readInt(u16, instruction, 6),
+        result,
+        readInt(u32, instruction, 12),
+        operands[0..operand_count],
+    );
+}
+
+fn imageDefiningInstruction(
+    catalogs: Catalogs,
+    definition: u16,
+) Error![]const u8 {
+    const segments = catalogs.envelope.section(.segments);
+    var segment_cursor: usize = 4;
+    for (0..readInt(u32, segments, 0)) |_| {
+        const segment_end = try recordEnd(
+            segments,
+            segment_cursor,
+            segment_prefix_length,
+        );
+        var cursor = segment_cursor + segment_prefix_length +
+            @as(usize, readInt(u16, segments, segment_cursor + 10)) * 2;
+        for (0..readInt(u32, segments, segment_cursor + 12)) |_| {
+            const instruction_end = try recordEnd(segments, cursor, 16);
+            if (readInt(u16, segments, cursor + 8) == definition) {
+                return segments[cursor..instruction_end];
+            }
+            cursor = instruction_end;
+        }
+        segment_cursor = segment_end;
+    }
+    return error.InvalidInvariant;
+}
+
+fn validateInvariantOperation(
+    catalogs: Catalogs,
+    operation_tag: u16,
+    result: u16,
+    immediate: u32,
+    operands: []const u16,
+) Error!void {
+    if (operands.len > 1024) return error.InvalidInvariant;
+    const operation = std.enums.fromInt(
+        program_semantics_v1.WireOperation,
+        operation_tag,
+    ) orelse return error.InvalidInvariant;
+    var operand_bytes: [2048]u8 = undefined;
+    for (operands, 0..) |operand, index| {
+        std.mem.writeInt(
+            u16,
+            operand_bytes[index * 2 ..][0..2],
+            operand,
+            .little,
+        );
+    }
+    validateInstructionSchemas(
+        catalogs,
+        operation,
+        result,
+        operand_bytes[0 .. operands.len * 2],
+        @intCast(operands.len),
+        immediate,
+    ) catch return error.InvalidInvariant;
+}
+
+fn validateInvariantConstantSchema(
+    catalogs: Catalogs,
+    result: u16,
+    kind: u8,
+    payload: u64,
+) Error!void {
+    const result_kind = try invariantKind(catalogs, result);
+    switch (kind) {
+        0 => if (result_kind != .bool) return error.InvalidInvariant,
+        1 => if (!isSignedIntegerKind(result_kind)) return error.InvalidInvariant,
+        2 => if (!isIntegerKind(result_kind) or
+            isSignedIntegerKind(result_kind)) return error.InvalidInvariant,
+        3 => try requireInvariantSumCase(catalogs, result, payload),
+        else => return error.InvalidInvariant,
+    }
+}
+
+fn requireInvariantSumCase(
+    catalogs: Catalogs,
+    value: u16,
+    case_index: u64,
+) Error!void {
+    const schema = catalogs.schemas.node(valueSchema(catalogs, value)) catch
+        return error.InvalidInvariant;
+    const case_count: u64 = switch (schema.kind) {
+        .optional => 2,
+        .sum => readInt(u32, schema.payload, 4),
+        else => return error.InvalidInvariant,
+    };
+    if (case_index >= case_count) return error.InvalidInvariant;
+}
+
+fn requireInvariantKind(
+    catalogs: Catalogs,
+    value: u16,
+    expected: dynamic_value_v1.Kind,
+) Error!void {
+    if (try invariantKind(catalogs, value) != expected) {
+        return error.InvalidInvariant;
+    }
+}
+
+fn requireInvariantScalarTag(
+    catalogs: Catalogs,
+    value: u16,
+    expected: u8,
+) Error!void {
+    if (@intFromEnum(try invariantKind(catalogs, value)) != expected) {
+        return error.InvalidInvariant;
+    }
+}
+
+fn invariantKind(catalogs: Catalogs, value: u16) Error!dynamic_value_v1.Kind {
+    return (catalogs.schemas.node(valueSchema(catalogs, value)) catch
+        return error.InvalidInvariant).kind;
 }
 
 fn isScalarSchemaTag(tag: u8) bool {

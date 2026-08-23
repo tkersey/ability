@@ -13,6 +13,9 @@ const first_environment_offset = state_header_length + frame_header_length;
 
 test "BPI1 emits the admitted constructor invariant families" {
     var relation_probe_count: usize = 0;
+    var duplicate_field_probe_count: usize = 0;
+    var invariant_schema_probe_count: usize = 0;
+    var instruction_operand_probe_count: usize = 0;
     inline for (.{
         SumBody,
         OptionalBody,
@@ -67,10 +70,78 @@ test "BPI1 emits the admitted constructor invariant families" {
                 constructors[constructor_cursor + 20 ..][0..2],
                 .little,
             );
+            const field_count = activation_count + environment_count;
+            if (activation_count >= 2 or environment_count >= 2) {
+                var malformed = Image.bytes;
+                const first_field = section_offset + constructor_cursor + 24 +
+                    if (activation_count >= 2)
+                        @as(usize, 0)
+                    else
+                        @as(usize, activation_count) * 8;
+                const second_field = first_field + 8;
+                @memcpy(
+                    malformed[second_field..][0..8],
+                    malformed[first_field..][0..8],
+                );
+                workspace = .{};
+                try std.testing.expectError(
+                    error.InvalidConstructor,
+                    image_v1.validateImage(&malformed, &workspace),
+                );
+                duplicate_field_probe_count += 1;
+            }
             var invariant_cursor = constructor_cursor + 24 +
-                @as(usize, activation_count + environment_count) * 8;
+                @as(usize, field_count) * 8;
             for (0..invariant_count) |_| {
                 const tag = constructors[invariant_cursor + 4];
+                if (tag == 5 or tag == 11 or tag == 16) {
+                    var malformed = Image.bytes;
+                    malformed[section_offset + invariant_cursor + 4] = 2;
+                    workspace = .{};
+                    try std.testing.expectError(
+                        error.InvalidInvariant,
+                        image_v1.validateImage(&malformed, &workspace),
+                    );
+                    invariant_schema_probe_count += 1;
+                }
+                if (tag == 8 and std.mem.readInt(
+                    u16,
+                    constructors[invariant_cursor + 12 ..][0..2],
+                    .little,
+                ) > 0) {
+                    const operand = std.mem.readInt(
+                        u16,
+                        constructors[invariant_cursor + 16 ..][0..2],
+                        .little,
+                    );
+                    const operand_schema = try validated.catalogs.valueSchemaId(
+                        operand,
+                    );
+                    var wrong_schema: ?u16 = null;
+                    for (0..validated.catalogs.value_count) |value| {
+                        if (try validated.catalogs.valueSchemaId(@intCast(value)) !=
+                            operand_schema)
+                        {
+                            wrong_schema = @intCast(value);
+                            break;
+                        }
+                    }
+                    if (wrong_schema) |value| {
+                        var malformed = Image.bytes;
+                        std.mem.writeInt(
+                            u16,
+                            malformed[section_offset + invariant_cursor + 16 ..][0..2],
+                            value,
+                            .little,
+                        );
+                        workspace = .{};
+                        try std.testing.expectError(
+                            error.InvalidInvariant,
+                            image_v1.validateImage(&malformed, &workspace),
+                        );
+                        instruction_operand_probe_count += 1;
+                    }
+                }
                 if (tag == 17 or tag == 18) {
                     var malformed = Image.bytes;
                     const relation_offset = section_offset + invariant_cursor +
@@ -94,6 +165,9 @@ test "BPI1 emits the admitted constructor invariant families" {
         }
     }
     try std.testing.expect(relation_probe_count > 0);
+    try std.testing.expect(duplicate_field_probe_count > 0);
+    try std.testing.expect(invariant_schema_probe_count > 0);
+    try std.testing.expect(instruction_operand_probe_count > 0);
 }
 
 const relation_instructions = [_]cir.Instruction{
