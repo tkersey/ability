@@ -984,8 +984,6 @@ fn segmentIsUnfunded(
 }
 
 const SegmentPreflight = struct {
-    constructor: []const u8,
-    segment: []const u8,
     segment_id: u16,
     cumulative: u64,
     cost: u64,
@@ -1025,8 +1023,6 @@ fn preflightCurrentSegment(
         else => err,
     };
     return .{
-        .constructor = constructor,
-        .segment = segment,
         .segment_id = segment_id,
         .cumulative = readInt(u64, state, 52),
         .cost = cost,

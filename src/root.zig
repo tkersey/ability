@@ -20,7 +20,24 @@ pub const image = image_v1;
 pub const machine_v2 = struct {
     pub const Options = machine.Options;
     pub const profile = machine_v2_profile_v1;
-    pub const kernel = kernel_v1;
+    pub const kernel = struct {
+        pub const Error = kernel_v1.Error;
+        pub const MachineFailure = kernel_v1.MachineFailure;
+        pub const state_magic = kernel_v1.state_magic;
+        pub const state_header_length = kernel_v1.state_header_length;
+        pub const frame_header_length = kernel_v1.frame_header_length;
+        pub const Outcome = kernel_v1.Outcome;
+        pub const RequestIdentity = kernel_v1.RequestIdentity;
+        pub const RequestView = kernel_v1.RequestView;
+        pub const BoundProgram = kernel_v1.BoundProgram;
+        pub const bindMachineV2 = kernel_v1.bindMachineV2;
+        pub const initial = kernel_v1.initial;
+        pub const validateState = kernel_v1.validateState;
+        pub const current = kernel_v1.current;
+        pub const @"resume" = kernel_v1.@"resume";
+        pub const step = kernel_v1.step;
+        pub const maximumResumeStateSize = kernel_v1.maximumResumeStateSize;
+    };
 };
 /// Public canonical portable-value and codec namespace.
 pub const schema = portable_value;
@@ -55,6 +72,8 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(!@hasDecl(@This(), "program_evaluator"));
     try std.testing.expect(!@hasDecl(@This(), "internal_evaluator"));
     try std.testing.expect(@hasDecl(@This(), "machine_v2"));
+    try std.testing.expect(!@hasDecl(machine_v2.kernel, "preflightStep"));
+    try std.testing.expect(!@hasDecl(machine_v2.kernel, "StepAdmission"));
     try std.testing.expect(!@hasDecl(@This(), "kernel"));
     try std.testing.expect(@hasDecl(@This(), "schema"));
     try std.testing.expect(@hasDecl(@This(), "ir"));
