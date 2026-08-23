@@ -132,6 +132,33 @@ pub fn validateState(
     state: []const u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
+    try validateStateEnvelope(image, state);
+    const sequence = readInt(u64, state, 44);
+    const frame_count = readInt(u32, state, 60);
+    var cursor: usize = state_header_length;
+    var top_kind: u8 = 0;
+    for (0..frame_count) |_| {
+        const constructor_id = readInt(u32, state, cursor);
+        const environment_length = readInt(u32, state, cursor + 4);
+        cursor += frame_header_length;
+        const environment_end = cursor + environment_length;
+        const constructor = try constructorRecord(image, constructor_id);
+        top_kind = constructor[8];
+        validateEnvironment(
+            image,
+            constructor,
+            state[cursor..environment_end],
+            workspace,
+        ) catch return error.InvalidState;
+        cursor = environment_end;
+    }
+    if (top_kind == 3 and sequence == 0) return error.InvalidState;
+}
+
+fn validateStateEnvelope(
+    image: image_v1.ValidatedImage,
+    state: []const u8,
+) Error!void {
     if (state.len < state_header_length + frame_header_length or
         state.len > image.catalogs.envelope.header.maximum_state_bytes or
         !std.mem.eql(u8, state[0..8], &state_magic) or
@@ -171,12 +198,6 @@ pub fn validateState(
         const constructor = constructorRecord(image, constructor_id) catch
             return error.InvalidState;
         top_kind = constructor[8];
-        validateEnvironment(
-            image,
-            constructor,
-            state[cursor..environment_end],
-            workspace,
-        ) catch return error.InvalidState;
         cursor = environment_end;
     }
     if (cursor != state.len or (top_kind == 3 and sequence == 0)) {
@@ -403,10 +424,12 @@ fn stepSegment(
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!SegmentOutcome {
+    try validateStateEnvelope(image, state);
     const constructor_id = topConstructorId(state) catch
         return error.InvalidState;
     const constructor = constructorRecord(image, constructor_id) catch
         return error.InvalidState;
+    if (constructor[8] == 3) return error.InvalidState;
     const segment_id = readInt(u16, constructor, 12);
     const segment = segmentRecord(image, segment_id) catch
         return error.InvalidImage;
@@ -592,6 +615,11 @@ fn stepSegment(
                     next_cumulative,
                     output_state,
                 );
+                if (try maximumResumeStateSize(image, parked) >
+                    image.catalogs.envelope.header.maximum_state_bytes)
+                {
+                    return error.InvalidState;
+                }
                 @memcpy(output_value[0..request_payload.len], request_payload);
                 const canonical_payload = output_value[0..request_payload.len];
                 break :blk .{ .requested = .{
@@ -710,6 +738,76 @@ fn stepSegment(
     };
     caller_fuel.* -= cost;
     return outcome;
+}
+
+pub fn maximumResumeStateSize(
+    image: image_v1.ValidatedImage,
+    state: []const u8,
+) Error!usize {
+    const constructor_id = try topConstructorId(state);
+    const constructor = try constructorRecord(image, constructor_id);
+    if (constructor[8] != 3) return error.InvalidState;
+    const segment_id = readInt(u16, constructor, 12);
+    const segment = try segmentRecord(image, segment_id);
+    const continuation = suspensionContinuation(
+        segment,
+        segmentTerminatorOffset(segment),
+    );
+    const target_segment = readInt(u16, continuation, 0);
+    const next_constructor_id = try transitionConstructor(
+        image,
+        segment_id,
+        4,
+        target_segment,
+    );
+    const next_constructor = try constructorRecord(
+        image,
+        next_constructor_id,
+    );
+    var maximum_environment: usize = if (readInt(u16, next_constructor, 10) & 1 != 0)
+        4
+    else
+        0;
+    const activation_count = readInt(u16, next_constructor, 16);
+    const environment_count = readInt(u16, next_constructor, 18);
+    var field_cursor: usize = 24;
+    for (0..@as(u32, activation_count) + environment_count) |_| {
+        const schema_id = readInt(u32, next_constructor, field_cursor + 4);
+        const schema = image.catalogs.schemas.node(schema_id) catch
+            return error.InvalidImage;
+        const maximum = std.math.cast(
+            usize,
+            schema.maximum_encoded_size,
+        ) orelse return error.InvalidImage;
+        maximum_environment = std.math.add(
+            usize,
+            maximum_environment,
+            maximum,
+        ) catch return error.InvalidImage;
+        field_cursor += 8;
+    }
+    const top_offset = try topFrameOffset(state);
+    const current_environment = readInt(u32, state, top_offset + 4);
+    const current_top = std.math.add(
+        usize,
+        frame_header_length,
+        current_environment,
+    ) catch return error.InvalidState;
+    const without_top = std.math.sub(
+        usize,
+        state.len,
+        current_top,
+    ) catch return error.InvalidState;
+    const maximum_top = std.math.add(
+        usize,
+        frame_header_length,
+        maximum_environment,
+    ) catch return error.InvalidImage;
+    return std.math.add(
+        usize,
+        without_top,
+        maximum_top,
+    ) catch return error.InvalidImage;
 }
 
 fn transitionState(

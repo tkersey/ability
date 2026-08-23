@@ -39,6 +39,16 @@ const input = vector.subarray(8, 8 + inputLength);
 const expectedOutput = vector.subarray(8 + inputLength, 8 + inputLength + expectedLength);
 const memory = new Uint8Array(instance.exports.memory.buffer);
 const inputPtr = instance.exports.boundary_kernel_input_ptr();
+const imageLength = input.readUInt32LE(24);
+const wrapped = Buffer.from(input.subarray(0, 40 + imageLength));
+wrapped.writeUInt16LE(0, 10);
+wrapped.writeUInt32LE(0xffffffff, 28);
+wrapped.writeUInt32LE(1, 32);
+memory.set(wrapped, inputPtr);
+if (instance.exports.boundary_kernel_execute(wrapped.length) !== 1) {
+  throw new Error("wrapped aggregate input lengths were accepted");
+}
+if (instance.exports.boundary_kernel_reset() !== 0) throw new Error("reset failed");
 memory.set(input, inputPtr);
 if (instance.exports.boundary_kernel_execute(input.length) !== 0) {
   throw new Error("kernel semantic vector failed");

@@ -182,6 +182,66 @@ pub fn main(init: std.process.Init) !void {
         kernel_request.identity.digest,
         typed_kernel_request.identity.digest,
     );
+    const parked_before = try KernelMachine.encodeState(
+        allocator,
+        typed_kernel_state,
+    );
+    defer freeBytes(allocator, parked_before);
+    const parked_fuel = typed_kernel_fuel;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.step(typed_kernel_state, &typed_kernel_fuel),
+    );
+    try std.testing.expectEqual(parked_fuel, typed_kernel_fuel);
+    const parked_after = try KernelMachine.encodeState(
+        allocator,
+        typed_kernel_state,
+    );
+    defer freeBytes(allocator, parked_after);
+    try std.testing.expectEqualSlices(u8, parked_before, parked_after);
+
+    var forged = typed_kernel_request;
+    forged.identity.site_ordinal +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.sequence +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.constructor_id +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.machine_contract_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.effect_site_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.payload_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.continuation_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
     const typed_prepared = try KernelMachine.prepareResume(
         typed_kernel_state,
         typed_kernel_request,

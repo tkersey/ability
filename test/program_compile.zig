@@ -260,6 +260,14 @@ const LargeResponseMachine = program_v2.program(
     .maximum_state_bytes = 128,
     .maximum_machine_fuel = 32,
 });
+const LargeResponseKernelMachine = program_v2.program(
+    "large-response-state-preflight",
+    LargeResponseBody,
+).kernelMachine(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 128,
+    .maximum_machine_fuel = 32,
+});
 
 fn identityBody(
     comptime constant_value: u32,
@@ -823,6 +831,35 @@ test "Machine preflights the complete response state before request authority" {
         before,
         after,
     );
+}
+
+test "KernelMachine preflights the complete response state before request authority" {
+    const state = try LargeResponseKernelMachine.initialState(
+        std.testing.allocator,
+        9,
+    );
+    defer LargeResponseKernelMachine.deinitState(state);
+    const before = try LargeResponseKernelMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(before);
+    var fuel: u64 = 8;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        LargeResponseKernelMachine.step(state, &fuel),
+    );
+    try std.testing.expectEqual(@as(u64, 8), fuel);
+    try std.testing.expectEqual(
+        @as(?LargeResponseKernelMachine.Request, null),
+        try LargeResponseKernelMachine.current(state),
+    );
+    const after = try LargeResponseKernelMachine.encodeState(
+        std.testing.allocator,
+        state,
+    );
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 const ignored_argument_blocks = [_]cir.Block{.{

@@ -96,15 +96,21 @@ fn execute(input: []const u8) ExecuteError!u32 {
     const image_length = readInt(u32, input, 24);
     const state_length = readInt(u32, input, 28);
     const auxiliary_length = readInt(u32, input, 32);
-    const expected = std.math.add(
+    var expected = std.math.add(
         usize,
         input_header_length,
-        @as(usize, image_length) + state_length + auxiliary_length,
+        image_length,
     ) catch return error.MalformedKernelInput;
+    expected = std.math.add(usize, expected, state_length) catch
+        return error.MalformedKernelInput;
+    expected = std.math.add(usize, expected, auxiliary_length) catch
+        return error.MalformedKernelInput;
     if (expected != input.len) return error.MalformedKernelInput;
     const image_start = input_header_length;
-    const state_start = image_start + image_length;
-    const auxiliary_start = state_start + state_length;
+    const state_start = std.math.add(usize, image_start, image_length) catch
+        return error.MalformedKernelInput;
+    const auxiliary_start = std.math.add(usize, state_start, state_length) catch
+        return error.MalformedKernelInput;
     const image_bytes = input[image_start..state_start];
     const state_bytes = input[state_start..auxiliary_start];
     const auxiliary = input[auxiliary_start..];

@@ -379,6 +379,37 @@ test "direct and kernel reject shared malformed State classes" {
     }
 }
 
+test "zero caller fuel cannot launder a malformed State" {
+    const image_v1 = @import("image_v1");
+    const kernel_v1 = @import("kernel_v1");
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const state = try ProgramMachine.initialState(std.testing.allocator, 29);
+    defer ProgramMachine.deinitState(state);
+    const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const malformed = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(malformed);
+    malformed[0] ^= 0xff;
+    var fuel: u64 = 0;
+    var output_state: [4096]u8 = undefined;
+    var output_value: [4096]u8 = undefined;
+    var scratch: [8192]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidState,
+        kernel_v1.step(
+            image,
+            malformed,
+            &fuel,
+            &output_state,
+            &output_value,
+            &scratch,
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), fuel);
+}
+
 test "Reified constants emit in canonical first-use order" {
     const constant_instructions = [_]cir.Instruction{.{
         .kind = .constant,

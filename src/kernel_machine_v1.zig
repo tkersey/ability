@@ -276,6 +276,17 @@ pub fn Machine(
             const expected = (try current(state)) orelse
                 return error.ProgramContractViolation;
             if (!requestEql(expected, request)) return error.ProgramContractViolation;
+            var workspace: image_v1.ValidationWorkspace = .{};
+            workspace.invariant_result = value.request_storage;
+            const image = image_v1.validateImage(&Image.bytes, &workspace) catch
+                return error.ProgramContractViolation;
+            const maximum_resume_state = kernel_v1.maximumResumeStateSize(
+                image,
+                value.storage[0..value.length],
+            ) catch return error.ProgramContractViolation;
+            if (maximum_resume_state > options.maximum_state_bytes) {
+                return error.ProgramContractViolation;
+            }
             const prepared = value.allocator.create(PreparedResumeValue) catch
                 return error.OutOfMemory;
             errdefer value.allocator.destroy(prepared);
@@ -458,7 +469,34 @@ pub fn Machine(
         fn requestEql(left: Request, right: Request) bool {
             return left.sequence == right.sequence and
                 left.constructor_id == right.constructor_id and
-                std.mem.eql(u8, &left.identity.digest, &right.identity.digest) and
+                left.identity.sequence == right.identity.sequence and
+                left.identity.constructor_id == right.identity.constructor_id and
+                left.identity.site_ordinal == right.identity.site_ordinal and
+                std.mem.eql(
+                    u8,
+                    &left.identity.machine_contract_digest,
+                    &right.identity.machine_contract_digest,
+                ) and
+                std.mem.eql(
+                    u8,
+                    &left.identity.effect_site_digest,
+                    &right.identity.effect_site_digest,
+                ) and
+                std.mem.eql(
+                    u8,
+                    &left.identity.payload_digest,
+                    &right.identity.payload_digest,
+                ) and
+                std.mem.eql(
+                    u8,
+                    &left.identity.continuation_digest,
+                    &right.identity.continuation_digest,
+                ) and
+                std.mem.eql(
+                    u8,
+                    &left.identity.digest,
+                    &right.identity.digest,
+                ) and
                 Definition.requestEql(left.value, right.value);
         }
     };
