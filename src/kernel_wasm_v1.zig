@@ -82,6 +82,7 @@ const ExecuteError = image_v1.Error || kernel_v1.Error || error{
 };
 
 fn execute(input: []const u8) ExecuteError!u32 {
+    validation_workspace.invariant_result = &value_storage;
     if (input.len < input_header_length or
         !std.mem.eql(u8, input[0..8], "ABL_KIN1") or
         readInt(u16, input, 8) != 1 or

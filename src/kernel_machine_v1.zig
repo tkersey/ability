@@ -105,6 +105,7 @@ pub fn Machine(
             const state = try allocateState(allocator);
             errdefer destroyState(state);
             var workspace: image_v1.ValidationWorkspace = .{};
+            workspace.invariant_result = state.request_storage;
             const image = image_v1.validateImage(&Image.bytes, &workspace) catch
                 return error.ProgramContractViolation;
             state.length = kernel_v1.initial(
@@ -142,6 +143,7 @@ pub fn Machine(
             const value = storedConst(state);
             if (value.terminal) return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
+            workspace.invariant_result = value.request_storage;
             const image = image_v1.validateImage(&Image.bytes, &workspace) catch
                 return error.ProgramContractViolation;
             kernel_v1.validateState(
@@ -183,6 +185,7 @@ pub fn Machine(
             const value = stored(state);
             try validateState(state);
             var workspace: image_v1.ValidationWorkspace = .{};
+            workspace.invariant_result = value.request_storage;
             const image = image_v1.validateImage(&Image.bytes, &workspace) catch
                 return error.ProgramContractViolation;
             const maybe_request = kernel_v1.current(
@@ -216,6 +219,7 @@ pub fn Machine(
             const scratch = value.allocator.alloc(u8, scratch_length) catch
                 return error.OutOfMemory;
             defer value.allocator.free(scratch);
+            workspace.invariant_result = scratch[options.maximum_state_bytes..];
             const outcome = kernel_v1.step(
                 image,
                 value.storage[0..value.length],
@@ -319,6 +323,7 @@ pub fn Machine(
                 response_bytes,
             ) catch return error.ProgramContractViolation;
             var workspace: image_v1.ValidationWorkspace = .{};
+            workspace.invariant_result = state.request_storage;
             const image = image_v1.validateImage(&Image.bytes, &workspace) catch
                 return error.ProgramContractViolation;
             const next_length = kernel_v1.@"resume"(

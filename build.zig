@@ -807,6 +807,16 @@ pub fn build(b: *std.Build) void {
     reified_program_test.addImport("image_v1", host_core.image_v1);
     reified_program_test.addImport("kernel_v1", host_core.kernel_v1);
     reified_program_test.addImport("machine", host_core.machine);
+    const reification_generated_test = programTestModule(
+        b,
+        host_core,
+        "test/reification_generated_v1.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reification_generated_test.addImport("machine", host_core.machine);
     const reducer_semantics_test = b.createModule(.{
         .root_source_file = b.path("test/reducer_semantics_v1.zig"),
         .target = b.graph.host,
@@ -919,6 +929,11 @@ pub fn build(b: *std.Build) void {
     reified_core_step.dependOn(reification_baseline_step);
     addTestArtifact(b, reified_core_step, reified_program_test);
     addTestArtifact(b, reified_core_step, reducer_semantics_test);
+    const reification_generated_step = b.step(
+        "check-boundary-reification-generated",
+        "Exhaust finite graphs and run 10000 seeded direct/kernel traces.",
+    );
+    addTestArtifact(b, reification_generated_step, reification_generated_test);
 
     const image_step = b.step(
         "check-boundary-image",
@@ -1809,6 +1824,7 @@ pub fn build(b: *std.Build) void {
         image_digest_step,
         specialization_equivalence_step,
         engine_switch_step,
+        reification_generated_step,
         reification_deletion_step,
         reification_measure_step,
     }) |dependency| reification_receipt_step.dependOn(dependency);
@@ -1839,6 +1855,7 @@ pub fn build(b: *std.Build) void {
         agent_step,
         parity_step,
         kernel_wasm_step,
+        reification_generated_step,
         reification_receipt_step,
         no_interpreter_step,
         deletion_step,

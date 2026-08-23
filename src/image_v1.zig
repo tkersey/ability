@@ -104,6 +104,8 @@ pub const ValidationWorkspace = struct {
     schema_nodes: [1024]dynamic_value_v1.NodeIndex = undefined,
     value_tasks: [2048]dynamic_value_v1.ValueTask = undefined,
     schema_hash_tasks: [8192]dynamic_value_v1.SchemaHashTask = undefined,
+    invariant_instruction: [16 + 2 * 1024]u8 = undefined,
+    invariant_result: []u8 = &.{},
 };
 
 pub const Catalogs = struct {

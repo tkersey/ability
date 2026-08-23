@@ -63,6 +63,7 @@ test/program_operations.zig
 test/program_residual_effects.zig
 test/reducer_semantics_v1.zig
 test/reification_baseline.zig
+test/reification_generated_v1.zig
 test/reified_program_v1.zig
 test/research_digest_v2.zig
 test/run_machine_native.zig

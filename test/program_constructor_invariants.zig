@@ -456,6 +456,11 @@ const ClosedExpressionMachine = ClosedExpressionProgram.compile(.{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
 });
+const ClosedExpressionKernelMachine = ClosedExpressionProgram.kernelMachine(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
 
 const ConstantAlgebraicLookup = struct {
     pub const id: u32 = 0;
@@ -706,6 +711,11 @@ const WideProductProgram = program_v2.program(
     WideProductBody,
 );
 const WideProductMachine = WideProductProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 64,
+});
+const WideProductKernelMachine = WideProductProgram.kernelMachine(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 64,
@@ -1957,6 +1967,13 @@ test "closed arithmetic definitions bind retained branch operands" {
         error.ProgramContractViolation,
         ClosedExpressionMachine.decodeState(std.testing.allocator, forged),
     );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        ClosedExpressionKernelMachine.decodeState(
+            std.testing.allocator,
+            forged,
+        ),
+    );
 }
 
 test "payload-bearing algebraic constants retain executable definitions" {
@@ -2076,6 +2093,10 @@ test "wide product definitions survive target-edge projection" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         WideProductMachine.decodeState(std.testing.allocator, forged),
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        WideProductKernelMachine.decodeState(std.testing.allocator, forged),
     );
 }
 

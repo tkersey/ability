@@ -190,6 +190,7 @@ pub fn current(
     output_payload: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!?RequestView {
+    workspace.invariant_result = output_payload;
     try validateState(image, state, workspace);
     const constructor_id = try topConstructorId(state);
     const constructor = try constructorRecord(image, constructor_id);
@@ -329,6 +330,7 @@ pub fn step(
     if (scratch.len < maximum_state) return error.ScratchCapacity;
     const temporary_state = scratch[0..maximum_state];
     const value_scratch = scratch[maximum_state..];
+    workspace.invariant_result = value_scratch;
     var current_state = state;
     var remaining = caller_fuel.*;
     var next_uses_output = true;
@@ -2452,13 +2454,14 @@ fn validateEnvironment(
         field_cursor += 8;
     }
     if (value_cursor != environment.len) return error.InvalidState;
-    try validatePathInvariants(image, constructor, &slots);
+    try validatePathInvariants(image, constructor, &slots, workspace);
 }
 
 fn validatePathInvariants(
     image: image_v1.ValidatedImage,
     constructor: []const u8,
-    slots: *const [1024]Slot,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     const activation_count = readInt(u16, constructor, 16);
     const environment_count = readInt(u16, constructor, 18);
@@ -2477,6 +2480,151 @@ fn validatePathInvariants(
                     (slots[value].bytes[0] == 1) ==
                         (constructor[payload + 2] == 1);
             },
+            1, 5 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                1,
+                0,
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
+            2 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                20,
+                0,
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
+            3 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                21 + constructor[payload + 6],
+                0,
+                &.{
+                    readInt(u16, constructor, payload + 2),
+                    readInt(u16, constructor, payload + 4),
+                },
+                slots,
+                workspace,
+            ),
+            4, 7 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                23,
+                0,
+                &.{
+                    readInt(u16, constructor, payload + 2),
+                    readInt(u16, constructor, payload + 4),
+                    readInt(u16, constructor, payload + 6),
+                },
+                slots,
+                workspace,
+            ),
+            6 => try validateInvariantConstant(
+                image,
+                readInt(u16, constructor, payload),
+                constructor[payload + 4],
+                readInt(u64, constructor, payload + 12),
+                slots,
+            ),
+            8 => blk: {
+                const result = readInt(u16, constructor, payload);
+                const definition = readInt(u16, constructor, payload + 2);
+                const operand_count = readInt(u16, constructor, payload + 4);
+                var operands: [1024]u16 = undefined;
+                if (operand_count > operands.len) return error.InvalidState;
+                for (0..operand_count) |index| {
+                    operands[index] = readInt(
+                        u16,
+                        constructor,
+                        payload + 8 + index * 2,
+                    );
+                }
+                const instruction = try definingInstruction(image, definition);
+                break :blk try validateComputedResult(
+                    image,
+                    result,
+                    readInt(u16, instruction, 6),
+                    readInt(u32, instruction, 12),
+                    operands[0..operand_count],
+                    slots,
+                    workspace,
+                );
+            },
+            9 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                25,
+                readInt(u16, constructor, payload + 4),
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
+            10 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                29,
+                readInt(u16, constructor, payload + 4),
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
+            11 => blk: {
+                const bounded = readInt(u16, constructor, payload + 2);
+                const operation: u16 = switch ((try valueNode(image, bounded)).kind) {
+                    .vector => 34,
+                    .text => 53,
+                    .bytes => 54,
+                    else => return error.InvalidState,
+                };
+                break :blk try validateComputedResult(
+                    image,
+                    readInt(u16, constructor, payload),
+                    operation,
+                    0,
+                    &.{bounded},
+                    slots,
+                    workspace,
+                );
+            },
+            12 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                if (constructor[payload + 4] == 0) 8 else 15,
+                0,
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
+            13 => blk: {
+                const operations = [_]u16{ 3, 4, 5, 6, 7, 16, 17, 18 };
+                const operation = constructor[payload + 6];
+                if (operation >= operations.len) return error.InvalidState;
+                break :blk try validateComputedResult(
+                    image,
+                    readInt(u16, constructor, payload),
+                    operations[operation],
+                    0,
+                    &.{
+                        readInt(u16, constructor, payload + 2),
+                        readInt(u16, constructor, payload + 4),
+                    },
+                    slots,
+                    workspace,
+                );
+            },
+            14 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                19,
+                0,
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
             15 => blk: {
                 const value = readInt(u16, constructor, payload);
                 if (!slots[value].initialized) break :blk false;
@@ -2484,6 +2632,15 @@ fn validatePathInvariants(
                 for (slots[value].bytes) |byte| zero = zero and byte == 0;
                 break :blk zero == (constructor[payload + 2] == 1);
             },
+            16 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                2,
+                0,
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
             17 => blk: {
                 const left_id = readInt(u16, constructor, payload);
                 const right_id = readInt(u16, constructor, payload + 2);
@@ -2502,6 +2659,18 @@ fn validatePathInvariants(
                 break :blk compareIntegers(left, right, operation) ==
                     (constructor[payload + 5] == 1);
             },
+            18 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                9 + constructor[payload + 6],
+                0,
+                &.{
+                    readInt(u16, constructor, payload + 2),
+                    readInt(u16, constructor, payload + 4),
+                },
+                slots,
+                workspace,
+            ),
             19 => blk: {
                 const value = readInt(u16, constructor, payload);
                 if (!slots[value].initialized) break :blk false;
@@ -2513,11 +2682,139 @@ fn validatePathInvariants(
                 break :blk (actual == readInt(u16, constructor, payload + 2)) ==
                     (constructor[payload + 4] == 1);
             },
-            else => true,
+            20 => try validateComputedResult(
+                image,
+                readInt(u16, constructor, payload),
+                28,
+                readInt(u16, constructor, payload + 4),
+                &.{readInt(u16, constructor, payload + 2)},
+                slots,
+                workspace,
+            ),
+            else => return error.InvalidState,
         };
         if (!accepted) return error.InvalidState;
         cursor += length;
     }
+}
+
+fn definingInstruction(
+    image: image_v1.ValidatedImage,
+    definition: u16,
+) Error![]const u8 {
+    for (0..image.segment_count) |segment_id| {
+        const segment = try segmentRecord(image, @intCast(segment_id));
+        var cursor: usize = 24 + @as(usize, readInt(u16, segment, 10)) * 2;
+        for (0..readInt(u32, segment, 12)) |_| {
+            const length = readInt(u32, segment, cursor);
+            if (readInt(u16, segment, cursor + 8) == definition) {
+                return segment[cursor .. cursor + length];
+            }
+            cursor += length;
+        }
+    }
+    return error.InvalidState;
+}
+
+fn validateComputedResult(
+    image: image_v1.ValidatedImage,
+    result: u16,
+    operation: u16,
+    immediate: u32,
+    operands: []const u16,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!bool {
+    if (!slots[result].initialized or operands.len > 1024) return false;
+    const instruction_length = 16 + operands.len * 2;
+    if (instruction_length > workspace.invariant_instruction.len) {
+        return error.ScratchCapacity;
+    }
+    const instruction = workspace.invariant_instruction[0..instruction_length];
+    @memset(instruction, 0);
+    std.mem.writeInt(u32, instruction[0..4], @intCast(instruction_length), .little);
+    std.mem.writeInt(u16, instruction[6..8], operation, .little);
+    std.mem.writeInt(u16, instruction[8..10], result, .little);
+    std.mem.writeInt(u16, instruction[10..12], @intCast(operands.len), .little);
+    std.mem.writeInt(u32, instruction[12..16], immediate, .little);
+    for (operands, 0..) |operand, index| {
+        std.mem.writeInt(
+            u16,
+            instruction[16 + index * 2 ..][0..2],
+            operand,
+            .little,
+        );
+    }
+    const expected = slots[result];
+    defer slots[result] = expected;
+    var scratch_cursor: usize = 0;
+    const failure = if (operation == 0) blk: {
+        slots[result] = .{
+            .bytes = try constantBytes(image, immediate),
+            .initialized = true,
+        };
+        break :blk null;
+    } else if (operation == 1) blk: {
+        if (operands.len != 1 or !slots[operands[0]].initialized) return false;
+        slots[result] = slots[operands[0]];
+        break :blk null;
+    } else if (operation <= 23 or operation == 57)
+        try executeScalarOperation(
+            image,
+            instruction,
+            result,
+            slots,
+            workspace.invariant_result,
+            &scratch_cursor,
+        )
+    else if (operation <= 56)
+        try executeCompositeOperation(
+            image,
+            instruction,
+            result,
+            slots,
+            workspace.invariant_result,
+            &scratch_cursor,
+            workspace,
+        )
+    else
+        return error.InvalidState;
+    return failure == null and slots[result].initialized and
+        std.mem.eql(u8, expected.bytes, slots[result].bytes);
+}
+
+fn validateInvariantConstant(
+    image: image_v1.ValidatedImage,
+    result: u16,
+    kind: u8,
+    payload: u64,
+    slots: *const [1024]Slot,
+) Error!bool {
+    if (!slots[result].initialized) return false;
+    return switch (kind) {
+        0 => slots[result].bytes.len == 1 and
+            slots[result].bytes[0] == @as(u8, @intCast(payload)),
+        1 => blk: {
+            const value = try decodeInteger(
+                try valueKind(image, result),
+                slots[result].bytes,
+            );
+            break :blk value.signed and signedValue(value) == @as(i64, @bitCast(payload));
+        },
+        2 => blk: {
+            const value = try decodeInteger(
+                try valueKind(image, result),
+                slots[result].bytes,
+            );
+            break :blk !value.signed and value.raw == payload;
+        },
+        3 => (try algebraicCaseIndex(
+            image,
+            result,
+            slots[result].bytes,
+        )) == payload,
+        else => error.InvalidState,
+    };
 }
 
 fn algebraicCaseIndex(
