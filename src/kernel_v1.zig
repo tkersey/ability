@@ -73,6 +73,7 @@ pub const BoundProgram = struct {
     profile_bytes: []const u8,
     image_sha256: [32]u8,
     profile_sha256: [32]u8,
+    maximum_state_bytes: u32,
 };
 
 const ValidatedProgram = struct {
@@ -129,7 +130,7 @@ pub fn bindMachineV2(
         image_bytes,
         workspace,
     ) catch return error.InvalidImage;
-    _ = try bindValidatedMachineV2(
+    const validated = try bindValidatedMachineV2(
         refreshed_image,
         profile_bytes,
         workspace,
@@ -139,6 +140,7 @@ pub fn bindMachineV2(
         .profile_bytes = profile_bytes,
         .image_sha256 = sha256(image_bytes),
         .profile_sha256 = sha256(profile_bytes),
+        .maximum_state_bytes = validated.profile.maximum_state_bytes,
     };
 }
 

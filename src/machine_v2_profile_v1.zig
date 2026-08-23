@@ -264,6 +264,9 @@ pub fn validateProjection(
         if (count == 0) return error.InvalidProfile;
     }
 
+    if (profile.initial_constructor_id != catalogs.initial_constructor_id) {
+        return error.InvalidProfile;
+    }
     const mapped_initial = try profile.mappedConstructor(
         profile.initial_constructor_id,
     );

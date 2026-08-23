@@ -79,6 +79,7 @@ pub export fn boundary_machine_v2_kernel_reset() u32 {
 const ExecuteError = image_v1.Error || kernel_v1.Error || error{
     MalformedKernelInput,
     OutputCapacity,
+    ProfileResourceLimit,
 };
 
 fn execute(input: []const u8) ExecuteError!u32 {
@@ -135,6 +136,18 @@ fn execute(input: []const u8) ExecuteError!u32 {
         profile_bytes,
         &validation_workspace,
     );
+    const required_scratch = std.math.add(
+        u64,
+        image.maximum_state_bytes,
+        program_image.catalogs.envelope.header.maximum_kernel_scratch_bytes,
+    ) catch return error.ProfileResourceLimit;
+    if (image.maximum_state_bytes > state_capacity or
+        program_image.catalogs.envelope.header.maximum_single_value_bytes >
+            value_capacity or
+        required_scratch > scratch_capacity)
+    {
+        return error.ProfileResourceLimit;
+    }
     return switch (command) {
         0 => try writeOutput(command, 0, caller_fuel, &.{}, &.{}, &.{}),
         1 => blk: {
@@ -393,6 +406,7 @@ fn errorCode(err: ExecuteError) u32 {
         error.LengthMismatch,
         error.TrailingBytes,
         error.ScratchCapacity,
+        error.ProfileResourceLimit,
         error.ExecutionBudgetExceeded,
         error.CapacityExceeded,
         error.UnsupportedOperation,

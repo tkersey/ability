@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 
 const bytes = fs.readFileSync(process.argv[2]);
 const vectors = process.argv.slice(3).map((path) => fs.readFileSync(path));
@@ -71,6 +72,26 @@ wrapped.writeUInt32LE(1, 36);
 memory.set(wrapped, inputPtr);
 if (instance.exports.boundary_machine_v2_kernel_execute(wrapped.length) !== 6) {
   throw new Error("wrapped aggregate input lengths were accepted");
+}
+if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
+const oversizedProfile = Buffer.from(input.subarray(0, 48 + imageLength + profileLength));
+oversizedProfile.writeUInt16LE(0, 10);
+oversizedProfile.writeUInt32LE(0, 32);
+oversizedProfile.writeUInt32LE(0, 36);
+const profile = oversizedProfile.subarray(profileStart, profileStart + profileLength);
+profile.writeUInt32LE(4 * 1024 * 1024 + 1, 132);
+const semanticDigest = profile.subarray(64, 96);
+const contract = crypto.createHash("sha256");
+contract.update(semanticDigest);
+contract.update("\0boundary-machine-abi=2");
+contract.update("\0state=rnf-v1");
+contract.update(`\0frames=${profile.readUInt32LE(128)}`);
+contract.update(`\0state-bytes=${profile.readUInt32LE(132)}`);
+contract.update(`\0fuel=${profile.readBigUInt64LE(136)}`);
+contract.digest().copy(profile, 96);
+memory.set(oversizedProfile, inputPtr);
+if (instance.exports.boundary_machine_v2_kernel_execute(oversizedProfile.length) !== 6) {
+  throw new Error("unexecutable Machine v2 profile capacity was accepted");
 }
 if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
 const sectionOffset = (image, kind) => Number(image.readBigUInt64LE(76 + (kind - 1) * 24 + 8));
