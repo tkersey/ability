@@ -904,6 +904,42 @@ test "BPI1 validation recomputes evaluator scratch requirements" {
     );
 }
 
+test "BPI1 scratch sizing includes retained zero-capacity child schemas" {
+    const ZeroCapacity = [0][64]u8;
+    const ZeroCapacityBody = struct {
+        pub const InitialArgs = ZeroCapacity;
+        pub const Result = ZeroCapacity;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{ZeroCapacity};
+        pub const control_ir: cir.Program = .{
+            .label = "zero-capacity-schema-scratch",
+            .value_types = &.{cir.ValueType{ .schema = 0 }},
+            .blocks = &.{.{
+                .id = 0,
+                .parameters = &.{0},
+                .terminator = .{ .return_value = 0 },
+            }},
+            .entry = 0,
+            .result_type = .{ .schema = 0 },
+        };
+    };
+    const ZeroCapacityProgram = program_v2.program(
+        "zero-capacity-schema-scratch",
+        ZeroCapacityBody,
+    );
+    const ZeroCapacityImage = ZeroCapacityProgram.image();
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const validated = try image_v1.validateImage(
+        &ZeroCapacityImage.bytes,
+        &workspace,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 64),
+        validated.catalogs.envelope.header.maximum_single_value_bytes,
+    );
+}
+
 test "BPI1 rejects 1000 deterministic mutations without trap" {
     try std.testing.expectEqual(@as(u32, 1000), try malformedImageCaseCount());
 }

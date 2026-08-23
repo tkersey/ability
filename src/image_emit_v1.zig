@@ -277,6 +277,49 @@ pub fn SchemaSet(comptime RootTypes: anytype) type {
     };
 }
 
+fn maximumSchemaNodeEncodedSize(comptime T: type) usize {
+    portable_value.assertPortable(T);
+    var maximum = portable_value.maximumEncodedSize(T);
+    if (comptime portable_value.isVectorType(T)) {
+        return @max(maximum, maximumSchemaNodeEncodedSize(T.ElementType));
+    }
+    if (comptime portable_value.isBytesType(T) or
+        portable_value.isTextType(T))
+    {
+        return maximum;
+    }
+    switch (@typeInfo(T)) {
+        .array => |info| maximum = @max(
+            maximum,
+            maximumSchemaNodeEncodedSize(info.child),
+        ),
+        .optional => |info| maximum = @max(
+            maximum,
+            maximumSchemaNodeEncodedSize(info.child),
+        ),
+        .@"struct" => |info| inline for (info.fields) |field| {
+            maximum = @max(
+                maximum,
+                maximumSchemaNodeEncodedSize(field.type),
+            );
+        },
+        .@"union" => |info| {
+            maximum = @max(
+                maximum,
+                maximumSchemaNodeEncodedSize(info.tag_type.?),
+            );
+            inline for (info.fields) |field| {
+                maximum = @max(
+                    maximum,
+                    maximumSchemaNodeEncodedSize(field.type),
+                );
+            }
+        },
+        else => {},
+    }
+    return maximum;
+}
+
 /// Emit all schemas in the normative BPI1 root traversal order for one
 /// Reified Program.
 pub fn ProgramSchemaSet(comptime Reified: type) type {
@@ -326,7 +369,7 @@ pub fn ProgramSchemaSet(comptime Reified: type) type {
         for (roots) |Root| {
             maximum = @max(
                 maximum,
-                portable_value.maximumEncodedSize(Root),
+                maximumSchemaNodeEncodedSize(Root),
             );
         }
         break :blk maximum;
