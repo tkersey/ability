@@ -30,6 +30,9 @@ The v2 compatibility claim is transition equivalence: outcome tag, caller fuel, 
 request identity and payload, result, failure, and operational rejection must
 agree at every boundary. Run `zig build check-boundary-reification-receipt` for
 the aggregate executable proof.
+That Boundary-local receipt reports only Boundary-owned observations. World and
+Agent compatibility remains proven in their owning repositories rather than
+being asserted without a downstream witness in Boundary's artifact.
 
 Debug names and source locations are not semantic image data. Boundary 1.6
 adds no runtime definition loader, callback registry, source interpreter, open

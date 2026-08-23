@@ -318,18 +318,19 @@ fn parseTestArgs(b: *std.Build) TestArgs {
     };
 }
 
-fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
+fn addZigPathCoverageGuard(b: *std.Build) *std.Build.Step {
     const guard = b.addSystemCommand(&.{
         "sh",
         "-c",
         \\set -eu
         \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
         \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
-        \\find src examples test -type f -name '*.zig' | sort > "$tmp.actual"
-        \\grep -E '^(src|examples|test)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
+        \\{ printf '%s\n' build.zig; find src examples test -type f -name '*.zig'; } | sort > "$tmp.actual"
+        \\sort repo_zig_paths.txt > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
-    lint_step.dependOn(&guard.step);
+    guard.setCwd(b.path("."));
+    return &guard.step;
 }
 
 fn addTestArtifactWithArgs(
@@ -393,6 +394,7 @@ fn addReificationReceiptSources(
         if (source_path.len != 0) command.addFileArg(b.path(source_path));
     }
     inline for (.{
+        "repo_zig_paths.txt",
         "conformance/reification-v1/baseline.lock.json",
         "conformance/reification-v1/baseline/vectors.json",
         "conformance/reification-v1/check_baseline.sh",
@@ -2041,7 +2043,8 @@ pub fn build(b: *std.Build) void {
     });
     const lint_step = b.step("lint", "Lint Boundary Zig source.");
     lint_step.dependOn(&format_command.step);
-    addZigPathCoverageGuard(b, lint_step);
+    const zig_path_coverage_guard = addZigPathCoverageGuard(b);
+    lint_step.dependOn(zig_path_coverage_guard);
     var lint_builder = zlinter.builder(b, .{});
     lint_builder.addPaths(.{
         .include = &.{
@@ -2245,6 +2248,7 @@ pub fn build(b: *std.Build) void {
     }
     reification_proof_stamp_command.addArg("--receipt-sources");
     addReificationReceiptSources(b, reification_proof_stamp_command);
+    reification_proof_stamp_command.step.dependOn(zig_path_coverage_guard);
     const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
         .basename = "boundary-reification-v1-proof.json",
     });

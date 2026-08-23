@@ -8,6 +8,14 @@ const repository = process.cwd();
 const script = path.join(repository, "scripts", "write_reification_receipt.mjs");
 const proofScript = path.join(repository, "scripts", "write_reification_proof.mjs");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "boundary-reification-receipt-"));
+const unownedDownstreamClaims = [
+  "world_application_identity_match",
+  "world_frame_byte_match",
+  "agent_witness_passed",
+  "application_abi_changed",
+  "frame_format_changed",
+  "effect_protocol_changed",
+];
 
 try {
   const artifact = path.join(temporary, "artifact.bin");
@@ -66,7 +74,8 @@ try {
   fs.writeFileSync(
     build,
     "installation.step.dependOn(reification_receipt_step);\n" +
-      "emit_reification_assets_step.dependOn(reification_receipt_step);\n",
+      "emit_reification_assets_step.dependOn(reification_receipt_step);\n" +
+      "reification_proof_stamp_command.step.dependOn(zig_path_coverage_guard);\n",
   );
   const pure = path.join(temporary, "pure.zig");
   fs.writeFileSync(pure, "pub const Pure = void;\n");
@@ -94,6 +103,9 @@ try {
     proofArgs,
     { encoding: "utf8" },
   ));
+  if (unownedDownstreamClaims.some((field) => Object.hasOwn(proof, field))) {
+    throw new Error("Boundary proof claimed an unobserved downstream result");
+  }
   fs.writeFileSync(proofPath, JSON.stringify(proof));
   const loaderSource = path.join(temporary, "loader.zig");
   fs.writeFileSync(loaderSource, "pub const DefinitionLoader = void;\n");
@@ -112,7 +124,8 @@ try {
   }
   fs.writeFileSync(
     build,
-    "emit_reification_assets_step.dependOn(reification_receipt_step);\n",
+    "emit_reification_assets_step.dependOn(reification_receipt_step);\n" +
+      "reification_proof_stamp_command.step.dependOn(zig_path_coverage_guard);\n",
   );
   const unorderedInstall = childProcess.spawnSync(
     process.execPath,
@@ -126,6 +139,20 @@ try {
     build,
     "installation.step.dependOn(reification_receipt_step);\n" +
       "emit_reification_assets_step.dependOn(reification_receipt_step);\n",
+  );
+  const unguardedInventory = childProcess.spawnSync(
+    process.execPath,
+    proofArgs,
+    { encoding: "utf8" },
+  );
+  if (unguardedInventory.status === 0) {
+    throw new Error("proof source inventory without its coverage guard was accepted");
+  }
+  fs.writeFileSync(
+    build,
+    "installation.step.dependOn(reification_receipt_step);\n" +
+      "emit_reification_assets_step.dependOn(reification_receipt_step);\n" +
+      "reification_proof_stamp_command.step.dependOn(zig_path_coverage_guard);\n",
   );
   const malformedProvenance = JSON.parse(fs.readFileSync(generated, "utf8"));
   malformedProvenance.generated_trace_sha256 = "digest";
@@ -188,7 +215,8 @@ try {
   if (
     receipt.image_profile_invariance_passed !== true ||
     receipt.baseline_digest_count !== 7 ||
-    receipt.malformed_image_case_count !== 123
+    receipt.malformed_image_case_count !== 123 ||
+    unownedDownstreamClaims.some((field) => Object.hasOwn(receipt, field))
   ) {
     throw new Error("receipt did not derive claims from the executed proof stamp");
   }

@@ -33,3 +33,6 @@ derives baseline inventory, semantic invariance, malformed-corpus counts,
 generated comparisons, WASM imports, and source topology from their executed
 outputs. The receipt writer rejects a missing, failed, or mistyped proof and
 derives its claims from that artifact rather than asserting them independently.
+The Boundary-local receipt contains only Boundary-owned observations. World
+Application and Agent compatibility evidence remains executable in those owning
+repositories and is combined only by coordinated release closure.

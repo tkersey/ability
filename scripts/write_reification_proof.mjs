@@ -88,6 +88,8 @@ const pureClauseMachineV2DependencyPresent = /@import\("(?:machine|machine_v2|ke
 const proofGateRequiredBeforeEmission =
   /installation\.step\.dependOn\(reification_receipt_step\)/.test(build) &&
   /emit_reification_assets_step\.dependOn\(reification_receipt_step\)/.test(build);
+const sourceInventoryGuardRequired =
+  /reification_proof_stamp_command\.step\.dependOn\(zig_path_coverage_guard\)/.test(build);
 
 const proof = {
   format: "boundary-reification-proof/v1",
@@ -105,14 +107,8 @@ const proof = {
   wasm_transition_comparison_count: wasmExecution.transition_comparison_count,
   malformed_image_case_count: semantic.malformed_image_case_count,
   malformed_state_case_count: semantic.malformed_state_case_count,
-  world_application_identity_match: false,
-  world_frame_byte_match: false,
-  agent_witness_passed: false,
   machine_abi_changed: baseline.machine_abi !== semantic.machine_abi,
   state_format_changed: baseline.state_format_version !== semantic.state_format_version,
-  application_abi_changed: false,
-  frame_format_changed: false,
-  effect_protocol_changed: false,
   source_interpreter_present: /(?:@import\("interpreter"\)|pub const Runtime\b)/.test(allSources),
   runtime_definition_loader_present: /(?:DefinitionLoader|LoadedDefinition|RuntimeDefinition)/.test(allSources),
   callback_registry_present: /(?:CallbackRegistry|callback_registry)/.test(allSources),
@@ -138,6 +134,7 @@ if (
   proof.callback_registry_present ||
   proof.public_clause_evaluator_present ||
   proof.pure_clause_machine_v2_dependency_present ||
+  !sourceInventoryGuardRequired ||
   !proof.proof_gate_required_before_emission
 ) {
   throw new Error("reification architecture proof failed");
