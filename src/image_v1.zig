@@ -105,6 +105,7 @@ pub const ValidationWorkspace = struct {
     catalog_offsets: [1024]u32 = undefined,
     catalog_lengths: [1024]u32 = undefined,
     constant_used: [1024]bool = undefined,
+    value_defined: [1024]bool = undefined,
     canonical_schema_seen: [1024]bool = undefined,
     canonical_schema_stack: [2048]SchemaOrderTask = undefined,
 };
@@ -291,14 +292,19 @@ pub fn validateImage(
     const catalogs = try validateCatalogs(image, workspace);
     try validateCanonicalSchemaOrder(catalogs, workspace);
     @memset(workspace.constant_used[0..catalogs.constant_count], false);
+    @memset(workspace.value_defined[0..catalogs.value_count], false);
     var next_constant: u32 = 0;
     const segment_count = try validateSegments(
         catalogs,
         &workspace.constant_used,
         &next_constant,
+        &workspace.value_defined,
     );
     for (workspace.constant_used[0..catalogs.constant_count]) |used| {
         if (!used) return error.InvalidConstant;
+    }
+    for (workspace.value_defined[0..catalogs.value_count]) |defined| {
+        if (!defined) return error.InvalidValue;
     }
     try validateFunctionEntries(catalogs, segment_count);
     const constructor_count = try validateConstructors(
@@ -311,6 +317,7 @@ pub fn validateImage(
     {
         return error.UnreachableEntry;
     }
+    try validateSegmentReachability(catalogs, segment_count);
     const program_digest = try computeProgramTransitionDigest(
         catalogs,
         &workspace.schema_hash_tasks,
@@ -863,6 +870,7 @@ fn validateSegments(
     catalogs: Catalogs,
     constant_used: *[1024]bool,
     next_constant: *u32,
+    value_defined: *[1024]bool,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
     if (bytes.len < 4) return error.InvalidSegment;
@@ -886,7 +894,6 @@ fn validateSegments(
         const instruction_count = readInt(u32, bytes, cursor + 12);
         const function_id = readInt(u16, bytes, cursor + 6);
         var available = [_]bool{false} ** 1024;
-        var defined = [_]bool{false} ** 1024;
         for (0..catalogs.value_count) |value| {
             const schema = catalogs.schemas.node(
                 try catalogs.valueSchemaId(@intCast(value)),
@@ -903,6 +910,7 @@ fn validateSegments(
             if (end - cursor < 2) return error.InvalidSegment;
             const value = readInt(u16, bytes, cursor);
             if (value >= catalogs.value_count) return error.InvalidSegment;
+            if (value_defined[value]) return error.InvalidValue;
             var prior = cursor - index * 2;
             while (prior < cursor) : (prior += 2) {
                 if (readInt(u16, bytes, prior) == value) {
@@ -910,7 +918,7 @@ fn validateSegments(
                 }
             }
             available[value] = true;
-            defined[value] = true;
+            value_defined[value] = true;
             cursor += 2;
         }
         for (0..instruction_count) |_| {
@@ -922,7 +930,7 @@ fn validateSegments(
                 constant_used,
                 next_constant,
                 &available,
-                &defined,
+                value_defined,
             );
         }
         cursor = try validateTerminator(
@@ -1004,7 +1012,7 @@ fn validateInstruction(
     constant_used: *[1024]bool,
     next_constant: *u32,
     available: *[1024]bool,
-    defined: *[1024]bool,
+    value_defined: *[1024]bool,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
     const end = recordEnd(bytes, start, 16) catch
@@ -1036,7 +1044,7 @@ fn validateInstruction(
     } else if (operation < 25 or operation > 29) {
         if (immediate != 0) return error.InvalidInstruction;
     }
-    if (defined[result]) return error.InvalidInstruction;
+    if (value_defined[result]) return error.InvalidValue;
     var cursor = start + 16;
     for (0..operand_count) |_| {
         const operand = readInt(u16, bytes, cursor);
@@ -1054,7 +1062,7 @@ fn validateInstruction(
         immediate,
     );
     available[result] = true;
-    defined[result] = true;
+    value_defined[result] = true;
     return end;
 }
 
@@ -2405,6 +2413,36 @@ fn validateTransitions(
         previous = key;
     }
     try validateTransitionCompleteness(catalogs, bytes, count);
+}
+
+fn validateSegmentReachability(
+    catalogs: Catalogs,
+    segment_count: u32,
+) Error!void {
+    var reachable = [_]bool{false} ** 128;
+    var worklist: [128]u16 = undefined;
+    var head: usize = 0;
+    var tail: usize = 1;
+    reachable[catalogs.entry_segment_id] = true;
+    worklist[0] = catalogs.entry_segment_id;
+
+    const transitions = catalogs.envelope.section(.entry_transitions);
+    const transition_count = readInt(u32, transitions, 0);
+    while (head < tail) : (head += 1) {
+        const source = worklist[head];
+        for (0..transition_count) |index| {
+            const offset = 4 + index * 12;
+            if (readInt(u16, transitions, offset) != source) continue;
+            const target = readInt(u16, transitions, offset + 4);
+            if (reachable[target]) continue;
+            reachable[target] = true;
+            worklist[tail] = target;
+            tail += 1;
+        }
+    }
+    for (reachable[0..segment_count]) |is_reachable| {
+        if (!is_reachable) return error.UnreachableEntry;
+    }
 }
 
 fn validateTransitionCompleteness(

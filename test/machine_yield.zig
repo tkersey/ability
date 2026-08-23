@@ -86,6 +86,10 @@ const mixed_value_types = [_]cir.ValueType{
     u32_type,
     u32_type,
     u32_type,
+    u32_type,
+    u32_type,
+    u32_type,
+    u32_type,
 };
 const mixed_entry_instructions = [_]cir.Instruction{
     .{
@@ -101,8 +105,30 @@ const mixed_entry_instructions = [_]cir.Instruction{
         .operation = .{ .product_extract = 1 },
     },
 };
-const mixed_checkpoint_arguments = [_]cir.EdgeArgument{.{ .value = 3 }};
-const mixed_ordinary_arguments = [_]cir.EdgeArgument{.{ .value = 4 }};
+const mixed_checkpoint_instructions = [_]cir.Instruction{.{
+    .kind = .constant,
+    .result = 6,
+    .operation = .{ .constant = 0 },
+}};
+const mixed_ordinary_instructions = [_]cir.Instruction{.{
+    .kind = .constant,
+    .result = 7,
+    .operation = .{ .constant = 0 },
+}};
+const mixed_join_instructions = [_]cir.Instruction{.{
+    .kind = .pure,
+    .result = 9,
+    .operands = &.{ 5, 8 },
+    .operation = .integer_add,
+}};
+const mixed_checkpoint_arguments = [_]cir.EdgeArgument{
+    .{ .value = 3 },
+    .{ .value = 6 },
+};
+const mixed_ordinary_arguments = [_]cir.EdgeArgument{
+    .{ .value = 4 },
+    .{ .value = 7 },
+};
 const mixed_branch_arguments = [_]cir.EdgeArgument{.{ .value = 2 }};
 const mixed_blocks = [_]cir.Block{
     .{
@@ -118,6 +144,7 @@ const mixed_blocks = [_]cir.Block{
     .{
         .id = 1,
         .parameters = &.{3},
+        .instructions = &mixed_checkpoint_instructions,
         .terminator = .{ .@"suspend" = .{
             .kind = .caller_fuel,
             .continuation = .{
@@ -129,17 +156,24 @@ const mixed_blocks = [_]cir.Block{
     .{
         .id = 2,
         .parameters = &.{4},
+        .instructions = &mixed_ordinary_instructions,
         .terminator = .{ .jump = .{
             .target = 3,
             .arguments = &mixed_ordinary_arguments,
         } },
     },
-    .{ .id = 3, .parameters = &.{5}, .terminator = .{ .return_value = 5 } },
+    .{
+        .id = 3,
+        .parameters = &.{ 5, 8 },
+        .instructions = &mixed_join_instructions,
+        .terminator = .{ .return_value = 9 },
+    },
 };
 const MixedBody = struct {
     pub const InitialArgs = MixedInput;
     pub const Result = u32;
-    pub const Failure = enum { rejected };
+    pub const Failure = enum { rejected, arithmetic_overflow };
+    pub const constants = .{@as(u32, 0)};
     pub const effect_sites = .{};
     pub const schema_types = .{MixedInput};
     pub const control_ir: cir.Program = .{
@@ -378,6 +412,20 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
         MixedV2.generated_reducer_operation_count,
         MixedProgram.generated_reducer_operation_count,
     );
+    var pure_join_constructor_count: usize = 0;
+    for (MixedReified.rnf_value.constructorSlice()) |constructor| {
+        if (constructor.source_block != 3) continue;
+        try std.testing.expect(constructor.invariant_len > 0);
+        pure_join_constructor_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), pure_join_constructor_count);
+    var v2_join_constructor_count: usize = 0;
+    for (MixedV2.rnf_value.constructorSlice()) |constructor| {
+        if (constructor.source_block != 3) continue;
+        try std.testing.expect(constructor.invariant_len > 0);
+        v2_join_constructor_count += 1;
+    }
+    try std.testing.expect(v2_join_constructor_count > pure_join_constructor_count);
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&MixedImage.bytes, &workspace);
     _ = try kernel_v1.bindMachineV2(
@@ -573,8 +621,8 @@ test "mixed checkpoint and ordinary jump share BPI1 but preserve Machine v2" {
         defer std.testing.allocator.free(kernel_yielded);
         try std.testing.expectEqualSlices(u8, direct_yielded, kernel_yielded);
 
-        var direct_completion_fuel: u64 = 1;
-        var kernel_completion_fuel: u64 = 1;
+        var direct_completion_fuel: u64 = 8;
+        var kernel_completion_fuel: u64 = 8;
         const direct_done = switch (try MixedDirect.step(
             direct,
             &direct_completion_fuel,

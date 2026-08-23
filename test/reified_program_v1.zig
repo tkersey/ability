@@ -1438,7 +1438,58 @@ test "fixed kernel branches and yields at the next segment boundary" {
     const BranchProfile = BranchProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
     const parsed = try image_v1.validateImage(&BranchImage.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(parsed, &BranchProfile.bytes, &workspace);
+
+    var duplicate_definition = BranchImage.bytes;
+    const segments_offset: usize = @intCast(
+        parsed.catalogs.envelope.sections[7].offset,
+    );
+    var third_segment = segments_offset + 4;
+    third_segment += std.mem.readInt(
+        u32,
+        duplicate_definition[third_segment..][0..4],
+        .little,
+    );
+    third_segment += std.mem.readInt(
+        u32,
+        duplicate_definition[third_segment..][0..4],
+        .little,
+    );
+    const duplicate_instruction = third_segment + image_v1.segment_prefix_length;
+    std.mem.writeInt(
+        u16,
+        duplicate_definition[duplicate_instruction + 8 ..][0..2],
+        1,
+        .little,
+    );
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidValue,
+        image_v1.validateImage(&duplicate_definition, &workspace),
+    );
+
+    var unreachable_catalog = BranchImage.bytes;
+    const roots_offset: usize = @intCast(
+        parsed.catalogs.envelope.sections[0].offset,
+    );
+    std.mem.writeInt(
+        u16,
+        unreachable_catalog[roots_offset + 12 ..][0..2],
+        1,
+        .little,
+    );
+    workspace = .{};
+    try std.testing.expectError(
+        error.UnreachableEntry,
+        image_v1.validateImage(&unreachable_catalog, &workspace),
+    );
+
+    workspace = .{};
+    const rebound = try image_v1.validateImage(&BranchImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(
+        rebound,
+        &BranchProfile.bytes,
+        &workspace,
+    );
 
     inline for (.{ true, false }) |condition| {
         const direct_state = try BranchMachine.initialState(

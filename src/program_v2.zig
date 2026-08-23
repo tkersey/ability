@@ -3,11 +3,11 @@ const image_emit_v1 = @import("image_emit_v1");
 const kernel_machine_v1 = @import("kernel_machine_v1");
 const machine = @import("machine");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
+const std = @import("std");
 
 fn constructorFieldsEqual(
     left: anytype,
     right: anytype,
-    allow_invariants: bool,
 ) bool {
     if (left.source_block != right.source_block or
         left.resume_target != right.resume_target or
@@ -24,9 +24,10 @@ fn constructorFieldsEqual(
     for (left.environmentFields(), right.environmentFields()) |a, b| {
         if (a.value != b.value or !a.value_type.eql(b.value_type)) return false;
     }
-    // Divergent catalogs are admitted only when the quotient constructor has
-    // no path-local invariant data to lose. Equal catalogs retain identity.
-    return allow_invariants or left.invariant_len == 0;
+    for (left.invariantTerms(), right.invariantTerms()) |a, b| {
+        if (!std.meta.eql(a, b)) return false;
+    }
+    return true;
 }
 
 /// Declare one typed Boundary source program with one Machine meaning.
@@ -166,7 +167,6 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                         if (!constructorFieldsEqual(
                             &v2_constructor,
                             &Reified.rnf_value.constructors[v2_id],
-                            true,
                         )) {
                             @compileError("Machine v2 constructor layout diverges from BPI1");
                         }
@@ -177,7 +177,6 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                         constructorFieldsEqual(
                             &v2_constructor,
                             &Reified.rnf_value.constructors[v2_id],
-                            true,
                         ))
                     {
                         values[v2_id] = @intCast(v2_id);
@@ -191,7 +190,6 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                         if (!constructorFieldsEqual(
                             &v2_constructor,
                             &pure_constructor,
-                            false,
                         )) continue;
                         if (match != null) {
                             @compileError("Machine v2 constructor mapping is ambiguous");
