@@ -410,6 +410,24 @@ test "zero caller fuel cannot launder a malformed State" {
     try std.testing.expectEqual(@as(u64, 0), fuel);
 }
 
+test "maximum resume sizing rejects malformed State framing" {
+    const image_v1 = @import("image_v1");
+    const kernel_v1 = @import("kernel_v1");
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const state = try ProgramMachine.initialState(std.testing.allocator, 29);
+    defer ProgramMachine.deinitState(state);
+    const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const malformed = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(malformed);
+    std.mem.writeInt(u32, malformed[60..64], 2, .little);
+    try std.testing.expectError(
+        error.InvalidState,
+        kernel_v1.maximumResumeStateSize(image, malformed),
+    );
+}
+
 test "KernelMachine terminal owner OOM preserves State ownership" {
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,

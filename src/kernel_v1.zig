@@ -780,6 +780,7 @@ pub fn maximumResumeStateSize(
     image: image_v1.ValidatedImage,
     state: []const u8,
 ) Error!usize {
+    try validateStateEnvelope(image, state);
     const constructor_id = try topConstructorId(state);
     const constructor = try constructorRecord(image, constructor_id);
     if (constructor[8] != 3) return error.InvalidState;

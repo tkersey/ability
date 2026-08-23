@@ -341,6 +341,9 @@ pub fn Machine(
             const value = preparedValue(prepared);
             if (value.consumed) return error.ProgramContractViolation;
             const state = stored(value.state);
+            if (!responseTypeMatches(value.request, @TypeOf(response))) {
+                return error.ProgramContractViolation;
+            }
             const response_bytes = value.allocator.alloc(
                 u8,
                 portable_value.maximumEncodedSize(@TypeOf(response)),
@@ -516,6 +519,15 @@ pub fn Machine(
                     &right.identity.digest,
                 ) and
                 Definition.requestEql(left.value, right.value);
+        }
+
+        fn responseTypeMatches(request: Request, comptime Response: type) bool {
+            inline for (0..EffectRow.operation_site_count) |ordinal| {
+                if (request.identity.site_ordinal == ordinal) {
+                    return Response == EffectRow.site(ordinal).Resume;
+                }
+            }
+            return false;
         }
     };
 }

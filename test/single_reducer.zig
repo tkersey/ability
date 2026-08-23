@@ -293,6 +293,10 @@ pub fn main(init: std.process.Init) !void {
         typed_kernel_state,
         typed_kernel_request,
     );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.@"resume"(typed_prepared, @as(i32, 42)),
+    );
     try KernelMachine.@"resume"(typed_prepared, @as(u32, 42));
     KernelMachine.deinitPreparedResume(typed_prepared);
     const typed_kernel_done = switch (try KernelMachine.step(

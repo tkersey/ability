@@ -166,7 +166,7 @@ fn runGeneratedTrace(
     comptime bias: u32,
     input: u32,
     response: u32,
-    require_yield: bool,
+    initial_fuel: u64,
     require_switch: bool,
     finite_states: ?*FiniteStates,
     hasher: *std.crypto.hash.sha2.Sha256,
@@ -182,27 +182,38 @@ fn runGeneratedTrace(
         defer std.testing.allocator.free(initial);
         states.insert(initial);
     }
-    if (require_yield) {
-        var direct_zero: u64 = 0;
-        var kernel_zero: u64 = 0;
-        try std.testing.expectEqual(Direct.Outcome.yielded, try Direct.step(direct, &direct_zero));
-        try std.testing.expectEqual(Kernel.Outcome.yielded, try Kernel.step(kernel, &kernel_zero));
-        try std.testing.expectEqual(@as(u64, 0), direct_zero);
-        try std.testing.expectEqual(direct_zero, kernel_zero);
-        const yielded = try expectStateBytesEqual(Direct, Kernel, direct, kernel);
-        std.testing.allocator.free(yielded);
+    var direct_fuel = initial_fuel;
+    var kernel_fuel = initial_fuel;
+    var direct_request: Direct.Request = undefined;
+    var kernel_request: Kernel.Request = undefined;
+    const direct_first = try Direct.step(direct, &direct_fuel);
+    const kernel_first = try Kernel.step(kernel, &kernel_fuel);
+    switch (direct_first) {
+        .yielded => {
+            try std.testing.expectEqual(Kernel.Outcome.yielded, kernel_first);
+            try std.testing.expectEqual(direct_fuel, kernel_fuel);
+            const yielded = try expectStateBytesEqual(Direct, Kernel, direct, kernel);
+            std.testing.allocator.free(yielded);
+            direct_fuel = 64;
+            kernel_fuel = 64;
+            direct_request = switch (try Direct.step(direct, &direct_fuel)) {
+                .request => |request| request,
+                else => return error.ExpectedRequest,
+            };
+            kernel_request = switch (try Kernel.step(kernel, &kernel_fuel)) {
+                .request => |request| request,
+                else => return error.ExpectedRequest,
+            };
+        },
+        .request => |request| {
+            direct_request = request;
+            kernel_request = switch (kernel_first) {
+                .request => |kernel_value| kernel_value,
+                else => return error.ExpectedRequest,
+            };
+        },
+        else => return error.ExpectedRequest,
     }
-
-    var direct_fuel: u64 = 64;
-    var kernel_fuel: u64 = 64;
-    const direct_request = switch (try Direct.step(direct, &direct_fuel)) {
-        .request => |request| request,
-        else => return error.ExpectedRequest,
-    };
-    const kernel_request = switch (try Kernel.step(kernel, &kernel_fuel)) {
-        .request => |request| request,
-        else => return error.ExpectedRequest,
-    };
     try std.testing.expectEqual(direct_fuel, kernel_fuel);
     try std.testing.expectEqualSlices(
         u8,
@@ -272,7 +283,7 @@ test "two finite Programs exhaust their bounded input response and fuel frontier
                         entry[1],
                         input,
                         response,
-                        fuel == 0,
+                        fuel,
                         true,
                         &states,
                         &hasher,
@@ -299,7 +310,7 @@ test "seeded source generator executes ten thousand differential traces" {
                 1,
                 input,
                 response,
-                trace % 5 == 0,
+                if (trace % 5 == 0) 0 else 64,
                 trace % 10 == 0,
                 null,
                 &hasher,
@@ -310,7 +321,7 @@ test "seeded source generator executes ten thousand differential traces" {
                 3,
                 input,
                 response,
-                trace % 5 == 0,
+                if (trace % 5 == 0) 0 else 64,
                 trace % 10 == 0,
                 null,
                 &hasher,
