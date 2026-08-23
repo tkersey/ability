@@ -4,6 +4,7 @@ const image_emit_v1 = @import("image_emit_v1");
 const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
+const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const program_evaluator_v1 = @import("program_evaluator_v1");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -309,7 +310,7 @@ test "Reified Program preserves direct canonical State bytes" {
 
     var workspace: image_v1.ValidationWorkspace = .{};
     const parsed = try image_v1.validateImage(&Image.bytes, &workspace);
-    const validated = try kernel_v1.bindMachineV2(parsed, &Profile.bytes);
+    const validated = try kernel_v1.bindMachineV2(parsed, &Profile.bytes, &workspace);
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 29, .little);
     var kernel_state: [4096]u8 = undefined;
@@ -394,8 +395,43 @@ test "MachineV2Profile validation recomputes the v2 contract digest" {
     var workspace: image_v1.ValidationWorkspace = .{};
     const image = try image_v1.validateImage(&Image.bytes, &workspace);
     try std.testing.expectError(
-        error.InvalidImage,
-        kernel_v1.bindMachineV2(image, &malformed),
+        error.InvalidProfile,
+        kernel_v1.bindMachineV2(image, &malformed, &workspace),
+    );
+}
+
+test "MachineV2Profile binds segment costs to v2 semantic identity" {
+    var malformed = Profile.bytes;
+    const cost_offset = machine_v2_profile_v1.header_length;
+    std.mem.writeInt(
+        u64,
+        malformed[cost_offset..][0..8],
+        std.mem.readInt(u64, malformed[cost_offset..][0..8], .little) + 1,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    try std.testing.expectError(
+        error.InvalidProfile,
+        kernel_v1.bindMachineV2(image, &malformed, &workspace),
+    );
+}
+
+test "MachineV2Profile rejects a State ceiling below one RNF frame" {
+    var malformed = Profile.bytes;
+    std.mem.writeInt(u32, malformed[132..136], 75, .little);
+    const contract = machine_v2_profile_v1.machineV2ContractDigest(
+        malformed[64..96].*,
+        std.mem.readInt(u32, malformed[128..132], .little),
+        75,
+        std.mem.readInt(u64, malformed[136..144], .little),
+    );
+    @memcpy(malformed[96..128], &contract);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&Image.bytes, &workspace);
+    try std.testing.expectError(
+        error.InvalidProfile,
+        kernel_v1.bindMachineV2(image, &malformed, &workspace),
     );
 }
 
@@ -439,7 +475,7 @@ test "direct and kernel reject shared malformed State classes" {
     defer std.testing.allocator.free(encoded);
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
     var malformed: [4096]u8 = undefined;
     for (0..12) |case| {
         @memcpy(malformed[0..encoded.len], encoded);
@@ -481,7 +517,7 @@ test "direct and kernel reject shared malformed State classes" {
 test "zero caller fuel cannot launder a malformed State" {
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
     const state = try ProgramMachine.initialState(std.testing.allocator, 29);
     defer ProgramMachine.deinitState(state);
     const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
@@ -511,7 +547,7 @@ test "zero caller fuel cannot launder a malformed State" {
 test "maximum resume sizing rejects malformed State framing" {
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
     const state = try ProgramMachine.initialState(std.testing.allocator, 29);
     defer ProgramMachine.deinitState(state);
     const encoded = try ProgramMachine.encodeState(std.testing.allocator, state);
@@ -623,6 +659,7 @@ test "Reified constants emit in canonical first-use order" {
     const validated = try kernel_v1.bindMachineV2(
         parsed,
         &ConstantProfile.bytes,
+        &workspace,
     );
     var state: [4096]u8 = undefined;
     const state_length = try kernel_v1.initial(
@@ -695,7 +732,7 @@ test "fixed kernel scalar algebra matches direct success and failure" {
     const ScalarProfile = ScalarProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
     const parsed = try image_v1.validateImage(&ScalarImage.bytes, &workspace);
-    const validated = try kernel_v1.bindMachineV2(parsed, &ScalarProfile.bytes);
+    const validated = try kernel_v1.bindMachineV2(parsed, &ScalarProfile.bytes, &workspace);
 
     inline for (.{ @as(u32, 41), std.math.maxInt(u32) }) |input| {
         const direct_state = try ScalarMachine.initialState(
@@ -758,6 +795,141 @@ test "fixed kernel scalar algebra matches direct success and failure" {
             );
         }
     }
+    var malformed = ScalarImage.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segments_offset: usize = @intCast(envelope.sections[7].offset);
+    const record = segments_offset + 4;
+    var instruction = record + 24 +
+        @as(usize, std.mem.readInt(u16, malformed[record + 10 ..][0..2], .little)) * 2;
+    instruction += std.mem.readInt(
+        u32,
+        malformed[instruction..][0..4],
+        .little,
+    );
+    std.mem.writeInt(u16, malformed[instruction + 16 ..][0..2], 2, .little);
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidInstruction,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
+test "BPI1 rejects out-of-domain authored failure tags" {
+    const fail_blocks = [_]cir.Block{.{
+        .id = 0,
+        .terminator = .{ .fail = 0 },
+    }};
+    const FailBody = struct {
+        pub const InitialArgs = void;
+        pub const Result = void;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "failure-tag-image-proof",
+            .value_types = &.{},
+            .blocks = &fail_blocks,
+            .entry = 0,
+            .result_type = .{ .scalar = .unit },
+        };
+    };
+    const FailImage = program_v2.program(
+        "failure-tag-image-proof",
+        FailBody,
+    ).image();
+    const envelope = try image_v1.validateEnvelope(&FailImage.bytes);
+    const segments_offset: usize = @intCast(envelope.sections[7].offset);
+    const terminator_payload = segments_offset + 4 + 24 + 8;
+    inline for (.{ @as(u32, 1), std.math.maxInt(u32) }) |tag| {
+        var malformed = FailImage.bytes;
+        std.mem.writeInt(
+            u32,
+            malformed[terminator_payload..][0..4],
+            tag,
+            .little,
+        );
+        var workspace: image_v1.ValidationWorkspace = .{};
+        try std.testing.expectError(
+            error.InvalidTerminator,
+            image_v1.validateImage(&malformed, &workspace),
+        );
+    }
+}
+
+test "BPI1 type-checks branch and terminal values" {
+    const u8_type: cir.ValueType = .{ .scalar = .u8 };
+    const bool_type: cir.ValueType = .{ .scalar = .boolean };
+    const compare_operands = [_]cir.ValueId{0};
+    const typed_blocks = [_]cir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{0},
+            .instructions = &.{.{
+                .kind = .compare_eq_zero,
+                .result = 1,
+                .operands = &compare_operands,
+                .operation = .compare_eq_zero,
+            }},
+            .terminator = .{ .branch = .{
+                .condition = 1,
+                .then_edge = .{ .target = 1 },
+                .else_edge = .{ .target = 2 },
+            } },
+        },
+        .{
+            .id = 1,
+            .instructions = &.{.{
+                .kind = .constant,
+                .result = 2,
+                .operation = .{ .constant = 0 },
+            }},
+            .terminator = .{ .return_value = 2 },
+        },
+        .{
+            .id = 2,
+            .instructions = &.{.{
+                .kind = .constant,
+                .result = 3,
+                .operation = .{ .constant = 1 },
+            }},
+            .terminator = .{ .return_value = 3 },
+        },
+    };
+    const TypedBody = struct {
+        pub const InitialArgs = u8;
+        pub const Result = u8;
+        pub const Failure = enum { rejected };
+        pub const constants = .{ @as(u8, 7), @as(u8, 8) };
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "typed-terminator-image-proof",
+            .value_types = &.{ u8_type, bool_type, u8_type, u8_type },
+            .blocks = &typed_blocks,
+            .entry = 0,
+            .result_type = u8_type,
+        };
+    };
+    const TypedImage = program_v2.program(
+        "typed-terminator-image-proof",
+        TypedBody,
+    ).image();
+    var malformed = TypedImage.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segments_offset: usize = @intCast(envelope.sections[7].offset);
+    const record = segments_offset + 4;
+    var terminator = record + 24 + 2;
+    terminator += std.mem.readInt(
+        u32,
+        malformed[terminator..][0..4],
+        .little,
+    );
+    std.mem.writeInt(u16, malformed[terminator + 8 ..][0..2], 0, .little);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&malformed, &workspace),
+    );
 }
 
 test "fixed kernel branches and yields at the next segment boundary" {
@@ -815,7 +987,7 @@ test "fixed kernel branches and yields at the next segment boundary" {
     const BranchProfile = BranchProgram.machineV2Profile(options);
     var workspace: image_v1.ValidationWorkspace = .{};
     const parsed = try image_v1.validateImage(&BranchImage.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(parsed, &BranchProfile.bytes);
+    const image = try kernel_v1.bindMachineV2(parsed, &BranchProfile.bytes, &workspace);
 
     inline for (.{ true, false }) |condition| {
         const direct_state = try BranchMachine.initialState(

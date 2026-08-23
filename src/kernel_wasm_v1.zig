@@ -131,7 +131,11 @@ fn execute(input: []const u8) ExecuteError!u32 {
         image_bytes,
         &validation_workspace,
     );
-    const image = try kernel_v1.bindMachineV2(program_image, profile_bytes);
+    const image = try kernel_v1.bindMachineV2(
+        program_image,
+        profile_bytes,
+        &validation_workspace,
+    );
     return switch (command) {
         0 => try writeOutput(command, 0, caller_fuel, &.{}, &.{}, &.{}),
         1 => blk: {
@@ -374,6 +378,7 @@ fn errorCode(err: ExecuteError) u32 {
         error.DuplicateFailureTag,
         error.DuplicateConstant,
         error.DuplicateEffectIdentity,
+        error.InvalidProfile,
         => 2,
         error.InvalidState => 3,
         error.InvalidInitialArgs => 4,

@@ -469,6 +469,12 @@ fn addCoreModules(
     reducer_semantics_v1.addImport("control_ir", control_ir);
     reducer_semantics_v1.addImport("portable_value", portable_value);
     reducer_semantics_v1.addImport("rnf", rnf);
+    machine_v2_profile_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    machine_v2_profile_v1.addImport("image_v1", image_v1);
+    machine_v2_profile_v1.addImport(
+        "reducer_semantics_v1",
+        reducer_semantics_v1,
+    );
     image_v1.addImport("reducer_semantics_v1", reducer_semantics_v1);
     image_emit_v1.addImport("reducer_semantics_v1", reducer_semantics_v1);
     const compiler = b.createModule(.{
@@ -834,6 +840,10 @@ pub fn build(b: *std.Build) void {
     reified_program_test.addImport("image_v1", host_core.image_v1);
     reified_program_test.addImport("kernel_v1", host_core.kernel_v1);
     reified_program_test.addImport("machine", host_core.machine);
+    reified_program_test.addImport(
+        "machine_v2_profile_v1",
+        host_core.machine_v2_profile_v1,
+    );
     reified_program_test.addImport(
         "program_evaluator_v1",
         host_core.program_evaluator_v1,

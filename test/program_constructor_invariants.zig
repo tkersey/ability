@@ -1707,7 +1707,7 @@ test "sum branches persist the source case and reject a forged local path" {
     );
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&SumImage.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes);
+    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes, &workspace);
     try std.testing.expectError(
         error.InvalidState,
         kernel_v1.validateState(image, forged, &workspace),
@@ -1732,7 +1732,7 @@ test "unfunded kernel step defers deep environment validation" {
     );
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&SumImage.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes);
+    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes, &workspace);
     var fuel: u64 = 0;
     var output_state: [4096]u8 = undefined;
     var output_value: [4096]u8 = undefined;

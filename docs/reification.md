@@ -15,6 +15,9 @@ source -> normalized Control IR -> semantic RNF -> Reified Program -> BPI1
 reducer clauses and semantic RNF data, never fuel, Machine limits, ABI identity,
 or a persisted instruction cursor. The profile owns the exact legacy metering,
 checkpointing, Machine contract, and `ABL_RNF2` envelope.
+The profile validator reconstructs the legacy v2 semantic digest from BPI1 and
+the profile-owned deltas; profile bytes cannot alter metering while retaining
+the same State or Request identity.
 Valid images describe effects but grant no authority; the kernel returns a
 typed request and stops.
 

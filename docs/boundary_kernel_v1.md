@@ -5,6 +5,13 @@ BPI1, `ABL_MV2P1` MachineV2Profile, and canonical `ABL_RNF2` bytes. It retains
 no authoritative State and invokes no callback. It is not the future generic
 Boundary Process kernel.
 
+The profile carries only v2 policy deltas: hard limits, segment costs, and the
+constructor/transition classifications needed to preserve synthetic caller
+checkpoints. Binding recomputes the frozen
+`boundary-rnf-compiler-semantics-v4` digest from BPI1 plus those deltas before
+accepting the Machine contract. Changing a cost or checkpoint annotation
+without changing the v2 semantic and contract identities is rejected.
+
 Native operations are `initial`, `validateState`, `current`, `step`, and
 `resume`. A funded segment executes atomically. Insufficient caller fuel yields
 before the segment, preserving State and fuel. Ordinary transitions remain

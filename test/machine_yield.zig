@@ -173,7 +173,7 @@ test "fixed kernel preserves explicit and caller-fuel checkpoints" {
         const input = fixture[2];
         var workspace: image_v1.ValidationWorkspace = .{};
         const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
-        const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
+        const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
         var args: [4]u8 = undefined;
         std.mem.writeInt(u32, &args, input, .little);
         var state: [4096]u8 = undefined;

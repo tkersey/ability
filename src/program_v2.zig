@@ -82,6 +82,13 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                         @compileError("Machine v2 segment ids diverge from BPI1");
                     }
                 }
+                if (MachineV2Lowering.rnf_value.constructor_count !=
+                    Reified.rnf_value.constructor_count or
+                    MachineV2Lowering.rnf_value.entry_transition_count !=
+                        Reified.rnf_value.entry_transition_count)
+                {
+                    @compileError("Machine v2 RNF identity catalog diverges from BPI1");
+                }
             }
             const costs = comptime blk: {
                 var values: [MachineV2Lowering.semantic_canonicalization.block_count]u64 =
@@ -95,12 +102,54 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 }
                 break :blk values;
             };
+            const terminator_overrides = comptime blk: {
+                var values: [costs.len]u8 = [_]u8{0} ** costs.len;
+                for (0..values.len) |dense_segment| {
+                    const source_segment = MachineV2Lowering
+                        .semantic_canonicalization
+                        .block_dense_to_source[dense_segment];
+                    switch (MachineV2Lowering.control.blocks[source_segment].terminator) {
+                        .@"suspend" => |suspension| {
+                            if (suspension.kind == .caller_fuel) {
+                                values[dense_segment] = 1;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                break :blk values;
+            };
+            const constructor_origins = comptime blk: {
+                var values: [MachineV2Lowering.rnf_value.constructor_count]u8 =
+                    undefined;
+                for (MachineV2Lowering.rnf_value.constructorSlice(), 0..) |
+                    constructor,
+                    index,
+                | {
+                    values[index] = @intFromEnum(constructor.origin);
+                }
+                break :blk values;
+            };
+            const transition_kinds = comptime blk: {
+                var values: [MachineV2Lowering.rnf_value.entry_transition_count]u8 =
+                    undefined;
+                for (MachineV2Lowering.rnf_value.entryTransitionSlice(), 0..) |
+                    transition,
+                    index,
+                | {
+                    values[index] = @intFromEnum(transition.edge_kind);
+                }
+                break :blk values;
+            };
             return machine_v2_profile_v1.Profile(
                 program_transition_digest,
                 machine_v2_semantic_digest,
                 DirectMachine.Manifest.machine_contract_digest,
                 options,
                 &costs,
+                &terminator_overrides,
+                &constructor_origins,
+                &transition_kinds,
             );
         }
 

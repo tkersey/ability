@@ -62,6 +62,7 @@ const input = vector.subarray(8, 8 + inputLength);
 const expectedOutput = vector.subarray(8 + inputLength, 8 + inputLength + expectedLength);
 const imageLength = input.readUInt32LE(24);
 const profileLength = input.readUInt32LE(28);
+const profileStart = 48 + imageLength;
 const wrapped = Buffer.from(input.subarray(0, 48 + imageLength + profileLength));
 wrapped.writeUInt16LE(0, 10);
 wrapped.writeUInt32LE(0xffffffff, 32);
@@ -91,6 +92,18 @@ for (const [name, mutate] of [
   }
   if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
 }
+const unboundCost = Buffer.from(input.subarray(0, 48 + imageLength + profileLength));
+unboundCost.writeUInt16LE(0, 10);
+unboundCost.writeUInt32LE(0, 32);
+unboundCost.writeUInt32LE(0, 36);
+const costOffset = profileStart + 192;
+unboundCost.writeBigUInt64LE(unboundCost.readBigUInt64LE(costOffset) + 1n, costOffset);
+memory.set(unboundCost, inputPtr);
+const unboundCostResult = instance.exports.boundary_machine_v2_kernel_execute(unboundCost.length);
+if (unboundCostResult !== 2) {
+  throw new Error(`unbound Machine v2 segment cost disposition ${unboundCostResult}`);
+}
+if (instance.exports.boundary_machine_v2_kernel_reset() !== 0) throw new Error("reset failed");
 memory.set(input, inputPtr);
 if (instance.exports.boundary_machine_v2_kernel_execute(input.length) !== 0) {
   throw new Error("kernel semantic vector failed");

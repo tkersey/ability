@@ -130,6 +130,7 @@ pub fn main(init: std.process.Init) !void {
     const image = try boundary.machine_v2.kernel.bindMachineV2(
         program_image,
         &Profile.bytes,
+        &image_workspace,
     );
     var tail_malformed_image = Image.bytes;
     const tail_malformed_envelope = try boundary.image.validateEnvelope(

@@ -86,7 +86,11 @@ pub fn Machine(
         ) Error!kernel_v1.BoundProgram {
             const image = image_v1.validateImage(&Image.bytes, workspace) catch
                 return error.ProgramContractViolation;
-            return kernel_v1.bindMachineV2(image, &Profile.bytes) catch
+            return kernel_v1.bindMachineV2(
+                image,
+                &Profile.bytes,
+                workspace,
+            ) catch
                 return error.ProgramContractViolation;
         }
 

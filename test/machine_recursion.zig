@@ -1061,7 +1061,7 @@ test "compiled bounded recursive frames survive canonical round trip" {
 
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
-    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 3, .little);
     var kernel_initial: [4096]u8 = undefined;
@@ -1578,6 +1578,23 @@ test "machine call stack rejects an authentic alternate call entry" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         AlternateEntryMachine.decodeState(std.testing.allocator, forged),
+    );
+    const Image = AlternateEntryProgram.image();
+    const Profile = AlternateEntryProgram.machineV2Profile(.{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const bound = try kernel_v1.bindMachineV2(
+        program_image,
+        &Profile.bytes,
+        &workspace,
+    );
+    try std.testing.expectError(
+        error.InvalidState,
+        kernel_v1.validateState(bound, forged, &workspace),
     );
 }
 

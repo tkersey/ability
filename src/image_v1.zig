@@ -882,6 +882,20 @@ fn validateSegments(
         }
         const parameter_count = readInt(u16, bytes, cursor + 10);
         const instruction_count = readInt(u32, bytes, cursor + 12);
+        const function_id = readInt(u16, bytes, cursor + 6);
+        var available = [_]bool{false} ** 1024;
+        var defined = [_]bool{false} ** 1024;
+        for (0..catalogs.value_count) |value| {
+            const schema = catalogs.schemas.node(
+                try catalogs.valueSchemaId(@intCast(value)),
+            ) catch return error.InvalidSegment;
+            if (schema.maximum_encoded_size == 0) available[value] = true;
+        }
+        try addGuaranteedConstructorValues(
+            catalogs,
+            @intCast(segment_id),
+            &available,
+        );
         cursor += 24;
         for (0..parameter_count) |index| {
             if (end - cursor < 2) return error.InvalidSegment;
@@ -893,6 +907,8 @@ fn validateSegments(
                     return error.InvalidSegment;
                 }
             }
+            available[value] = true;
+            defined[value] = true;
             cursor += 2;
         }
         for (0..instruction_count) |_| {
@@ -903,13 +919,69 @@ fn validateSegments(
                 end,
                 constant_used,
                 next_constant,
+                &available,
+                &defined,
             );
         }
-        cursor = try validateTerminator(catalogs, bytes, cursor, end);
+        cursor = try validateTerminator(
+            catalogs,
+            bytes,
+            cursor,
+            end,
+            function_id,
+            &available,
+        );
         if (cursor != end) return error.InvalidSegment;
     }
     if (cursor != bytes.len) return error.InvalidSegment;
     return count;
+}
+
+fn addGuaranteedConstructorValues(
+    catalogs: Catalogs,
+    segment_id: u16,
+    available: *[1024]bool,
+) Error!void {
+    const bytes = catalogs.envelope.section(.constructors);
+    if (bytes.len < 4) return error.InvalidConstructor;
+    const count = readInt(u32, bytes, 0);
+    var guaranteed = [_]bool{false} ** 1024;
+    var found = false;
+    var cursor: usize = 4;
+    for (0..count) |_| {
+        const end = recordEnd(bytes, cursor, 24) catch
+            return error.InvalidConstructor;
+        const kind = bytes[cursor + 8];
+        const origin = bytes[cursor + 9];
+        if (readInt(u16, bytes, cursor + 12) == segment_id and
+            kind != 3 and !(kind == 4 and origin == 2))
+        {
+            var retained = [_]bool{false} ** 1024;
+            const activation_count = readInt(u16, bytes, cursor + 16);
+            const environment_count = readInt(u16, bytes, cursor + 18);
+            var field_cursor = cursor + 24;
+            for (0..@as(u32, activation_count) + environment_count) |_| {
+                if (end - field_cursor < 8) return error.InvalidConstructor;
+                const value = readInt(u16, bytes, field_cursor);
+                if (value >= catalogs.value_count) return error.InvalidConstructor;
+                retained[value] = true;
+                field_cursor += 8;
+            }
+            if (!found) {
+                guaranteed = retained;
+                found = true;
+            } else {
+                for (0..catalogs.value_count) |value| {
+                    guaranteed[value] = guaranteed[value] and retained[value];
+                }
+            }
+        }
+        cursor = end;
+    }
+    if (!found) return error.InvalidSegment;
+    for (0..catalogs.value_count) |value| {
+        available[value] = available[value] or guaranteed[value];
+    }
 }
 
 fn validateInstruction(
@@ -919,6 +991,8 @@ fn validateInstruction(
     segment_end: usize,
     constant_used: *[1024]bool,
     next_constant: *u32,
+    available: *[1024]bool,
+    defined: *[1024]bool,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
     const end = recordEnd(bytes, start, 16) catch
@@ -950,9 +1024,11 @@ fn validateInstruction(
     } else if (operation < 25 or operation > 29) {
         if (immediate != 0) return error.InvalidInstruction;
     }
+    if (defined[result]) return error.InvalidInstruction;
     var cursor = start + 16;
     for (0..operand_count) |_| {
-        if (readInt(u16, bytes, cursor) >= catalogs.value_count) {
+        const operand = readInt(u16, bytes, cursor);
+        if (operand >= catalogs.value_count or !available[operand]) {
             return error.InvalidInstruction;
         }
         cursor += 2;
@@ -965,6 +1041,8 @@ fn validateInstruction(
         operand_count,
         immediate,
     );
+    available[result] = true;
+    defined[result] = true;
     return end;
 }
 
@@ -1318,6 +1396,32 @@ fn constantSchema(catalogs: Catalogs, target: u32) Error!u32 {
     return error.InvalidInstruction;
 }
 
+fn valueNodeKind(catalogs: Catalogs, value: u16) dynamic_value_v1.Kind {
+    const schema = valueSchema(catalogs, value);
+    return (catalogs.schemas.node(schema) catch unreachable).kind;
+}
+
+fn functionResultSchema(catalogs: Catalogs, function_id: u16) u32 {
+    return readInt(
+        u32,
+        catalogs.functions_section,
+        4 + @as(usize, function_id) * 8 + 4,
+    );
+}
+
+fn failureTagExists(catalogs: Catalogs, target: u32) bool {
+    const bytes = catalogs.envelope.section(.failures);
+    const count = readInt(u32, bytes, 0);
+    var cursor: usize = 4;
+    for (0..count) |_| {
+        const tag = readInt(u32, bytes, cursor);
+        const length = readInt(u32, bytes, cursor + 4);
+        if (tag == target) return true;
+        cursor += 8 + length;
+    }
+    return false;
+}
+
 fn isIntegerKind(kind: dynamic_value_v1.Kind) bool {
     return @intFromEnum(kind) >= @intFromEnum(dynamic_value_v1.Kind.i8) and
         @intFromEnum(kind) <= @intFromEnum(dynamic_value_v1.Kind.u64);
@@ -1332,6 +1436,8 @@ fn validateTerminator(
     bytes: []const u8,
     start: usize,
     segment_end: usize,
+    function_id: u16,
+    available: *const [1024]bool,
 ) Error!usize {
     if (segment_end - start < 8) return error.InvalidTerminator;
     const end = recordEnd(bytes, start, 8) catch
@@ -1343,19 +1449,34 @@ fn validateTerminator(
     }
     var cursor = start + 8;
     switch (bytes[start + 4]) {
-        0 => try validateEdge(catalogs, bytes, &cursor, end, null),
+        0 => try validateEdge(
+            catalogs,
+            bytes,
+            &cursor,
+            end,
+            null,
+            available,
+        ),
         1 => {
+            const condition = readInt(u16, bytes, cursor);
             if (end - cursor < 4 or
-                readInt(u16, bytes, cursor) >= catalogs.value_count or
+                condition >= catalogs.value_count or !available[condition] or
+                valueNodeKind(catalogs, condition) != .bool or
                 readInt(u16, bytes, cursor + 2) != 0)
             {
                 return error.InvalidTerminator;
             }
             cursor += 4;
-            try validateEdge(catalogs, bytes, &cursor, end, null);
-            try validateEdge(catalogs, bytes, &cursor, end, null);
+            try validateEdge(catalogs, bytes, &cursor, end, null, available);
+            try validateEdge(catalogs, bytes, &cursor, end, null, available);
         },
-        2 => try validateSuspension(catalogs, bytes, &cursor, end),
+        2 => try validateSuspension(
+            catalogs,
+            bytes,
+            &cursor,
+            end,
+            available,
+        ),
         3 => {
             if (end - cursor != 4 or bytes[cursor] > 1 or
                 bytes[cursor + 1] != 0)
@@ -1364,15 +1485,21 @@ fn validateTerminator(
             }
             const value = readInt(u16, bytes, cursor + 2);
             if ((bytes[cursor] == 0 and value != std.math.maxInt(u16)) or
-                (bytes[cursor] == 1 and value >= catalogs.value_count))
+                (bytes[cursor] == 1 and
+                    (value >= catalogs.value_count or !available[value] or
+                        valueSchema(catalogs, value) !=
+                            functionResultSchema(catalogs, function_id))))
             {
                 return error.InvalidTerminator;
             }
             cursor += 4;
         },
-        4, 6 => {
+        4 => {
+            const value = readInt(u16, bytes, cursor);
             if (end - cursor != 4 or
-                readInt(u16, bytes, cursor) >= catalogs.value_count or
+                value >= catalogs.value_count or !available[value] or
+                valueSchema(catalogs, value) !=
+                    functionResultSchema(catalogs, function_id) or
                 readInt(u16, bytes, cursor + 2) != 0)
             {
                 return error.InvalidTerminator;
@@ -1380,7 +1507,23 @@ fn validateTerminator(
             cursor += 4;
         },
         5 => {
-            if (end - cursor != 4) return error.InvalidTerminator;
+            const tag = readInt(u32, bytes, cursor);
+            if (end - cursor != 4 or tag > std.math.maxInt(u16) or
+                !failureTagExists(catalogs, tag))
+            {
+                return error.InvalidTerminator;
+            }
+            cursor += 4;
+        },
+        6 => {
+            const value = readInt(u16, bytes, cursor);
+            if (end - cursor != 4 or
+                value >= catalogs.value_count or !available[value] or
+                valueSchema(catalogs, value) != catalogs.failure_schema_id or
+                readInt(u16, bytes, cursor + 2) != 0)
+            {
+                return error.InvalidTerminator;
+            }
             cursor += 4;
         },
         else => unreachable,
@@ -1394,6 +1537,7 @@ fn validateSuspension(
     bytes: []const u8,
     cursor: *usize,
     end: usize,
+    available: *const [1024]bool,
 ) Error!void {
     if (end - cursor.* < 20) return error.InvalidTerminator;
     const kind = bytes[cursor.*];
@@ -1417,7 +1561,8 @@ fn validateSuspension(
     const request_values_start = cursor.*;
     for (0..request_count) |_| {
         if (end - cursor.* < 2 or
-            readInt(u16, bytes, cursor.*) >= catalogs.value_count)
+            readInt(u16, bytes, cursor.*) >= catalogs.value_count or
+            !available[readInt(u16, bytes, cursor.*)])
         {
             return error.InvalidTerminator;
         }
@@ -1442,7 +1587,7 @@ fn validateSuspension(
     }
     cursor.* += 4;
     if (callee_present == 1) {
-        try validateEdge(catalogs, bytes, cursor, end, null);
+        try validateEdge(catalogs, bytes, cursor, end, null, available);
     }
     try validateEdge(
         catalogs,
@@ -1453,6 +1598,7 @@ fn validateSuspension(
             null
         else
             declared_resume_schema,
+        available,
     );
     if (end - cursor.* != 4) return error.InvalidTerminator;
     const resume_schema = readInt(u32, bytes, cursor.*);
@@ -1469,6 +1615,7 @@ fn validateEdge(
     cursor: *usize,
     end: usize,
     resume_schema: ?u32,
+    available: *const [1024]bool,
 ) Error!void {
     if (end - cursor.* < 4) return error.InvalidTerminator;
     const target = readInt(u16, bytes, cursor.*);
@@ -1489,7 +1636,8 @@ fn validateEdge(
             return error.InvalidTerminator;
         }
         const value = readInt(u16, bytes, cursor.* + 2);
-        if ((bytes[cursor.*] == 0 and value >= catalogs.value_count) or
+        if ((bytes[cursor.*] == 0 and
+            (value >= catalogs.value_count or !available[value])) or
             (bytes[cursor.*] == 1 and value != std.math.maxInt(u16)))
         {
             return error.InvalidTerminator;
@@ -1937,7 +2085,7 @@ fn maximumSingleValueBytes(schemas: dynamic_value_v1.Table) u32 {
     return std.math.cast(u32, maximum) orelse std.math.maxInt(u32);
 }
 
-const SemanticHasher = std.crypto.hash.sha2.Sha256;
+pub const SemanticHasher = std.crypto.hash.sha2.Sha256;
 
 fn computeProgramTransitionDigest(
     catalogs: Catalogs,
@@ -2009,7 +2157,7 @@ fn computeProgramTransitionDigest(
     return digest;
 }
 
-fn semanticHashSchema(
+pub fn semanticHashSchema(
     hasher: *SemanticHasher,
     catalogs: Catalogs,
     schema_id: u32,
@@ -2023,7 +2171,7 @@ fn semanticHashSchema(
     hasher.update(&digest);
 }
 
-fn hashFailures(hasher: *SemanticHasher, bytes: []const u8) Error!void {
+pub fn hashFailures(hasher: *SemanticHasher, bytes: []const u8) Error!void {
     semanticHashBytes(hasher, "failure-name-tag-map-v1");
     const count = readInt(u32, bytes, 0);
     semanticHashU32(hasher, count);
@@ -2039,7 +2187,7 @@ fn hashFailures(hasher: *SemanticHasher, bytes: []const u8) Error!void {
     }
 }
 
-fn hashEffectContracts(hasher: *SemanticHasher, bytes: []const u8) Error!void {
+pub fn hashEffectContracts(hasher: *SemanticHasher, bytes: []const u8) Error!void {
     const count = readInt(u32, bytes, 0);
     var cursor: usize = 4;
     for (0..count) |_| {
@@ -2093,7 +2241,7 @@ fn hashSegments(
     }
 }
 
-fn hashInstruction(
+pub fn hashInstruction(
     hasher: *SemanticHasher,
     catalogs: Catalogs,
     schema_tasks: []dynamic_value_v1.SchemaHashTask,
@@ -2158,7 +2306,7 @@ fn hashConstant(
     return error.InvalidConstant;
 }
 
-fn hashTerminator(
+pub fn hashTerminator(
     hasher: *SemanticHasher,
     catalogs: Catalogs,
     schema_tasks: []dynamic_value_v1.SchemaHashTask,
@@ -2254,7 +2402,7 @@ fn hashSuspension(
     cursor.* = edge_cursor + 4;
 }
 
-fn hashEdge(
+pub fn hashEdge(
     hasher: *SemanticHasher,
     bytes: []const u8,
     cursor: *usize,
@@ -2330,7 +2478,7 @@ fn hashConstructors(
     }
 }
 
-fn hashEnvironmentField(
+pub fn hashEnvironmentField(
     hasher: *SemanticHasher,
     catalogs: Catalogs,
     schema_tasks: []dynamic_value_v1.SchemaHashTask,
@@ -2347,7 +2495,7 @@ fn hashEnvironmentField(
     cursor.* += 8;
 }
 
-fn hashInvariant(
+pub fn hashInvariant(
     hasher: *SemanticHasher,
     bytes: []const u8,
     start: usize,
@@ -2469,33 +2617,33 @@ fn hashTransitions(hasher: *SemanticHasher, bytes: []const u8) void {
     }
 }
 
-fn semanticHashU32(hasher: anytype, value: u32) void {
+pub fn semanticHashU32(hasher: anytype, value: u32) void {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .little);
     hasher.update(&bytes);
 }
 
-fn semanticHashU8(hasher: anytype, value: u8) void {
+pub fn semanticHashU8(hasher: anytype, value: u8) void {
     hasher.update(&.{value});
 }
 
-fn semanticHashU16(hasher: anytype, value: u16) void {
+pub fn semanticHashU16(hasher: anytype, value: u16) void {
     var bytes: [2]u8 = undefined;
     std.mem.writeInt(u16, &bytes, value, .little);
     hasher.update(&bytes);
 }
 
-fn semanticHashBool(hasher: anytype, value: bool) void {
+pub fn semanticHashBool(hasher: anytype, value: bool) void {
     semanticHashU8(hasher, @intFromBool(value));
 }
 
-fn semanticHashU64(hasher: anytype, value: u64) void {
+pub fn semanticHashU64(hasher: anytype, value: u64) void {
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, value, .little);
     hasher.update(&bytes);
 }
 
-fn semanticHashBytes(hasher: anytype, value: []const u8) void {
+pub fn semanticHashBytes(hasher: anytype, value: []const u8) void {
     semanticHashU64(hasher, value.len);
     hasher.update(value);
 }
