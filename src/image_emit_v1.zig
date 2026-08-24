@@ -499,6 +499,8 @@ pub fn ProgramImage(
 pub const RuntimeError = error{
     OutputCapacity,
     SectionCapacity,
+    CatalogLimit,
+    ImageLimit,
 };
 
 const RuntimeWriter = struct {
@@ -794,8 +796,7 @@ fn RuntimeConstants(comptime Reified: type) type {
                     const schema_id = schemas_state.root_ids[
                         RuntimeSchemas(Reified).value_root_start + dense_value
                     ];
-                    var canonical: [portable_value.maximumEncodedSize(Value)]u8 =
-                        undefined;
+                    var canonical: [value_length]u8 = undefined;
                     const encoded_length = portable_value.encode(
                         Value,
                         value,
@@ -937,7 +938,7 @@ pub fn encodeProgramImage(
         writeAt(u64, output, descriptor + 8, offset);
         writeAt(u64, output, descriptor + 16, length);
     }
-    if (writer.cursor > maximum_image_bytes) return error.OutputCapacity;
+    if (writer.cursor > maximum_image_bytes) return error.ImageLimit;
     return writer.cursor;
 }
 
@@ -990,6 +991,7 @@ fn writeProgramFailuresRuntime(
     writer: *RuntimeWriter,
 ) RuntimeError!void {
     const fields = std.meta.fields(Reified.Body.Failure);
+    if (!failureCatalogAdmitted(fields.len)) return error.CatalogLimit;
     try writer.append(u32, fields.len);
     inline for (fields) |field| {
         try writer.append(u32, field.value);
@@ -1590,7 +1592,7 @@ pub fn ProgramRoots(comptime Reified: type, comptime Schemas: type) type {
 
 pub fn ProgramFailures(comptime Reified: type) type {
     const fields = std.meta.fields(Reified.Body.Failure);
-    if (fields.len > image_v1.maximum_catalog_entries) {
+    if (!failureCatalogAdmitted(fields.len)) {
         @compileError("BPI1 failure variants exceed validator capacity");
     }
     const length = comptime blk: {
@@ -1615,6 +1617,10 @@ pub fn ProgramFailures(comptime Reified: type) type {
     return struct {
         pub const bytes = encoded;
     };
+}
+
+fn failureCatalogAdmitted(count: usize) bool {
+    return count <= image_v1.maximum_catalog_entries;
 }
 
 pub fn ProgramEffects(
