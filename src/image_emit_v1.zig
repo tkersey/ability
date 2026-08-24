@@ -786,7 +786,7 @@ fn RuntimeConstants(comptime Reified: type) type {
                     };
                     const value = Reified.Body.constants[constant_index];
                     const Value = @TypeOf(value);
-                    const value_length = portable_value.encodedSize(
+                    const value_length = comptime portable_value.encodedSize(
                         Value,
                         value,
                     ) catch unreachable;
