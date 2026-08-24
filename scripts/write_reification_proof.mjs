@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 const [
   wasmExecutionPath,
@@ -22,10 +23,21 @@ if (receiptSourceDelimiter < sourceDelimiter) {
 }
 const allSourcePaths = sourcePaths.slice(sourceDelimiter + 1, receiptSourceDelimiter);
 const receiptSourcePaths = sourcePaths.slice(receiptSourceDelimiter + 1);
-if (allSourcePaths.length === 0) {
-  throw new Error("empty complete source inventory");
+const requireNonEmptyInventory = (values, name) => {
+  if (values.length === 0) throw new Error(`empty ${name} inventory`);
+};
+requireNonEmptyInventory(allSourcePaths, "complete source");
+requireNonEmptyInventory(receiptSourcePaths, "receipt source");
+const expectedPureSourceNames = [
+  "image_v1.zig",
+  "program_semantics_v1.zig",
+  "reducer_clause_v1.zig",
+  "reified_program_v1.zig",
+];
+const pureSourceNames = purePaths.map((file) => path.basename(file)).sort();
+if (!isDeepStrictEqual(pureSourceNames, expectedPureSourceNames)) {
+  throw new Error("incomplete pure source inventory");
 }
-if (receiptSourcePaths.length === 0) throw new Error("empty receipt source inventory");
 
 const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
 const digest = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -41,6 +53,11 @@ const positiveCount = (owner, name) => {
   }
   return value;
 };
+const baselineFixtureCount = positiveCount(baseline, "fixture_count");
+const baselineMalformedStateCaseCount = positiveCount(
+  baseline,
+  "malformed_state_case_count",
+);
 
 if (
   baseline.format !== "boundary-reification-baseline-proof/v1" ||
@@ -54,6 +71,8 @@ if (
   baseline.mismatch_count !== 0 ||
   baseline.current_mismatch_count !== 0 ||
   baseline.oracle_mismatch_count !== 0 ||
+  baselineFixtureCount !== 10 ||
+  baselineMalformedStateCaseCount !== 4 ||
   baseline.oracle_boundary_commit !== "ed4956b6229e039c72f3080dd60ddb94f58a56fc" ||
   !/^[0-9a-f]{64}$/.test(baseline.oracle_fixture_patch_sha256) ||
   semantic.image_profile_invariance_passed !== true ||
@@ -101,9 +120,9 @@ const proof = {
   release_asset_sha256: wasmExecution.release_asset_sha256,
   image_profile_invariance_passed: semantic.image_profile_invariance_passed,
   metering_annotation_invariance_passed: semantic.metering_annotation_invariance_passed,
-  baseline_digest_count: baseline.fixture_count,
+  baseline_digest_count: baselineFixtureCount,
   baseline_digest_mismatch_count: baseline.mismatch_count,
-  canonical_image_fixture_count: baseline.fixture_count,
+  canonical_image_fixture_count: baselineFixtureCount,
   wasm_transition_comparison_count: wasmExecution.transition_comparison_count,
   malformed_image_case_count: semantic.malformed_image_case_count,
   malformed_state_case_count: semantic.malformed_state_case_count,

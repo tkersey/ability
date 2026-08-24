@@ -40,10 +40,11 @@ try {
     format: "boundary-reification-baseline-proof/v1",
     oracle_boundary_commit: "ed4956b6229e039c72f3080dd60ddb94f58a56fc",
     oracle_fixture_patch_sha256: "a".repeat(64),
-    fixture_count: 7,
+    fixture_count: 10,
     mismatch_count: 0,
     current_mismatch_count: 0,
     oracle_mismatch_count: 0,
+    malformed_state_case_count: 4,
     machine_abi: 2,
     state_format: "ABL_RNF2",
     state_format_version: 1,
@@ -77,8 +78,18 @@ try {
       "emit_reification_assets_step.dependOn(reification_receipt_step);\n" +
       "reification_proof_stamp_command.step.dependOn(zig_path_coverage_guard);\n",
   );
-  const pure = path.join(temporary, "pure.zig");
-  fs.writeFileSync(pure, "pub const Pure = void;\n");
+  const pureDirectory = path.join(temporary, "pure");
+  fs.mkdirSync(pureDirectory);
+  const pureSources = [
+    "image_v1.zig",
+    "program_semantics_v1.zig",
+    "reducer_clause_v1.zig",
+    "reified_program_v1.zig",
+  ].map((name) => path.join(pureDirectory, name));
+  for (const pureSource of pureSources) {
+    fs.writeFileSync(pureSource, "pub const Pure = void;\n");
+  }
+  const pure = pureSources[1];
   const executor = path.join(temporary, "proof-executor.mjs");
   fs.writeFileSync(executor, "export const proof = true;\n");
   const proofPath = path.join(temporary, "boundary-reification-v1-proof.json");
@@ -90,10 +101,10 @@ try {
     generated,
     root,
     build,
-    pure,
+    ...pureSources,
     "--all-sources",
     root,
-    pure,
+    ...pureSources,
     "--receipt-sources",
     pure,
     executor,
@@ -107,6 +118,18 @@ try {
     throw new Error("Boundary proof claimed an unobserved downstream result");
   }
   fs.writeFileSync(proofPath, JSON.stringify(proof));
+  const sourceDelimiter = proofArgs.indexOf("--all-sources");
+  const incompletePureInventory = childProcess.spawnSync(
+    process.execPath,
+    [
+      ...proofArgs.slice(0, sourceDelimiter - 1),
+      ...proofArgs.slice(sourceDelimiter),
+    ],
+    { encoding: "utf8" },
+  );
+  if (incompletePureInventory.status === 0) {
+    throw new Error("incomplete pure source inventory was accepted");
+  }
   const loaderSource = path.join(temporary, "loader.zig");
   fs.writeFileSync(loaderSource, "pub const DefinitionLoader = void;\n");
   const receiptSourceDelimiter = proofArgs.indexOf("--receipt-sources");
@@ -181,6 +204,26 @@ try {
   }
   forgedBaseline.oracle_mismatch_count = 0;
   fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));
+  for (const [field, forged] of [
+    ["fixture_count", 0],
+    ["fixture_count", 9],
+    ["malformed_state_case_count", 0],
+    ["malformed_state_case_count", 3],
+  ]) {
+    const authentic = forgedBaseline[field];
+    forgedBaseline[field] = forged;
+    fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));
+    const invalidInventory = childProcess.spawnSync(
+      process.execPath,
+      proofArgs,
+      { encoding: "utf8" },
+    );
+    if (invalidInventory.status === 0) {
+      throw new Error(`invalid baseline ${field} inventory was accepted`);
+    }
+    forgedBaseline[field] = authentic;
+  }
+  fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));
 
   const forgedSemantic = JSON.parse(fs.readFileSync(semantic, "utf8"));
   for (const field of ["malformed_image_case_count", "malformed_state_case_count"]) {
@@ -214,7 +257,7 @@ try {
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
   if (
     receipt.image_profile_invariance_passed !== true ||
-    receipt.baseline_digest_count !== 7 ||
+    receipt.baseline_digest_count !== 10 ||
     receipt.malformed_image_case_count !== 123 ||
     unownedDownstreamClaims.some((field) => Object.hasOwn(receipt, field))
   ) {
