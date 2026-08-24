@@ -1728,6 +1728,14 @@ test "fixed kernel branches and yields at the next segment boundary" {
         image_v1.validateImage(&missing_branch_invariant, &workspace),
     );
 
+    var top_level_activation = BranchImage.bytes;
+    top_level_activation[constructor_cursor + 10] |= 1;
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidConstructor,
+        image_v1.validateImage(&top_level_activation, &workspace),
+    );
+
     var permuted_definitions = BranchImage.bytes;
     const permutation_segments: usize = @intCast(
         parsed.catalogs.envelope.sections[7].offset,

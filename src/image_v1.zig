@@ -1918,6 +1918,17 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
         )) {
             return error.InvalidConstructor;
         }
+        const source_segment = imageSegmentRecord(
+            catalogs,
+            readInt(u16, bytes, cursor + 12),
+        ) catch return error.InvalidConstructor;
+        const has_activation_context =
+            readInt(u16, bytes, cursor + 10) & 1 != 0;
+        if (has_activation_context !=
+            (readInt(u16, source_segment, 6) != 0))
+        {
+            return error.InvalidConstructor;
+        }
         const resume_target = readInt(u16, bytes, cursor + 14);
         if (resume_target != std.math.maxInt(u16) and
             resume_target >= segment_count)
@@ -1927,6 +1938,9 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
         const activation_count = readInt(u16, bytes, cursor + 16);
         const environment_count = readInt(u16, bytes, cursor + 18);
         const invariant_count = readInt(u16, bytes, cursor + 20);
+        if (!has_activation_context and activation_count != 0) {
+            return error.InvalidConstructor;
+        }
         cursor += 24;
         const field_count = @as(u32, activation_count) + environment_count;
         var activation_seen = [_]bool{false} ** 1024;
