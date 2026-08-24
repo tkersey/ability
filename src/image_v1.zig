@@ -2400,23 +2400,23 @@ fn validateInstructionResultInvariant(
     {
         return error.InvalidInvariant;
     }
-    var operands: [1024]u16 = undefined;
+    const operand_bytes = invariant[payload + 8 ..][0 .. @as(usize, operand_count) * 2];
     for (0..operand_count) |index| {
-        const operand = readInt(u16, invariant, payload + 8 + index * 2);
+        const operand = readInt(u16, operand_bytes, index * 2);
         const definition_operand = readInt(u16, instruction, 16 + index * 2);
         if (valueSchema(catalogs, operand) !=
             valueSchema(catalogs, definition_operand))
         {
             return error.InvalidInvariant;
         }
-        operands[index] = operand;
     }
-    try validateInvariantOperation(
+    try validateInvariantOperationEncoded(
         catalogs,
         readInt(u16, instruction, 6),
         result,
         readInt(u32, instruction, 12),
-        operands[0..operand_count],
+        operand_bytes,
+        operand_count,
     );
 }
 
@@ -2453,12 +2453,8 @@ fn validateInvariantOperation(
     immediate: u32,
     operands: []const u16,
 ) Error!void {
-    if (operands.len > 1024) return error.InvalidInvariant;
-    const operation = std.enums.fromInt(
-        program_semantics_v1.WireOperation,
-        operation_tag,
-    ) orelse return error.InvalidInvariant;
-    var operand_bytes: [2048]u8 = undefined;
+    var operand_bytes: [6]u8 = undefined;
+    if (operands.len > operand_bytes.len / 2) return error.InvalidInvariant;
     for (operands, 0..) |operand, index| {
         std.mem.writeInt(
             u16,
@@ -2467,12 +2463,37 @@ fn validateInvariantOperation(
             .little,
         );
     }
+    try validateInvariantOperationEncoded(
+        catalogs,
+        operation_tag,
+        result,
+        immediate,
+        operand_bytes[0 .. operands.len * 2],
+        @intCast(operands.len),
+    );
+}
+
+fn validateInvariantOperationEncoded(
+    catalogs: Catalogs,
+    operation_tag: u16,
+    result: u16,
+    immediate: u32,
+    operand_bytes: []const u8,
+    operand_count: u16,
+) Error!void {
+    if (operand_bytes.len != @as(usize, operand_count) * 2) {
+        return error.InvalidInvariant;
+    }
+    const operation = std.enums.fromInt(
+        program_semantics_v1.WireOperation,
+        operation_tag,
+    ) orelse return error.InvalidInvariant;
     validateInstructionSchemas(
         catalogs,
         operation,
         result,
-        operand_bytes[0 .. operands.len * 2],
-        @intCast(operands.len),
+        operand_bytes,
+        operand_count,
         immediate,
     ) catch return error.InvalidInvariant;
 }

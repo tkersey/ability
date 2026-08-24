@@ -22,6 +22,36 @@ pub const Slot = struct {
     initialized: bool = false,
 };
 
+pub fn productConstructMatches(
+    expected: []const u8,
+    operand_bytes: []const u8,
+    operand_count: u16,
+    slots: *const [1024]Slot,
+) bool {
+    if (operand_bytes.len != @as(usize, operand_count) * 2) return false;
+    var cursor: usize = 0;
+    for (0..operand_count) |index| {
+        const operand = std.mem.readInt(
+            u16,
+            operand_bytes[index * 2 ..][0..2],
+            .little,
+        );
+        if (operand >= slots.len or !slots[operand].initialized) return false;
+        const end = std.math.add(
+            usize,
+            cursor,
+            slots[operand].bytes.len,
+        ) catch return false;
+        if (end > expected.len or !std.mem.eql(
+            u8,
+            expected[cursor..end],
+            slots[operand].bytes,
+        )) return false;
+        cursor = end;
+    }
+    return cursor == expected.len;
+}
+
 /// One finite program-owned reducer-clause result.
 pub const ClauseOutcome = union(enum) {
     progressed: struct { edge_kind: u8, edge: []const u8 },

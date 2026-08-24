@@ -57,4 +57,23 @@ test "product construction streams more operands than the value catalog" {
     );
     try std.testing.expectEqual(@as(usize, operand_count), slots[1].bytes.len);
     for (slots[1].bytes) |byte| try std.testing.expectEqual(@as(u8, 7), byte);
+    try std.testing.expect(clause.productConstructMatches(
+        slots[1].bytes,
+        instruction[16..],
+        operand_count,
+        &slots,
+    ));
+    scratch[operand_count - 1] = 8;
+    try std.testing.expect(!clause.productConstructMatches(
+        slots[1].bytes,
+        instruction[16..],
+        operand_count,
+        &slots,
+    ));
+    try std.testing.expect(!clause.productConstructMatches(
+        slots[1].bytes,
+        instruction[16 .. instruction.len - 2],
+        operand_count,
+        &slots,
+    ));
 }

@@ -2152,22 +2152,15 @@ fn validatePathInvariants(
                 const result = readInt(u16, constructor, payload);
                 const definition = readInt(u16, constructor, payload + 2);
                 const operand_count = readInt(u16, constructor, payload + 4);
-                var operands: [1024]u16 = undefined;
-                if (operand_count > operands.len) return error.InvalidState;
-                for (0..operand_count) |index| {
-                    operands[index] = readInt(
-                        u16,
-                        constructor,
-                        payload + 8 + index * 2,
-                    );
-                }
+                const operand_bytes = constructor[payload + 8 ..][0 .. @as(usize, operand_count) * 2];
                 const instruction = try definingInstruction(image, definition);
-                break :blk try validateComputedResult(
+                break :blk try validateComputedResultEncoded(
                     image,
                     result,
                     readInt(u16, instruction, 6),
                     readInt(u32, instruction, 12),
-                    operands[0..operand_count],
+                    operand_bytes,
+                    operand_count,
                     slots,
                     workspace,
                 );
@@ -2343,8 +2336,52 @@ fn validateComputedResult(
     slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!bool {
-    if (!slots[result].initialized or operands.len > 1024) return false;
-    const instruction_length = 16 + operands.len * 2;
+    var operand_bytes: [6]u8 = undefined;
+    if (operands.len > operand_bytes.len / 2) return false;
+    for (operands, 0..) |operand, index| {
+        std.mem.writeInt(
+            u16,
+            operand_bytes[index * 2 ..][0..2],
+            operand,
+            .little,
+        );
+    }
+    return validateComputedResultEncoded(
+        image,
+        result,
+        operation,
+        immediate,
+        operand_bytes[0 .. operands.len * 2],
+        @intCast(operands.len),
+        slots,
+        workspace,
+    );
+}
+
+fn validateComputedResultEncoded(
+    image: anytype,
+    result: u16,
+    operation: u16,
+    immediate: u32,
+    operand_bytes: []const u8,
+    operand_count: u16,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!bool {
+    if (!slots[result].initialized or
+        operand_bytes.len != @as(usize, operand_count) * 2)
+    {
+        return false;
+    }
+    if (operation == 24) {
+        return reducer_clause_v1.productConstructMatches(
+            slots[result].bytes,
+            operand_bytes,
+            operand_count,
+            slots,
+        );
+    }
+    const instruction_length = 16 + operand_bytes.len;
     if (instruction_length > workspace.invariant_instruction.len) {
         return error.ScratchCapacity;
     }
@@ -2353,16 +2390,9 @@ fn validateComputedResult(
     std.mem.writeInt(u32, instruction[0..4], @intCast(instruction_length), .little);
     std.mem.writeInt(u16, instruction[6..8], operation, .little);
     std.mem.writeInt(u16, instruction[8..10], result, .little);
-    std.mem.writeInt(u16, instruction[10..12], @intCast(operands.len), .little);
+    std.mem.writeInt(u16, instruction[10..12], operand_count, .little);
     std.mem.writeInt(u32, instruction[12..16], immediate, .little);
-    for (operands, 0..) |operand, index| {
-        std.mem.writeInt(
-            u16,
-            instruction[16 + index * 2 ..][0..2],
-            operand,
-            .little,
-        );
-    }
+    @memcpy(instruction[16..], operand_bytes);
     const expected = slots[result];
     defer slots[result] = expected;
     var scratch_cursor: usize = 0;
@@ -2373,8 +2403,10 @@ fn validateComputedResult(
         };
         break :blk null;
     } else if (operation == 1) blk: {
-        if (operands.len != 1 or !slots[operands[0]].initialized) return false;
-        slots[result] = slots[operands[0]];
+        if (operand_count != 1) return false;
+        const operand = readInt(u16, operand_bytes, 0);
+        if (operand >= slots.len or !slots[operand].initialized) return false;
+        slots[result] = slots[operand];
         break :blk null;
     } else if (operation <= 23 or operation == 57)
         try reducer_clause_v1.executeScalarOperation(
