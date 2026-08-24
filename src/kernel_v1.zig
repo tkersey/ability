@@ -873,6 +873,9 @@ fn stepValidated(
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    // Machine ABI v2 intentionally admits an unfunded short path after only
+    // envelope and top-constructor validation. Environment and invariant
+    // validation remains deferred until the caller funds the segment.
     if (try segmentIsUnfunded(image, state, caller_fuel.*)) {
         return .{ .yielded = state };
     }

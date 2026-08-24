@@ -32,6 +32,13 @@ fuel yields before the segment, preserving State and fuel. Ordinary transitions
 remain internal to one call; external effect requests park a canonical await
 constructor and include RequestIdentity v2.
 
+The legacy unfunded short path validates only the `ABL_RNF2` envelope and top
+constructor needed to select the compiler-known minimum cost. Environment,
+invariant, and stack-pair validation is intentionally deferred until that cost
+is funded, matching direct Machine-v2 scheduling. Call `validateState`
+explicitly at an untrusted-State ingress that requires deep validation
+independently of caller fuel.
+
 `boundary-machine-v2-kernel-v1.wasm` targets `wasm32-freestanding`, imports nothing,
 exports memory, and exposes Kernel ABI v1:
 

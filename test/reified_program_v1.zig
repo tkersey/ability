@@ -221,7 +221,7 @@ fn malformedStateCaseCount(allocator: std.mem.Allocator) !u32 {
     return rejected;
 }
 
-fn zeroFuelMalformedStateRejected(allocator: std.mem.Allocator) !bool {
+fn zeroFuelMalformedStateEnvelopeRejected(allocator: std.mem.Allocator) !bool {
     var workspace: image_v1.ValidationWorkspace = .{};
     const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
     const image = try kernel_v1.bindMachineV2(
@@ -267,7 +267,7 @@ pub fn reificationReceiptWitness(
         .metering_annotation_invariance_passed = invariance.metering_annotation,
         .malformed_image_case_count = try malformedImageCaseCount(),
         .malformed_state_case_count = malformed_state_count +
-            @intFromBool(try zeroFuelMalformedStateRejected(allocator)),
+            @intFromBool(try zeroFuelMalformedStateEnvelopeRejected(allocator)),
         .machine_abi = machine_v2_profile_v1.machine_abi_version,
         .state_format_version = machine_v2_profile_v1.state_format_version,
     };
@@ -984,9 +984,9 @@ test "direct and kernel reject shared malformed State classes" {
     );
 }
 
-test "zero caller fuel cannot launder a malformed State" {
+test "zero caller fuel rejects malformed State framing" {
     try std.testing.expect(
-        try zeroFuelMalformedStateRejected(std.testing.allocator),
+        try zeroFuelMalformedStateEnvelopeRejected(std.testing.allocator),
     );
 }
 
