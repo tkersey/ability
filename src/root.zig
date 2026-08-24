@@ -14,7 +14,23 @@ pub const package_version = "1.6.0";
 /// Public typed residual-effect authoring namespace.
 pub const effect = effect_v2;
 /// Canonical Boundary Program Image v1 wire format and validation.
-pub const image = image_v1;
+pub const image = struct {
+    pub const magic = image_v1.magic;
+    pub const image_format_version = image_v1.image_format_version;
+    pub const evaluator_semantics_version = image_v1.evaluator_semantics_version;
+    pub const header_length = image_v1.header_length;
+    pub const section_count = image_v1.section_count;
+    pub const Error = image_v1.Error;
+    pub const SectionKind = image_v1.SectionKind;
+    pub const Section = image_v1.Section;
+    pub const Header = image_v1.Header;
+    pub const ValidatedEnvelope = image_v1.ValidatedEnvelope;
+    pub const ValidationWorkspace = image_v1.ValidationWorkspace;
+    pub const ValidatedImage = image_v1.ValidatedImage;
+    pub const validateEnvelope = image_v1.validateEnvelope;
+    pub const validateImage = image_v1.validateImage;
+    pub const reencodeValidated = image_v1.reencodeValidated;
+};
 /// Bounded Machine ABI v2 compatibility surfaces.
 pub const machine_v2 = struct {
     pub const Options = machine.Options;
@@ -63,6 +79,21 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(@hasDecl(@This(), "Agent"));
     try std.testing.expect(@hasDecl(@This(), "effect"));
     try std.testing.expect(@hasDecl(@This(), "image"));
+    try std.testing.expect(@hasDecl(image, "validateImage"));
+    try std.testing.expect(@hasDecl(image, "reencodeValidated"));
+    inline for (.{
+        "SemanticHasher",
+        "semanticHashSchema",
+        "hashFailures",
+        "hashEffectContracts",
+        "hashInstruction",
+        "hashTerminator",
+        "hashEdge",
+        "hashEnvironmentField",
+        "hashInvariant",
+    }) |internal_decl| {
+        try std.testing.expect(!@hasDecl(image, internal_decl));
+    }
     try std.testing.expect(!@hasDecl(@This(), "evaluator"));
     try std.testing.expect(!@hasDecl(@This(), "reducer"));
     try std.testing.expect(!@hasDecl(@This(), "clause"));
