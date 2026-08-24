@@ -635,7 +635,6 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("image_v1", core.image_v1);
     module.addImport("kernel_v1", core.kernel_v1);
     module.addImport("machine", core.machine);
-    module.addImport("machine_v2_profile_v1", core.machine_v2_profile_v1);
     module.addImport("portable_value", core.portable_value);
     module.addImport("program_v2", core.program_v2);
 }

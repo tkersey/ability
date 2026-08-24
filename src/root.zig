@@ -5,7 +5,6 @@ const effect_v2 = @import("effect_v2");
 const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
-const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 
@@ -19,7 +18,6 @@ pub const image = image_v1;
 /// Bounded Machine ABI v2 compatibility surfaces.
 pub const machine_v2 = struct {
     pub const Options = machine.Options;
-    pub const profile = machine_v2_profile_v1;
     pub const kernel = struct {
         pub const Error = kernel_v1.Error;
         pub const MachineFailure = kernel_v1.MachineFailure;
@@ -71,6 +69,7 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(!@hasDecl(@This(), "program_evaluator"));
     try std.testing.expect(!@hasDecl(@This(), "internal_evaluator"));
     try std.testing.expect(@hasDecl(@This(), "machine_v2"));
+    try std.testing.expect(!@hasDecl(machine_v2, "profile"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "preflightStep"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "StepAdmission"));
     try std.testing.expect(!@hasDecl(
