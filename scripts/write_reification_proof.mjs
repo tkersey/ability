@@ -81,6 +81,10 @@ const baselineMalformedStateCaseCount = positiveCount(
   baseline,
   "malformed_state_case_count",
 );
+const canonicalImageFixtureCount = positiveCount(
+  wasmExecution,
+  "canonical_image_fixture_count",
+);
 
 if (
   baseline.format !== "boundary-reification-baseline-proof/v1" ||
@@ -107,6 +111,7 @@ if (
   positiveCount(wasmExecution, "kernel_wasm_bytes") <= 0 ||
   !/^[0-9a-f]{64}$/.test(wasmExecution.kernel_wasm_sha256) ||
   Object.keys(wasmExecution.release_asset_sha256 ?? {}).length !== 4 ||
+  canonicalImageFixtureCount !== 2 ||
   !Object.values(wasmExecution.release_asset_sha256 ?? {}).every(
     (value) => /^[0-9a-f]{64}$/.test(value),
   ) ||
@@ -146,7 +151,7 @@ const proof = {
   metering_annotation_invariance_passed: semantic.metering_annotation_invariance_passed,
   baseline_digest_count: baselineFixtureCount,
   baseline_digest_mismatch_count: baseline.mismatch_count,
-  canonical_image_fixture_count: baselineFixtureCount,
+  canonical_image_fixture_count: canonicalImageFixtureCount,
   wasm_transition_comparison_count: wasmExecution.transition_comparison_count,
   malformed_image_case_count: semantic.malformed_image_case_count,
   malformed_state_case_count: semantic.malformed_state_case_count,

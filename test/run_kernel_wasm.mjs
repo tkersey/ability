@@ -214,10 +214,11 @@ for (const semanticVector of vectors.slice(1)) {
   }
   transitionComparisonCount += 1;
 }
-for (const [image, profile] of [
+const releaseImageProfilePairs = [
   [releaseAssets[0], releaseAssets[2]],
   [releaseAssets[1], releaseAssets[3]],
-]) {
+];
+for (const [image, profile] of releaseImageProfilePairs) {
   const validation = Buffer.alloc(48 + image.length + profile.length);
   validation.write("ABL_KIN1", 0, "ascii");
   validation.writeUInt16LE(1, 8);
@@ -241,6 +242,7 @@ process.stdout.write(`${JSON.stringify({
   import_count: WebAssembly.Module.imports(module).length,
   abi: instance.exports.boundary_machine_v2_kernel_abi_version(),
   transition_comparison_count: transitionComparisonCount,
+  canonical_image_fixture_count: releaseImageProfilePairs.length,
   release_asset_sha256: {
     one_effect_image: crypto.createHash("sha256").update(releaseAssets[0]).digest("hex"),
     portable_values_image: crypto.createHash("sha256").update(releaseAssets[1]).digest("hex"),

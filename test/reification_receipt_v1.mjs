@@ -28,6 +28,7 @@ try {
     import_count: 0,
     abi: 1,
     transition_comparison_count: 3,
+    canonical_image_fixture_count: 2,
     release_asset_sha256: {
       one_effect_image: crypto.createHash("sha256").update("artifact").digest("hex"),
       portable_values_image: crypto.createHash("sha256").update("artifact").digest("hex"),
@@ -230,6 +231,22 @@ try {
   malformedProvenance.generated_trace_sha256 = "a".repeat(64);
   fs.writeFileSync(generated, JSON.stringify(malformedProvenance));
 
+  const forgedWasmExecution = JSON.parse(fs.readFileSync(wasmExecution, "utf8"));
+  for (const count of [0, 1, 3]) {
+    forgedWasmExecution.canonical_image_fixture_count = count;
+    fs.writeFileSync(wasmExecution, JSON.stringify(forgedWasmExecution));
+    const invalidImageCount = childProcess.spawnSync(
+      process.execPath,
+      proofArgs,
+      { encoding: "utf8" },
+    );
+    if (invalidImageCount.status === 0) {
+      throw new Error("invalid canonical image fixture count was accepted");
+    }
+  }
+  forgedWasmExecution.canonical_image_fixture_count = 2;
+  fs.writeFileSync(wasmExecution, JSON.stringify(forgedWasmExecution));
+
   const forgedBaseline = JSON.parse(fs.readFileSync(baseline, "utf8"));
   forgedBaseline.oracle_mismatch_count = 1;
   fs.writeFileSync(baseline, JSON.stringify(forgedBaseline));
@@ -297,6 +314,7 @@ try {
   if (
     receipt.image_profile_invariance_passed !== true ||
     receipt.baseline_digest_count !== 10 ||
+    receipt.canonical_image_fixture_count !== 2 ||
     receipt.malformed_image_case_count !== 123 ||
     unownedDownstreamClaims.some((field) => Object.hasOwn(receipt, field))
   ) {
