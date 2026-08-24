@@ -2221,15 +2221,26 @@ pub fn build(b: *std.Build) void {
     reification_proof_stamp_command.addFileArg(reification_generated_proof);
     reification_proof_stamp_command.addFileArg(b.path("src/root.zig"));
     reification_proof_stamp_command.addFileArg(b.path("build.zig"));
-    reification_proof_stamp_command.addFileArg(
-        b.path("src/program_semantics_v1.zig"),
+    inline for (.{
+        "src/control_ir.zig",
+        "src/dynamic_value_v1.zig",
+        "src/image_v1.zig",
+        "src/portable_value.zig",
+        "src/program_semantics_v1.zig",
+        "src/reducer_clause_v1.zig",
+        "src/rnf.zig",
+    }) |source_path| reification_proof_stamp_command.addFileArg(
+        b.path(source_path),
     );
-    reification_proof_stamp_command.addFileArg(
-        b.path("src/reducer_clause_v1.zig"),
-    );
-    reification_proof_stamp_command.addFileArg(b.path("src/image_v1.zig"));
-    reification_proof_stamp_command.addFileArg(
-        b.path("src/reified_program_v1.zig"),
+    reification_proof_stamp_command.addArg("--pure-semantics");
+    inline for (.{
+        "src/image_emit_v1.zig",
+        "src/image_v1.zig",
+        "src/program_semantics_v1.zig",
+        "src/reducer_clause_v1.zig",
+        "src/reified_program_v1.zig",
+    }) |source_path| reification_proof_stamp_command.addFileArg(
+        b.path(source_path),
     );
     reification_proof_stamp_command.addArg("--all-sources");
     var reification_source_paths = std.mem.splitScalar(

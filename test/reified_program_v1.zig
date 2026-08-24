@@ -1709,6 +1709,25 @@ test "fixed kernel branches and yields at the next segment boundary" {
         image_v1.validateImage(&opposite_branch_invariant, &workspace),
     );
 
+    var missing_branch_invariant = BranchImage.bytes;
+    missing_branch_invariant[invariant_cursor + 4] = 1;
+    const branch_condition_value = std.mem.readInt(
+        u16,
+        missing_branch_invariant[invariant_cursor + 8 ..][0..2],
+        .little,
+    );
+    std.mem.writeInt(
+        u16,
+        missing_branch_invariant[invariant_cursor + 10 ..][0..2],
+        branch_condition_value,
+        .little,
+    );
+    workspace = .{};
+    try std.testing.expectError(
+        error.InvalidInvariant,
+        image_v1.validateImage(&missing_branch_invariant, &workspace),
+    );
+
     var permuted_definitions = BranchImage.bytes;
     const permutation_segments: usize = @intCast(
         parsed.catalogs.envelope.sections[7].offset,

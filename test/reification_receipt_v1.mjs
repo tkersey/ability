@@ -78,18 +78,24 @@ try {
       "emit_reification_assets_step.dependOn(reification_receipt_step);\n" +
       "reification_proof_stamp_command.step.dependOn(zig_path_coverage_guard);\n",
   );
-  const pureDirectory = path.join(temporary, "pure");
-  fs.mkdirSync(pureDirectory);
-  const pureSources = [
+  const pureGraphSources = [
+    "control_ir.zig",
+    "dynamic_value_v1.zig",
+    "image_v1.zig",
+    "portable_value.zig",
+    "program_semantics_v1.zig",
+    "reducer_clause_v1.zig",
+    "rnf.zig",
+  ].map((name) => path.join(repository, "src", name));
+  const pureSemanticSources = [
+    "image_emit_v1.zig",
     "image_v1.zig",
     "program_semantics_v1.zig",
     "reducer_clause_v1.zig",
     "reified_program_v1.zig",
-  ].map((name) => path.join(pureDirectory, name));
-  for (const pureSource of pureSources) {
-    fs.writeFileSync(pureSource, "pub const Pure = void;\n");
-  }
-  const pure = pureSources[1];
+  ].map((name) => path.join(repository, "src", name));
+  const pure = path.join(temporary, "receipt-source.zig");
+  fs.writeFileSync(pure, "pub const Pure = void;\n");
   const executor = path.join(temporary, "proof-executor.mjs");
   fs.writeFileSync(executor, "export const proof = true;\n");
   const proofPath = path.join(temporary, "boundary-reification-v1-proof.json");
@@ -101,10 +107,13 @@ try {
     generated,
     root,
     build,
-    ...pureSources,
+    ...pureGraphSources,
+    "--pure-semantics",
+    ...pureSemanticSources,
     "--all-sources",
     root,
-    ...pureSources,
+    ...pureGraphSources,
+    ...pureSemanticSources,
     "--receipt-sources",
     pure,
     executor,
@@ -118,8 +127,20 @@ try {
     throw new Error("Boundary proof claimed an unobserved downstream result");
   }
   fs.writeFileSync(proofPath, JSON.stringify(proof));
+  const pureSemanticDelimiter = proofArgs.indexOf("--pure-semantics");
   const sourceDelimiter = proofArgs.indexOf("--all-sources");
-  const incompletePureInventory = childProcess.spawnSync(
+  const incompletePureGraphInventory = childProcess.spawnSync(
+    process.execPath,
+    [
+      ...proofArgs.slice(0, pureSemanticDelimiter - 1),
+      ...proofArgs.slice(pureSemanticDelimiter),
+    ],
+    { encoding: "utf8" },
+  );
+  if (incompletePureGraphInventory.status === 0) {
+    throw new Error("incomplete pure graph inventory was accepted");
+  }
+  const incompletePureSemanticInventory = childProcess.spawnSync(
     process.execPath,
     [
       ...proofArgs.slice(0, sourceDelimiter - 1),
@@ -127,8 +148,26 @@ try {
     ],
     { encoding: "utf8" },
   );
-  if (incompletePureInventory.status === 0) {
-    throw new Error("incomplete pure source inventory was accepted");
+  if (incompletePureSemanticInventory.status === 0) {
+    throw new Error("incomplete pure semantic inventory was accepted");
+  }
+  const substitutedPureDirectory = path.join(temporary, "substituted-pure");
+  fs.mkdirSync(substitutedPureDirectory);
+  const substitutedPure = path.join(
+    substitutedPureDirectory,
+    "dynamic_value_v1.zig",
+  );
+  fs.writeFileSync(substitutedPure, "pub const Benign = void;\n");
+  const substitutedPureArgs = [...proofArgs];
+  substitutedPureArgs[substitutedPureArgs.indexOf(pureGraphSources[1])] =
+    substitutedPure;
+  const substitutedPureInventory = childProcess.spawnSync(
+    process.execPath,
+    substitutedPureArgs,
+    { encoding: "utf8" },
+  );
+  if (substitutedPureInventory.status === 0) {
+    throw new Error("same-basename pure source substitution was accepted");
   }
   const loaderSource = path.join(temporary, "loader.zig");
   fs.writeFileSync(loaderSource, "pub const DefinitionLoader = void;\n");

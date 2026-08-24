@@ -3064,9 +3064,20 @@ fn validateDirectBranchInvariant(
     }
     const condition = readInt(u16, source_segment, terminator + 8);
     const expected = edge_kind == 1;
-    var cursor: usize = 24 +
-        (@as(usize, readInt(u16, constructor, 16)) +
-            readInt(u16, constructor, 18)) * 8;
+    const field_count = @as(usize, readInt(u16, constructor, 16)) +
+        readInt(u16, constructor, 18);
+    var condition_retained = false;
+    var field_cursor: usize = 24;
+    for (0..field_count) |_| {
+        if (try edgeSourceValue(
+            target_segment,
+            edge,
+            readInt(u16, constructor, field_cursor),
+        ) == condition) condition_retained = true;
+        field_cursor += 8;
+    }
+    var witness_present = false;
+    var cursor: usize = 24 + field_count * 8;
     for (0..readInt(u16, constructor, 20)) |_| {
         const end = recordEnd(constructor, cursor, 8) catch
             return error.InvalidInvariant;
@@ -3077,13 +3088,17 @@ fn validateDirectBranchInvariant(
                 edge,
                 value,
             );
-            if (source_value == condition and
-                (constructor[cursor + 10] == 1) != expected)
-            {
-                return error.InvalidInvariant;
+            if (source_value == condition) {
+                if ((constructor[cursor + 10] == 1) != expected) {
+                    return error.InvalidInvariant;
+                }
+                witness_present = true;
             }
         }
         cursor = end;
+    }
+    if (condition_retained and !witness_present) {
+        return error.InvalidInvariant;
     }
 }
 

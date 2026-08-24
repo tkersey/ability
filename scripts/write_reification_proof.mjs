@@ -12,11 +12,17 @@ const [
   buildPath,
   ...sourcePaths
 ] = process.argv.slice(2);
+const sourceKey = (file) => path.relative(process.cwd(), file).split(path.sep).join("/");
+const pureSemanticDelimiter = sourcePaths.indexOf("--pure-semantics");
 const sourceDelimiter = sourcePaths.indexOf("--all-sources");
+if (pureSemanticDelimiter < 0 || sourceDelimiter < pureSemanticDelimiter) {
+  throw new Error("missing pure source inventory delimiter");
+}
 if (sourceDelimiter < 0) {
   throw new Error("missing complete source inventory delimiter");
 }
-const purePaths = sourcePaths.slice(0, sourceDelimiter);
+const pureGraphPaths = sourcePaths.slice(0, pureSemanticDelimiter);
+const pureSemanticPaths = sourcePaths.slice(pureSemanticDelimiter + 1, sourceDelimiter);
 const receiptSourceDelimiter = sourcePaths.indexOf("--receipt-sources");
 if (receiptSourceDelimiter < sourceDelimiter) {
   throw new Error("missing receipt source inventory delimiter");
@@ -28,20 +34,37 @@ const requireNonEmptyInventory = (values, name) => {
 };
 requireNonEmptyInventory(allSourcePaths, "complete source");
 requireNonEmptyInventory(receiptSourcePaths, "receipt source");
-const expectedPureSourceNames = [
-  "image_v1.zig",
-  "program_semantics_v1.zig",
-  "reducer_clause_v1.zig",
-  "reified_program_v1.zig",
+const requireExactSourceInventory = (values, expected, name) => {
+  const actual = values.map(sourceKey).sort();
+  if (!isDeepStrictEqual(actual, expected)) {
+    throw new Error(`incorrect ${name} inventory`);
+  }
+};
+const expectedPureGraphPaths = [
+  "src/control_ir.zig",
+  "src/dynamic_value_v1.zig",
+  "src/image_v1.zig",
+  "src/portable_value.zig",
+  "src/program_semantics_v1.zig",
+  "src/reducer_clause_v1.zig",
+  "src/rnf.zig",
 ];
-const pureSourceNames = purePaths.map((file) => path.basename(file)).sort();
-if (!isDeepStrictEqual(pureSourceNames, expectedPureSourceNames)) {
-  throw new Error("incomplete pure source inventory");
-}
+const expectedPureSemanticPaths = [
+  "src/image_emit_v1.zig",
+  "src/image_v1.zig",
+  "src/program_semantics_v1.zig",
+  "src/reducer_clause_v1.zig",
+  "src/reified_program_v1.zig",
+];
+requireExactSourceInventory(pureGraphPaths, expectedPureGraphPaths, "pure graph source");
+requireExactSourceInventory(
+  pureSemanticPaths,
+  expectedPureSemanticPaths,
+  "pure semantic source",
+);
 
 const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
 const digest = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-const sourceKey = (file) => path.relative(process.cwd(), file).split(path.sep).join("/");
 const baseline = readJson(baselinePath);
 const semantic = readJson(semanticPath);
 const generated = readJson(generatedPath);
@@ -99,11 +122,12 @@ if (
 }
 const root = fs.readFileSync(rootPath, "utf8");
 const build = fs.readFileSync(buildPath, "utf8");
-const pureSources = purePaths.map((path) => fs.readFileSync(path, "utf8")).join("\n");
+const pureGraphSources = pureGraphPaths.map((path) => fs.readFileSync(path, "utf8")).join("\n");
+const pureSemanticSources = pureSemanticPaths.map((path) => fs.readFileSync(path, "utf8")).join("\n");
 const allSources = allSourcePaths.map((path) => fs.readFileSync(path, "utf8")).join("\n");
 const publicClauseEvaluatorPresent = /pub const (evaluator|reducer|clause|program_evaluator|internal_evaluator)\b/.test(root);
-const pureClauseMachineV2DependencyPresent = /@import\("(?:machine|machine_v2|kernel)/.test(pureSources) ||
-  /\b(?:MachineOptions|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|ABL_RNF2)\b/.test(pureSources);
+const pureClauseMachineV2DependencyPresent = /@import\("(?:machine|machine_v2|kernel)/.test(pureGraphSources) ||
+  /\b(?:MachineOptions|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|ABL_RNF2)\b/.test(pureSemanticSources);
 const proofGateRequiredBeforeEmission =
   /installation\.step\.dependOn\(reification_receipt_step\)/.test(build) &&
   /emit_reification_assets_step\.dependOn\(reification_receipt_step\)/.test(build);
