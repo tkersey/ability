@@ -123,7 +123,7 @@ comptime {
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
     var image_workspace: boundary.image.ValidationWorkspace = .{};
-    const program_image = try boundary.image.validateImage(
+    const program_image = try boundary.image.validateImageView(
         &Image.bytes,
         &image_workspace,
     );
@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     var tail_malformed_workspace: boundary.image.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.InvalidEffect,
-        boundary.image.validateImage(
+        boundary.image.validateImageView(
             &tail_malformed_image,
             &tail_malformed_workspace,
         ),
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         identity_length + 12;
     malformed_image[semantic_digest_offset] ^= 0xff;
     var malformed_workspace: boundary.image.ValidationWorkspace = .{};
-    if (boundary.image.validateImage(
+    if (boundary.image.validateImageView(
         &malformed_image,
         &malformed_workspace,
     )) |_| {

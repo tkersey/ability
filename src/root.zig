@@ -26,10 +26,13 @@ pub const image = struct {
     pub const Header = image_v1.Header;
     pub const ValidatedEnvelope = image_v1.ValidatedEnvelope;
     pub const ValidationWorkspace = image_v1.ValidationWorkspace;
-    pub const ValidatedImage = image_v1.ValidatedImage;
+    /// Borrowed validated view. Reusing its ValidationWorkspace invalidates it.
+    pub const ValidatedImageView = image_v1.ValidatedImage;
     pub const validateEnvelope = image_v1.validateEnvelope;
-    pub const validateImage = image_v1.validateImage;
-    pub const reencodeValidated = image_v1.reencodeValidated;
+    /// Validate one image into a view borrowed from `workspace`.
+    pub const validateImageView = image_v1.validateImage;
+    /// Re-encode a view before reusing the workspace that backs it.
+    pub const reencodeValidatedView = image_v1.reencodeValidated;
 };
 /// Bounded Machine ABI v2 compatibility surfaces.
 pub const machine_v2 = struct {
@@ -79,8 +82,11 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(@hasDecl(@This(), "Agent"));
     try std.testing.expect(@hasDecl(@This(), "effect"));
     try std.testing.expect(@hasDecl(@This(), "image"));
-    try std.testing.expect(@hasDecl(image, "validateImage"));
-    try std.testing.expect(@hasDecl(image, "reencodeValidated"));
+    try std.testing.expect(@hasDecl(image, "validateImageView"));
+    try std.testing.expect(@hasDecl(image, "reencodeValidatedView"));
+    try std.testing.expect(!@hasDecl(image, "ValidatedImage"));
+    try std.testing.expect(!@hasDecl(image, "validateImage"));
+    try std.testing.expect(!@hasDecl(image, "reencodeValidated"));
     inline for (.{
         "SemanticHasher",
         "semanticHashSchema",
