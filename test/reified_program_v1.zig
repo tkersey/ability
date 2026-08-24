@@ -544,6 +544,53 @@ test "Reified Program preserves direct canonical State bytes" {
     );
 }
 
+test "BPI1 admits empty exhaustive Failure enums" {
+    const empty_blocks = [_]cir.Block{.{
+        .id = 0,
+        .terminator = .{ .return_value = null },
+    }};
+    const EmptyFailureBody = struct {
+        pub const InitialArgs = void;
+        pub const Result = void;
+        pub const Failure = enum(u0) {};
+        pub const effect_sites = .{};
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "empty-failure-image-proof",
+            .value_types = &.{},
+            .blocks = &empty_blocks,
+            .entry = 0,
+            .result_type = .{ .scalar = .unit },
+        };
+    };
+    const EmptyProgram = program_v2.program(
+        "empty-failure-image-proof",
+        EmptyFailureBody,
+    );
+    const EmptyImage = EmptyProgram.image();
+    const EmptyDirect = EmptyProgram.compileV2(options);
+    const EmptyKernel = EmptyProgram.kernelMachineV2(options);
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(&EmptyImage.bytes, &workspace);
+
+    const direct = try EmptyDirect.initialState(std.testing.allocator, {});
+    defer EmptyDirect.deinitState(direct);
+    const kernel = try EmptyKernel.initialState(std.testing.allocator, {});
+    defer EmptyKernel.deinitState(kernel);
+    const direct_bytes = try EmptyDirect.encodeState(
+        std.testing.allocator,
+        direct,
+    );
+    defer std.testing.allocator.free(direct_bytes);
+    const kernel_bytes = try EmptyKernel.encodeState(
+        std.testing.allocator,
+        kernel,
+    );
+    defer std.testing.allocator.free(kernel_bytes);
+    try std.testing.expectEqualSlices(u8, direct_bytes, kernel_bytes);
+}
+
 test "BPI1 catalog validation fails closed on forged roots" {
     var malformed = Image.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);

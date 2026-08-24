@@ -626,7 +626,7 @@ fn validateOptional(
 fn validateEnum(payload: []const u8) Error!Sizes {
     if (payload.len < 4) return error.InvalidSchema;
     const count = readInt(u32, payload, 0);
-    if (count == 0 or count > maximum_schema_members or
+    if (count > maximum_schema_members or
         payload.len != try recordArrayLength(4, count, 4))
     {
         return error.InvalidSchema;
@@ -636,8 +636,10 @@ fn validateEnum(payload: []const u8) Error!Sizes {
         tags[index] = readInt(u32, payload, 4 + index * 4);
     }
     std.mem.sortUnstable(u32, tags[0..count], {}, std.sort.asc(u32));
-    for (tags[1..count], tags[0 .. count - 1]) |current, previous| {
-        if (current == previous) return error.InvalidSchema;
+    if (count > 1) {
+        for (tags[1..count], tags[0 .. count - 1]) |current, previous| {
+            if (current == previous) return error.InvalidSchema;
+        }
     }
     return .{ .minimum = 4, .maximum = 4 };
 }
