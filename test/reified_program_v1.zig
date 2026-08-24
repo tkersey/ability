@@ -544,7 +544,7 @@ test "Reified Program preserves direct canonical State bytes" {
     );
 }
 
-test "BPI1 admits empty exhaustive Failure enums" {
+test "BPI1 matches the typed zero-cardinality schema algebra" {
     const empty_blocks = [_]cir.Block{.{
         .id = 0,
         .terminator = .{ .return_value = null },
@@ -589,6 +589,63 @@ test "BPI1 admits empty exhaustive Failure enums" {
     );
     defer std.testing.allocator.free(kernel_bytes);
     try std.testing.expectEqualSlices(u8, direct_bytes, kernel_bytes);
+
+    const EmptyTag = enum(u0) {};
+    const EmptySum = union(EmptyTag) {};
+    const EmptyProduct = struct {};
+    const ZeroAggregate = struct {
+        product: EmptyProduct,
+        array: [0]u8,
+        enum_values: [0]EmptyTag,
+        sum_values: [0]EmptySum,
+    };
+    const zero_blocks = [_]cir.Block{.{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .return_value = 0 },
+    }};
+    const ZeroAggregateBody = struct {
+        pub const InitialArgs = ZeroAggregate;
+        pub const Result = ZeroAggregate;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{ZeroAggregate};
+        pub const control_ir: cir.Program = .{
+            .label = "zero-cardinality-schema-algebra",
+            .value_types = &.{cir.ValueType{ .schema = 0 }},
+            .blocks = &zero_blocks,
+            .entry = 0,
+            .result_type = .{ .schema = 0 },
+        };
+    };
+    const ZeroProgram = program_v2.program(
+        "zero-cardinality-schema-algebra",
+        ZeroAggregateBody,
+    );
+    const ZeroImage = ZeroProgram.image();
+    workspace = .{};
+    const zero_image = try image_v1.validateImage(&ZeroImage.bytes, &workspace);
+    var empty_enum_seen = false;
+    var empty_sum_seen = false;
+    for (0..zero_image.catalogs.schemas.count()) |schema_id| {
+        const schema = try zero_image.catalogs.schemas.node(@intCast(schema_id));
+        if (schema.kind == .@"enum" and
+            std.mem.readInt(u32, schema.payload[0..4], .little) == 0)
+        {
+            empty_enum_seen = true;
+            try std.testing.expectEqual(@as(u64, 4), schema.minimum_encoded_size);
+            try std.testing.expectEqual(@as(u64, 4), schema.maximum_encoded_size);
+        }
+        if (schema.kind == .sum and
+            std.mem.readInt(u32, schema.payload[4..8], .little) == 0)
+        {
+            empty_sum_seen = true;
+            try std.testing.expectEqual(@as(u64, 4), schema.minimum_encoded_size);
+            try std.testing.expectEqual(@as(u64, 4), schema.maximum_encoded_size);
+        }
+    }
+    try std.testing.expect(empty_enum_seen);
+    try std.testing.expect(empty_sum_seen);
 }
 
 test "BPI1 catalog validation fails closed on forged roots" {
