@@ -478,6 +478,11 @@ pub fn ProgramImageParts(
 pub fn ProgramImage(
     comptime Reified: type,
 ) type {
+    comptime {
+        if (!failureCatalogAdmitted(std.meta.fields(Reified.Body.Failure).len)) {
+            @compileError("BPI1 failure variants exceed validator capacity");
+        }
+    }
     const encoded = comptime blk: {
         var storage: [maximum_image_bytes]u8 = undefined;
         const length = encodeProgramImage(Reified, &storage) catch |err| {
