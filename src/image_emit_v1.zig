@@ -478,21 +478,36 @@ pub fn ProgramImageParts(
 pub fn ProgramImage(
     comptime Reified: type,
 ) type {
-    const Parts = ProgramImageParts(Reified);
-    const Encoded = Envelope(.{
-        .program_transition_digest = Parts.program_transition_digest,
-        .maximum_kernel_scratch_bytes = Parts.maximum_kernel_scratch_bytes,
-        .maximum_single_value_bytes = Parts.maximum_single_value_bytes,
-    }, Parts.section_bytes);
+    const encoded = comptime blk: {
+        var storage: [maximum_image_bytes]u8 = undefined;
+        const length = encodeProgramImage(Reified, &storage) catch |err| {
+            @compileError(
+                "canonical BPI1 encoding failed: " ++ @errorName(err),
+            );
+        };
+        break :blk storage[0..length].*;
+    };
+    const artifact_digest = comptime blk: {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&encoded, &digest, .{});
+        break :blk digest;
+    };
     return struct {
         pub const format_version = image_v1.image_format_version;
-        pub const bytes = Encoded.bytes;
-        pub const byte_length = Encoded.byte_length;
-        pub const program_transition_digest = Parts.program_transition_digest;
-        pub const artifact_sha256 = Encoded.artifact_sha256;
-        pub const maximum_kernel_scratch_bytes =
-            Parts.maximum_kernel_scratch_bytes;
-        pub const maximum_single_value_bytes = Parts.maximum_single_value_bytes;
+        pub const bytes = encoded;
+        pub const byte_length: u64 = encoded.len;
+        pub const program_transition_digest = Reified.program_transition_digest;
+        pub const artifact_sha256 = artifact_digest;
+        pub const maximum_kernel_scratch_bytes = std.mem.readInt(
+            u64,
+            encoded[64..][0..8],
+            .little,
+        );
+        pub const maximum_single_value_bytes = std.mem.readInt(
+            u32,
+            encoded[72..][0..4],
+            .little,
+        );
     };
 }
 
