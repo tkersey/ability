@@ -2283,6 +2283,7 @@ pub fn build(b: *std.Build) void {
         "check-boundary-machine-receipt-falsifiers",
         "Prove completion receipt reachability from the live build graph.",
     );
+    receipt_falsifier_step.dependOn(&reification_receipt_script_test.step);
 
     const release_proof_step = b.step(
         "check-boundary-machine-release-proof",
