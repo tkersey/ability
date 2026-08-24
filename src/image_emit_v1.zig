@@ -694,15 +694,18 @@ fn RuntimeSchemas(comptime Reified: type) type {
             kind: dynamic_value_v1.Kind,
             words: []const u32,
         ) RuntimeError!u32 {
-            const start = writer.cursor;
             const record_length = 8 + words.len * 4;
-            try writer.append(u32, record_length);
-            try writer.append(u8, @intFromEnum(kind));
-            try writer.append(u8, 0);
-            try writer.append(u16, 0);
-            for (words) |word| try writer.append(u32, word);
-
-            const record = writer.bytes[start..writer.cursor];
+            const maximum_record_length = 8 +
+                (2 + dynamic_value_v1.maximum_schema_members * 2) * 4;
+            var candidate: [maximum_record_length]u8 = undefined;
+            writeAt(u32, &candidate, 0, record_length);
+            writeAt(u8, &candidate, 4, @intFromEnum(kind));
+            writeAt(u8, &candidate, 5, 0);
+            writeAt(u16, &candidate, 6, 0);
+            for (words, 0..) |word, index| {
+                writeAt(u32, &candidate, 8 + index * 4, word);
+            }
+            const record = candidate[0..record_length];
             const hash = recordHash(record);
             var bucket: usize = @intCast(hash & (schema_bucket_count - 1));
             while (self.buckets[bucket]) |existing_id| {
@@ -716,13 +719,14 @@ fn RuntimeSchemas(comptime Reified: type) type {
                         writer.bytes[offset .. offset + self.lengths[existing]],
                         record,
                     )) {
-                        writer.cursor = start;
                         return existing_id;
                     }
                 }
                 bucket = (bucket + 1) & (schema_bucket_count - 1);
             }
             if (self.node_count == maximum_nodes) return error.SectionCapacity;
+            const start = writer.cursor;
+            try writer.copy(record);
             self.offsets[self.node_count] = @intCast(start);
             self.lengths[self.node_count] = @intCast(record_length);
             self.hashes[self.node_count] = hash;

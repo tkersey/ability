@@ -368,7 +368,8 @@ test "Program.image has no Machine options parameter" {
     try std.testing.expectEqual(@as(usize, 0), info.params.len);
 }
 
-test "Program.encodeImage writes the exact canonical image" {
+test "Program.encodeImage fills an exact buffer with duplicate schema roots" {
+    try std.testing.expect(ProgramSchemas.node_count < 5);
     var output: [Image.bytes.len]u8 = undefined;
     const length = try Program.encodeImage(&output);
     try std.testing.expectEqual(Image.bytes.len, length);
