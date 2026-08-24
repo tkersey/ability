@@ -1258,11 +1258,10 @@ fn writeProgramConstructorsRuntime(
         }
         inline for (0..constructor.invariant_len) |invariant_index| {
             const invariant = constructor.invariants[invariant_index];
-            appendInvariant(
+            try appendInvariant(
                 Reified,
                 invariant,
-                writer.bytes,
-                &writer.cursor,
+                writer,
             );
         }
         writer.patch(u32, start, writer.cursor - start);
@@ -2079,7 +2078,9 @@ pub fn ProgramConstructors(comptime Reified: type, comptime Schemas: type) type 
                 appendEnvironmentField(Reified, Schemas, field, &bytes, &cursor);
             }
             for (constructor.invariantTerms()) |invariant| {
-                appendInvariant(Reified, invariant, &bytes, &cursor);
+                var writer: RuntimeWriter = .{ .bytes = &bytes, .cursor = cursor };
+                appendInvariant(Reified, invariant, &writer) catch unreachable;
+                cursor = writer.cursor;
             }
             writeAt(u32, &bytes, start, cursor - start);
         }
@@ -2112,175 +2113,168 @@ fn appendEnvironmentField(
 fn appendInvariant(
     comptime Reified: type,
     comptime invariant: anytype,
-    bytes: []u8,
-    cursor: *usize,
-) void {
-    const start = cursor.*;
-    appendInt(u32, bytes, cursor, 0);
-    appendInt(
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const start = writer.cursor;
+    try writer.append(u32, 0);
+    try writer.append(
         u8,
-        bytes,
-        cursor,
         @intFromEnum(program_semantics_v1.wireInvariant(invariant)),
     );
-    appendInt(u8, bytes, cursor, 0);
-    appendInt(u16, bytes, cursor, 0);
+    try writer.append(u8, 0);
+    try writer.append(u16, 0);
     switch (invariant) {
         .boolean => |term| {
-            appendValueId(Reified, term.value, bytes, cursor);
-            appendInt(u8, bytes, cursor, @intFromBool(term.expected));
-            appendInt(u8, bytes, cursor, 0);
+            try appendValueId(Reified, term.value, writer);
+            try writer.append(u8, @intFromBool(term.expected));
+            try writer.append(u8, 0);
         },
         .boolean_copy => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.source, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.source, writer);
         },
         .value_copy => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.source, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.source, writer);
         },
         .boolean_not => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.operand, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.operand, writer);
         },
         .boolean_binary => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.left, bytes, cursor);
-            appendValueId(Reified, term.right, bytes, cursor);
-            appendInt(u8, bytes, cursor, booleanBinaryTag(term.operation));
-            appendInt(u8, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.left, writer);
+            try appendValueId(Reified, term.right, writer);
+            try writer.append(u8, booleanBinaryTag(term.operation));
+            try writer.append(u8, 0);
         },
         .boolean_select => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.condition, bytes, cursor);
-            appendValueId(Reified, term.then_value, bytes, cursor);
-            appendValueId(Reified, term.else_value, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.condition, writer);
+            try appendValueId(Reified, term.then_value, writer);
+            try appendValueId(Reified, term.else_value, writer);
         },
         .value_select => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.condition, bytes, cursor);
-            appendValueId(Reified, term.then_value, bytes, cursor);
-            appendValueId(Reified, term.else_value, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.condition, writer);
+            try appendValueId(Reified, term.then_value, writer);
+            try appendValueId(Reified, term.else_value, writer);
         },
         .value_constant => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendInt(u16, bytes, cursor, 0);
-            appendInvariantValue(term.contents, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try writer.append(u16, 0);
+            try appendInvariantValue(term.contents, writer);
         },
         .instruction_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.definition, bytes, cursor);
-            appendInt(u16, bytes, cursor, term.operand_count);
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.definition, writer);
+            try writer.append(u16, term.operand_count);
+            try writer.append(u16, 0);
             for (term.operands[0..term.operand_count]) |operand| {
-                appendValueId(Reified, operand, bytes, cursor);
+                try appendValueId(Reified, operand, writer);
             }
         },
         .product_extract_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.product, bytes, cursor);
-            appendInt(u16, bytes, cursor, term.field_index);
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.product, writer);
+            try writer.append(u16, term.field_index);
+            try writer.append(u16, 0);
         },
         .sum_extract_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.sum, bytes, cursor);
-            appendInt(u16, bytes, cursor, term.case_index);
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.sum, writer);
+            try writer.append(u16, term.case_index);
+            try writer.append(u16, 0);
         },
         .bounded_length_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.bounded, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.bounded, writer);
         },
         .integer_unary_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.operand, bytes, cursor);
-            appendInt(u8, bytes, cursor, integerUnaryTag(term.operation));
-            appendInt(u8, bytes, cursor, scalarSchemaTag(term.scalar_type));
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.operand, writer);
+            try writer.append(u8, integerUnaryTag(term.operation));
+            try writer.append(u8, scalarSchemaTag(term.scalar_type));
+            try writer.append(u16, 0);
         },
         .integer_binary_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.left, bytes, cursor);
-            appendValueId(Reified, term.right, bytes, cursor);
-            appendInt(u8, bytes, cursor, integerBinaryTag(term.operation));
-            appendInt(u8, bytes, cursor, scalarSchemaTag(term.scalar_type));
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.left, writer);
+            try appendValueId(Reified, term.right, writer);
+            try writer.append(u8, integerBinaryTag(term.operation));
+            try writer.append(u8, scalarSchemaTag(term.scalar_type));
         },
         .integer_convert_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.operand, bytes, cursor);
-            appendInt(u8, bytes, cursor, scalarSchemaTag(term.scalar_type));
-            appendInt(u8, bytes, cursor, 0);
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.operand, writer);
+            try writer.append(u8, scalarSchemaTag(term.scalar_type));
+            try writer.append(u8, 0);
+            try writer.append(u16, 0);
         },
         .integer_zero => |term| {
-            appendValueId(Reified, term.value, bytes, cursor);
-            appendInt(u8, bytes, cursor, @intFromBool(term.equal));
-            appendInt(u8, bytes, cursor, 0);
+            try appendValueId(Reified, term.value, writer);
+            try writer.append(u8, @intFromBool(term.equal));
+            try writer.append(u8, 0);
         },
         .integer_zero_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.value, bytes, cursor);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.value, writer);
         },
         .integer_relation => |term| {
-            appendValueId(Reified, term.left, bytes, cursor);
-            appendValueId(Reified, term.right, bytes, cursor);
-            appendInt(u8, bytes, cursor, integerRelationTag(term.relation));
-            appendInt(u8, bytes, cursor, @intFromBool(term.expected));
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.left, writer);
+            try appendValueId(Reified, term.right, writer);
+            try writer.append(u8, integerRelationTag(term.relation));
+            try writer.append(u8, @intFromBool(term.expected));
+            try writer.append(u16, 0);
         },
         .integer_relation_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.left, bytes, cursor);
-            appendValueId(Reified, term.right, bytes, cursor);
-            appendInt(u8, bytes, cursor, integerRelationTag(term.relation));
-            appendInt(u8, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.left, writer);
+            try appendValueId(Reified, term.right, writer);
+            try writer.append(u8, integerRelationTag(term.relation));
+            try writer.append(u8, 0);
         },
         .sum_case => |term| {
-            appendValueId(Reified, term.value, bytes, cursor);
-            appendInt(u16, bytes, cursor, term.case_index);
-            appendInt(u8, bytes, cursor, @intFromBool(term.equal));
-            appendInt(u8, bytes, cursor, 0);
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.value, writer);
+            try writer.append(u16, term.case_index);
+            try writer.append(u8, @intFromBool(term.equal));
+            try writer.append(u8, 0);
+            try writer.append(u16, 0);
         },
         .sum_case_result => |term| {
-            appendValueId(Reified, term.result, bytes, cursor);
-            appendValueId(Reified, term.value, bytes, cursor);
-            appendInt(u16, bytes, cursor, term.case_index);
-            appendInt(u16, bytes, cursor, 0);
+            try appendValueId(Reified, term.result, writer);
+            try appendValueId(Reified, term.value, writer);
+            try writer.append(u16, term.case_index);
+            try writer.append(u16, 0);
         },
     }
-    writeAt(u32, bytes, start, cursor.* - start);
+    writer.patch(u32, start, writer.cursor - start);
 }
 
 fn appendValueId(
     comptime Reified: type,
     value: u16,
-    bytes: []u8,
-    cursor: *usize,
-) void {
-    appendInt(
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    try writer.append(
         u16,
-        bytes,
-        cursor,
         Reified.semantic_canonicalization.valueId(value),
     );
 }
 
 fn appendInvariantValue(
     comptime value: anytype,
-    bytes: []u8,
-    cursor: *usize,
-) void {
+    writer: *RuntimeWriter,
+) RuntimeError!void {
     const payload: u64 = switch (value) {
         .boolean => |item| @intFromBool(item),
         .signed => |item| @bitCast(item),
         .unsigned => |item| item,
         .sum_case => |item| item,
     };
-    appendInt(u8, bytes, cursor, @intFromEnum(std.meta.activeTag(value)));
-    for (0..7) |_| appendInt(u8, bytes, cursor, 0);
-    appendInt(u64, bytes, cursor, payload);
+    try writer.append(u8, @intFromEnum(std.meta.activeTag(value)));
+    for (0..7) |_| try writer.append(u8, 0);
+    try writer.append(u64, payload);
 }
 
 fn booleanBinaryTag(comptime operation: anytype) u8 {
