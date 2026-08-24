@@ -1,0 +1,42 @@
+# Boundary Program Image v1
+
+BPI1 is the canonical, target-neutral serialization of one Reified Program.
+Executable truth is owned by
+`src/image_v1.zig`, `src/image_emit_v1.zig`, and the conformance vectors.
+
+The fixed header prefix is 76 bytes. It contains `ABL_BPI1`, image version 1,
+program-evaluator semantics version 1, flags, exact header and total lengths,
+section count, `program_transition_digest`, and derived schema/evaluator
+scratch maxima. A 240-byte directory follows, so the exact v1 header length is
+316 bytes.
+
+Exactly ten contiguous sections occur in this order:
+
+1. roots
+2. schemas
+3. failures
+4. constants
+5. effects
+6. values
+7. functions
+8. segments
+9. constructors
+10. entry transitions
+
+Integers are little-endian; lengths are logical and exact; reserved bytes are
+zero; there is no padding or trailing data. Schemas are structurally interned
+in depth-first postorder. Constants are interned by schema and canonical bytes.
+All program identities are dense semantic identities, not source ordinals.
+
+Segment records have a 16-byte prefix and contain no metering word. Synthetic
+caller-fuel suspensions are normalized to semantic edges; explicit authored
+yields remain. Dead fields from the unreleased BEI1 draft were removed rather
+than preserved as archaeology.
+
+Validation checks the complete structure, dynamic values, graph references,
+constructor laws, effect/schema/program-transition digests, scratch requirements,
+and exact canonical re-encoding before execution. Image validity never grants
+effect authority.
+
+BPI1 contains no Machine ABI, State-format binding, Machine contract digest,
+fuel law, segment cost, frame limit, State-byte limit, or lifetime budget.

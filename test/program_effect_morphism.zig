@@ -83,14 +83,19 @@ const options: machine.Options = .{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
 };
-const Morphed = program_v2.program(
+const MorphedProgram = program_v2.program(
     "morphed-effect",
     MorphismBody(),
-).compile(options);
+);
+const Morphed = MorphedProgram.compile(options);
 const Direct = program_v2.program(
     "direct-effect",
     DirectBody(),
 ).compile(options);
+
+pub const ReificationBaselineBody = MorphismBody();
+pub const ReificationBaselineProgram = MorphedProgram;
+pub const ReificationBaselineMachine = Morphed;
 
 test "declarative effect morphism lowers to the canonical residual contract" {
     try std.testing.expectEqualSlices(

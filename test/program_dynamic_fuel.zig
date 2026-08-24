@@ -54,17 +54,29 @@ fn BodyWithBlockCost(comptime block_cost: u64) type {
 }
 
 const Body = BodyWithBlockCost(3);
+const DynamicProgram = program_v2.program("dynamic-fuel", Body);
 
-const Machine = program_v2.program("dynamic-fuel", Body).compile(.{
+const Machine = DynamicProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 64,
+});
+const KernelMachine = DynamicProgram.kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 64,
 });
 
-const OverflowMachine = program_v2.program(
+const OverflowProgram = program_v2.program(
     "dynamic-fuel-overflow",
     BodyWithBlockCost(std.math.maxInt(u64)),
-).compile(.{
+);
+const OverflowMachine = OverflowProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = std.math.maxInt(u64),
+});
+const OverflowKernelMachine = OverflowProgram.kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = std.math.maxInt(u64),
@@ -116,6 +128,39 @@ test "canonical dynamic size changes fuel without changing transactional yield" 
     try std.testing.expect(long_fuel > short_fuel);
 }
 
+test "kernel dynamic-fuel yield does not allocate" {
+    const input = try Text.fromSlice("dynamic fuel requires more than its base cost");
+    const required = try requiredFuel(input, "dynamic fuel requires more than its base cost!");
+    try std.testing.expect(required > 3);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const state = try KernelMachine.initialState(failing.allocator(), input);
+    defer KernelMachine.deinitState(state);
+    const before = try KernelMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(before);
+    failing.fail_index = failing.allocations;
+    var fuel = required - 1;
+    try std.testing.expectEqual(
+        KernelMachine.Outcome.yielded,
+        try KernelMachine.step(state, &fuel),
+    );
+    try std.testing.expectEqual(required - 1, fuel);
+    try std.testing.expect(!failing.has_induced_failure);
+    const after = try KernelMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+
+    const direct = try Machine.initialState(std.testing.allocator, input);
+    defer Machine.deinitState(direct);
+    var direct_fuel = required - 1;
+    try std.testing.expectEqual(
+        Machine.Outcome.yielded,
+        try Machine.step(direct, &direct_fuel),
+    );
+    const direct_bytes = try Machine.encodeState(std.testing.allocator, direct);
+    defer std.testing.allocator.free(direct_bytes);
+    try std.testing.expectEqualSlices(u8, direct_bytes, after);
+}
+
 test "dynamic fuel addition overflow commits terminal failure" {
     const state = try OverflowMachine.initialState(
         std.testing.allocator,
@@ -143,6 +188,21 @@ test "dynamic fuel addition overflow commits terminal failure" {
         OverflowMachine.step(state, &retry_fuel),
     );
     try std.testing.expectEqual(std.math.maxInt(u64), retry_fuel);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const kernel_state = try OverflowKernelMachine.initialState(
+        failing.allocator(),
+        try Text.fromSlice("a"),
+    );
+    defer OverflowKernelMachine.deinitState(kernel_state);
+    failing.fail_index = failing.allocations;
+    var kernel_fuel: u64 = std.math.maxInt(u64);
+    try std.testing.expectEqual(
+        OverflowKernelMachine.Outcome{ .failed = .execution_budget_exceeded },
+        try OverflowKernelMachine.step(kernel_state, &kernel_fuel),
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), kernel_fuel);
+    try std.testing.expect(!failing.has_induced_failure);
 }
 
 const TextPair = struct {
@@ -234,10 +294,16 @@ const PairBody = struct {
         },
     };
 };
-const PairMachine = program_v2.program(
+const PairProgram = program_v2.program(
     "helper-product-exact-sizing",
     PairBody,
-).compile(.{
+);
+const PairMachine = PairProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 4096,
+});
+const PairKernelMachine = PairProgram.kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 4096,
@@ -427,6 +493,22 @@ test "helper activation exact sizing uses materialized product and vector values
         PairMachine,
         TextPair{ .left = long, .right = short },
         40,
+    );
+    try std.testing.expectEqual(
+        short_product_fuel,
+        try requiredHelperFuel(
+            PairKernelMachine,
+            TextPair{ .left = short, .right = long },
+            1,
+        ),
+    );
+    try std.testing.expectEqual(
+        long_product_fuel,
+        try requiredHelperFuel(
+            PairKernelMachine,
+            TextPair{ .left = long, .right = short },
+            40,
+        ),
     );
     try std.testing.expect(long_product_fuel > short_product_fuel);
 

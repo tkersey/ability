@@ -1,6 +1,10 @@
 const control_ir = @import("control_ir");
 const machine = @import("machine");
+const machine_v2_metering_v1 = @import("machine_v2_metering_v1");
+const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
 const portable_value = @import("portable_value");
+const program_semantics_v1 = @import("program_semantics_v1");
+const reified_program_v1 = @import("reified_program_v1");
 const rnf = @import("rnf");
 const std = @import("std");
 
@@ -13,11 +17,6 @@ const implementation_limits: control_ir.CompilerLimits = .{
     .maximum_generated_operations = 32_768,
 };
 const compiler_evaluation_branch_quota = 500_000_000;
-const dynamic_fuel_quantum_bytes: u64 = 16;
-// Advance this domain whenever deterministic segment charging changes.
-const segment_fuel_semantic_domain =
-    "segment-fuel=preflight-resource-shape-v4";
-
 const ResidualResponseMode = enum {
     single_resume,
 };
@@ -72,6 +71,8 @@ fn valueName(comptime value: control_ir.ValueId) [:0]const u8 {
     @setEvalBranchQuota(compiler_evaluation_branch_quota);
     return std.fmt.comptimePrint("v{d}", .{value});
 }
+
+const compilerValueName = valueName;
 
 const activation_entry_name: [:0]const u8 = "activation_entry";
 
@@ -699,6 +700,52 @@ fn NormalizedProgram(
     };
 }
 
+/// Remove Machine-v2-only caller-fuel checkpoints from program meaning.
+/// Every checkpoint continuation is already an ordinary semantic edge; the
+/// bounded v2 scheduler retains the original checkpointed projection below.
+fn SemanticProgram(comptime normalized: control_ir.Program) type {
+    return struct {
+        const blocks = blk: {
+            var result: [normalized.blocks.len]control_ir.Block = undefined;
+            for (normalized.blocks, 0..) |block, block_index| {
+                result[block_index] = block;
+                switch (block.terminator) {
+                    .@"suspend" => |suspension| {
+                        if (suspension.kind == .caller_fuel) {
+                            result[block_index].terminator = .{
+                                .jump = suspension.continuation,
+                            };
+                        }
+                    },
+                    else => {},
+                }
+            }
+            break :blk result;
+        };
+
+        const instruction_definitions = blk: {
+            var result = [_]?control_ir.Instruction{null} **
+                normalized.value_types.len;
+            for (blocks) |block| {
+                for (block.instructions) |instruction| {
+                    result[@intCast(instruction.result)] = instruction;
+                }
+            }
+            break :blk result;
+        };
+
+        pub const value: control_ir.Program = .{
+            .label = normalized.label,
+            .value_types = normalized.value_types,
+            .blocks = &blocks,
+            .entry = normalized.entry,
+            .result_type = normalized.result_type,
+            .functions = normalized.functions,
+            .instruction_definitions = &instruction_definitions,
+        };
+    };
+}
+
 fn isVector(comptime T: type) bool {
     return portable_value.isVectorType(T);
 }
@@ -734,7 +781,7 @@ fn failureFromTag(comptime Body: type, comptime tag: u16) Body.Failure {
 }
 
 fn minimumBlockCost(comptime block: control_ir.Block) u64 {
-    return @intCast(block.instructions.len + 1);
+    return machine_v2_metering_v1.minimumBlockCost(block);
 }
 
 fn minimumSourceBlockCost(
@@ -812,6 +859,16 @@ fn validateInstruction(
     comptime instruction: control_ir.Instruction,
 ) void {
     const Result = typeForValue(Body, program.value_types[instruction.result]);
+    if (instruction.kind != program_semantics_v1.canonicalInstructionKind(
+        instruction.operation,
+    )) {
+        @compileError("Control IR operation has a noncanonical instruction kind");
+    }
+    inline for (program_semantics_v1.failureRoles(
+        instruction.operation,
+    )) |role| {
+        _ = failureNamed(Body, program_semantics_v1.failureName(role));
+    }
     switch (instruction.operation) {
         .metadata => @compileError(
             "executable Boundary Control IR instructions require normative operations",
@@ -846,16 +903,12 @@ fn validateInstruction(
         },
         .integer_add => {
             validateEqualIntegerBinary(Body, program, instruction, Result);
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .integer_subtract, .integer_multiply => {
             validateEqualIntegerBinary(Body, program, instruction, Result);
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .integer_divide, .integer_remainder => {
             validateEqualIntegerBinary(Body, program, instruction, Result);
-            _ = failureNamed(Body, "arithmetic_overflow");
-            _ = failureNamed(Body, "division_by_zero");
         },
         .integer_negate => {
             requireOperandCount(instruction, 1);
@@ -868,7 +921,6 @@ fn validateInstruction(
                     "integer_negate requires one signed fixed-width integer",
                 );
             }
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .integer_equal,
         .integer_not_equal,
@@ -897,7 +949,6 @@ fn validateInstruction(
                     "integer_convert requires fixed-width integer types",
                 );
             }
-            _ = failureNamed(Body, "arithmetic_overflow");
         },
         .enum_to_u32 => {
             requireOperandCount(instruction, 1);
@@ -1049,7 +1100,6 @@ fn validateInstruction(
             {
                 @compileError("sum_extract variant or result is invalid");
             }
-            _ = failureNamed(Body, "invalid_variant");
         },
         .optional_none => {
             requireOperandCount(instruction, 0);
@@ -1093,7 +1143,6 @@ fn validateInstruction(
             if (!isVector(Vector) or Index != u32 or Result != Vector.ElementType) {
                 @compileError("vector_get requires Vector and u32 index");
             }
-            _ = failureNamed(Body, "invalid_index");
         },
         .vector_set => {
             requireOperandCount(instruction, 3);
@@ -1104,7 +1153,6 @@ fn validateInstruction(
             {
                 @compileError("vector_set type mismatch");
             }
-            _ = failureNamed(Body, "invalid_index");
         },
         .vector_push => {
             requireOperandCount(instruction, 2);
@@ -1115,7 +1163,6 @@ fn validateInstruction(
             {
                 @compileError("vector_push type mismatch");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .vector_pop => {
             requireOperandCount(instruction, 1);
@@ -1167,7 +1214,6 @@ fn validateInstruction(
             if (!isText(Destination) or !isText(Suffix) or Result != Destination) {
                 @compileError("text_append requires Text destination and suffix");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .text_append_scalar => {
             requireOperandCount(instruction, 2);
@@ -1177,8 +1223,6 @@ fn validateInstruction(
             {
                 @compileError("text_append_scalar requires Text and u32");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
-            _ = failureNamed(Body, "invalid_utf8");
         },
         .text_append_unsigned => {
             requireOperandCount(instruction, 2);
@@ -1190,7 +1234,6 @@ fn validateInstruction(
             {
                 @compileError("text_append_unsigned requires Text and unsigned integer");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .text_append_signed => {
             requireOperandCount(instruction, 2);
@@ -1204,7 +1247,6 @@ fn validateInstruction(
                     "text_append_signed requires Text and signed integer",
                 );
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .text_copy => {
             requireOperandCount(instruction, 3);
@@ -1215,8 +1257,6 @@ fn validateInstruction(
             {
                 @compileError("text_copy requires Text, u32, u32 -> Text");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
-            _ = failureNamed(Body, "invalid_utf8");
         },
         .text_compare => {
             requireOperandCount(instruction, 2);
@@ -1236,7 +1276,6 @@ fn validateInstruction(
             {
                 @compileError("text_join requires three Text operands");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_empty => {
             requireOperandCount(instruction, 0);
@@ -1258,7 +1297,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_append requires Bytes operands");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_append_scalar => {
             requireOperandCount(instruction, 2);
@@ -1268,7 +1306,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_append_scalar requires Bytes and u8");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_copy => {
             requireOperandCount(instruction, 3);
@@ -1279,7 +1316,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_copy requires Bytes, u32, u32 -> Bytes");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
         .bytes_compare => {
             requireOperandCount(instruction, 2);
@@ -1299,7 +1335,6 @@ fn validateInstruction(
             {
                 @compileError("bytes_join requires three Bytes operands");
             }
-            _ = failureNamed(Body, "capacity_exceeded");
         },
     }
 }
@@ -1690,7 +1725,7 @@ fn semanticHashInstruction(
     }
     semanticHashU8(
         hasher,
-        @intCast(@intFromEnum(std.meta.activeTag(instruction.operation))),
+        program_semantics_v1.currentSemanticTag(instruction.operation),
     );
     switch (instruction.operation) {
         .constant => |constant| semanticHashConstantAt(
@@ -1997,21 +2032,29 @@ fn invariantValueMatches(value: anytype, expected: rnf.InvariantValue) bool {
     };
 }
 
-fn compilerSemanticDigest(
+fn transitionDigest(
     comptime Body: type,
     program: control_ir.Program,
     normal_form: anytype,
     comptime residual_effects: anytype,
     reachability: anytype,
     canonical: anytype,
+    comptime machine_v2_metering: bool,
 ) [32]u8 {
     var hasher = SemanticHasher.init(.{});
-    semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
-    semanticHashBytes(
-        &hasher,
-        segment_fuel_semantic_domain,
-    );
-    semanticHashU64(&hasher, dynamic_fuel_quantum_bytes);
+    if (machine_v2_metering) {
+        semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
+        semanticHashBytes(
+            &hasher,
+            machine_v2_metering_v1.segment_fuel_semantic_domain,
+        );
+        semanticHashU64(
+            &hasher,
+            machine_v2_metering_v1.dynamic_fuel_quantum_bytes,
+        );
+    } else {
+        semanticHashBytes(&hasher, "boundary-program-transition-v1");
+    }
     semanticHashSchema(Body.InitialArgs, &hasher);
     semanticHashSchema(Body.Result, &hasher);
     semanticHashSchema(Body.Failure, &hasher);
@@ -2086,14 +2129,18 @@ fn compilerSemanticDigest(
             residual_effects,
             canonical,
         );
-        const block_cost: u64 = if (comptime hasDeclSafe(Body, "block_costs"))
-            Body.block_costs[block.id]
-        else
-            minimumBlockCost(block);
-        semanticHashU64(&hasher, block_cost);
+        if (machine_v2_metering) {
+            const block_cost: u64 = if (comptime hasDeclSafe(Body, "block_costs"))
+                Body.block_costs[block.id]
+            else
+                minimumBlockCost(block);
+            semanticHashU64(&hasher, block_cost);
+        }
     }
-    semanticHashBytes(&hasher, "await-effect-cost");
-    semanticHashU64(&hasher, 1);
+    if (machine_v2_metering) {
+        semanticHashBytes(&hasher, "await-effect-cost");
+        semanticHashU64(&hasher, machine_v2_metering_v1.await_effect_cost);
+    }
 
     semanticHashU32(
         &hasher,
@@ -2184,14 +2231,35 @@ fn generatedReducerOperationCount(
     return total;
 }
 
-/// Generate one program-specific direct reducer from private typed Control IR.
-pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
+fn initialConstructorId(
+    comptime program: control_ir.Program,
+    comptime normal_form: anytype,
+) u32 {
+    for (0..normal_form.constructor_count) |index| {
+        const constructor = normal_form.constructors[index];
+        if (constructor.source_block == program.entry and
+            constructor.resume_target == program.entry and
+            constructor.origin == .block_entry and
+            constructor.kind != .await_effect and
+            constructor.kind != .caller_fuel_yield)
+        {
+            return @intCast(index);
+        }
+    }
+    @compileError(
+        "RNF is missing a direct constructor for the Control IR entry block",
+    );
+}
+
+/// Analyze one source Body into the canonical post-normalization program.
+pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
     @setEvalBranchQuota(compiler_evaluation_branch_quota);
     if (label.len == 0) @compileError("Boundary program label must be non-empty");
     const source_program: control_ir.Program = Body.control_ir;
     const limits = comptime compilerLimitsFor(Body);
     comptime validateBody(Body, source_program, limits);
-    const program = NormalizedProgram(Body, source_program).value;
+    const normalized_program = NormalizedProgram(Body, source_program).value;
+    const program = SemanticProgram(normalized_program).value;
     comptime control_ir.validate(
         limits.maximum_values,
         limits.maximum_blocks,
@@ -2239,31 +2307,142 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
     ) catch |err| @compileError(
         "Boundary compiler blocked program: " ++ @errorName(err),
     );
-    const generated_semantic_digest = comptime compilerSemanticDigest(
+    const initial_constructor_id = comptime initialConstructorId(
+        program,
+        normal_form,
+    );
+    const program_transition_digest = comptime transitionDigest(
         Body,
         program,
         normal_form,
         residual_effects,
         reachability,
         semantic_canonicalization,
+        false,
     );
-    const FrameType = frameType(Body, program, normal_form);
-    const initial_constructor_index = comptime blk: {
-        for (0..normal_form.constructor_count) |index| {
-            const constructor = normal_form.constructors[index];
-            if (constructor.source_block == program.entry and
-                constructor.resume_target == program.entry and
-                constructor.origin == .block_entry and
-                constructor.kind != .await_effect and
-                constructor.kind != .caller_fuel_yield)
-            {
-                break :blk index;
-            }
+    return reified_program_v1.Program(
+        label,
+        Body,
+        limits,
+        program,
+        reachability,
+        semantic_canonicalization,
+        residual_effects,
+        invariant_constants,
+        normal_form,
+        initial_constructor_id,
+        generated_operation_count,
+        program_transition_digest,
+    );
+}
+
+/// Project one pure Reified Program into the exact legacy Machine ABI v2
+/// checkpointing and metering semantics.
+pub fn MachineV2LoweringFor(comptime Reified: type) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
+    comptime reified_program_v1.require(Reified);
+    const Body = Reified.Body;
+    const limits = Reified.compiler_limits;
+    const program = NormalizedProgram(Body, Body.control_ir).value;
+    const reachability = comptime control_ir.Reachability(
+        limits.maximum_blocks,
+    ).analyze(program) catch |err| @compileError(
+        "Boundary v2 reachability analysis failed: " ++ @errorName(err),
+    );
+    const semantic_canonicalization = comptime SemanticCanonicalization(
+        limits.maximum_values,
+        limits.maximum_blocks,
+    ).analyze(program, reachability);
+    const residual_effects = comptime analyzeResidualEffects(
+        Body,
+        program,
+        reachability,
+    );
+    const invariant_constants = comptime invariantConstantValues(
+        Body,
+        program,
+        limits.maximum_values,
+    );
+    const normal_form = comptime rnf.NormalForm(
+        limits.maximum_values,
+        limits.maximum_blocks,
+        limits.maximum_constructors,
+        limits.maximum_environment_fields,
+        limits.maximum_invariant_terms,
+    ).synthesizeReachableWithConstants(
+        program,
+        reachability,
+        &invariant_constants,
+    ) catch |err| @compileError(
+        "Boundary Machine v2 RNF synthesis failed: " ++ @errorName(err),
+    );
+    const generated_operation_count = comptime generatedReducerOperationCount(
+        program,
+        normal_form,
+        limits,
+    ) catch |err| @compileError(
+        "Boundary Machine v2 compiler blocked program: " ++ @errorName(err),
+    );
+    const initial_constructor_id = comptime initialConstructorId(
+        program,
+        normal_form,
+    );
+    const effective_block_costs = comptime blk: {
+        var costs: [program.blocks.len]u64 = undefined;
+        for (program.blocks, 0..) |_, block_id| {
+            costs[block_id] = minimumSourceBlockCost(
+                Body,
+                program,
+                @intCast(block_id),
+            );
         }
-        @compileError(
-            "RNF is missing a direct constructor for the Control IR entry block",
-        );
+        break :blk costs;
     };
+    const machine_v2_semantic_digest = comptime transitionDigest(
+        Body,
+        program,
+        normal_form,
+        residual_effects,
+        reachability,
+        semantic_canonicalization,
+        true,
+    );
+    return machine_v2_profile_v1.Lowering(
+        Reified,
+        program,
+        reachability,
+        semantic_canonicalization,
+        residual_effects,
+        invariant_constants,
+        normal_form,
+        initial_constructor_id,
+        effective_block_costs,
+        generated_operation_count,
+        machine_v2_semantic_digest,
+    );
+}
+
+/// Generate one program-specific direct reducer from the Machine v2 lowering.
+pub fn DirectDefinitionFor(comptime Input: type) type {
+    const V2 = if (@hasDecl(Input, "machine_v2_semantic_digest"))
+        Input
+    else
+        MachineV2LoweringFor(Input);
+    comptime machine_v2_profile_v1.requireLowering(V2);
+    const Reified = V2.reified_program;
+    const label = V2.program_label;
+    const Body = V2.Body;
+    const limits = V2.compiler_limits;
+    const program = V2.control;
+    const reachability = V2.reachability;
+    const semantic_canonicalization = V2.semantic_canonicalization;
+    const residual_effects = V2.residual_effects;
+    const normal_form = V2.rnf_value;
+    const generated_operation_count =
+        V2.generated_reducer_operation_count;
+    const generated_semantic_digest = V2.machine_v2_semantic_digest;
+    const FrameType = frameType(Body, program, normal_form);
+    const initial_constructor_index = V2.initial_constructor_id;
     const InitialEnvironment = @FieldType(
         FrameType,
         constructorName(initial_constructor_index),
@@ -2291,6 +2470,8 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
 
     return struct {
         const Self = @This();
+
+        pub const reified_program = Reified;
 
         pub const Frame = FrameType;
         pub const minimum_initial_environment_bytes =
@@ -2708,12 +2889,10 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         }
 
         fn dynamicBytesCost(comptime T: type, canonical_bytes: u64) u64 {
-            if (comptime !hasDynamicEncodedSize(T)) return 0;
-            return std.math.divCeil(
-                u64,
+            return machine_v2_metering_v1.dynamicBytesCost(
+                comptime hasDynamicEncodedSize(T),
                 canonical_bytes,
-                dynamic_fuel_quantum_bytes,
-            ) catch std.math.maxInt(u64);
+            );
         }
 
         fn boundedBytes(
@@ -2721,18 +2900,6 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             candidate: u64,
         ) u64 {
             return @min(maximumEncodedBytes(T), candidate);
-        }
-
-        fn combinedSequenceBytes(
-            comptime T: type,
-            prefix: u64,
-            suffixes: []const u64,
-        ) u64 {
-            var result = prefix;
-            for (suffixes) |suffix| {
-                result +|= suffix -| 4;
-            }
-            return boundedBytes(T, result);
         }
 
         fn definingInstructionInBlock(
@@ -2866,800 +3033,113 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             sizes: *const [limits.maximum_values]u64,
             available: *const [limits.maximum_values]bool,
         ) u64 {
-            const result_name = comptime valueName(instruction.result);
-            const ResultType = @FieldType(ValueCatalog, result_name);
-            const maximum = maximumEncodedBytes(ResultType);
-            return switch (instruction.operation) {
-                .metadata => unreachable,
-                .constant => |constant_index| encodedBytes(
-                    ResultType,
-                    Body.constants[constant_index],
-                ),
-                .copy => sizes[@intCast(instruction.operands[0])],
-                .product_construct => blk: {
-                    var total: u64 = 0;
-                    inline for (instruction.operands) |operand| {
-                        total +|= sizes[@intCast(operand)];
-                    }
-                    break :blk boundedBytes(ResultType, total);
+            return machine_v2_metering_v1.resultEncodedBytes(
+                instruction,
+                .{
+                    .block = block,
+                    .environment = environment,
+                    .sizes = sizes,
+                    .available = available,
                 },
-                .product_extract => |field_index| exactProductFieldBytes(
-                    block,
+                TypedPreflightBackend,
+            );
+        }
+
+        const TypedPreflightBackend = struct {
+            pub fn maximumResultBytes(
+                comptime instruction: control_ir.Instruction,
+            ) u64 {
+                const name = comptime valueName(instruction.result);
+                return maximumEncodedBytes(@FieldType(ValueCatalog, name));
+            }
+
+            pub fn constantBytes(
+                comptime instruction: control_ir.Instruction,
+            ) u64 {
+                const name = comptime valueName(instruction.result);
+                const ResultType = @FieldType(ValueCatalog, name);
+                return encodedBytes(
+                    ResultType,
+                    Body.constants[instruction.operation.constant],
+                );
+            }
+
+            pub fn operandBytes(
+                context: anytype,
+                value: control_ir.ValueId,
+            ) u64 {
+                return context.sizes[@intCast(value)];
+            }
+
+            pub fn boundedResultBytes(
+                comptime instruction: control_ir.Instruction,
+                candidate: u64,
+            ) u64 {
+                const name = comptime valueName(instruction.result);
+                return boundedBytes(
+                    @FieldType(ValueCatalog, name),
+                    candidate,
+                );
+            }
+
+            pub fn exactProductFieldBytes(
+                context: anytype,
+                comptime instruction: control_ir.Instruction,
+                comptime field_index: usize,
+            ) ?u64 {
+                return Self.exactProductFieldBytes(
+                    context.block,
                     instruction.operands[0],
                     field_index,
-                    environment,
-                    sizes,
-                    available,
-                ) orelse maximum,
-                .product_replace => maximum,
-                .sum_construct => boundedBytes(
-                    ResultType,
-                    4 +| if (instruction.operands.len == 0)
-                        0
-                    else
-                        sizes[@intCast(instruction.operands[0])],
-                ),
-                .sum_extract => maximum,
-                .optional_none => 1,
-                .optional_some => boundedBytes(
-                    ResultType,
-                    1 +| sizes[@intCast(instruction.operands[0])],
-                ),
-                .select => @max(
-                    sizes[@intCast(instruction.operands[1])],
-                    sizes[@intCast(instruction.operands[2])],
-                ),
-                .vector_empty, .text_empty, .bytes_empty => 4,
-                .vector_get => exactVectorElementBytes(
-                    block,
+                    context.environment,
+                    context.sizes,
+                    context.available,
+                );
+            }
+
+            pub fn exactVectorElementBytes(
+                context: anytype,
+                comptime instruction: control_ir.Instruction,
+            ) ?u64 {
+                return Self.exactVectorElementBytes(
+                    context.block,
                     instruction.result,
-                    environment,
-                    available,
-                ) orelse maximum,
-                .vector_set => maximum,
-                .vector_push => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +|
-                        sizes[@intCast(instruction.operands[1])],
-                ),
-                .vector_pop => maximum,
-                .vector_truncate => @min(
-                    maximum,
-                    sizes[@intCast(instruction.operands[0])],
-                ),
-                .vector_clear => 4,
-                .text_append, .bytes_append => combinedSequenceBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])],
-                    &.{sizes[@intCast(instruction.operands[1])]},
-                ),
-                .bytes_append_scalar => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +| 1,
-                ),
-                .text_append_scalar => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +| 4,
-                ),
-                .text_append_unsigned, .text_append_signed => boundedBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])] +| 20,
-                ),
-                .text_copy, .bytes_copy => @min(
-                    maximum,
-                    sizes[@intCast(instruction.operands[0])],
-                ),
-                .text_join, .bytes_join => combinedSequenceBytes(
-                    ResultType,
-                    sizes[@intCast(instruction.operands[0])],
-                    &.{
-                        sizes[@intCast(instruction.operands[1])],
-                        sizes[@intCast(instruction.operands[2])],
-                    },
-                ),
-                .compare_eq_zero,
-                .integer_add,
-                .integer_subtract,
-                .integer_multiply,
-                .integer_divide,
-                .integer_remainder,
-                .integer_negate,
-                .integer_equal,
-                .integer_not_equal,
-                .integer_less_than,
-                .integer_less_equal,
-                .integer_greater_than,
-                .integer_greater_equal,
-                .integer_bit_not,
-                .integer_bit_and,
-                .integer_bit_or,
-                .integer_bit_xor,
-                .integer_convert,
-                .enum_to_u32,
-                .boolean_not,
-                .boolean_and,
-                .boolean_or,
-                .sum_tag_is,
-                .optional_is_some,
-                .vector_length,
-                .text_length,
-                .bytes_length,
-                .text_compare,
-                .bytes_compare,
-                => maximum,
-            };
-        }
+                    context.environment,
+                    context.available,
+                );
+            }
+        };
 
         // Keep each typed Control IR block as one direct code-generation unit.
         // Inlining every block into the constructor dispatcher makes LLVM
         // reconstruct one pathological monolithic reducer.
+        const TypedReducerBackend = struct {
+            pub fn valueName(comptime value: control_ir.ValueId) [:0]const u8 {
+                return compilerValueName(value);
+            }
+
+            pub fn failure(
+                comptime role: program_semantics_v1.FailureRole,
+            ) Body.Failure {
+                return failureNamed(
+                    Body,
+                    program_semantics_v1.failureName(role),
+                );
+            }
+        };
+
         noinline fn executeInstructions(
             comptime block: control_ir.Block,
             store: anytype,
         ) ?Failure {
-            inline for (block.instructions) |instruction| {
-                const result_name = comptime valueName(instruction.result);
-                switch (instruction.operation) {
-                    .metadata => unreachable,
-                    .constant => |constant_index| {
-                        const Constant = @TypeOf(Body.constants[constant_index]);
-                        const canonical = comptime portable_value.canonicalValue(
-                            Constant,
-                            Body.constants[constant_index],
-                        ) catch unreachable;
-                        @field(store, result_name) = canonical;
-                    },
-                    .copy => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                    },
-                    .compare_eq_zero => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) == 0;
-                    },
-                    .integer_add => {
-                        const ResultType = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = std.math.add(
-                            ResultType,
-                            @field(store, valueName(instruction.operands[0])),
-                            @field(store, valueName(instruction.operands[1])),
-                        ) catch return failureNamed(Body, "arithmetic_overflow");
-                    },
-                    .integer_subtract => {
-                        const ResultType = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = std.math.sub(
-                            ResultType,
-                            @field(store, valueName(instruction.operands[0])),
-                            @field(store, valueName(instruction.operands[1])),
-                        ) catch return failureNamed(Body, "arithmetic_overflow");
-                    },
-                    .integer_multiply => {
-                        const ResultType = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = std.math.mul(
-                            ResultType,
-                            @field(store, valueName(instruction.operands[0])),
-                            @field(store, valueName(instruction.operands[1])),
-                        ) catch return failureNamed(Body, "arithmetic_overflow");
-                    },
-                    .integer_divide => {
-                        const ResultType = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = std.math.divTrunc(
-                            ResultType,
-                            @field(store, valueName(instruction.operands[0])),
-                            @field(store, valueName(instruction.operands[1])),
-                        ) catch |err| return switch (err) {
-                            error.DivisionByZero => failureNamed(
-                                Body,
-                                "division_by_zero",
-                            ),
-                            error.Overflow => failureNamed(
-                                Body,
-                                "arithmetic_overflow",
-                            ),
-                        };
-                    },
-                    .integer_remainder => {
-                        const ResultType = @FieldType(ValueCatalog, result_name);
-                        const left = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const right = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        _ = std.math.divTrunc(
-                            ResultType,
-                            left,
-                            right,
-                        ) catch |err| return switch (err) {
-                            error.DivisionByZero => failureNamed(
-                                Body,
-                                "division_by_zero",
-                            ),
-                            error.Overflow => failureNamed(
-                                Body,
-                                "arithmetic_overflow",
-                            ),
-                        };
-                        @field(store, result_name) = @rem(left, right);
-                    },
-                    .integer_negate => {
-                        @field(store, result_name) = std.math.negate(@field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        )) catch return failureNamed(
-                            Body,
-                            "arithmetic_overflow",
-                        );
-                    },
-                    .integer_equal => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) == @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_not_equal => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) != @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_less_than => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) < @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_less_equal => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) <= @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_greater_than => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) > @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_greater_equal => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) >= @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_bit_not => {
-                        @field(store, result_name) = ~@field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                    },
-                    .integer_bit_and => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) & @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_bit_or => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) | @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_bit_xor => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) ^ @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .integer_convert => {
-                        const ResultType = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = std.math.cast(
-                            ResultType,
-                            @field(store, valueName(instruction.operands[0])),
-                        ) orelse return failureNamed(
-                            Body,
-                            "arithmetic_overflow",
-                        );
-                    },
-                    .enum_to_u32 => {
-                        @field(store, result_name) = @intCast(@intFromEnum(@field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        )));
-                    },
-                    .boolean_not => {
-                        @field(store, result_name) = !@field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                    },
-                    .boolean_and => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) and @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .boolean_or => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) or @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                    },
-                    .select => {
-                        @field(store, result_name) = if (@field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ))
-                            @field(
-                                store,
-                                valueName(instruction.operands[1]),
-                            )
-                        else
-                            @field(
-                                store,
-                                valueName(instruction.operands[2]),
-                            );
-                    },
-                    .product_construct => {
-                        const Product = @FieldType(ValueCatalog, result_name);
-                        var product: Product = undefined;
-                        inline for (
-                            std.meta.fields(Product),
-                            instruction.operands,
-                        ) |field, operand| {
-                            @field(product, field.name) = @field(
-                                store,
-                                valueName(operand),
-                            );
-                        }
-                        @field(store, result_name) = product;
-                    },
-                    .product_extract => |field_index| {
-                        const Product = @FieldType(
-                            ValueCatalog,
-                            valueName(instruction.operands[0]),
-                        );
-                        const field = std.meta.fields(Product)[field_index];
-                        @field(store, result_name) = @field(
-                            @field(
-                                store,
-                                valueName(instruction.operands[0]),
-                            ),
-                            field.name,
-                        );
-                    },
-                    .product_replace => |field_index| {
-                        var product = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const Product = @TypeOf(product);
-                        const field = std.meta.fields(Product)[field_index];
-                        @field(product, field.name) = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        @field(store, result_name) = product;
-                    },
-                    .sum_construct => |variant_index| {
-                        const Sum = @FieldType(ValueCatalog, result_name);
-                        const field = std.meta.fields(Sum)[variant_index];
-                        @field(store, result_name) = @unionInit(
-                            Sum,
-                            field.name,
-                            if (field.type == void) {} else @field(
-                                store,
-                                valueName(instruction.operands[0]),
-                            ),
-                        );
-                    },
-                    .sum_tag_is => |variant_index| {
-                        const Sum = @FieldType(
-                            ValueCatalog,
-                            valueName(instruction.operands[0]),
-                        );
-                        const Tag = @typeInfo(Sum).@"union".tag_type.?;
-                        const field = std.meta.fields(Sum)[variant_index];
-                        @field(store, result_name) = std.meta.activeTag(@field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        )) == @field(Tag, field.name);
-                    },
-                    .sum_extract => |variant_index| {
-                        const sum = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const Sum = @TypeOf(sum);
-                        const Tag = @typeInfo(Sum).@"union".tag_type.?;
-                        const field = std.meta.fields(Sum)[variant_index];
-                        if (std.meta.activeTag(sum) != @field(Tag, field.name)) {
-                            return failureNamed(Body, "invalid_variant");
-                        }
-                        @field(store, result_name) = @field(sum, field.name);
-                    },
-                    .optional_none => {
-                        @field(store, result_name) = null;
-                    },
-                    .optional_some => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                    },
-                    .optional_is_some => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ) != null;
-                    },
-                    .vector_empty => {
-                        const Vector = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = Vector.empty();
-                    },
-                    .vector_length => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ).len() catch unreachable;
-                    },
-                    .vector_get => {
-                        const observed = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ).get(@field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        )) catch unreachable;
-                        @field(store, result_name) = observed orelse
-                            return failureNamed(Body, "invalid_index");
-                    },
-                    .vector_set => {
-                        var vector = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        vector.set(
-                            @field(
-                                store,
-                                valueName(instruction.operands[1]),
-                            ),
-                            @field(
-                                store,
-                                valueName(instruction.operands[2]),
-                            ),
-                        ) catch return failureNamed(Body, "invalid_index");
-                        @field(store, result_name) = vector;
-                    },
-                    .vector_push => {
-                        var vector = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        vector.push(@field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        )) catch return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = vector;
-                    },
-                    .vector_pop => {
-                        var vector = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const popped = vector.pop() catch unreachable;
-                        const Product = @FieldType(ValueCatalog, result_name);
-                        const fields = std.meta.fields(Product);
-                        var product: Product = undefined;
-                        @field(product, fields[0].name) = vector;
-                        @field(product, fields[1].name) = popped;
-                        @field(store, result_name) = product;
-                    },
-                    .vector_truncate => {
-                        var vector = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        vector.truncate(@field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        ));
-                        @field(store, result_name) = vector;
-                    },
-                    .vector_clear => {
-                        var vector = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        vector.clear();
-                        @field(store, result_name) = vector;
-                    },
-                    .text_empty => {
-                        const Text = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = Text.empty();
-                    },
-                    .text_length => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ).len() catch unreachable;
-                    },
-                    .text_append => {
-                        var text = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const suffix = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        text.append(suffix.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = text;
-                    },
-                    .text_append_scalar => {
-                        var text = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const scalar = std.math.cast(
-                            u21,
-                            @field(
-                                store,
-                                valueName(instruction.operands[1]),
-                            ),
-                        ) orelse return failureNamed(Body, "invalid_utf8");
-                        text.appendScalar(scalar) catch |err| return switch (err) {
-                            error.InvalidUtf8 => failureNamed(
-                                Body,
-                                "invalid_utf8",
-                            ),
-                            error.CapacityExceeded => failureNamed(
-                                Body,
-                                "capacity_exceeded",
-                            ),
-                            else => failureNamed(Body, "capacity_exceeded"),
-                        };
-                        @field(store, result_name) = text;
-                    },
-                    .text_append_unsigned => {
-                        var text = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        text.appendUnsigned(@intCast(@field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        ))) catch return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = text;
-                    },
-                    .text_append_signed => {
-                        var text = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        text.appendSigned(@intCast(@field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        ))) catch return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = text;
-                    },
-                    .text_copy => {
-                        const Source = @FieldType(
-                            ValueCatalog,
-                            valueName(instruction.operands[0]),
-                        );
-                        _ = Source;
-                        const ResultText = @FieldType(
-                            ValueCatalog,
-                            result_name,
-                        );
-                        const source = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        @field(store, result_name) = source.copyRange(
-                            ResultText.maximum_length,
-                            @field(
-                                store,
-                                valueName(instruction.operands[1]),
-                            ),
-                            @field(
-                                store,
-                                valueName(instruction.operands[2]),
-                            ),
-                        ) catch |err| return switch (err) {
-                            error.InvalidUtf8 => failureNamed(
-                                Body,
-                                "invalid_utf8",
-                            ),
-                            error.CapacityExceeded => failureNamed(
-                                Body,
-                                "capacity_exceeded",
-                            ),
-                            else => failureNamed(Body, "capacity_exceeded"),
-                        };
-                    },
-                    .text_compare => {
-                        const left = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const right = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        @field(store, result_name) = switch (std.mem.order(
-                            u8,
-                            left.slice() catch unreachable,
-                            right.slice() catch unreachable,
-                        )) {
-                            .lt => -1,
-                            .eq => 0,
-                            .gt => 1,
-                        };
-                    },
-                    .text_join => {
-                        var text = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const separator = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        const right = @field(
-                            store,
-                            valueName(instruction.operands[2]),
-                        );
-                        text.append(separator.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
-                        text.append(right.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = text;
-                    },
-                    .bytes_empty => {
-                        const Bytes = @FieldType(ValueCatalog, result_name);
-                        @field(store, result_name) = Bytes.empty();
-                    },
-                    .bytes_length => {
-                        @field(store, result_name) = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        ).len() catch unreachable;
-                    },
-                    .bytes_append => {
-                        var bytes = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const suffix = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        bytes.append(suffix.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = bytes;
-                    },
-                    .bytes_append_scalar => {
-                        var bytes = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const scalar = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        bytes.append(&.{scalar}) catch
-                            return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = bytes;
-                    },
-                    .bytes_copy => {
-                        const ResultBytes = @FieldType(
-                            ValueCatalog,
-                            result_name,
-                        );
-                        const source = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        @field(store, result_name) = source.copyRange(
-                            ResultBytes.maximum_length,
-                            @field(
-                                store,
-                                valueName(instruction.operands[1]),
-                            ),
-                            @field(
-                                store,
-                                valueName(instruction.operands[2]),
-                            ),
-                        ) catch return failureNamed(
-                            Body,
-                            "capacity_exceeded",
-                        );
-                    },
-                    .bytes_compare => {
-                        const left = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const right = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        @field(store, result_name) = switch (std.mem.order(
-                            u8,
-                            left.slice() catch unreachable,
-                            right.slice() catch unreachable,
-                        )) {
-                            .lt => -1,
-                            .eq => 0,
-                            .gt => 1,
-                        };
-                    },
-                    .bytes_join => {
-                        var bytes = @field(
-                            store,
-                            valueName(instruction.operands[0]),
-                        );
-                        const separator = @field(
-                            store,
-                            valueName(instruction.operands[1]),
-                        );
-                        const right = @field(
-                            store,
-                            valueName(instruction.operands[2]),
-                        );
-                        bytes.append(separator.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
-                        bytes.append(right.slice() catch unreachable) catch
-                            return failureNamed(Body, "capacity_exceeded");
-                        @field(store, result_name) = bytes;
-                    },
-                }
-            }
-            return null;
+            return program_semantics_v1.executeTypedInstructions(
+                Body,
+                ValueCatalog,
+                TypedReducerBackend,
+                block,
+                store,
+            );
         }
-
         fn requestFor(
             comptime source_site_id: usize,
             payload: anytype,
@@ -3707,11 +3187,7 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
         fn baseCostForConstructor(comptime constructor_id: usize) u64 {
             const constructor = comptime normal_form.constructors[constructor_id];
             if (constructor.kind == .await_effect) return 1;
-            return minimumSourceBlockCost(
-                Body,
-                program,
-                constructor.source_block,
-            );
+            return V2.effective_block_costs[constructor.source_block];
         }
 
         fn preflightCostConstructor(
@@ -3972,6 +3448,19 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
                     environment,
                     accepted_cost,
                 ),
+            };
+        }
+
+        /// Evaluate exactly one typed reducer clause without Machine v2
+        /// metering. Machine adapters apply costs and lifetime limits around
+        /// this program-owned transition.
+        pub fn reduceClause(frame: Frame) Transition {
+            return switch (frame) {
+                inline else => |environment, tag| planConstructor(
+                    comptime @intFromEnum(tag),
+                    environment,
+                    0,
+                ).transition,
             };
         }
 
@@ -4630,4 +4119,10 @@ pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
             _ = Self;
         }
     };
+}
+
+/// Compile one source Body through the canonical Reified Program boundary.
+pub fn DefinitionFor(comptime label: []const u8, comptime Body: type) type {
+    const Reified = ReifiedFor(label, Body);
+    return DirectDefinitionFor(MachineV2LoweringFor(Reified));
 }

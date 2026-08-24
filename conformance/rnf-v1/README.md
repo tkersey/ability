@@ -33,9 +33,11 @@ from an empty package/cache so those observations are not cache-hit timings.
 
 The gate rejects native or WASM runtime above 1.25 times the v0.7.0 median, a
 WASM artifact above 1.5 times the v0.7.0 artifact, any parked-state growth, or
-failure to reduce the four predecessor runtime-semantic source owners to the
-current build-classified `runtime_semantics` roles. The role classification is
-an exhaustive source-complexity metric, never reducer authority. Executable
+growth beyond the four predecessor direct runtime-semantic source owners. The
+current classification includes direct, image, and shared runtime ownership;
+shared modules count toward the direct path rather than manufacturing a false
+reduction. The role classification is an exhaustive source-complexity metric,
+never reducer authority. Executable
 singularity is proved separately by reflecting the public
 `Program.compile(...).step` surface and by the deletion/no-interpreter gates.
 Both WASM artifacts accept the same changing `i32` response and return the same

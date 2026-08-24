@@ -1,6 +1,6 @@
 .{
     .name = .boundary,
-    .version = "1.5.0",
+    .version = "1.6.0",
     .dependencies = .{
         .zlinter = .{
             .url = "git+https://github.com/KurtWagner/zlinter?ref=0.16.x#9b4d67b9725e7137ac876cc628fe5dd2ca5a2681",
@@ -17,6 +17,7 @@
         "docs",
         "examples",
         "repo_zig_paths.txt",
+        "scripts",
         "src",
         "test",
     },

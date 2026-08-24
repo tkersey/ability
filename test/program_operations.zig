@@ -1,4 +1,7 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
+const machine = @import("machine");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -120,11 +123,18 @@ const Body = struct {
 };
 
 const Program = program_v2.program("pure-operation-algebra", Body);
-const PureMachine = Program.compile(.{
+const pure_options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 128,
-});
+};
+const PureMachine = Program.compile(pure_options);
+const PureImage = Program.image();
+const PureProfile = Program.machineV2Profile(pure_options);
+
+pub const ReificationBaselineBody = Body;
+pub const ReificationBaselineProgram = Program;
+pub const ReificationBaselineMachine = PureMachine;
 
 test "compiled pure operations construct products vectors and text" {
     const state = try PureMachine.initialState(std.testing.allocator, {});
@@ -159,6 +169,167 @@ test "compiled pure operations construct products vectors and text" {
     try std.testing.expectEqual(@as(u32, 7), item.score);
     try std.testing.expectEqualStrings("alpha", try result.digest.slice());
     try std.testing.expectEqual(@as(u32, 8), result.total);
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&PureImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &PureProfile.bytes, &workspace);
+    var kernel_state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
+    const kernel_state_length = try kernel_v1.initial(
+        image,
+        &.{},
+        &kernel_state,
+        &invariant_scratch,
+        &workspace,
+    );
+    var scratch: [8192]u8 = undefined;
+    var kernel_output: [4096]u8 = undefined;
+    var kernel_next_state: [4096]u8 = undefined;
+    var kernel_insufficient_fuel: u64 = 10;
+    const kernel_yielded = switch (try kernel_v1.step(
+        image,
+        kernel_state[0..kernel_state_length],
+        &kernel_insufficient_fuel,
+        &kernel_next_state,
+        &kernel_output,
+        &scratch,
+        &workspace,
+    )) {
+        .yielded => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualSlices(
+        u8,
+        kernel_state[0..kernel_state_length],
+        kernel_yielded,
+    );
+    try std.testing.expectEqual(@as(u64, 10), kernel_insufficient_fuel);
+
+    var kernel_fuel: u64 = 64;
+    const kernel_done = switch (try kernel_v1.step(
+        image,
+        kernel_state[0..kernel_state_length],
+        &kernel_fuel,
+        &kernel_next_state,
+        &kernel_output,
+        &scratch,
+        &workspace,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const maximum_result_size = comptime portable_value.maximumEncodedSize(
+        PureResult,
+    );
+    var direct_bytes: [maximum_result_size]u8 = undefined;
+    const direct_length = try portable_value.encode(
+        PureResult,
+        result.*,
+        &direct_bytes,
+    );
+    try std.testing.expectEqual(fuel, kernel_fuel);
+    try std.testing.expectEqualSlices(
+        u8,
+        direct_bytes[0..direct_length],
+        kernel_done,
+    );
+}
+
+test "BPI1 rejects schema-invalid operation substitutions before execution" {
+    var malformed = PureImage.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segment_offset: usize = @intCast(envelope.sections[7].offset);
+    var cursor = segment_offset + 4;
+    cursor += image_v1.segment_prefix_length + @as(usize, std.mem.readInt(
+        u16,
+        malformed[cursor + 10 ..][0..2],
+        .little,
+    )) * 2;
+    const instruction_count = std.mem.readInt(
+        u32,
+        malformed[segment_offset + 4 + 12 ..][0..4],
+        .little,
+    );
+    var replaced = false;
+    for (0..instruction_count) |_| {
+        const operation = std.mem.readInt(
+            u16,
+            malformed[cursor + 6 ..][0..2],
+            .little,
+        );
+        if (operation == 3) {
+            std.mem.writeInt(
+                u16,
+                malformed[cursor + 6 ..][0..2],
+                21,
+                .little,
+            );
+            replaced = true;
+            break;
+        }
+        cursor += std.mem.readInt(
+            u32,
+            malformed[cursor..][0..4],
+            .little,
+        );
+    }
+    try std.testing.expect(replaced);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidInstruction,
+        image_v1.validateImage(&malformed, &workspace),
+    );
+}
+
+test "BPI1 rejects constants made unreachable by instruction mutation" {
+    var malformed = PureImage.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segment_offset: usize = @intCast(envelope.sections[7].offset);
+    var cursor = segment_offset + 4;
+    cursor += image_v1.segment_prefix_length + @as(usize, std.mem.readInt(
+        u16,
+        malformed[cursor + 10 ..][0..2],
+        .little,
+    )) * 2;
+    const instruction_count = std.mem.readInt(
+        u32,
+        malformed[segment_offset + 4 + 12 ..][0..4],
+        .little,
+    );
+    var replaced = false;
+    for (0..instruction_count) |_| {
+        const operation = std.mem.readInt(
+            u16,
+            malformed[cursor + 6 ..][0..2],
+            .little,
+        );
+        const immediate = std.mem.readInt(
+            u32,
+            malformed[cursor + 12 ..][0..4],
+            .little,
+        );
+        if (operation == 0 and immediate == 2) {
+            std.mem.writeInt(
+                u32,
+                malformed[cursor + 12 ..][0..4],
+                1,
+                .little,
+            );
+            replaced = true;
+            break;
+        }
+        cursor += std.mem.readInt(
+            u32,
+            malformed[cursor..][0..4],
+            .little,
+        );
+    }
+    try std.testing.expect(replaced);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidConstant,
+        image_v1.validateImage(&malformed, &workspace),
+    );
 }
 
 const ConstantTitles = portable_value.Vector(Title, 2);

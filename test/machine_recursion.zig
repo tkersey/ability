@@ -1,4 +1,7 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
+const machine = @import("machine");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
@@ -194,6 +197,15 @@ const Body = struct {
 };
 
 const Program = program_v2.program("bounded-recursive-helper", Body);
+
+pub const ReificationBaselineBody = Body;
+pub const ReificationBaselineProgram = Program;
+const reification_options: machine.Options = .{
+    .maximum_frames = 8,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 64,
+};
+pub const ReificationBaselineMachine = Program.compile(reification_options);
 
 const staged_second_call_arguments = [_]cir.EdgeArgument{
     .{ .value = 16 },
@@ -1017,11 +1029,9 @@ test "compiled bounded recursive frames survive canonical round trip" {
     }
     try std.testing.expectEqual(@as(usize, 2), call_return_count);
 
-    const RecursiveMachine = Program.compile(.{
-        .maximum_frames = 8,
-        .maximum_state_bytes = 4096,
-        .maximum_machine_fuel = 64,
-    });
+    const RecursiveMachine = Program.compile(reification_options);
+    const Image = Program.image();
+    const Profile = Program.machineV2Profile(reification_options);
     const state = try RecursiveMachine.initialState(std.testing.allocator, 3);
     defer RecursiveMachine.deinitState(state);
 
@@ -1048,6 +1058,122 @@ test "compiled bounded recursive frames survive canonical round trip" {
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 6), done.value().*);
     try std.testing.expectEqual(@as(u64, 7), completion_fuel);
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &Profile.bytes, &workspace);
+    var args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &args, 3, .little);
+    var kernel_initial: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
+    const kernel_initial_length = try kernel_v1.initial(
+        image,
+        &args,
+        &kernel_initial,
+        &invariant_scratch,
+        &workspace,
+    );
+    var kernel_split_fuel: u64 = 3;
+    var kernel_state: [4096]u8 = undefined;
+    var kernel_output: [4]u8 = undefined;
+    var kernel_scratch: [16 * 1024]u8 = undefined;
+    const kernel_yielded = switch (try kernel_v1.step(
+        image,
+        kernel_initial[0..kernel_initial_length],
+        &kernel_split_fuel,
+        &kernel_state,
+        &kernel_output,
+        &kernel_scratch,
+        &workspace,
+    )) {
+        .yielded => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualSlices(u8, encoded, kernel_yielded);
+    try std.testing.expectEqual(@as(u64, 0), kernel_split_fuel);
+    var kernel_completion_fuel: u64 = 32;
+    var kernel_terminal_state: [4096]u8 = undefined;
+    const kernel_done = switch (try kernel_v1.step(
+        image,
+        kernel_yielded,
+        &kernel_completion_fuel,
+        &kernel_terminal_state,
+        &kernel_output,
+        &kernel_scratch,
+        &workspace,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        done.value().*,
+        std.mem.readInt(u32, kernel_done[0..4], .little),
+    );
+    try std.testing.expectEqual(completion_fuel, kernel_completion_fuel);
+}
+
+test "BPI1 rejects call edges outside the declared callee function" {
+    const Image = Program.image();
+    var malformed = Image.bytes;
+    const envelope = try image_v1.validateEnvelope(&malformed);
+    const segments_offset: usize = @intCast(envelope.sections[7].offset);
+    const segments = malformed[segments_offset..];
+    var cursor: usize = 4;
+    var mutated = false;
+    for (0..std.mem.readInt(u32, segments[0..4], .little)) |_| {
+        const record_length = std.mem.readInt(
+            u32,
+            malformed[segments_offset + cursor ..][0..4],
+            .little,
+        );
+        var terminator = segments_offset + cursor + image_v1.segment_prefix_length +
+            @as(
+                usize,
+                std.mem.readInt(
+                    u16,
+                    malformed[segments_offset + cursor + 10 ..][0..2],
+                    .little,
+                ),
+            ) * 2;
+        for (0..std.mem.readInt(
+            u32,
+            malformed[segments_offset + cursor + 12 ..][0..4],
+            .little,
+        )) |_| {
+            terminator += std.mem.readInt(
+                u32,
+                malformed[terminator..][0..4],
+                .little,
+            );
+        }
+        if (malformed[terminator + 4] == 2 and
+            malformed[terminator + 8] == 1)
+        {
+            const payload = terminator + 8;
+            const request_count = std.mem.readInt(
+                u16,
+                malformed[payload + 10 ..][0..2],
+                .little,
+            );
+            const callee_edge = payload + 12 +
+                @as(usize, request_count) * 2 + 4;
+            std.mem.writeInt(
+                u16,
+                malformed[callee_edge..][0..2],
+                0,
+                .little,
+            );
+            mutated = true;
+            break;
+        }
+        cursor += record_length;
+    }
+    try std.testing.expect(mutated);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidTerminator,
+        image_v1.validateImage(&malformed, &workspace),
+    );
 }
 
 test "helper entry backedges rebind future state without overwriting activation context" {
@@ -1114,35 +1240,74 @@ test "helper entry backedges rebind future state without overwriting activation 
         .maximum_state_bytes = 4096,
         .maximum_machine_fuel = 64,
     });
+    const BackedgeKernel = HelperBackedgeProgram.kernelMachineV2(.{
+        .maximum_frames = 2,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
     const state = try BackedgeMachine.initialState(std.testing.allocator, 2);
     defer BackedgeMachine.deinitState(state);
+    const kernel_state = try BackedgeKernel.initialState(std.testing.allocator, 2);
+    defer BackedgeKernel.deinitState(kernel_state);
 
     var caller_fuel: u64 = 16;
+    var kernel_fuel: u64 = 16;
     try std.testing.expectEqual(
         BackedgeMachine.Outcome.yielded,
         try BackedgeMachine.step(state, &caller_fuel),
     );
+    try std.testing.expectEqual(
+        BackedgeKernel.Outcome.yielded,
+        try BackedgeKernel.step(kernel_state, &kernel_fuel),
+    );
+    try std.testing.expectEqual(caller_fuel, kernel_fuel);
     const encoded = try BackedgeMachine.encodeState(
         std.testing.allocator,
         state,
     );
     defer std.testing.allocator.free(encoded);
+    const kernel_encoded = try BackedgeKernel.encodeState(
+        std.testing.allocator,
+        kernel_state,
+    );
+    defer std.testing.allocator.free(kernel_encoded);
+    try std.testing.expectEqualSlices(u8, encoded, kernel_encoded);
     const restored = try BackedgeMachine.decodeState(
         std.testing.allocator,
         encoded,
     );
     defer BackedgeMachine.deinitState(restored);
+    const kernel_restored = try BackedgeKernel.decodeState(
+        std.testing.allocator,
+        kernel_encoded,
+    );
+    defer BackedgeKernel.deinitState(kernel_restored);
 
     try std.testing.expectEqual(
         BackedgeMachine.Outcome.yielded,
         try BackedgeMachine.step(restored, &caller_fuel),
     );
+    try std.testing.expectEqual(
+        BackedgeKernel.Outcome.yielded,
+        try BackedgeKernel.step(kernel_restored, &kernel_fuel),
+    );
+    try std.testing.expectEqual(caller_fuel, kernel_fuel);
     const done = switch (try BackedgeMachine.step(restored, &caller_fuel)) {
         .done => |result| result,
         else => return error.TestUnexpectedResult,
     };
     defer done.deinit();
+    const kernel_done = switch (try BackedgeKernel.step(
+        kernel_restored,
+        &kernel_fuel,
+    )) {
+        .done => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    defer kernel_done.deinit();
     try std.testing.expectEqual(@as(u32, 2), done.value().*);
+    try std.testing.expectEqual(done.value().*, kernel_done.value().*);
+    try std.testing.expectEqual(caller_fuel, kernel_fuel);
 }
 
 test "progressed helper requests observe current environment before activation" {
@@ -1518,6 +1683,24 @@ test "machine call stack rejects an authentic alternate call entry" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         AlternateEntryMachine.decodeState(std.testing.allocator, forged),
+    );
+    const Image = AlternateEntryProgram.image();
+    const Profile = AlternateEntryProgram.machineV2Profile(.{
+        .maximum_frames = 4,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 32,
+    });
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&Image.bytes, &workspace);
+    const bound = try kernel_v1.bindMachineV2(
+        program_image,
+        &Profile.bytes,
+        &workspace,
+    );
+    var invariant_scratch: [4096]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidState,
+        kernel_v1.validateState(bound, forged, &invariant_scratch, &workspace),
     );
 }
 
@@ -1908,4 +2091,32 @@ test "compiled frame-depth failure preserves state and caller fuel" {
     const after = try ShallowMachine.encodeState(std.testing.allocator, state);
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualSlices(u8, before, after);
+
+    const ShallowKernel = Program.kernelMachineV2(.{
+        .maximum_frames = 3,
+        .maximum_state_bytes = 4096,
+        .maximum_machine_fuel = 64,
+    });
+    const kernel = try ShallowKernel.initialState(std.testing.allocator, 3);
+    defer ShallowKernel.deinitState(kernel);
+    const kernel_before = try ShallowKernel.encodeState(
+        std.testing.allocator,
+        kernel,
+    );
+    defer std.testing.allocator.free(kernel_before);
+    var kernel_fuel: u64 = 20;
+    switch (try ShallowKernel.step(kernel, &kernel_fuel)) {
+        .failed => |failure| try std.testing.expectEqual(
+            ShallowKernel.Failure.frame_depth_exceeded,
+            failure,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u64, 20), kernel_fuel);
+    const kernel_after = try ShallowKernel.encodeState(
+        std.testing.allocator,
+        kernel,
+    );
+    defer std.testing.allocator.free(kernel_after);
+    try std.testing.expectEqualSlices(u8, kernel_before, kernel_after);
 }

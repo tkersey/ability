@@ -1,4 +1,8 @@
 const cir = @import("control_ir");
+const compiler = @import("compiler");
+const image_emit_v1 = @import("image_emit_v1");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
@@ -6,6 +10,208 @@ const std = @import("std");
 const state_header_length: usize = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
 const frame_header_length: usize = 4 + 4;
 const first_environment_offset = state_header_length + frame_header_length;
+
+test "BPI1 emits the admitted constructor invariant families" {
+    var relation_probe_count: usize = 0;
+    var duplicate_field_probe_count: usize = 0;
+    var invariant_schema_probe_count: usize = 0;
+    var instruction_operand_probe_count: usize = 0;
+    inline for (.{
+        SumBody,
+        OptionalBody,
+        DerivedBody,
+        ClosedExpressionBody,
+        ConstantAlgebraicBody,
+        ConstantOptionalBody,
+        WideProductBody,
+        AggregateBranchBody,
+        LiveThroughBody,
+        ProductExtractBody,
+        SumExtractBody,
+        VectorLengthBody,
+        BooleanConstantBody,
+        LocalTextBody,
+        RelationBody,
+    }) |Body| {
+        const Reified = compiler.ReifiedFor(Body.control_ir.label, Body);
+        const Schemas = image_emit_v1.ProgramSchemaSet(Reified);
+        const Constructors = image_emit_v1.ProgramConstructors(
+            Reified,
+            Schemas,
+        );
+        try std.testing.expect(Constructors.bytes.len > 4);
+        const Program = program_v2.program(Body.control_ir.label, Body);
+        const Image = Program.image();
+        var workspace: image_v1.ValidationWorkspace = .{};
+        const validated = try image_v1.validateImage(&Image.bytes, &workspace);
+        const constructors = validated.catalogs.envelope.section(.constructors);
+        const section_offset: usize = @intCast(
+            validated.catalogs.envelope.sections[8].offset,
+        );
+        var constructor_cursor: usize = 4;
+        for (0..std.mem.readInt(u32, constructors[0..4], .little)) |_| {
+            const constructor_end = constructor_cursor + std.mem.readInt(
+                u32,
+                constructors[constructor_cursor..][0..4],
+                .little,
+            );
+            const activation_count = std.mem.readInt(
+                u16,
+                constructors[constructor_cursor + 16 ..][0..2],
+                .little,
+            );
+            const environment_count = std.mem.readInt(
+                u16,
+                constructors[constructor_cursor + 18 ..][0..2],
+                .little,
+            );
+            const invariant_count = std.mem.readInt(
+                u16,
+                constructors[constructor_cursor + 20 ..][0..2],
+                .little,
+            );
+            const field_count = activation_count + environment_count;
+            if (activation_count >= 2 or environment_count >= 2) {
+                var malformed = Image.bytes;
+                const first_field = section_offset + constructor_cursor + 24 +
+                    if (activation_count >= 2)
+                        @as(usize, 0)
+                    else
+                        @as(usize, activation_count) * 8;
+                const second_field = first_field + 8;
+                @memcpy(
+                    malformed[second_field..][0..8],
+                    malformed[first_field..][0..8],
+                );
+                workspace = .{};
+                try std.testing.expectError(
+                    error.InvalidConstructor,
+                    image_v1.validateImage(&malformed, &workspace),
+                );
+                duplicate_field_probe_count += 1;
+            }
+            var invariant_cursor = constructor_cursor + 24 +
+                @as(usize, field_count) * 8;
+            for (0..invariant_count) |_| {
+                const tag = constructors[invariant_cursor + 4];
+                if (tag == 5 or tag == 11 or tag == 16) {
+                    var malformed = Image.bytes;
+                    malformed[section_offset + invariant_cursor + 4] = 2;
+                    workspace = .{};
+                    try std.testing.expectError(
+                        error.InvalidInvariant,
+                        image_v1.validateImage(&malformed, &workspace),
+                    );
+                    invariant_schema_probe_count += 1;
+                }
+                if (tag == 8 and std.mem.readInt(
+                    u16,
+                    constructors[invariant_cursor + 12 ..][0..2],
+                    .little,
+                ) > 0) {
+                    const operand = std.mem.readInt(
+                        u16,
+                        constructors[invariant_cursor + 16 ..][0..2],
+                        .little,
+                    );
+                    const operand_schema = try validated.catalogs.valueSchemaId(
+                        operand,
+                    );
+                    var wrong_schema: ?u16 = null;
+                    for (0..validated.catalogs.value_count) |value| {
+                        if (try validated.catalogs.valueSchemaId(@intCast(value)) !=
+                            operand_schema)
+                        {
+                            wrong_schema = @intCast(value);
+                            break;
+                        }
+                    }
+                    if (wrong_schema) |value| {
+                        var malformed = Image.bytes;
+                        std.mem.writeInt(
+                            u16,
+                            malformed[section_offset + invariant_cursor + 16 ..][0..2],
+                            value,
+                            .little,
+                        );
+                        workspace = .{};
+                        try std.testing.expectError(
+                            error.InvalidInvariant,
+                            image_v1.validateImage(&malformed, &workspace),
+                        );
+                        instruction_operand_probe_count += 1;
+                    }
+                }
+                if (tag == 17 or tag == 18) {
+                    var malformed = Image.bytes;
+                    const relation_offset = section_offset + invariant_cursor +
+                        8 + if (tag == 17) @as(usize, 4) else 6;
+                    malformed[relation_offset] = 0xff;
+                    workspace = .{};
+                    try std.testing.expectError(
+                        error.InvalidInvariant,
+                        image_v1.validateImage(&malformed, &workspace),
+                    );
+                    relation_probe_count += 1;
+                }
+                invariant_cursor += std.mem.readInt(
+                    u32,
+                    constructors[invariant_cursor..][0..4],
+                    .little,
+                );
+            }
+            try std.testing.expectEqual(constructor_end, invariant_cursor);
+            constructor_cursor = constructor_end;
+        }
+    }
+    try std.testing.expect(relation_probe_count > 0);
+    try std.testing.expect(duplicate_field_probe_count > 0);
+    try std.testing.expect(invariant_schema_probe_count > 0);
+    try std.testing.expect(instruction_operand_probe_count > 0);
+}
+
+const relation_instructions = [_]cir.Instruction{
+    .{ .kind = .constant, .result = 0, .operation = .{ .constant = 0 } },
+    .{ .kind = .constant, .result = 1, .operation = .{ .constant = 1 } },
+    .{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{ 0, 1 },
+        .operation = .integer_less_than,
+    },
+};
+const relation_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .instructions = &relation_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 2,
+            .then_edge = .{ .target = 1 },
+            .else_edge = .{ .target = 2 },
+        } },
+    },
+    .{ .id = 1, .terminator = .{ .return_value = 0 } },
+    .{ .id = 2, .terminator = .{ .return_value = 1 } },
+};
+const RelationBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const constants = .{ @as(u32, 1), @as(u32, 2) };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: cir.Program = .{
+        .label = "integer-relation-invariant",
+        .value_types = &.{
+            .{ .scalar = .u32 },
+            .{ .scalar = .u32 },
+            .{ .scalar = .boolean },
+        },
+        .blocks = &relation_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u32 },
+    };
+};
 
 const Choice = union(enum) {
     left: u32,
@@ -109,6 +315,12 @@ const SumProgram = program_v2.program(
     SumBody,
 );
 const SumMachine = SumProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
+const SumImage = SumProgram.image();
+const SumProfile = SumProgram.machineV2Profile(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
@@ -415,6 +627,11 @@ const ClosedExpressionMachine = ClosedExpressionProgram.compile(.{
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
 });
+const ClosedExpressionKernelMachine = ClosedExpressionProgram.kernelMachineV2(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 32,
+});
 
 const ConstantAlgebraicLookup = struct {
     pub const id: u32 = 0;
@@ -665,6 +882,11 @@ const WideProductProgram = program_v2.program(
     WideProductBody,
 );
 const WideProductMachine = WideProductProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 64,
+});
+const WideProductKernelMachine = WideProductProgram.kernelMachineV2(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 64,
@@ -1654,6 +1876,53 @@ test "sum branches persist the source case and reject a forged local path" {
         error.ProgramContractViolation,
         SumMachine.decodeState(std.testing.allocator, forged),
     );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes, &workspace);
+    var invariant_scratch: [4096]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidState,
+        kernel_v1.validateState(image, forged, &invariant_scratch, &workspace),
+    );
+}
+
+test "unfunded kernel step defers deep environment validation" {
+    const state = try SumMachine.initialState(
+        std.testing.allocator,
+        .{ .left = 7 },
+    );
+    defer SumMachine.deinitState(state);
+    const encoded = try SumMachine.encodeState(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+    const malformed = try std.testing.allocator.dupe(u8, encoded);
+    defer std.testing.allocator.free(malformed);
+    std.mem.writeInt(
+        u32,
+        malformed[first_environment_offset..][0..4],
+        2,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const program_image = try image_v1.validateImage(&SumImage.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(program_image, &SumProfile.bytes, &workspace);
+    var fuel: u64 = 0;
+    var output_state: [4096]u8 = undefined;
+    var output_value: [4096]u8 = undefined;
+    var scratch: [8192]u8 = undefined;
+    const yielded = switch (try kernel_v1.step(
+        image,
+        malformed,
+        &fuel,
+        &output_state,
+        &output_value,
+        &scratch,
+        &workspace,
+    )) {
+        .yielded => |bytes| bytes,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualSlices(u8, malformed, yielded);
+    try std.testing.expectEqual(@as(u64, 0), fuel);
 }
 
 test "public resume consumes only preallocated response authority" {
@@ -1910,6 +2179,13 @@ test "closed arithmetic definitions bind retained branch operands" {
         error.ProgramContractViolation,
         ClosedExpressionMachine.decodeState(std.testing.allocator, forged),
     );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        ClosedExpressionKernelMachine.decodeState(
+            std.testing.allocator,
+            forged,
+        ),
+    );
 }
 
 test "payload-bearing algebraic constants retain executable definitions" {
@@ -2029,6 +2305,10 @@ test "wide product definitions survive target-edge projection" {
     try std.testing.expectError(
         error.ProgramContractViolation,
         WideProductMachine.decodeState(std.testing.allocator, forged),
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        WideProductKernelMachine.decodeState(std.testing.allocator, forged),
     );
 }
 

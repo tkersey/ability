@@ -48,11 +48,15 @@ const Body = struct {
 };
 
 const Program = boundary.program("single-reducer-proof", Body);
-const Machine = Program.compile(.{
+const options: boundary.MachineOptions = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
     .maximum_machine_fuel = 32,
-});
+};
+const Machine = Program.compile(options);
+const KernelMachine = Program.kernelMachineV2(options);
+const Image = Program.image();
+const Profile = Program.machineV2Profile(options);
 const Reducer = fn (Machine.State, *u64) Machine.Error!Machine.Outcome;
 
 fn reducerDeclarationCount(comptime Owner: type) comptime_int {
@@ -74,6 +78,10 @@ fn functionDeclarationCount(comptime Owner: type) comptime_int {
     return result;
 }
 
+fn freeBytes(allocator: std.mem.Allocator, bytes: []u8) void {
+    allocator.free(bytes);
+}
+
 comptime {
     if (!@hasDecl(Machine, "step")) {
         @compileError("compiled Boundary Machine has no public step reducer");
@@ -84,8 +92,25 @@ comptime {
     if (reducerDeclarationCount(Machine) != 1) {
         @compileError("compiled Boundary Machine exposes more than one ABI-shaped reducer");
     }
-    if (!@hasDecl(Program, "compile") or functionDeclarationCount(Program) != 1) {
+    if (!@hasDecl(Program, "compile") or
+        !@hasDecl(Program, "compileV2") or
+        !@hasDecl(Program, "image") or
+        !@hasDecl(Program, "machineV2Profile") or
+        !@hasDecl(Program, "kernelMachineV2") or
+        @hasDecl(Program, "kernelMachine") or
+        functionDeclarationCount(Program) != 5)
+    {
         @compileError("Boundary Program exposes a competing compilation route");
+    }
+    if (@hasDecl(Image, "step") or @hasDecl(Image, "resume")) {
+        @compileError("Boundary image product exposes reducer authority");
+    }
+    if (!std.mem.eql(
+        u8,
+        &Machine.Manifest.machine_contract_digest,
+        &KernelMachine.Manifest.machine_contract_digest,
+    )) {
+        @compileError("kernel Machine changes Machine contract identity");
     }
     if (@hasDecl(boundary, "Runtime") or
         @hasDecl(boundary, "staticMachine") or
@@ -96,11 +121,332 @@ comptime {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const state = try Machine.initialState(std.heap.page_allocator, 21);
+    const allocator = std.heap.page_allocator;
+    var image_workspace: boundary.image.ValidationWorkspace = .{};
+    const program_image = try boundary.image.validateImageView(
+        &Image.bytes,
+        &image_workspace,
+    );
+    const image = try boundary.machine_v2.kernel.bindMachineV2(
+        program_image,
+        &Profile.bytes,
+        &image_workspace,
+    );
+    var tail_malformed_image = Image.bytes;
+    const tail_malformed_envelope = try boundary.image.validateEnvelope(
+        &tail_malformed_image,
+    );
+    const tail_effects_offset: usize = @intCast(
+        tail_malformed_envelope.sections[4].offset,
+    );
+    std.mem.writeInt(
+        u32,
+        tail_malformed_image[tail_effects_offset + 8 ..][0..4],
+        @intCast(tail_malformed_image.len - tail_effects_offset),
+        .little,
+    );
+    var tail_malformed_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidEffect,
+        boundary.image.validateImageView(
+            &tail_malformed_image,
+            &tail_malformed_workspace,
+        ),
+    );
+    var malformed_image = Image.bytes;
+    const envelope = try boundary.image.validateEnvelope(&malformed_image);
+    const effects_offset: usize = envelope.sections[4].offset;
+    const identity_length = std.mem.readInt(
+        u32,
+        malformed_image[effects_offset + 8 ..][0..4],
+        .little,
+    );
+    const semantic_digest_offset = effects_offset + 4 + 8 +
+        identity_length + 12;
+    malformed_image[semantic_digest_offset] ^= 0xff;
+    var malformed_workspace: boundary.image.ValidationWorkspace = .{};
+    if (boundary.image.validateImageView(
+        &malformed_image,
+        &malformed_workspace,
+    )) |_| {
+        return error.ForgedEffectDigestAccepted;
+    } else |err| if (err != error.DigestMismatch) {
+        return err;
+    }
+    var kernel_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &kernel_args, 21, .little);
+    var kernel_initial: [4096]u8 = undefined;
+    var kernel_invariant_scratch: [4096]u8 = undefined;
+    const kernel_initial_length = try boundary.machine_v2.kernel.initial(
+        image,
+        &kernel_args,
+        &kernel_initial,
+        &kernel_invariant_scratch,
+        &image_workspace,
+    );
+    var kernel_fuel: u64 = 8;
+    var kernel_state: [4096]u8 = undefined;
+    var kernel_payload: [4]u8 = undefined;
+    var kernel_scratch: [12 * 1024]u8 = undefined;
+    const kernel_request = switch (try boundary.machine_v2.kernel.step(
+        image,
+        kernel_initial[0..kernel_initial_length],
+        &kernel_fuel,
+        &kernel_state,
+        &kernel_payload,
+        &kernel_scratch,
+        &image_workspace,
+    )) {
+        .requested => |request| request,
+        else => return error.ExpectedEffectRequest,
+    };
+    var malformed_parked: [4096]u8 = undefined;
+    @memcpy(
+        malformed_parked[0..kernel_request.state.len],
+        kernel_request.state,
+    );
+    std.mem.writeInt(
+        u32,
+        malformed_parked[72..76],
+        std.math.maxInt(u32),
+        .little,
+    );
+    var malformed_resume_output: [4096]u8 = undefined;
+    var malformed_resume_workspace: boundary.image.ValidationWorkspace = .{};
+    var malformed_resume_scratch: [4096]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidState,
+        boundary.machine_v2.kernel.@"resume"(
+            image,
+            malformed_parked[0..kernel_request.state.len],
+            kernel_request.identity,
+            &([_]u8{ 42, 0, 0, 0 }),
+            &malformed_resume_output,
+            &malformed_resume_scratch,
+            &malformed_resume_workspace,
+        ),
+    );
+    const typed_kernel_state = try KernelMachine.initialState(allocator, 21);
+    defer KernelMachine.deinitState(typed_kernel_state);
+    var typed_kernel_fuel: u64 = 8;
+    const typed_kernel_request = switch (try KernelMachine.step(
+        typed_kernel_state,
+        &typed_kernel_fuel,
+    )) {
+        .request => |request| request,
+        else => return error.ExpectedEffectRequest,
+    };
+    try std.testing.expectEqual(
+        kernel_request.identity.digest,
+        typed_kernel_request.identity.digest,
+    );
+    const parked_before = try KernelMachine.encodeState(
+        allocator,
+        typed_kernel_state,
+    );
+    defer freeBytes(allocator, parked_before);
+    const parked_fuel = typed_kernel_fuel;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.step(typed_kernel_state, &typed_kernel_fuel),
+    );
+    try std.testing.expectEqual(parked_fuel, typed_kernel_fuel);
+    const parked_after = try KernelMachine.encodeState(
+        allocator,
+        typed_kernel_state,
+    );
+    defer freeBytes(allocator, parked_after);
+    try std.testing.expectEqualSlices(u8, parked_before, parked_after);
+
+    var forged = typed_kernel_request;
+    forged.identity.site_ordinal +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.sequence +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.constructor_id +%= 1;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.machine_contract_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.effect_site_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.payload_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    forged = typed_kernel_request;
+    forged.identity.continuation_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.prepareResume(typed_kernel_state, forged),
+    );
+    const typed_prepared = try KernelMachine.prepareResume(
+        typed_kernel_state,
+        typed_kernel_request,
+    );
+    try std.testing.expectError(
+        error.ProgramContractViolation,
+        KernelMachine.@"resume"(typed_prepared, @as(i32, 42)),
+    );
+    try KernelMachine.@"resume"(typed_prepared, @as(u32, 42));
+    KernelMachine.deinitPreparedResume(typed_prepared);
+    const typed_kernel_done = switch (try KernelMachine.step(
+        typed_kernel_state,
+        &typed_kernel_fuel,
+    )) {
+        .done => |value| value,
+        else => return error.ExpectedEffectRequest,
+    };
+    defer typed_kernel_done.deinit();
+    try std.testing.expectEqual(@as(u32, 42), typed_kernel_done.value().*);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const preflight_state = try KernelMachine.initialState(
+        failing.allocator(),
+        21,
+    );
+    defer KernelMachine.deinitState(preflight_state);
+    failing.fail_index = failing.allocations;
+    var unfunded_fuel: u64 = 0;
+    try std.testing.expectEqual(
+        KernelMachine.Outcome.yielded,
+        try KernelMachine.step(preflight_state, &unfunded_fuel),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+    var preflight_fuel: u64 = 8;
+    const preflight_request = switch (try KernelMachine.step(
+        preflight_state,
+        &preflight_fuel,
+    )) {
+        .request => |request| request,
+        else => return error.ExpectedEffectRequest,
+    };
+    const preflight_prepared = try KernelMachine.prepareResume(
+        preflight_state,
+        preflight_request,
+    );
+    defer KernelMachine.deinitPreparedResume(preflight_prepared);
+    failing.fail_index = failing.allocations;
+    try KernelMachine.@"resume"(preflight_prepared, @as(u32, 42));
+    try std.testing.expect(!failing.has_induced_failure);
+
+    const state = try Machine.initialState(allocator, 21);
     defer Machine.deinitState(state);
     var caller_fuel: u64 = 8;
     switch (try Machine.step(state, &caller_fuel)) {
-        .request => {},
+        .request => |request| {
+            const direct_state = try Machine.encodeState(
+                allocator,
+                state,
+            );
+            defer freeBytes(allocator, direct_state);
+            try std.testing.expectEqualSlices(
+                u8,
+                direct_state,
+                kernel_request.state,
+            );
+            try std.testing.expectEqual(
+                request.identity.digest,
+                kernel_request.identity.digest,
+            );
+            try std.testing.expectEqual(
+                request.identity.continuation_digest,
+                kernel_request.identity.continuation_digest,
+            );
+            try std.testing.expectEqual(
+                @as(u32, 21),
+                std.mem.readInt(u32, kernel_request.payload[0..4], .little),
+            );
+            try std.testing.expectEqual(caller_fuel, kernel_fuel);
+            const prepared = try Machine.prepareResume(state, request);
+            try Machine.@"resume"(prepared, @as(u32, 42));
+            Machine.deinitPreparedResume(prepared);
+            const direct_resumed = try Machine.encodeState(
+                allocator,
+                state,
+            );
+            defer freeBytes(allocator, direct_resumed);
+            var response: [4]u8 = undefined;
+            std.mem.writeInt(u32, &response, 42, .little);
+            var kernel_resumed: [4096]u8 = undefined;
+            @memset(&kernel_resumed, 0xa5);
+            var stale_identity = kernel_request.identity;
+            stale_identity.sequence += 1;
+            try std.testing.expectError(
+                error.InvalidState,
+                boundary.machine_v2.kernel.@"resume"(
+                    image,
+                    kernel_request.state,
+                    stale_identity,
+                    &response,
+                    &kernel_resumed,
+                    &kernel_invariant_scratch,
+                    &image_workspace,
+                ),
+            );
+            try std.testing.expectEqual(@as(u8, 0xa5), kernel_resumed[0]);
+            const kernel_resumed_length = try boundary.machine_v2.kernel.@"resume"(
+                image,
+                kernel_request.state,
+                kernel_request.identity,
+                &response,
+                &kernel_resumed,
+                &kernel_invariant_scratch,
+                &image_workspace,
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                direct_resumed,
+                kernel_resumed[0..kernel_resumed_length],
+            );
+            const direct_done = switch (try Machine.step(
+                state,
+                &caller_fuel,
+            )) {
+                .done => |value| value,
+                else => return error.ExpectedEffectRequest,
+            };
+            defer direct_done.deinit();
+            var kernel_terminal_state: [4096]u8 = undefined;
+            const kernel_done = switch (try boundary.machine_v2.kernel.step(
+                image,
+                kernel_resumed[0..kernel_resumed_length],
+                &kernel_fuel,
+                &kernel_terminal_state,
+                &kernel_payload,
+                &kernel_scratch,
+                &image_workspace,
+            )) {
+                .done => |value| value,
+                else => return error.ExpectedEffectRequest,
+            };
+            try std.testing.expectEqual(caller_fuel, kernel_fuel);
+            try std.testing.expectEqual(
+                direct_done.value().*,
+                std.mem.readInt(u32, kernel_done[0..4], .little),
+            );
+        },
         else => return error.ExpectedEffectRequest,
     }
 
@@ -110,10 +456,12 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print(
         "single_boundary_reducer={}\n" ++
             "reducer_public_entry=Program.compile(...).step\n" ++
-            "program_compile_surface_count={d}\n",
+            "program_execution_constructor_count={d}\n",
         .{
             reducerDeclarationCount(Machine) == 1,
-            functionDeclarationCount(Program),
+            @as(u8, @intFromBool(@hasDecl(Program, "compile"))) +
+                @as(u8, @intFromBool(@hasDecl(Program, "compileV2"))) +
+                @as(u8, @intFromBool(@hasDecl(Program, "kernelMachineV2"))),
         },
     );
     try stdout.flush();

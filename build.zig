@@ -7,10 +7,21 @@ const CoreModules = struct {
     compiler: *std.Build.Module,
     control_ir: *std.Build.Module,
     driver: *std.Build.Module,
+    dynamic_value_v1: *std.Build.Module,
     effect_v2: *std.Build.Module,
+    image_v1: *std.Build.Module,
+    image_emit_v1: *std.Build.Module,
+    kernel_v1: *std.Build.Module,
+    kernel_machine_v1: *std.Build.Module,
+    kernel_wasm_v1: *std.Build.Module,
     machine: *std.Build.Module,
+    machine_v2_metering_v1: *std.Build.Module,
+    machine_v2_profile_v1: *std.Build.Module,
     portable_value: *std.Build.Module,
+    program_semantics_v1: *std.Build.Module,
     program_v2: *std.Build.Module,
+    reducer_clause_v1: *std.Build.Module,
+    reified_program_v1: *std.Build.Module,
     rnf: *std.Build.Module,
 };
 
@@ -19,16 +30,29 @@ const CoreModuleId = enum {
     compiler,
     control_ir,
     driver,
+    dynamic_value_v1,
     effect_v2,
+    image_v1,
+    image_emit_v1,
+    kernel_v1,
+    kernel_machine_v1,
+    kernel_wasm_v1,
     machine,
+    machine_v2_metering_v1,
+    machine_v2_profile_v1,
     portable_value,
+    program_semantics_v1,
     program_v2,
+    reducer_clause_v1,
+    reified_program_v1,
     rnf,
 };
 
 const CoreModuleRole = enum {
     support,
-    runtime_semantics,
+    direct_runtime_semantics,
+    image_runtime_semantics,
+    shared_runtime_semantics,
 };
 
 fn coreModulePath(module: CoreModuleId) []const u8 {
@@ -37,23 +61,45 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .compiler => "src/compiler.zig",
         .control_ir => "src/control_ir.zig",
         .driver => "src/driver.zig",
+        .dynamic_value_v1 => "src/dynamic_value_v1.zig",
         .effect_v2 => "src/effect_v2.zig",
+        .image_v1 => "src/image_v1.zig",
+        .image_emit_v1 => "src/image_emit_v1.zig",
+        .kernel_v1 => "src/kernel_v1.zig",
+        .kernel_machine_v1 => "src/kernel_machine_v1.zig",
+        .kernel_wasm_v1 => "src/kernel_wasm_v1.zig",
         .machine => "src/machine.zig",
+        .machine_v2_metering_v1 => "src/machine_v2_metering_v1.zig",
+        .machine_v2_profile_v1 => "src/machine_v2_profile_v1.zig",
         .portable_value => "src/portable_value.zig",
+        .program_semantics_v1 => "src/program_semantics_v1.zig",
         .program_v2 => "src/program_v2.zig",
+        .reducer_clause_v1 => "src/reducer_clause_v1.zig",
+        .reified_program_v1 => "src/reified_program_v1.zig",
         .rnf => "src/rnf.zig",
     };
 }
 
 fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
     return switch (module) {
-        .compiler, .machine => .runtime_semantics,
+        .compiler, .machine, .machine_v2_metering_v1 => .direct_runtime_semantics,
+        .dynamic_value_v1,
+        .image_v1,
+        .reducer_clause_v1,
+        .kernel_v1,
+        .kernel_machine_v1,
+        .kernel_wasm_v1,
+        .machine_v2_profile_v1,
+        => .image_runtime_semantics,
+        .program_semantics_v1 => .shared_runtime_semantics,
         .agent_profile,
         .control_ir,
         .driver,
         .effect_v2,
+        .image_emit_v1,
         .portable_value,
         .program_v2,
+        .reified_program_v1,
         .rnf,
         => .support,
     };
@@ -73,7 +119,7 @@ fn requireDirectDependency(
 }
 
 comptime {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(50_000);
     const module_fields = std.meta.fields(CoreModules);
     const module_ids = std.meta.fields(CoreModuleId);
     if (module_fields.len != module_ids.len) {
@@ -272,18 +318,19 @@ fn parseTestArgs(b: *std.Build) TestArgs {
     };
 }
 
-fn addZigPathCoverageGuard(b: *std.Build, lint_step: *std.Build.Step) void {
+fn addZigPathCoverageGuard(b: *std.Build) *std.Build.Step {
     const guard = b.addSystemCommand(&.{
         "sh",
         "-c",
         \\set -eu
         \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
         \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
-        \\find src examples test -type f -name '*.zig' | sort > "$tmp.actual"
-        \\grep -E '^(src|examples|test)/.*\.zig$' repo_zig_paths.txt | sort > "$tmp.expected"
+        \\{ printf '%s\n' build.zig; find src examples test -type f -name '*.zig'; } | sort > "$tmp.actual"
+        \\sort repo_zig_paths.txt > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
-    lint_step.dependOn(&guard.step);
+    guard.setCwd(b.path("."));
+    return &guard.step;
 }
 
 fn addTestArtifactWithArgs(
@@ -326,6 +373,7 @@ fn addExpectedCompileFailure(
     });
     module.addImport("control_ir", core.control_ir);
     module.addImport("driver", core.driver);
+    module.addImport("image_emit_v1", core.image_emit_v1);
     module.addImport("portable_value", core.portable_value);
     module.addImport("program_v2", core.program_v2);
     const compilation = b.addTest(.{ .root_module = module });
@@ -333,33 +381,188 @@ fn addExpectedCompileFailure(
     step.dependOn(&compilation.step);
 }
 
+fn addReificationReceiptSources(
+    b: *std.Build,
+    command: *std.Build.Step.Run,
+) void {
+    var zig_paths = std.mem.splitScalar(
+        u8,
+        @embedFile("repo_zig_paths.txt"),
+        '\n',
+    );
+    while (zig_paths.next()) |source_path| {
+        if (source_path.len != 0) command.addFileArg(b.path(source_path));
+    }
+    inline for (.{
+        "repo_zig_paths.txt",
+        "conformance/reification-v1/baseline.lock.json",
+        "conformance/reification-v1/baseline/vectors.json",
+        "conformance/reification-v1/check_baseline.sh",
+        "conformance/reification-v1/v1.5.0-baseline-fixture.patch",
+        "conformance/rnf-v1/check_performance.sh",
+        "conformance/rnf-v1/measure_wasm.mjs",
+        "conformance/rnf-v1/v0.7.0-performance.patch",
+        "scripts/write_reification_proof.mjs",
+        "scripts/write_reification_receipt.mjs",
+        "test/reification_receipt_v1.mjs",
+        "test/run_kernel_wasm.mjs",
+        "test/run_machine_wasm.mjs",
+    }) |source_path| command.addFileArg(b.path(source_path));
+}
+
+const PureProgramModules = struct {
+    control_ir: *std.Build.Module,
+    portable_value: *std.Build.Module,
+    rnf: *std.Build.Module,
+    dynamic_value_v1: *std.Build.Module,
+    program_semantics_v1: *std.Build.Module,
+    image_v1: *std.Build.Module,
+    reducer_clause_v1: *std.Build.Module,
+};
+
+fn addPureProgramModules(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) PureProgramModules {
+    const control_ir = b.createModule(.{
+        .root_source_file = b.path("src/control_ir.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const portable_value = b.createModule(.{
+        .root_source_file = b.path("src/portable_value.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const rnf = b.createModule(.{
+        .root_source_file = b.path("src/rnf.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rnf.addImport("control_ir", control_ir);
+    const dynamic_value_v1 = b.createModule(.{
+        .root_source_file = b.path("src/dynamic_value_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const program_semantics_v1 = b.createModule(.{
+        .root_source_file = b.path("src/program_semantics_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    program_semantics_v1.addImport("control_ir", control_ir);
+    program_semantics_v1.addImport("portable_value", portable_value);
+    program_semantics_v1.addImport("rnf", rnf);
+    const image_v1 = b.createModule(.{
+        .root_source_file = b.path("src/image_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    image_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    image_v1.addImport("program_semantics_v1", program_semantics_v1);
+    const reducer_clause_v1 = b.createModule(.{
+        .root_source_file = b.path("src/reducer_clause_v1.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    reducer_clause_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    reducer_clause_v1.addImport("image_v1", image_v1);
+    reducer_clause_v1.addImport("program_semantics_v1", program_semantics_v1);
+    return .{
+        .control_ir = control_ir,
+        .portable_value = portable_value,
+        .rnf = rnf,
+        .dynamic_value_v1 = dynamic_value_v1,
+        .program_semantics_v1 = program_semantics_v1,
+        .image_v1 = image_v1,
+        .reducer_clause_v1 = reducer_clause_v1,
+    };
+}
+
 fn addCoreModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) CoreModules {
-    const control_ir = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.control_ir)),
-        .target = target,
-        .optimize = optimize,
-    });
-    const portable_value = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.portable_value)),
-        .target = target,
-        .optimize = optimize,
-    });
+    const pure = addPureProgramModules(b, target, optimize);
+    const control_ir = pure.control_ir;
+    const portable_value = pure.portable_value;
+    const rnf = pure.rnf;
+    const dynamic_value_v1 = pure.dynamic_value_v1;
+    const program_semantics_v1 = pure.program_semantics_v1;
+    const image_v1 = pure.image_v1;
+    const reducer_clause_v1 = pure.reducer_clause_v1;
     const machine = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.machine)),
         .target = target,
         .optimize = optimize,
     });
     machine.addImport("portable_value", portable_value);
-    const rnf = b.createModule(.{
-        .root_source_file = b.path(coreModulePath(.rnf)),
+    const machine_v2_metering_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.machine_v2_metering_v1)),
         .target = target,
         .optimize = optimize,
     });
-    rnf.addImport("control_ir", control_ir);
+    machine_v2_metering_v1.addImport("control_ir", control_ir);
+    machine_v2_metering_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    machine_v2_metering_v1.addImport("image_v1", image_v1);
+    machine_v2_metering_v1.addImport(
+        "program_semantics_v1",
+        program_semantics_v1,
+    );
+    machine_v2_metering_v1.addImport("reducer_clause_v1", reducer_clause_v1);
+    const machine_v2_profile_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.machine_v2_profile_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    const kernel_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.kernel_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    kernel_v1.addImport("image_v1", image_v1);
+    kernel_v1.addImport("machine_v2_metering_v1", machine_v2_metering_v1);
+    kernel_v1.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
+    kernel_v1.addImport("reducer_clause_v1", reducer_clause_v1);
+    const kernel_machine_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.kernel_machine_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_machine_v1.addImport("image_v1", image_v1);
+    kernel_machine_v1.addImport("kernel_v1", kernel_v1);
+    kernel_machine_v1.addImport("machine", machine);
+    kernel_machine_v1.addImport("portable_value", portable_value);
+    const kernel_wasm_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.kernel_wasm_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel_wasm_v1.addImport("image_v1", image_v1);
+    kernel_wasm_v1.addImport("kernel_v1", kernel_v1);
+    const image_emit_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.image_emit_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    image_emit_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    image_emit_v1.addImport("image_v1", image_v1);
+    image_emit_v1.addImport("portable_value", portable_value);
+    const reified_program_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.reified_program_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    machine_v2_profile_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    machine_v2_profile_v1.addImport("image_v1", image_v1);
+    machine_v2_profile_v1.addImport(
+        "machine_v2_metering_v1",
+        machine_v2_metering_v1,
+    );
+    image_emit_v1.addImport("program_semantics_v1", program_semantics_v1);
     const compiler = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.compiler)),
         .target = target,
@@ -367,7 +570,11 @@ fn addCoreModules(
     });
     compiler.addImport("control_ir", control_ir);
     compiler.addImport("machine", machine);
+    compiler.addImport("machine_v2_metering_v1", machine_v2_metering_v1);
+    compiler.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
     compiler.addImport("portable_value", portable_value);
+    compiler.addImport("reified_program_v1", reified_program_v1);
+    compiler.addImport("program_semantics_v1", program_semantics_v1);
     compiler.addImport("rnf", rnf);
     const program_v2 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.program_v2)),
@@ -375,7 +582,10 @@ fn addCoreModules(
         .optimize = optimize,
     });
     program_v2.addImport("compiler", compiler);
+    program_v2.addImport("image_emit_v1", image_emit_v1);
+    program_v2.addImport("kernel_machine_v1", kernel_machine_v1);
     program_v2.addImport("machine", machine);
+    program_v2.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
     const driver = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.driver)),
         .target = target,
@@ -398,10 +608,21 @@ fn addCoreModules(
         .compiler = compiler,
         .control_ir = control_ir,
         .driver = driver,
+        .dynamic_value_v1 = dynamic_value_v1,
         .effect_v2 = effect_v2,
+        .image_v1 = image_v1,
+        .image_emit_v1 = image_emit_v1,
+        .kernel_v1 = kernel_v1,
+        .kernel_machine_v1 = kernel_machine_v1,
+        .kernel_wasm_v1 = kernel_wasm_v1,
         .machine = machine,
+        .machine_v2_metering_v1 = machine_v2_metering_v1,
+        .machine_v2_profile_v1 = machine_v2_profile_v1,
         .portable_value = portable_value,
+        .program_semantics_v1 = program_semantics_v1,
         .program_v2 = program_v2,
+        .reducer_clause_v1 = reducer_clause_v1,
+        .reified_program_v1 = reified_program_v1,
         .rnf = rnf,
     };
 }
@@ -411,6 +632,8 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("control_ir", core.control_ir);
     module.addImport("driver", core.driver);
     module.addImport("effect_v2", core.effect_v2);
+    module.addImport("image_v1", core.image_v1);
+    module.addImport("kernel_v1", core.kernel_v1);
     module.addImport("machine", core.machine);
     module.addImport("portable_value", core.portable_value);
     module.addImport("program_v2", core.program_v2);
@@ -476,6 +699,122 @@ pub fn build(b: *std.Build) void {
         .name = "boundary-one-effect",
         .root_module = one_effect_module,
     });
+    const reification_operations_fixture = programTestModule(
+        b,
+        host_core,
+        "test/program_operations.zig",
+        b.graph.host,
+        optimize,
+        false,
+        true,
+    );
+    reification_operations_fixture.addImport("image_v1", host_core.image_v1);
+    reification_operations_fixture.addImport("kernel_v1", host_core.kernel_v1);
+    reification_operations_fixture.addImport("machine", host_core.machine);
+    const reification_handler_fixture = programTestModule(
+        b,
+        host_core,
+        "test/program_effect_handler.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reification_handler_fixture.addImport("effect_v2", host_core.effect_v2);
+    reification_handler_fixture.addImport("machine", host_core.machine);
+    const reification_morphism_fixture = programTestModule(
+        b,
+        host_core,
+        "test/program_effect_morphism.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reification_morphism_fixture.addImport("effect_v2", host_core.effect_v2);
+    reification_morphism_fixture.addImport("machine", host_core.machine);
+    const reification_recursion_fixture = programTestModule(
+        b,
+        host_core,
+        "test/machine_recursion.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reification_recursion_fixture.addImport("image_v1", host_core.image_v1);
+    reification_recursion_fixture.addImport("kernel_v1", host_core.kernel_v1);
+    reification_recursion_fixture.addImport("machine", host_core.machine);
+    const reification_baseline_module = b.createModule(.{
+        .root_source_file = b.path("test/reification_baseline.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    reification_baseline_module.addImport("boundary", host_boundary);
+    reification_baseline_module.addImport("compiler", host_core.compiler);
+    reification_baseline_module.addImport(
+        "operations_fixture",
+        reification_operations_fixture,
+    );
+    reification_baseline_module.addImport(
+        "handler_fixture",
+        reification_handler_fixture,
+    );
+    reification_baseline_module.addImport(
+        "morphism_fixture",
+        reification_morphism_fixture,
+    );
+    reification_baseline_module.addImport(
+        "recursion_fixture",
+        reification_recursion_fixture,
+    );
+    const reification_baseline_executable = b.addExecutable(.{
+        .name = "boundary-reification-baseline",
+        .root_module = reification_baseline_module,
+    });
+    const reification_baseline_run = b.addRunArtifact(
+        reification_baseline_executable,
+    );
+    const reification_baseline_emit_step = b.step(
+        "emit-boundary-reification-baseline",
+        "Emit the current Boundary reification baseline vectors.",
+    );
+    reification_baseline_emit_step.dependOn(&reification_baseline_run.step);
+    const reification_baseline_check = b.addSystemCommand(&.{"sh"});
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/check_baseline.sh"),
+    );
+    reification_baseline_check.addFileArg(
+        reification_baseline_executable.getEmittedBin(),
+    );
+    reification_baseline_check.addArg(b.graph.zig_exe);
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/baseline.lock.json"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/baseline/vectors.json"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/reification-v1/v1.5.0-baseline-fixture.patch"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("test/reification_baseline.zig"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/rnf-v1/check_performance.sh"),
+    );
+    reification_baseline_check.addFileArg(
+        b.path("conformance/rnf-v1/v0.7.0-performance.patch"),
+    );
+    reification_baseline_check.setCwd(b.path("."));
+    const reification_baseline_proof = reification_baseline_check.captureStdOut(.{
+        .basename = "boundary-reification-baseline-proof.json",
+    });
+    const reification_baseline_step = b.step(
+        "check-boundary-reification-baseline",
+        "Verify the immutable Boundary v1.5.0 reification baseline.",
+    );
+    reification_baseline_step.dependOn(&reification_baseline_check.step);
     const examples_step = b.step(
         "check-boundary-examples",
         "Compile the Boundary Machine examples.",
@@ -500,6 +839,9 @@ pub fn build(b: *std.Build) void {
         false,
         true,
     );
+    program_operations.addImport("image_v1", host_core.image_v1);
+    program_operations.addImport("kernel_v1", host_core.kernel_v1);
+    program_operations.addImport("machine", host_core.machine);
     const integer_boolean_operations = programTestModule(
         b,
         host_core,
@@ -518,6 +860,9 @@ pub fn build(b: *std.Build) void {
         false,
         true,
     );
+    algebraic_collection_operations.addImport("image_v1", host_core.image_v1);
+    algebraic_collection_operations.addImport("kernel_v1", host_core.kernel_v1);
+    algebraic_collection_operations.addImport("machine", host_core.machine);
     const research_digest = programTestModule(
         b,
         host_core,
@@ -588,6 +933,95 @@ pub fn build(b: *std.Build) void {
     );
     program_dead_control.addImport("compiler", host_core.compiler);
     program_dead_control.addImport("machine", host_core.machine);
+    const reified_program_test = programTestModule(
+        b,
+        host_core,
+        "test/reified_program_v1.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reified_program_test.addImport("compiler", host_core.compiler);
+    reified_program_test.addImport("image_emit_v1", host_core.image_emit_v1);
+    reified_program_test.addImport("image_v1", host_core.image_v1);
+    reified_program_test.addImport("kernel_v1", host_core.kernel_v1);
+    reified_program_test.addImport("machine", host_core.machine);
+    reified_program_test.addImport(
+        "machine_v2_profile_v1",
+        host_core.machine_v2_profile_v1,
+    );
+    reified_program_test.addImport(
+        "reducer_clause_v1",
+        host_core.reducer_clause_v1,
+    );
+    const reification_receipt_witness_module = b.createModule(.{
+        .root_source_file = b.path("test/reification_receipt_witness.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    reification_receipt_witness_module.addImport(
+        "reified_program_fixture",
+        reified_program_test,
+    );
+    const reification_receipt_witness_executable = b.addExecutable(.{
+        .name = "boundary-reification-semantic-proof",
+        .root_module = reification_receipt_witness_module,
+    });
+    const run_reification_receipt_witness = b.addRunArtifact(
+        reification_receipt_witness_executable,
+    );
+    const reification_semantic_proof =
+        run_reification_receipt_witness.captureStdOut(.{
+            .basename = "boundary-reification-semantic-proof.json",
+        });
+    const reification_generated_test = programTestModule(
+        b,
+        host_core,
+        "test/reification_generated_v1.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    reification_generated_test.addImport("machine", host_core.machine);
+    const reification_generated_proof_executable = b.addExecutable(.{
+        .name = "boundary-reification-generated-proof",
+        .root_module = reification_generated_test,
+    });
+    const run_reification_generated_proof = b.addRunArtifact(
+        reification_generated_proof_executable,
+    );
+    const reification_generated_proof = run_reification_generated_proof.captureStdOut(.{
+        .basename = "boundary-reification-generated-proof.json",
+    });
+    const reducer_semantics_test = b.createModule(.{
+        .root_source_file = b.path("test/program_semantics_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    reducer_semantics_test.addImport("control_ir", host_core.control_ir);
+    reducer_semantics_test.addImport("rnf", host_core.rnf);
+    reducer_semantics_test.addImport(
+        "program_semantics_v1",
+        host_core.program_semantics_v1,
+    );
+    const machine_v2_metering_test = b.createModule(.{
+        .root_source_file = b.path("test/machine_v2_metering_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    machine_v2_metering_test.addImport("control_ir", host_core.control_ir);
+    machine_v2_metering_test.addImport(
+        "machine_v2_metering_v1",
+        host_core.machine_v2_metering_v1,
+    );
+    const image_test = b.createModule(.{
+        .root_source_file = b.path("test/image_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    image_test.addImport("image_v1", host_core.image_v1);
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -601,6 +1035,13 @@ pub fn build(b: *std.Build) void {
         "portable_value",
         host_core.portable_value,
     );
+    constructor_invariants.addImport("compiler", host_core.compiler);
+    constructor_invariants.addImport(
+        "image_emit_v1",
+        host_core.image_emit_v1,
+    );
+    constructor_invariants.addImport("image_v1", host_core.image_v1);
+    constructor_invariants.addImport("kernel_v1", host_core.kernel_v1);
     const recursion = programTestModule(
         b,
         host_core,
@@ -610,6 +1051,9 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    recursion.addImport("image_v1", host_core.image_v1);
+    recursion.addImport("kernel_v1", host_core.kernel_v1);
+    recursion.addImport("machine", host_core.machine);
     const after = programTestModule(
         b,
         host_core,
@@ -627,6 +1071,14 @@ pub fn build(b: *std.Build) void {
         optimize,
         false,
         false,
+    );
+    machine_yield.addImport("image_v1", host_core.image_v1);
+    machine_yield.addImport("compiler", host_core.compiler);
+    machine_yield.addImport("kernel_v1", host_core.kernel_v1);
+    machine_yield.addImport("machine", host_core.machine);
+    machine_yield.addImport(
+        "machine_v2_profile_v1",
+        host_core.machine_v2_profile_v1,
     );
     const agent_loop = programTestModule(
         b,
@@ -662,6 +1114,28 @@ pub fn build(b: *std.Build) void {
         "Check private Resumption Normal Form synthesis.",
     );
     addTestArtifact(b, rnf_step, core.rnf);
+
+    const reified_core_step = b.step(
+        "check-boundary-reified-core",
+        "Prove direct specialization consumes one canonical Reified Program.",
+    );
+    reified_core_step.dependOn(reification_baseline_step);
+    addTestArtifact(b, reified_core_step, reified_program_test);
+    addTestArtifact(b, reified_core_step, reducer_semantics_test);
+    addTestArtifact(b, reified_core_step, machine_v2_metering_test);
+    const reification_generated_step = b.step(
+        "check-boundary-reification-generated",
+        "Exhaust finite graphs and run 10000 seeded direct/kernel traces.",
+    );
+    addTestArtifact(b, reification_generated_step, reification_generated_test);
+
+    const image_step = b.step(
+        "check-boundary-image",
+        "Validate the canonical BPI1 envelope and section directory.",
+    );
+    addTestArtifact(b, image_step, host_core.dynamic_value_v1);
+    addTestArtifact(b, image_step, host_core.image_emit_v1);
+    addTestArtifact(b, image_step, image_test);
 
     const control_step = b.step(
         "check-boundary-rnf-control",
@@ -792,6 +1266,293 @@ pub fn build(b: *std.Build) void {
     performance_wasm_executable.rdynamic = true;
 
     const wasm_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const kernel_wasm_executable = b.addExecutable(.{
+        .name = "boundary-machine-v2-kernel-v1",
+        .root_module = wasm_core.kernel_wasm_v1,
+    });
+    kernel_wasm_executable.entry = .disabled;
+    kernel_wasm_executable.rdynamic = true;
+    kernel_wasm_executable.export_memory = true;
+    kernel_wasm_executable.max_memory = 128 << 20;
+    const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const kernel_wasm_reproducible = b.addExecutable(.{
+        .name = "boundary-machine-v2-kernel-v1-reproducible",
+        .root_module = wasm_repro_core.kernel_wasm_v1,
+    });
+    kernel_wasm_reproducible.entry = .disabled;
+    kernel_wasm_reproducible.rdynamic = true;
+    kernel_wasm_reproducible.export_memory = true;
+    kernel_wasm_reproducible.max_memory = 128 << 20;
+    const compare_kernel_wasm = b.addSystemCommand(&.{ "cmp", "-s" });
+    compare_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
+    compare_kernel_wasm.addFileArg(kernel_wasm_reproducible.getEmittedBin());
+    const kernel_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/kernel_wasm_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    kernel_vector_module.addImport("control_ir", host_core.control_ir);
+    kernel_vector_module.addImport("image_v1", host_core.image_v1);
+    kernel_vector_module.addImport("kernel_v1", host_core.kernel_v1);
+    kernel_vector_module.addImport("machine", host_core.machine);
+    kernel_vector_module.addImport("program_v2", host_core.program_v2);
+    const kernel_vector_executable = b.addExecutable(.{
+        .name = "boundary-kernel-wasm-vector",
+        .root_module = kernel_vector_module,
+    });
+    const run_kernel_vector = b.addRunArtifact(kernel_vector_executable);
+    const kernel_vector_output = run_kernel_vector.captureStdOut(.{
+        .basename = "boundary-kernel-wasm-vector.bin",
+    });
+    const kernel_failure_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/kernel_wasm_machine_failure_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    kernel_failure_vector_module.addImport("control_ir", host_core.control_ir);
+    kernel_failure_vector_module.addImport("image_v1", host_core.image_v1);
+    kernel_failure_vector_module.addImport("kernel_v1", host_core.kernel_v1);
+    kernel_failure_vector_module.addImport("machine", host_core.machine);
+    kernel_failure_vector_module.addImport("program_v2", host_core.program_v2);
+    const kernel_failure_vector_executable = b.addExecutable(.{
+        .name = "boundary-kernel-wasm-machine-failure-vector",
+        .root_module = kernel_failure_vector_module,
+    });
+    const run_kernel_failure_vector = b.addRunArtifact(
+        kernel_failure_vector_executable,
+    );
+    const kernel_failure_vector_output = run_kernel_failure_vector.captureStdOut(.{
+        .basename = "boundary-kernel-wasm-machine-failure-vector.bin",
+    });
+    const one_effect_image_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_one_effect_image.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    one_effect_image_module.addImport("boundary", host_boundary);
+    const one_effect_image_executable = b.addExecutable(.{
+        .name = "emit-one-effect-boundary-program-image",
+        .root_module = one_effect_image_module,
+    });
+    const run_one_effect_image = b.addRunArtifact(one_effect_image_executable);
+    const one_effect_image = run_one_effect_image.captureStdOut(.{
+        .basename = "one-effect.boundary-program-image",
+    });
+    const one_effect_profile_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_one_effect_profile.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    one_effect_profile_module.addImport(
+        "image_fixture",
+        one_effect_image_module,
+    );
+    const one_effect_profile_executable = b.addExecutable(.{
+        .name = "emit-one-effect-machine-v2-profile",
+        .root_module = one_effect_profile_module,
+    });
+    const run_one_effect_profile = b.addRunArtifact(one_effect_profile_executable);
+    const one_effect_profile = run_one_effect_profile.captureStdOut(.{
+        .basename = "one-effect.machine-v2-profile",
+    });
+    const portable_values_image_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_portable_values_image.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    portable_values_image_module.addImport("boundary", host_boundary);
+    portable_values_image_module.addImport(
+        "operations_fixture",
+        reification_operations_fixture,
+    );
+    const portable_values_image_executable = b.addExecutable(.{
+        .name = "emit-portable-values-boundary-program-image",
+        .root_module = portable_values_image_module,
+    });
+    const run_portable_values_image = b.addRunArtifact(
+        portable_values_image_executable,
+    );
+    const portable_values_image = run_portable_values_image.captureStdOut(.{
+        .basename = "portable-values.boundary-program-image",
+    });
+    const portable_values_profile_module = b.createModule(.{
+        .root_source_file = b.path("test/emit_portable_values_profile.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    portable_values_profile_module.addImport(
+        "operations_fixture",
+        reification_operations_fixture,
+    );
+    const portable_values_profile_executable = b.addExecutable(.{
+        .name = "emit-portable-values-machine-v2-profile",
+        .root_module = portable_values_profile_module,
+    });
+    const run_portable_values_profile = b.addRunArtifact(
+        portable_values_profile_executable,
+    );
+    const portable_values_profile = run_portable_values_profile.captureStdOut(.{
+        .basename = "portable-values.machine-v2-profile",
+    });
+    const kernel_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    kernel_sha_command.addFileArg(kernel_wasm_executable.getEmittedBin());
+    const kernel_sha = kernel_sha_command.captureStdOut(.{
+        .basename = "boundary-machine-v2-kernel-v1.wasm.sha256",
+    });
+    const one_effect_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    one_effect_sha_command.addFileArg(one_effect_image);
+    const one_effect_sha = one_effect_sha_command.captureStdOut(.{
+        .basename = "one-effect.boundary-program-image.sha256",
+    });
+    const portable_values_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    portable_values_sha_command.addFileArg(portable_values_image);
+    const portable_values_sha = portable_values_sha_command.captureStdOut(.{
+        .basename = "portable-values.boundary-program-image.sha256",
+    });
+    const one_effect_profile_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    one_effect_profile_sha_command.addFileArg(one_effect_profile);
+    const one_effect_profile_sha = one_effect_profile_sha_command.captureStdOut(.{
+        .basename = "one-effect.machine-v2-profile.sha256",
+    });
+    const portable_values_profile_sha_command = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "shasum -a 256 \"$1\" | awk '{print $1}'",
+        "sh",
+    });
+    portable_values_profile_sha_command.addFileArg(portable_values_profile);
+    const portable_values_profile_sha = portable_values_profile_sha_command.captureStdOut(.{
+        .basename = "portable-values.machine-v2-profile.sha256",
+    });
+    const reification_asset_receipt_command = b.addSystemCommand(&.{
+        "node",
+        "scripts/write_reification_receipt.mjs",
+    });
+    reification_asset_receipt_command.addFileArg(
+        kernel_wasm_executable.getEmittedBin(),
+    );
+    reification_asset_receipt_command.addFileArg(one_effect_image);
+    reification_asset_receipt_command.addFileArg(portable_values_image);
+    reification_asset_receipt_command.addFileArg(one_effect_profile);
+    reification_asset_receipt_command.addFileArg(portable_values_profile);
+    addReificationReceiptSources(b, reification_asset_receipt_command);
+    reification_asset_receipt_command.addFileArg(
+        reification_generated_proof,
+    );
+    const reification_receipt_file = reification_asset_receipt_command.captureStdOut(.{
+        .basename = "boundary-reification-v1-receipt.json",
+    });
+    const install_kernel = b.addInstallFileWithDir(
+        kernel_wasm_executable.getEmittedBin(),
+        .prefix,
+        "boundary-machine-v2-kernel-v1.wasm",
+    );
+    const install_kernel_sha = b.addInstallFileWithDir(
+        kernel_sha,
+        .prefix,
+        "boundary-machine-v2-kernel-v1.wasm.sha256",
+    );
+    const install_one_effect = b.addInstallFileWithDir(
+        one_effect_image,
+        .prefix,
+        "one-effect.boundary-program-image",
+    );
+    const install_one_effect_sha = b.addInstallFileWithDir(
+        one_effect_sha,
+        .prefix,
+        "one-effect.boundary-program-image.sha256",
+    );
+    const install_portable_values = b.addInstallFileWithDir(
+        portable_values_image,
+        .prefix,
+        "portable-values.boundary-program-image",
+    );
+    const install_portable_values_sha = b.addInstallFileWithDir(
+        portable_values_sha,
+        .prefix,
+        "portable-values.boundary-program-image.sha256",
+    );
+    const install_one_effect_profile = b.addInstallFileWithDir(
+        one_effect_profile,
+        .prefix,
+        "one-effect.machine-v2-profile",
+    );
+    const install_one_effect_profile_sha = b.addInstallFileWithDir(
+        one_effect_profile_sha,
+        .prefix,
+        "one-effect.machine-v2-profile.sha256",
+    );
+    const install_portable_values_profile = b.addInstallFileWithDir(
+        portable_values_profile,
+        .prefix,
+        "portable-values.machine-v2-profile",
+    );
+    const install_portable_values_profile_sha = b.addInstallFileWithDir(
+        portable_values_profile_sha,
+        .prefix,
+        "portable-values.machine-v2-profile.sha256",
+    );
+    const install_reification_receipt = b.addInstallFileWithDir(
+        reification_receipt_file,
+        .prefix,
+        "boundary-reification-v1-receipt.json",
+    );
+    const emit_reification_assets_step = b.step(
+        "emit-boundary-reification-assets",
+        "Emit BPI1 examples, fixed kernel, checksums, and receipt.",
+    );
+    inline for (.{
+        install_kernel,
+        install_kernel_sha,
+        install_one_effect,
+        install_one_effect_sha,
+        install_portable_values,
+        install_portable_values_sha,
+        install_one_effect_profile,
+        install_one_effect_profile_sha,
+        install_portable_values_profile,
+        install_portable_values_profile_sha,
+        install_reification_receipt,
+    }) |installation| emit_reification_assets_step.dependOn(&installation.step);
+    const run_kernel_wasm = b.addSystemCommand(&.{"node"});
+    run_kernel_wasm.addFileArg(b.path("test/run_kernel_wasm.mjs"));
+    run_kernel_wasm.addFileArg(kernel_wasm_executable.getEmittedBin());
+    run_kernel_wasm.addFileArg(kernel_vector_output);
+    run_kernel_wasm.addFileArg(kernel_failure_vector_output);
+    run_kernel_wasm.addArg("--release-assets");
+    run_kernel_wasm.addFileArg(one_effect_image);
+    run_kernel_wasm.addFileArg(portable_values_image);
+    run_kernel_wasm.addFileArg(one_effect_profile);
+    run_kernel_wasm.addFileArg(portable_values_profile);
+    const kernel_wasm_proof = run_kernel_wasm.captureStdOut(.{
+        .basename = "boundary-machine-v2-kernel-wasm-proof.json",
+    });
+    const kernel_wasm_step = b.step(
+        "check-boundary-machine-v2-kernel-wasm",
+        "Check fixed import-free Boundary Kernel WASM ABI and profile.",
+    );
+    kernel_wasm_step.dependOn(&run_kernel_wasm.step);
+    kernel_wasm_step.dependOn(&compare_kernel_wasm.step);
     const parity_wasm = programTestModule(
         b,
         wasm_core,
@@ -913,10 +1674,21 @@ pub fn build(b: *std.Build) void {
                 "source_module compiler {s} {s}\n" ++
                 "source_module control_ir {s} {s}\n" ++
                 "source_module driver {s} {s}\n" ++
+                "source_module dynamic_value_v1 {s} {s}\n" ++
                 "source_module effect_v2 {s} {s}\n" ++
+                "source_module image_v1 {s} {s}\n" ++
+                "source_module image_emit_v1 {s} {s}\n" ++
+                "source_module kernel_v1 {s} {s}\n" ++
+                "source_module kernel_machine_v1 image_runtime_semantics src/kernel_machine_v1.zig\n" ++
+                "source_module kernel_wasm_v1 image_runtime_semantics src/kernel_wasm_v1.zig\n" ++
                 "source_module machine {s} {s}\n" ++
+                "source_module machine_v2_metering_v1 direct_runtime_semantics src/machine_v2_metering_v1.zig\n" ++
+                "source_module machine_v2_profile_v1 image_runtime_semantics src/machine_v2_profile_v1.zig\n" ++
                 "source_module portable_value {s} {s}\n" ++
+                "source_module program_semantics_v1 shared_runtime_semantics src/program_semantics_v1.zig\n" ++
                 "source_module program_v2 {s} {s}\n" ++
+                "source_module reducer_clause_v1 image_runtime_semantics src/reducer_clause_v1.zig\n" ++
+                "source_module reified_program_v1 {s} {s}\n" ++
                 "source_module rnf {s} {s}\n",
             .{
                 std.meta.fields(CoreModules).len,
@@ -928,14 +1700,24 @@ pub fn build(b: *std.Build) void {
                 coreModulePath(.control_ir),
                 @tagName(coreModuleRole(.driver)),
                 coreModulePath(.driver),
+                @tagName(coreModuleRole(.dynamic_value_v1)),
+                coreModulePath(.dynamic_value_v1),
                 @tagName(coreModuleRole(.effect_v2)),
                 coreModulePath(.effect_v2),
+                @tagName(coreModuleRole(.image_v1)),
+                coreModulePath(.image_v1),
+                @tagName(coreModuleRole(.image_emit_v1)),
+                coreModulePath(.image_emit_v1),
+                @tagName(coreModuleRole(.kernel_v1)),
+                coreModulePath(.kernel_v1),
                 @tagName(coreModuleRole(.machine)),
                 coreModulePath(.machine),
                 @tagName(coreModuleRole(.portable_value)),
                 coreModulePath(.portable_value),
                 @tagName(coreModuleRole(.program_v2)),
                 coreModulePath(.program_v2),
+                @tagName(coreModuleRole(.reified_program_v1)),
+                coreModulePath(.reified_program_v1),
                 @tagName(coreModuleRole(.rnf)),
                 coreModulePath(.rnf),
             },
@@ -1084,6 +1866,14 @@ pub fn build(b: *std.Build) void {
         .{
             "test/compile_fail/non_enum_failure_void.zig",
             "Body.Failure must be an exhaustive enum",
+        },
+        .{
+            "test/compile_fail/image_failure_variant_limit.zig",
+            "BPI1 failure variants exceed validator capacity",
+        },
+        .{
+            "test/compile_fail/image_schema_member_limit.zig",
+            "BPI1 schema members exceed validator capacity",
         },
         .{
             "test/compile_fail/oversized_machine_state.zig",
@@ -1252,7 +2042,8 @@ pub fn build(b: *std.Build) void {
     });
     const lint_step = b.step("lint", "Lint Boundary Zig source.");
     lint_step.dependOn(&format_command.step);
-    addZigPathCoverageGuard(b, lint_step);
+    const zig_path_coverage_guard = addZigPathCoverageGuard(b);
+    lint_step.dependOn(zig_path_coverage_guard);
     var lint_builder = zlinter.builder(b, .{});
     lint_builder.addPaths(.{
         .include = &.{
@@ -1287,10 +2078,212 @@ pub fn build(b: *std.Build) void {
     defer b.graph.global_cache_root.path = saved_global_cache_path;
     lint_step.dependOn(lint_builder.build());
 
+    const image_canonical_step = b.step(
+        "check-boundary-image-canonical",
+        "Check canonical BPI1 emission, validation, and exact re-encoding.",
+    );
+    image_canonical_step.dependOn(image_step);
+    image_canonical_step.dependOn(reified_core_step);
+    const image_profile_invariance_step = b.step(
+        "check-boundary-image-profile-invariance",
+        "Prove BPI1 bytes ignore Machine v2 profiles and metering annotations.",
+    );
+    image_profile_invariance_step.dependOn(reified_core_step);
+    const machine_v2_profile_projection_step = b.step(
+        "check-boundary-machine-v2-profile-projection",
+        "Prove semantic RNF quotients mixed legacy checkpoint and jump paths.",
+    );
+    addTestArtifact(b, machine_v2_profile_projection_step, machine_yield);
+    const pure_evaluator_surface_guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "if rg -n 'machine_v2|machine\\.zig|MachineOptions|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded|ABL_RNF2' src/program_semantics_v1.zig src/reducer_clause_v1.zig src/image_v1.zig src/reified_program_v1.zig; then exit 1; fi; if rg -n '@import\\(\"(machine|machine_v2|kernel)' src/program_semantics_v1.zig src/reducer_clause_v1.zig src/image_v1.zig src/image_emit_v1.zig src/reified_program_v1.zig; then exit 1; fi",
+    });
+    const isolated_pure = addPureProgramModules(
+        b,
+        b.graph.host,
+        optimize,
+    );
+    const isolated_clause_test = b.createModule(.{
+        .root_source_file = b.path("test/reducer_clause_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    isolated_clause_test.addImport(
+        "reducer_clause_v1",
+        isolated_pure.reducer_clause_v1,
+    );
+    isolated_clause_test.addImport("image_v1", isolated_pure.image_v1);
+    const pure_topology_files = b.addWriteFiles();
+    const pure_topology_receipt = pure_topology_files.add(
+        "boundary-pure-module-topology.txt",
+        "control_ir -> program_semantics_v1\n" ++
+            "portable_value -> program_semantics_v1\n" ++
+            "rnf -> program_semantics_v1\n" ++
+            "dynamic_value_v1 -> image_v1\n" ++
+            "program_semantics_v1 -> image_v1\n" ++
+            "dynamic_value_v1 -> reducer_clause_v1\n" ++
+            "image_v1 -> reducer_clause_v1\n" ++
+            "program_semantics_v1 -> reducer_clause_v1\n",
+    );
+    const pure_topology_guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "test \"$(wc -l < \"$1\" | tr -d ' ')\" -eq 8 && ! rg -n 'machine|kernel' \"$1\"",
+        "sh",
+    });
+    pure_topology_guard.addFileArg(pure_topology_receipt);
+    const pure_evaluator_step = b.step(
+        "check-boundary-pure-evaluator",
+        "Check one finite BPI1 reducer clause without Machine v2 policy.",
+    );
+    addTestArtifact(b, pure_evaluator_step, isolated_clause_test);
+    pure_evaluator_step.dependOn(&pure_evaluator_surface_guard.step);
+    pure_evaluator_step.dependOn(&pure_topology_guard.step);
+    const image_malformed_step = b.step(
+        "check-boundary-image-malformed",
+        "Reject deterministic malformed BPI1 and ABL_RNF2 corpora.",
+    );
+    image_malformed_step.dependOn(reified_core_step);
+    image_malformed_step.dependOn(malformed_step);
+    const image_digest_step = b.step(
+        "check-boundary-image-digest",
+        "Reconstruct Program, Machine, schema, and effect digests from BPI1.",
+    );
+    image_digest_step.dependOn(reified_core_step);
+    const kernel_native_step = b.step(
+        "check-boundary-machine-v2-kernel-native",
+        "Check fixed native kernel execution across the admitted algebra.",
+    );
+    kernel_native_step.dependOn(reified_core_step);
+    kernel_native_step.dependOn(values_step);
+    kernel_native_step.dependOn(recursion_step);
+    const kernel_machine_step = b.step(
+        "check-boundary-machine-v2-kernel-adapter",
+        "Check typed KernelMachine ABI and ownership parity.",
+    );
+    kernel_machine_step.dependOn(reified_core_step);
+    kernel_machine_step.dependOn(single_reducer_step);
+    const specialization_equivalence_step = b.step(
+        "check-boundary-specialization-equivalence",
+        "Check direct and fixed-kernel transition equivalence.",
+    );
+    specialization_equivalence_step.dependOn(kernel_native_step);
+    specialization_equivalence_step.dependOn(kernel_machine_step);
+    specialization_equivalence_step.dependOn(parity_step);
+    const engine_switch_step = b.step(
+        "check-boundary-engine-switch",
+        "Exchange canonical States between direct and kernel engines.",
+    );
+    engine_switch_step.dependOn(reified_core_step);
+    engine_switch_step.dependOn(recursion_step);
+    const reification_deletion_step = b.step(
+        "check-boundary-reification-deletion",
+        "Check declared engine independence and removed runtime surfaces.",
+    );
+    reification_deletion_step.dependOn(deletion_step);
+    reification_deletion_step.dependOn(single_reducer_step);
+    const reification_measure_step = b.step(
+        "check-boundary-reification-measure",
+        "Measure direct and fixed-kernel artifacts under retained hard gates.",
+    );
+    reification_measure_step.dependOn(performance_step);
+    reification_measure_step.dependOn(kernel_wasm_step);
+    const reification_receipt_step = b.step(
+        "check-boundary-reification-receipt",
+        "Run the executable Boundary Reification v1 receipt surface.",
+    );
+    const reification_receipt_script_test = b.addSystemCommand(&.{
+        "node",
+        "test/reification_receipt_v1.mjs",
+    });
+    reification_receipt_step.dependOn(&reification_receipt_script_test.step);
+    inline for (.{
+        image_canonical_step,
+        image_profile_invariance_step,
+        machine_v2_profile_projection_step,
+        image_malformed_step,
+        image_digest_step,
+        pure_evaluator_step,
+        specialization_equivalence_step,
+        engine_switch_step,
+        reification_generated_step,
+        reification_deletion_step,
+        reification_measure_step,
+    }) |dependency| reification_receipt_step.dependOn(dependency);
+    const reification_proof_stamp_command = b.addSystemCommand(&.{
+        "node",
+        "scripts/write_reification_proof.mjs",
+    });
+    reification_proof_stamp_command.addFileArg(kernel_wasm_proof);
+    reification_proof_stamp_command.addFileArg(reification_baseline_proof);
+    reification_proof_stamp_command.addFileArg(reification_semantic_proof);
+    reification_proof_stamp_command.addFileArg(reification_generated_proof);
+    reification_proof_stamp_command.addFileArg(b.path("src/root.zig"));
+    reification_proof_stamp_command.addFileArg(b.path("build.zig"));
+    inline for (.{
+        "src/control_ir.zig",
+        "src/dynamic_value_v1.zig",
+        "src/image_v1.zig",
+        "src/portable_value.zig",
+        "src/program_semantics_v1.zig",
+        "src/reducer_clause_v1.zig",
+        "src/rnf.zig",
+    }) |source_path| reification_proof_stamp_command.addFileArg(
+        b.path(source_path),
+    );
+    reification_proof_stamp_command.addArg("--pure-semantics");
+    inline for (.{
+        "src/image_emit_v1.zig",
+        "src/image_v1.zig",
+        "src/program_semantics_v1.zig",
+        "src/reducer_clause_v1.zig",
+        "src/reified_program_v1.zig",
+    }) |source_path| reification_proof_stamp_command.addFileArg(
+        b.path(source_path),
+    );
+    reification_proof_stamp_command.addArg("--all-sources");
+    var reification_source_paths = std.mem.splitScalar(
+        u8,
+        @embedFile("repo_zig_paths.txt"),
+        '\n',
+    );
+    while (reification_source_paths.next()) |source_path| {
+        if (!std.mem.startsWith(u8, source_path, "src/") or
+            source_path.len == 0)
+        {
+            continue;
+        }
+        reification_proof_stamp_command.addFileArg(b.path(source_path));
+    }
+    reification_proof_stamp_command.addArg("--receipt-sources");
+    addReificationReceiptSources(b, reification_proof_stamp_command);
+    reification_proof_stamp_command.step.dependOn(zig_path_coverage_guard);
+    const reification_proof_stamp = reification_proof_stamp_command.captureStdOut(.{
+        .basename = "boundary-reification-v1-proof.json",
+    });
+    reification_asset_receipt_command.addFileArg(reification_proof_stamp);
+    reification_receipt_step.dependOn(&reification_asset_receipt_command.step);
+    inline for (.{
+        install_kernel,
+        install_kernel_sha,
+        install_one_effect,
+        install_one_effect_sha,
+        install_portable_values,
+        install_portable_values_sha,
+        install_one_effect_profile,
+        install_one_effect_profile_sha,
+        install_portable_values_profile,
+        install_portable_values_profile_sha,
+        install_reification_receipt,
+    }) |installation| installation.step.dependOn(reification_receipt_step);
+    emit_reification_assets_step.dependOn(reification_receipt_step);
+
     const receipt_falsifier_step = b.step(
         "check-boundary-machine-receipt-falsifiers",
         "Prove completion receipt reachability from the live build graph.",
     );
+    receipt_falsifier_step.dependOn(&reification_receipt_script_test.step);
 
     const release_proof_step = b.step(
         "check-boundary-machine-release-proof",
@@ -1298,6 +2291,9 @@ pub fn build(b: *std.Build) void {
     );
     inline for (.{
         test_step,
+        reification_baseline_step,
+        reified_core_step,
+        image_step,
         rnf_step,
         control_step,
         values_step,
@@ -1309,6 +2305,9 @@ pub fn build(b: *std.Build) void {
         after_step,
         agent_step,
         parity_step,
+        kernel_wasm_step,
+        reification_generated_step,
+        reification_receipt_step,
         no_interpreter_step,
         deletion_step,
         compile_fail_step,

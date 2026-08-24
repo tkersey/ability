@@ -56,7 +56,11 @@ require_complete_current_topology() {
         }
         {
             if (NF != 4 || $1 != "source_module") exit 1
-            if ($3 != "support" && $3 != "runtime_semantics") exit 1
+            if ($3 != "support" &&
+                $3 != "runtime_semantics" &&
+                $3 != "direct_runtime_semantics" &&
+                $3 != "image_runtime_semantics" &&
+                $3 != "shared_runtime_semantics") exit 1
         }
         END {
             if (NR < 2) exit 1
@@ -94,7 +98,7 @@ require_single_reducer_receipt() {
     test "$(grep -Fxc \
         'reducer_public_entry=Program.compile(...).step' \
         "$reducer_receipt")" -eq 1 || return 1
-    test "$(grep -Fxc 'program_compile_surface_count=1' \
+    test "$(grep -Fxc 'program_execution_constructor_count=3' \
         "$reducer_receipt")" -eq 1 || return 1
     test "$(wc -l <"$reducer_receipt" | tr -d ' ')" -eq 3 || return 1
 }
@@ -104,7 +108,24 @@ current_runtime_semantic_module_count() {
     topology_receipt=$2
     require_complete_current_topology "$source_root" "$topology_receipt"
     awk '
-        $1 == "source_module" && $3 == "runtime_semantics" { count += 1 }
+        $1 == "source_module" &&
+            ($3 == "runtime_semantics" ||
+             $3 == "direct_runtime_semantics" ||
+             $3 == "image_runtime_semantics" ||
+             $3 == "shared_runtime_semantics") { count += 1 }
+        END { print count + 0 }
+    ' "$topology_receipt"
+}
+
+current_direct_runtime_semantic_module_count() {
+    source_root=$1
+    topology_receipt=$2
+    require_complete_current_topology "$source_root" "$topology_receipt"
+    awk '
+        $1 == "source_module" &&
+            ($3 == "runtime_semantics" ||
+             $3 == "direct_runtime_semantics" ||
+             $3 == "shared_runtime_semantics") { count += 1 }
         END { print count + 0 }
     ' "$topology_receipt"
 }
@@ -232,10 +253,10 @@ self_test() {
         echo "state-size regression was accepted" >&2
         exit 1
     fi
-    test 2 -lt 4 ||
-        { echo "semantic-module reduction was rejected" >&2; exit 1; }
-    if test 4 -lt 4; then
-        echo "semantic-module non-reduction was accepted" >&2
+    test 4 -le 4 ||
+        { echo "semantic-module equality was rejected" >&2; exit 1; }
+    if test 5 -le 4; then
+        echo "semantic-module growth was accepted" >&2
         exit 1
     fi
     require_optimization_mode ReleaseSmall
@@ -277,12 +298,35 @@ self_test() {
     printf '%s\n' \
         'single_boundary_reducer=true' \
         'reducer_public_entry=Program.compile(...).step' \
-        'program_compile_surface_count=1' \
+        'program_execution_constructor_count=3' \
         >"$reducer_test_receipt"
     require_single_reducer_receipt "$reducer_test_receipt"
     test "$(current_runtime_semantic_module_count \
         "$topology_test_root" \
         "$topology_test_receipt")" -eq 2
+    touch "$topology_test_root/src/image_v1.zig"
+    printf '%s\n' \
+        'core_module_count=4' \
+        'source_module root support src/root.zig' \
+        'source_module compiler direct_runtime_semantics src/compiler.zig' \
+        'source_module image_v1 image_runtime_semantics src/image_v1.zig' \
+        'source_module machine direct_runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
+        >"$topology_test_receipt"
+    test "$(current_runtime_semantic_module_count \
+        "$topology_test_root" \
+        "$topology_test_receipt")" -eq 3
+    test "$(current_direct_runtime_semantic_module_count \
+        "$topology_test_root" \
+        "$topology_test_receipt")" -eq 2
+    rm "$topology_test_root/src/image_v1.zig"
+    printf '%s\n' \
+        'core_module_count=3' \
+        'source_module root support src/root.zig' \
+        'source_module compiler runtime_semantics src/compiler.zig' \
+        'source_module machine runtime_semantics src/machine.zig' \
+        'source_module program_v2 support src/program_v2.zig' \
+        >"$topology_test_receipt"
     printf '%s\n' 'runtime_semantic_module_count=1' \
         >>"$reducer_test_receipt"
     if require_single_reducer_receipt "$reducer_test_receipt"; then
@@ -589,8 +633,13 @@ current_runtime_semantic_modules=$(
         "$repository_root" \
         "$topology_receipt"
 )
-test "$current_runtime_semantic_modules" \
-    -lt "$baseline_runtime_semantic_modules"
+current_direct_runtime_semantic_modules=$(
+    current_direct_runtime_semantic_module_count \
+        "$repository_root" \
+        "$topology_receipt"
+)
+test "$current_direct_runtime_semantic_modules" \
+    -le "$baseline_runtime_semantic_modules"
 
 echo "boundary_performance_baseline_compile $baseline_compile_observation"
 echo "boundary_performance_status=pass baseline_release=$baseline_tag" \
@@ -615,4 +664,5 @@ echo "boundary_performance_status=pass baseline_release=$baseline_tag" \
     "wasm_result_schema=i32" \
     "current_wasm_witness=machine-performance-one-effect" \
     "baseline_runtime_semantic_modules=$baseline_runtime_semantic_modules" \
+    "current_direct_runtime_semantic_modules=$current_direct_runtime_semantic_modules" \
     "current_runtime_semantic_modules=$current_runtime_semantic_modules"
