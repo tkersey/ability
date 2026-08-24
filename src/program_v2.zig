@@ -90,6 +90,18 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
+        /// Stream the canonical Boundary Program Image without materializing
+        /// the complete envelope as one compile-time byte array.
+        pub fn writeImage(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            return image_emit_v1.writeProgramImage(Reified, writer);
+        }
+
+        /// Encode BPI1 into caller-owned storage while keeping the maximum
+        /// graph segment table out of comptime byte-array materialization.
+        pub fn encodeImage(output: []u8) image_emit_v1.RuntimeError!usize {
+            return image_emit_v1.encodeProgramImage(Reified, output);
+        }
+
         /// Materialize the bounded Machine ABI v2 policy separately from BPI1.
         pub fn machineV2Profile(comptime options: machine.Options) type {
             const DirectMachine = compileV2(options);

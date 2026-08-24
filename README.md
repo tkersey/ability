@@ -13,6 +13,9 @@ typed source -> Control IR -> semantic RNF -> Reified Program -> BPI1
 
 The direct reducer remains the default specialized engine. `Program.image()`
 emits the canonical Boundary Program Image without execution options.
+For large programs, `Program.encodeImage(output)` emits the same bytes into
+caller-owned runtime storage without materializing complete section buffers at
+compile time.
 `Program.kernelMachineV2(options)` combines that image with the separately
 identified bounded compatibility profile.
 Its canonical

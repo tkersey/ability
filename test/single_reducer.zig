@@ -95,10 +95,12 @@ comptime {
     if (!@hasDecl(Program, "compile") or
         !@hasDecl(Program, "compileV2") or
         !@hasDecl(Program, "image") or
+        !@hasDecl(Program, "writeImage") or
+        !@hasDecl(Program, "encodeImage") or
         !@hasDecl(Program, "machineV2Profile") or
         !@hasDecl(Program, "kernelMachineV2") or
         @hasDecl(Program, "kernelMachine") or
-        functionDeclarationCount(Program) != 5)
+        functionDeclarationCount(Program) != 7)
     {
         @compileError("Boundary Program exposes a competing compilation route");
     }

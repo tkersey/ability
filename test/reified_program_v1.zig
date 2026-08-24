@@ -368,6 +368,20 @@ test "Program.image has no Machine options parameter" {
     try std.testing.expectEqual(@as(usize, 0), info.params.len);
 }
 
+test "Program.writeImage streams the exact canonical image" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    try Program.writeImage(&output.writer);
+    try std.testing.expectEqualSlices(u8, &Image.bytes, output.written());
+}
+
+test "Program.encodeImage writes the exact canonical image" {
+    var output: [Image.bytes.len]u8 = undefined;
+    const length = try Program.encodeImage(&output);
+    try std.testing.expectEqual(Image.bytes.len, length);
+    try std.testing.expectEqualSlices(u8, &Image.bytes, output[0..length]);
+}
+
 test "non-unit root result rejects valueless completion" {
     var malformed = Image.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);

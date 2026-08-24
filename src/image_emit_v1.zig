@@ -5,6 +5,7 @@ const program_semantics_v1 = @import("program_semantics_v1");
 const std = @import("std");
 
 const maximum_nodes = 1024;
+const schema_bucket_count = maximum_nodes * 2;
 const maximum_bytes = 1 << 20;
 const maximum_image_bytes = 16 << 20;
 
@@ -84,7 +85,8 @@ pub fn Envelope(
         break :blk total;
     };
     const encoded = comptime blk: {
-        var bytes: [total_length]u8 = [_]u8{0} ** total_length;
+        var bytes: [total_length]u8 = undefined;
+        @memset(bytes[0..image_v1.header_length], 0);
         @memcpy(bytes[0..image_v1.magic.len], &image_v1.magic);
         writeAt(u16, &bytes, 8, image_v1.image_format_version);
         writeAt(u16, &bytes, 10, image_v1.evaluator_semantics_version);
@@ -129,9 +131,12 @@ fn writeAt(
 }
 
 const Builder = struct {
-    bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes,
+    bytes: [maximum_bytes]u8 = undefined,
     offsets: [maximum_nodes]u32 = undefined,
     lengths: [maximum_nodes]u32 = undefined,
+    hashes: [maximum_nodes]u64 = undefined,
+    buckets: [schema_bucket_count]?u32 =
+        [_]?u32{null} ** schema_bucket_count,
     node_count: usize = 0,
     length: usize = 4,
 
@@ -218,23 +223,33 @@ const Builder = struct {
         self.writeInt(u16, 0);
         for (words) |word| self.writeInt(u32, word);
 
-        for (0..self.node_count) |existing| {
-            if (self.length - start != self.lengths[existing]) continue;
-            const offset: usize = self.offsets[existing];
-            if (std.mem.eql(
-                u8,
-                self.bytes[offset .. offset + self.lengths[existing]],
-                self.bytes[start..self.length],
-            )) {
-                self.length = start;
-                return @intCast(existing);
+        const record = self.bytes[start..self.length];
+        const hash = recordHash(record);
+        var bucket: usize = @intCast(hash & (schema_bucket_count - 1));
+        while (self.buckets[bucket]) |existing_id| {
+            const existing: usize = @intCast(existing_id);
+            if (self.hashes[existing] == hash and
+                record.len == self.lengths[existing])
+            {
+                const offset: usize = self.offsets[existing];
+                if (std.mem.eql(
+                    u8,
+                    self.bytes[offset .. offset + self.lengths[existing]],
+                    record,
+                )) {
+                    self.length = start;
+                    return existing_id;
+                }
             }
+            bucket = (bucket + 1) & (schema_bucket_count - 1);
         }
         if (self.node_count == maximum_nodes) {
             @compileError("BPI1 schema node count exceeds implementation limit");
         }
         self.offsets[self.node_count] = @intCast(start);
         self.lengths[self.node_count] = @intCast(record_length);
+        self.hashes[self.node_count] = hash;
+        self.buckets[bucket] = @intCast(self.node_count);
         defer self.node_count += 1;
         return @intCast(self.node_count);
     }
@@ -265,6 +280,15 @@ const Builder = struct {
         }
     }
 };
+
+fn recordHash(bytes: []const u8) u64 {
+    var hash: u64 = 0xcbf29ce484222325;
+    for (bytes) |byte| {
+        hash ^= byte;
+        hash *%= 0x100000001b3;
+    }
+    return hash;
+}
 
 /// Produce the canonical structurally interned schema section for one ordered
 /// root tuple. Root ids preserve tuple order; schema nodes use DFS postorder.
@@ -408,7 +432,7 @@ pub fn ProgramSchemaSet(comptime Reified: type) type {
     };
 }
 
-pub fn ProgramImage(
+pub fn ProgramImageParts(
     comptime Reified: type,
 ) type {
     const Schemas = ProgramSchemaSet(Reified);
@@ -434,21 +458,1084 @@ pub fn ProgramImage(
         &Transitions.bytes,
     };
     const scratch = comptime conservativeKernelScratch(Reified, Schemas);
+    const total_length = comptime blk: {
+        var total: usize = image_v1.header_length;
+        for (sections) |section| total += section.len;
+        if (total > maximum_image_bytes) {
+            @compileError("BPI1 image exceeds the default 16 MiB profile");
+        }
+        break :blk total;
+    };
+    return struct {
+        pub const section_bytes = sections;
+        pub const byte_length: u64 = total_length;
+        pub const program_transition_digest = Reified.program_transition_digest;
+        pub const maximum_kernel_scratch_bytes = scratch;
+        pub const maximum_single_value_bytes = Schemas.maximum_single_value_bytes;
+    };
+}
+
+pub fn ProgramImage(
+    comptime Reified: type,
+) type {
+    const Parts = ProgramImageParts(Reified);
     const Encoded = Envelope(.{
-        .program_transition_digest = Reified.program_transition_digest,
-        .maximum_kernel_scratch_bytes = scratch,
-        .maximum_single_value_bytes = Schemas.maximum_single_value_bytes,
-    }, sections);
+        .program_transition_digest = Parts.program_transition_digest,
+        .maximum_kernel_scratch_bytes = Parts.maximum_kernel_scratch_bytes,
+        .maximum_single_value_bytes = Parts.maximum_single_value_bytes,
+    }, Parts.section_bytes);
     return struct {
         pub const format_version = image_v1.image_format_version;
         pub const bytes = Encoded.bytes;
         pub const byte_length = Encoded.byte_length;
-        pub const program_transition_digest =
-            Reified.program_transition_digest;
+        pub const program_transition_digest = Parts.program_transition_digest;
         pub const artifact_sha256 = Encoded.artifact_sha256;
-        pub const maximum_kernel_scratch_bytes = scratch;
-        pub const maximum_single_value_bytes = Schemas.maximum_single_value_bytes;
+        pub const maximum_kernel_scratch_bytes =
+            Parts.maximum_kernel_scratch_bytes;
+        pub const maximum_single_value_bytes = Parts.maximum_single_value_bytes;
     };
+}
+
+pub fn writeProgramImage(
+    comptime Reified: type,
+    writer: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    const Parts = ProgramImageParts(Reified);
+    var header: [image_v1.header_length]u8 =
+        [_]u8{0} ** image_v1.header_length;
+    @memcpy(header[0..image_v1.magic.len], &image_v1.magic);
+    writeAt(u16, &header, 8, image_v1.image_format_version);
+    writeAt(u16, &header, 10, image_v1.evaluator_semantics_version);
+    writeAt(u32, &header, 16, image_v1.header_length);
+    writeAt(u32, &header, 20, image_v1.section_count);
+    writeAt(u64, &header, 24, Parts.byte_length);
+    @memcpy(header[32..64], &Parts.program_transition_digest);
+    writeAt(
+        u64,
+        &header,
+        64,
+        Parts.maximum_kernel_scratch_bytes,
+    );
+    writeAt(u32, &header, 72, Parts.maximum_single_value_bytes);
+
+    var payload_offset: u64 = image_v1.header_length;
+    for (Parts.section_bytes, 0..) |section, index| {
+        const descriptor = image_v1.fixed_prefix_length +
+            index * image_v1.section_descriptor_length;
+        writeAt(u16, &header, descriptor, index + 1);
+        writeAt(u16, &header, descriptor + 2, 1);
+        writeAt(u64, &header, descriptor + 8, payload_offset);
+        writeAt(u64, &header, descriptor + 16, section.len);
+        payload_offset += section.len;
+    }
+    try writer.writeAll(&header);
+    for (Parts.section_bytes) |section| try writer.writeAll(section);
+}
+
+pub const RuntimeError = error{
+    OutputCapacity,
+    SectionCapacity,
+};
+
+const RuntimeWriter = struct {
+    bytes: []u8,
+    cursor: usize,
+
+    fn append(
+        self: *RuntimeWriter,
+        comptime T: type,
+        value: anytype,
+    ) RuntimeError!void {
+        if (self.cursor > self.bytes.len -| @sizeOf(T)) {
+            return error.OutputCapacity;
+        }
+        writeAt(T, self.bytes, self.cursor, value);
+        self.cursor += @sizeOf(T);
+    }
+
+    fn copy(self: *RuntimeWriter, value: []const u8) RuntimeError!void {
+        if (value.len > self.bytes.len -| self.cursor) {
+            return error.OutputCapacity;
+        }
+        @memcpy(self.bytes[self.cursor..][0..value.len], value);
+        self.cursor += value.len;
+    }
+
+    fn patch(self: *RuntimeWriter, comptime T: type, offset: usize, value: anytype) void {
+        writeAt(T, self.bytes, offset, value);
+    }
+};
+
+fn RuntimeSchemas(comptime Reified: type) type {
+    @setEvalBranchQuota(10_000_000);
+    const effect_count = Reified.residual_effects.residual_count;
+    const value_count = Reified.semantic_canonicalization.value_count;
+    const function_count = Reified.semantic_canonicalization.function_count;
+    const root_count = 3 + effect_count * 2 + value_count + function_count;
+    const RootTypes = comptime blk: {
+        var result: [root_count]type = undefined;
+        var index: usize = 0;
+        result[index] = Reified.Body.InitialArgs;
+        index += 1;
+        result[index] = Reified.Body.Result;
+        index += 1;
+        result[index] = Reified.Body.Failure;
+        index += 1;
+        for (0..effect_count) |ordinal| {
+            const Site = residualSite(Reified, ordinal);
+            result[index] = Site.Payload;
+            index += 1;
+            result[index] = Site.Resume;
+            index += 1;
+        }
+        for (0..value_count) |dense_value| {
+            const source_value = Reified.semantic_canonicalization
+                .value_dense_to_source[dense_value];
+            result[index] = Reified.portableType(
+                Reified.control.value_types[source_value],
+            );
+            index += 1;
+        }
+        for (0..function_count) |dense_function| {
+            const source_function = Reified.semantic_canonicalization
+                .function_dense_to_source[dense_function];
+            const result_type = if (Reified.control.functions.len == 0)
+                Reified.control.result_type
+            else
+                Reified.control.functions[source_function].result_type;
+            result[index] = Reified.portableType(result_type);
+            index += 1;
+        }
+        break :blk result;
+    };
+    return struct {
+        const Self = @This();
+        pub const initial_args_root_index: usize = 0;
+        pub const result_root_index: usize = 1;
+        pub const failure_root_index: usize = 2;
+        pub const effect_root_start: usize = 3;
+        pub const value_root_start: usize = effect_root_start + effect_count * 2;
+        pub const function_root_start: usize = value_root_start + value_count;
+
+        root_ids: [root_count]u32,
+        offsets: [maximum_nodes]u32,
+        lengths: [maximum_nodes]u32,
+        hashes: [maximum_nodes]u64,
+        buckets: [schema_bucket_count]?u32,
+        node_count: usize,
+
+        fn build(writer: *RuntimeWriter) RuntimeError!Self {
+            var self: Self = .{
+                .root_ids = undefined,
+                .offsets = undefined,
+                .lengths = undefined,
+                .hashes = undefined,
+                .buckets = [_]?u32{null} ** schema_bucket_count,
+                .node_count = 0,
+            };
+            const count_offset = writer.cursor;
+            try writer.append(u32, 0);
+            inline for (RootTypes, 0..) |Root, index| {
+                self.root_ids[index] = try self.intern(writer, Root);
+            }
+            writer.patch(u32, count_offset, self.node_count);
+            return self;
+        }
+
+        fn intern(
+            self: *Self,
+            writer: *RuntimeWriter,
+            comptime T: type,
+        ) RuntimeError!u32 {
+            comptime portable_value.assertPortable(T);
+            if (comptime portable_value.isVectorType(T)) {
+                const child = try self.intern(writer, T.ElementType);
+                return self.appendRecord(writer, .vector, &.{
+                    castU32(T.maximum_length),
+                    child,
+                });
+            }
+            if (comptime portable_value.isBytesType(T)) {
+                return self.appendRecord(
+                    writer,
+                    .bytes,
+                    &.{castU32(T.maximum_length)},
+                );
+            }
+            if (comptime portable_value.isTextType(T)) {
+                return self.appendRecord(
+                    writer,
+                    .text,
+                    &.{castU32(T.maximum_length)},
+                );
+            }
+            return switch (@typeInfo(T)) {
+                .void => self.appendRecord(writer, .unit, &.{}),
+                .bool => self.appendRecord(writer, .bool, &.{}),
+                .int => self.appendRecord(writer, integerKind(T), &.{}),
+                .array => |info| blk: {
+                    const child = try self.intern(writer, info.child);
+                    break :blk self.appendRecord(writer, .array, &.{
+                        castU32(info.len),
+                        child,
+                    });
+                },
+                .optional => |info| blk: {
+                    const child = try self.intern(writer, info.child);
+                    break :blk self.appendRecord(writer, .optional, &.{child});
+                },
+                .@"enum" => |info| blk: {
+                    assertSchemaMemberCount(info.fields.len);
+                    var words: [1 + info.fields.len]u32 = undefined;
+                    words[0] = castU32(info.fields.len);
+                    inline for (info.fields, 0..) |field, index| {
+                        words[index + 1] = std.math.cast(u32, field.value) orelse
+                            unreachable;
+                    }
+                    break :blk self.appendRecord(writer, .@"enum", &words);
+                },
+                .@"struct" => |info| blk: {
+                    assertSchemaMemberCount(info.fields.len);
+                    var words: [1 + info.fields.len]u32 = undefined;
+                    words[0] = castU32(info.fields.len);
+                    inline for (info.fields, 0..) |field, index| {
+                        words[index + 1] = try self.intern(writer, field.type);
+                    }
+                    break :blk self.appendRecord(writer, .product, &words);
+                },
+                .@"union" => |info| blk: {
+                    assertSchemaMemberCount(info.fields.len);
+                    const Tag = info.tag_type.?;
+                    var words: [2 + info.fields.len * 2]u32 = undefined;
+                    words[0] = try self.intern(writer, Tag);
+                    words[1] = castU32(info.fields.len);
+                    inline for (info.fields, 0..) |field, index| {
+                        words[2 + index * 2] = @intFromEnum(
+                            @field(Tag, field.name),
+                        );
+                        words[3 + index * 2] = try self.intern(
+                            writer,
+                            field.type,
+                        );
+                    }
+                    break :blk self.appendRecord(writer, .sum, &words);
+                },
+                else => unreachable,
+            };
+        }
+
+        fn appendRecord(
+            self: *Self,
+            writer: *RuntimeWriter,
+            kind: dynamic_value_v1.Kind,
+            words: []const u32,
+        ) RuntimeError!u32 {
+            const start = writer.cursor;
+            const record_length = 8 + words.len * 4;
+            try writer.append(u32, record_length);
+            try writer.append(u8, @intFromEnum(kind));
+            try writer.append(u8, 0);
+            try writer.append(u16, 0);
+            for (words) |word| try writer.append(u32, word);
+
+            const record = writer.bytes[start..writer.cursor];
+            const hash = recordHash(record);
+            var bucket: usize = @intCast(hash & (schema_bucket_count - 1));
+            while (self.buckets[bucket]) |existing_id| {
+                const existing: usize = @intCast(existing_id);
+                if (self.hashes[existing] == hash and
+                    record.len == self.lengths[existing])
+                {
+                    const offset: usize = self.offsets[existing];
+                    if (std.mem.eql(
+                        u8,
+                        writer.bytes[offset .. offset + self.lengths[existing]],
+                        record,
+                    )) {
+                        writer.cursor = start;
+                        return existing_id;
+                    }
+                }
+                bucket = (bucket + 1) & (schema_bucket_count - 1);
+            }
+            if (self.node_count == maximum_nodes) return error.SectionCapacity;
+            self.offsets[self.node_count] = @intCast(start);
+            self.lengths[self.node_count] = @intCast(record_length);
+            self.hashes[self.node_count] = hash;
+            self.buckets[bucket] = @intCast(self.node_count);
+            defer self.node_count += 1;
+            return @intCast(self.node_count);
+        }
+
+        fn schemaIdForValueType(
+            self: *const Self,
+            comptime value_type: anytype,
+        ) u32 {
+            inline for (0..value_count) |dense_value| {
+                const source_value = Reified.semantic_canonicalization
+                    .value_dense_to_source[dense_value];
+                if (Reified.control.value_types[source_value].eql(value_type)) {
+                    return self.root_ids[value_root_start + dense_value];
+                }
+            }
+            unreachable;
+        }
+    };
+}
+
+fn RuntimeConstants(comptime Reified: type) type {
+    const source_count = if (@hasDecl(Reified.Body, "constants"))
+        Reified.Body.constants.len
+    else
+        0;
+    return struct {
+        const Self = @This();
+        source_to_canonical: [source_count]?u32,
+
+        fn build(
+            schemas_state: *const RuntimeSchemas(Reified),
+            writer: *RuntimeWriter,
+        ) RuntimeError!Self {
+            var self: Self = .{
+                .source_to_canonical = [_]?u32{null} ** source_count,
+            };
+            var offsets: [Reified.compiler_limits.maximum_values]u32 = undefined;
+            var lengths: [Reified.compiler_limits.maximum_values]u32 = undefined;
+            var schemas: [Reified.compiler_limits.maximum_values]u32 = undefined;
+            var count: usize = 0;
+            const count_offset = writer.cursor;
+            try writer.append(u32, 0);
+            inline for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
+                const source_block = Reified.semantic_canonicalization
+                    .block_dense_to_source[dense_block];
+                const block = comptime Reified.control.blocks[source_block];
+                inline for (block.instructions) |instruction| {
+                    const constant_index = switch (instruction.operation) {
+                        .constant => |index| index,
+                        else => continue,
+                    };
+                    const value = Reified.Body.constants[constant_index];
+                    const Value = @TypeOf(value);
+                    const value_length = portable_value.encodedSize(
+                        Value,
+                        value,
+                    ) catch unreachable;
+                    const dense_value = Reified.semantic_canonicalization.valueId(
+                        instruction.result,
+                    );
+                    const schema_id = schemas_state.root_ids[
+                        RuntimeSchemas(Reified).value_root_start + dense_value
+                    ];
+                    var canonical: [portable_value.maximumEncodedSize(Value)]u8 =
+                        undefined;
+                    const encoded_length = portable_value.encode(
+                        Value,
+                        value,
+                        &canonical,
+                    ) catch unreachable;
+                    std.debug.assert(encoded_length == value_length);
+                    var canonical_id: ?u32 = null;
+                    for (0..count) |existing| {
+                        if (schemas[existing] != schema_id or
+                            lengths[existing] != value_length)
+                        {
+                            continue;
+                        }
+                        const offset: usize = offsets[existing];
+                        if (std.mem.eql(
+                            u8,
+                            writer.bytes[offset .. offset + value_length],
+                            canonical[0..value_length],
+                        )) {
+                            canonical_id = @intCast(existing);
+                            break;
+                        }
+                    }
+                    if (canonical_id) |id| {
+                        self.source_to_canonical[constant_index] = id;
+                    } else {
+                        try writer.append(u32, schema_id);
+                        try writer.append(u32, value_length);
+                        offsets[count] = @intCast(writer.cursor);
+                        lengths[count] = @intCast(value_length);
+                        schemas[count] = schema_id;
+                        self.source_to_canonical[constant_index] = @intCast(count);
+                        try writer.copy(canonical[0..value_length]);
+                        count += 1;
+                    }
+                }
+            }
+            writer.patch(u32, count_offset, count);
+            return self;
+        }
+    };
+}
+
+/// Encode the canonical BPI1 into caller-owned storage without materializing
+/// any complete BPI section as a comptime byte array.
+pub fn encodeProgramImage(
+    comptime Reified: type,
+    output: []u8,
+) RuntimeError!usize {
+    @setEvalBranchQuota(100_000_000);
+    const maximum_single_value_bytes = comptime runtimeMaximumSingleValueBytes(Reified);
+    if (output.len < image_v1.header_length) return error.OutputCapacity;
+    var writer: RuntimeWriter = .{
+        .bytes = output,
+        .cursor = image_v1.header_length,
+    };
+    var offsets: [image_v1.section_count]u64 = undefined;
+    var lengths: [image_v1.section_count]u64 = undefined;
+
+    offsets[0] = writer.cursor;
+    if (writer.cursor > output.len -| 28) return error.OutputCapacity;
+    writer.cursor += 28;
+    lengths[0] = 28;
+
+    offsets[1] = writer.cursor;
+    var schemas = try RuntimeSchemas(Reified).build(&writer);
+    lengths[1] = writer.cursor - offsets[1];
+    if (lengths[1] > maximum_bytes) return error.SectionCapacity;
+    writeProgramRootsRuntime(
+        Reified,
+        &schemas,
+        output[@intCast(offsets[0])..][0..28],
+    );
+
+    offsets[2] = writer.cursor;
+    try writeProgramFailuresRuntime(Reified, &writer);
+    lengths[2] = writer.cursor - offsets[2];
+
+    offsets[3] = writer.cursor;
+    var constants = try RuntimeConstants(Reified).build(&schemas, &writer);
+    lengths[3] = writer.cursor - offsets[3];
+    if (lengths[3] > maximum_bytes) return error.SectionCapacity;
+
+    offsets[4] = writer.cursor;
+    try writeProgramEffectsRuntime(Reified, &schemas, &writer);
+    lengths[4] = writer.cursor - offsets[4];
+
+    offsets[5] = writer.cursor;
+    try writeProgramValuesRuntime(Reified, &schemas, &writer);
+    lengths[5] = writer.cursor - offsets[5];
+
+    offsets[6] = writer.cursor;
+    try writeProgramFunctionsRuntime(Reified, &schemas, &writer);
+    lengths[6] = writer.cursor - offsets[6];
+
+    offsets[7] = writer.cursor;
+    try writeProgramSegmentsRuntime(Reified, &schemas, &constants, &writer);
+    lengths[7] = writer.cursor - offsets[7];
+    if (lengths[7] > maximum_bytes) return error.SectionCapacity;
+
+    offsets[8] = writer.cursor;
+    try writeProgramConstructorsRuntime(Reified, &schemas, &writer);
+    lengths[8] = writer.cursor - offsets[8];
+    if (lengths[8] > maximum_bytes) return error.SectionCapacity;
+
+    offsets[9] = writer.cursor;
+    try writeProgramTransitionsRuntime(Reified, &writer);
+    lengths[9] = writer.cursor - offsets[9];
+
+    @memset(output[0..image_v1.header_length], 0);
+    @memcpy(output[0..image_v1.magic.len], &image_v1.magic);
+    writeAt(u16, output, 8, image_v1.image_format_version);
+    writeAt(u16, output, 10, image_v1.evaluator_semantics_version);
+    writeAt(u32, output, 16, image_v1.header_length);
+    writeAt(u32, output, 20, image_v1.section_count);
+    writeAt(u64, output, 24, writer.cursor);
+    @memcpy(output[32..64], &Reified.program_transition_digest);
+    writeAt(
+        u64,
+        output,
+        64,
+        conservativeKernelScratchRuntime(
+            Reified,
+            schemas.node_count,
+            maximum_single_value_bytes,
+        ),
+    );
+    writeAt(
+        u32,
+        output,
+        72,
+        maximum_single_value_bytes,
+    );
+    for (offsets, lengths, 0..) |offset, length, index| {
+        const descriptor = image_v1.fixed_prefix_length +
+            index * image_v1.section_descriptor_length;
+        writeAt(u16, output, descriptor, index + 1);
+        writeAt(u16, output, descriptor + 2, 1);
+        writeAt(u64, output, descriptor + 8, offset);
+        writeAt(u64, output, descriptor + 16, length);
+    }
+    if (writer.cursor > maximum_image_bytes) return error.OutputCapacity;
+    return writer.cursor;
+}
+
+fn writeProgramRootsRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    output: *[28]u8,
+) void {
+    @memset(output, 0);
+    const entry = Reified.control.blocks[Reified.control.entry];
+    writeAt(
+        u32,
+        output,
+        0,
+        schemas.root_ids[RuntimeSchemas(Reified).initial_args_root_index],
+    );
+    writeAt(
+        u32,
+        output,
+        4,
+        schemas.root_ids[RuntimeSchemas(Reified).result_root_index],
+    );
+    writeAt(
+        u32,
+        output,
+        8,
+        schemas.root_ids[RuntimeSchemas(Reified).failure_root_index],
+    );
+    writeAt(
+        u16,
+        output,
+        12,
+        Reified.semantic_canonicalization.blockId(Reified.control.entry),
+    );
+    writeAt(u16, output, 14, entry.parameters.len);
+    writeAt(u32, output, 16, Reified.initial_constructor_id);
+    writeAt(
+        u16,
+        output,
+        24,
+        if (entry.parameters.len == 0)
+            std.math.maxInt(u16)
+        else
+            Reified.semantic_canonicalization.valueId(entry.parameters[0]),
+    );
+}
+
+fn writeProgramFailuresRuntime(
+    comptime Reified: type,
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const fields = std.meta.fields(Reified.Body.Failure);
+    try writer.append(u32, fields.len);
+    inline for (fields) |field| {
+        try writer.append(u32, field.value);
+        try writer.append(u32, field.name.len);
+        try writer.copy(field.name);
+    }
+}
+
+fn writeProgramEffectsRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const count = Reified.residual_effects.residual_count;
+    try writer.append(u32, count);
+    inline for (0..count) |ordinal| {
+        const Site = residualSite(Reified, ordinal);
+        try writer.append(u32, ordinal);
+        try writer.append(u32, Site.semantic_identity.len);
+        try writer.copy(Site.semantic_identity);
+        try writer.append(
+            u32,
+            schemas.root_ids[
+                RuntimeSchemas(Reified).effect_root_start + ordinal * 2
+            ],
+        );
+        try writer.append(
+            u32,
+            schemas.root_ids[
+                RuntimeSchemas(Reified).effect_root_start + ordinal * 2 + 1
+            ],
+        );
+        try writer.append(u8, 0);
+        try writer.append(u8, 0);
+        try writer.append(u16, 0);
+        const semantic_digest = effectDigest(Site, null);
+        const ordinal_digest = effectDigest(Site, ordinal);
+        try writer.copy(&semantic_digest);
+        try writer.copy(&ordinal_digest);
+    }
+}
+
+fn writeProgramValuesRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const count = Reified.semantic_canonicalization.value_count;
+    try writer.append(u32, count);
+    inline for (0..count) |dense_value| {
+        try writer.append(
+            u32,
+            schemas.root_ids[
+                RuntimeSchemas(Reified).value_root_start + dense_value
+            ],
+        );
+    }
+}
+
+fn writeProgramFunctionsRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const count = Reified.semantic_canonicalization.function_count;
+    try writer.append(u32, count);
+    inline for (0..count) |dense_function| {
+        const source_function = Reified.semantic_canonicalization
+            .function_dense_to_source[dense_function];
+        const entry = if (Reified.control.functions.len == 0)
+            Reified.control.entry
+        else
+            Reified.control.functions[source_function].entry;
+        try writer.append(u16, dense_function);
+        try writer.append(
+            u16,
+            Reified.semantic_canonicalization.blockId(entry),
+        );
+        try writer.append(
+            u32,
+            schemas.root_ids[
+                RuntimeSchemas(Reified).function_root_start + dense_function
+            ],
+        );
+    }
+}
+
+fn writeProgramTransitionsRuntime(
+    comptime Reified: type,
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const count = Reified.rnf_value.entry_transition_count;
+    const Record = struct {
+        source: u16,
+        edge: u8,
+        target: u16,
+        constructor: u32,
+    };
+    var records: [count]Record = undefined;
+    inline for (0..count) |index| {
+        const transition = Reified.rnf_value.entry_transitions[index];
+        records[index] = .{
+            .source = Reified.semantic_canonicalization.blockId(
+                transition.source_block,
+            ),
+            .edge = @intFromEnum(program_semantics_v1.wireIncomingEdge(
+                transition.edge_kind,
+            )),
+            .target = Reified.semantic_canonicalization.blockId(
+                transition.target_block,
+            ),
+            .constructor = transition.constructor_id,
+        };
+    }
+    if (count > 1) {
+        for (1..count) |index| {
+            var position = index;
+            while (position > 0 and transitionLess(
+                records[position],
+                records[position - 1],
+            )) : (position -= 1) {
+                const previous = records[position - 1];
+                records[position - 1] = records[position];
+                records[position] = previous;
+            }
+        }
+    }
+    try writer.append(u32, count);
+    for (records) |record| {
+        try writer.append(u16, record.source);
+        try writer.append(u8, record.edge);
+        try writer.append(u8, 0);
+        try writer.append(u16, record.target);
+        try writer.append(u16, 0);
+        try writer.append(u32, record.constructor);
+    }
+}
+
+fn conservativeKernelScratchRuntime(
+    comptime Reified: type,
+    schema_node_count: usize,
+    maximum_single_value_bytes: u32,
+) u64 {
+    const value_bytes = comptime blk: {
+        var total: u64 = 0;
+        for (0..Reified.semantic_canonicalization.value_count) |dense_value| {
+            const source_value = Reified.semantic_canonicalization
+                .value_dense_to_source[dense_value];
+            const Value = Reified.portableType(
+                Reified.control.value_types[source_value],
+            );
+            total = std.math.add(
+                u64,
+                total,
+                portable_value.maximumEncodedSize(Value),
+            ) catch @compileError("BPI1 scratch requirement overflows u64");
+        }
+        break :blk total;
+    };
+    const value_metadata = std.math.mul(
+        u64,
+        Reified.semantic_canonicalization.value_count,
+        16,
+    ) catch unreachable;
+    const schema_stack = std.math.mul(u64, schema_node_count, 16) catch
+        unreachable;
+    const framing = std.math.add(
+        u64,
+        std.math.mul(u64, maximum_single_value_bytes, 3) catch unreachable,
+        176,
+    ) catch unreachable;
+    return value_bytes +| value_metadata +| schema_stack +| framing;
+}
+
+fn writeProgramConstructorsRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    try writer.append(u32, Reified.rnf_value.constructor_count);
+    inline for (0..Reified.rnf_value.constructor_count) |constructor_index| {
+        const constructor = comptime Reified.rnf_value.constructors[constructor_index];
+        const start = writer.cursor;
+        try writer.append(u32, 0);
+        try writer.append(u32, constructor.id);
+        try writer.append(
+            u8,
+            @intFromEnum(imageConstructorKind(constructor.kind)),
+        );
+        try writer.append(
+            u8,
+            @intFromEnum(program_semantics_v1.wireConstructorOrigin(
+                constructor.origin,
+            )),
+        );
+        try writer.append(
+            u16,
+            @intFromBool(constructor.has_activation_context),
+        );
+        try writer.append(
+            u16,
+            Reified.semantic_canonicalization.blockId(
+                constructor.source_block,
+            ),
+        );
+        try writer.append(
+            u16,
+            if (constructor.resume_target) |target|
+                Reified.semantic_canonicalization.blockId(target)
+            else
+                std.math.maxInt(u16),
+        );
+        try writer.append(u16, constructor.activation_len);
+        try writer.append(u16, constructor.environment_len);
+        try writer.append(u16, constructor.invariant_len);
+        try writer.append(u16, 0);
+        inline for (0..constructor.activation_len) |field_index| {
+            const field = constructor.activation[field_index];
+            try appendEnvironmentFieldRuntime(
+                Reified,
+                schemas,
+                field,
+                writer,
+            );
+        }
+        inline for (0..constructor.environment_len) |field_index| {
+            const field = constructor.environment[field_index];
+            try appendEnvironmentFieldRuntime(
+                Reified,
+                schemas,
+                field,
+                writer,
+            );
+        }
+        inline for (0..constructor.invariant_len) |invariant_index| {
+            const invariant = constructor.invariants[invariant_index];
+            appendInvariant(
+                Reified,
+                invariant,
+                writer.bytes,
+                &writer.cursor,
+            );
+        }
+        writer.patch(u32, start, writer.cursor - start);
+    }
+}
+
+fn appendEnvironmentFieldRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    comptime field: anytype,
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const dense_value = Reified.semantic_canonicalization.valueId(field.value);
+    try writer.append(u16, dense_value);
+    try writer.append(u16, 0);
+    try writer.append(
+        u32,
+        schemas.root_ids[RuntimeSchemas(Reified).value_root_start + dense_value],
+    );
+}
+
+fn writeProgramSegmentsRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    constants: *const RuntimeConstants(Reified),
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    try writer.append(u32, Reified.semantic_canonicalization.block_count);
+    inline for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
+        const source_block_id = Reified.semantic_canonicalization
+            .block_dense_to_source[dense_block];
+        const block = comptime Reified.control.blocks[source_block_id];
+        const record_start = writer.cursor;
+        try writer.append(u32, 0);
+        try writer.append(u16, dense_block);
+        try writer.append(
+            u16,
+            Reified.semantic_canonicalization.functionId(block.function_id),
+        );
+        try writer.append(
+            u8,
+            if (dense_block == Reified.semantic_canonicalization.blockId(
+                Reified.control.entry,
+            )) 0 else blockRoleTag(block.role),
+        );
+        try writer.append(u8, 0);
+        try writer.append(u16, block.parameters.len);
+        try writer.append(u32, block.instructions.len);
+        inline for (block.parameters) |parameter| {
+            try writer.append(
+                u16,
+                Reified.semantic_canonicalization.valueId(parameter),
+            );
+        }
+        inline for (block.instructions) |instruction| {
+            const instruction_start = writer.cursor;
+            try writer.append(u32, 0);
+            try writer.append(u8, instructionKindTag(instruction.operation));
+            try writer.append(u8, 0);
+            try writer.append(
+                u16,
+                program_semantics_v1.wireTag(instruction.operation),
+            );
+            try writer.append(
+                u16,
+                Reified.semantic_canonicalization.valueId(instruction.result),
+            );
+            try writer.append(u16, instruction.operands.len);
+            try writer.append(
+                u32,
+                instructionImmediateRuntime(instruction.operation, constants),
+            );
+            inline for (instruction.operands) |operand| {
+                try writer.append(
+                    u16,
+                    Reified.semantic_canonicalization.valueId(operand),
+                );
+            }
+            writer.patch(
+                u32,
+                instruction_start,
+                writer.cursor - instruction_start,
+            );
+        }
+        try appendTerminatorRuntime(
+            Reified,
+            schemas,
+            block.terminator,
+            writer,
+        );
+        writer.patch(u32, record_start, writer.cursor - record_start);
+    }
+}
+
+fn appendTerminatorRuntime(
+    comptime Reified: type,
+    schemas: *const RuntimeSchemas(Reified),
+    comptime terminator: anytype,
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    const start = writer.cursor;
+    try writer.append(u32, 0);
+    try writer.append(
+        u8,
+        @intFromEnum(program_semantics_v1.wireTerminator(terminator)),
+    );
+    try writer.append(u8, 0);
+    try writer.append(u16, 0);
+    switch (terminator) {
+        .jump => |edge| try appendEdgeRuntime(Reified, edge, writer),
+        .branch => |branch| {
+            try writer.append(
+                u16,
+                Reified.semantic_canonicalization.valueId(branch.condition),
+            );
+            try writer.append(u16, 0);
+            try appendEdgeRuntime(Reified, branch.then_edge, writer);
+            try appendEdgeRuntime(Reified, branch.else_edge, writer);
+        },
+        .@"suspend" => |suspension| {
+            try writer.append(
+                u8,
+                @intFromEnum(imageSuspensionKind(suspension.kind)),
+            );
+            try writer.append(u8, 0);
+            try writer.append(u16, 0);
+            try writer.append(
+                u32,
+                if (suspension.site_id) |site|
+                    Reified.residual_effects.source_to_residual[site] orelse
+                        std.math.maxInt(u32)
+                else
+                    std.math.maxInt(u32),
+            );
+            try writer.append(
+                u16,
+                if (suspension.callee_function) |function|
+                    Reified.semantic_canonicalization.functionId(function)
+                else
+                    std.math.maxInt(u16),
+            );
+            try writer.append(u16, suspension.request_values.len);
+            inline for (suspension.request_values) |value| {
+                try writer.append(
+                    u16,
+                    Reified.semantic_canonicalization.valueId(value),
+                );
+            }
+            try writer.append(u8, @intFromBool(suspension.callee != null));
+            try writer.append(u8, 0);
+            try writer.append(u16, 0);
+            if (suspension.callee) |edge| {
+                try appendEdgeRuntime(Reified, edge, writer);
+            }
+            try appendEdgeRuntime(Reified, suspension.continuation, writer);
+            try writer.append(
+                u32,
+                if (suspension.resume_type) |resume_type|
+                    schemas.schemaIdForValueType(resume_type)
+                else
+                    std.math.maxInt(u32),
+            );
+        },
+        .return_value => |value| {
+            try writer.append(u8, @intFromBool(value != null));
+            try writer.append(u8, 0);
+            try writer.append(
+                u16,
+                if (value) |id|
+                    Reified.semantic_canonicalization.valueId(id)
+                else
+                    std.math.maxInt(u16),
+            );
+        },
+        .return_to_caller, .fail_value => |value| {
+            try writer.append(
+                u16,
+                Reified.semantic_canonicalization.valueId(value),
+            );
+            try writer.append(u16, 0);
+        },
+        .fail => |failure| try writer.append(u32, failure),
+    }
+    writer.patch(u32, start, writer.cursor - start);
+}
+
+fn appendEdgeRuntime(
+    comptime Reified: type,
+    comptime edge: anytype,
+    writer: *RuntimeWriter,
+) RuntimeError!void {
+    try writer.append(
+        u16,
+        Reified.semantic_canonicalization.blockId(edge.target),
+    );
+    try writer.append(u16, edge.arguments.len);
+    inline for (edge.arguments) |argument| {
+        switch (argument) {
+            .value => |value| {
+                try writer.append(u8, 0);
+                try writer.append(u8, 0);
+                try writer.append(
+                    u16,
+                    Reified.semantic_canonicalization.valueId(value),
+                );
+            },
+            .@"resume" => {
+                try writer.append(u8, 1);
+                try writer.append(u8, 0);
+                try writer.append(u16, std.math.maxInt(u16));
+            },
+        }
+    }
+}
+
+fn instructionImmediateRuntime(
+    comptime operation: anytype,
+    constants: anytype,
+) u32 {
+    return switch (operation) {
+        .constant => |source| constants.source_to_canonical[source].?,
+        .product_extract,
+        .product_replace,
+        .sum_construct,
+        .sum_tag_is,
+        .sum_extract,
+        => |index| index,
+        else => 0,
+    };
+}
+
+fn runtimeMaximumSingleValueBytes(comptime Reified: type) u32 {
+    var maximum: usize = 0;
+    maximum = @max(
+        maximum,
+        maximumSchemaNodeEncodedSize(Reified.Body.InitialArgs),
+    );
+    maximum = @max(
+        maximum,
+        maximumSchemaNodeEncodedSize(Reified.Body.Result),
+    );
+    maximum = @max(
+        maximum,
+        maximumSchemaNodeEncodedSize(Reified.Body.Failure),
+    );
+    for (0..Reified.residual_effects.residual_count) |ordinal| {
+        const Site = residualSite(Reified, ordinal);
+        maximum = @max(maximum, maximumSchemaNodeEncodedSize(Site.Payload));
+        maximum = @max(maximum, maximumSchemaNodeEncodedSize(Site.Resume));
+    }
+    for (0..Reified.semantic_canonicalization.value_count) |dense_value| {
+        const source_value = Reified.semantic_canonicalization
+            .value_dense_to_source[dense_value];
+        maximum = @max(
+            maximum,
+            maximumSchemaNodeEncodedSize(Reified.portableType(
+                Reified.control.value_types[source_value],
+            )),
+        );
+    }
+    for (0..Reified.semantic_canonicalization.function_count) |dense_function| {
+        const source_function = Reified.semantic_canonicalization
+            .function_dense_to_source[dense_function];
+        const result_type = if (Reified.control.functions.len == 0)
+            Reified.control.result_type
+        else
+            Reified.control.functions[source_function].result_type;
+        maximum = @max(
+            maximum,
+            maximumSchemaNodeEncodedSize(Reified.portableType(result_type)),
+        );
+    }
+    return castU32(maximum);
 }
 
 fn conservativeKernelScratch(comptime Reified: type, comptime Schemas: type) u64 {
@@ -630,7 +1717,7 @@ pub fn ProgramConstants(comptime Reified: type, comptime Schemas: type) type {
     else
         0;
     const built = comptime blk: {
-        var bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes;
+        var bytes: [maximum_bytes]u8 = undefined;
         var offsets: [Reified.compiler_limits.maximum_values]u32 = undefined;
         var lengths: [Reified.compiler_limits.maximum_values]u32 = undefined;
         var schemas: [Reified.compiler_limits.maximum_values]u32 = undefined;
@@ -778,7 +1865,7 @@ pub fn ProgramSegments(
     comptime Constants: type,
 ) type {
     const built = comptime blk: {
-        var bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes;
+        var bytes: [maximum_bytes]u8 = undefined;
         var cursor: usize = 4;
         writeAt(
             u32,
@@ -937,7 +2024,7 @@ pub fn ProgramEntryTransitions(comptime Reified: type) type {
 
 pub fn ProgramConstructors(comptime Reified: type, comptime Schemas: type) type {
     const built = comptime blk: {
-        var bytes: [maximum_bytes]u8 = [_]u8{0} ** maximum_bytes;
+        var bytes: [maximum_bytes]u8 = undefined;
         var cursor: usize = 4;
         writeAt(u32, &bytes, 0, Reified.rnf_value.constructor_count);
         for (Reified.rnf_value.constructorSlice()) |constructor| {
@@ -1008,7 +2095,7 @@ fn appendEnvironmentField(
     comptime Reified: type,
     comptime Schemas: type,
     comptime field: anytype,
-    bytes: *[maximum_bytes]u8,
+    bytes: []u8,
     cursor: *usize,
 ) void {
     const dense_value = Reified.semantic_canonicalization.valueId(field.value);
@@ -1025,7 +2112,7 @@ fn appendEnvironmentField(
 fn appendInvariant(
     comptime Reified: type,
     comptime invariant: anytype,
-    bytes: *[maximum_bytes]u8,
+    bytes: []u8,
     cursor: *usize,
 ) void {
     const start = cursor.*;
@@ -1063,7 +2150,13 @@ fn appendInvariant(
             appendInt(u8, bytes, cursor, booleanBinaryTag(term.operation));
             appendInt(u8, bytes, cursor, 0);
         },
-        .boolean_select, .value_select => |term| {
+        .boolean_select => |term| {
+            appendValueId(Reified, term.result, bytes, cursor);
+            appendValueId(Reified, term.condition, bytes, cursor);
+            appendValueId(Reified, term.then_value, bytes, cursor);
+            appendValueId(Reified, term.else_value, bytes, cursor);
+        },
+        .value_select => |term| {
             appendValueId(Reified, term.result, bytes, cursor);
             appendValueId(Reified, term.condition, bytes, cursor);
             appendValueId(Reified, term.then_value, bytes, cursor);
@@ -1163,7 +2256,7 @@ fn appendInvariant(
 fn appendValueId(
     comptime Reified: type,
     value: u16,
-    bytes: *[maximum_bytes]u8,
+    bytes: []u8,
     cursor: *usize,
 ) void {
     appendInt(
@@ -1176,7 +2269,7 @@ fn appendValueId(
 
 fn appendInvariantValue(
     comptime value: anytype,
-    bytes: *[maximum_bytes]u8,
+    bytes: []u8,
     cursor: *usize,
 ) void {
     const payload: u64 = switch (value) {
@@ -1253,7 +2346,7 @@ fn appendTerminator(
     comptime Reified: type,
     comptime Schemas: type,
     comptime terminator: anytype,
-    bytes: *[maximum_bytes]u8,
+    bytes: []u8,
     cursor: *usize,
 ) void {
     const start = cursor.*;
@@ -1363,7 +2456,7 @@ fn appendTerminator(
 fn appendEdge(
     comptime Reified: type,
     comptime edge: anytype,
-    bytes: *[maximum_bytes]u8,
+    bytes: []u8,
     cursor: *usize,
 ) void {
     appendInt(
@@ -1428,7 +2521,7 @@ fn blockRoleTag(comptime role: anytype) u8 {
     };
 }
 
-fn imageSuspensionKind(kind: anytype) program_semantics_v1.WireSuspension {
+fn imageSuspensionKind(comptime kind: anytype) program_semantics_v1.WireSuspension {
     return switch (kind) {
         .effect => .effect,
         .call => .call,
@@ -1452,13 +2545,11 @@ fn imageConstructorKind(kind: anytype) program_semantics_v1.WireConstructorKind 
 
 fn appendInt(
     comptime T: type,
-    bytes: *[maximum_bytes]u8,
+    bytes: []u8,
     cursor: *usize,
     value: anytype,
 ) void {
-    if (cursor.* > bytes.len - @sizeOf(T)) {
-        @compileError("BPI1 section exceeds implementation limit");
-    }
+    std.debug.assert(cursor.* <= bytes.len -| @sizeOf(T));
     writeAt(T, bytes, cursor.*, value);
     cursor.* += @sizeOf(T);
 }
