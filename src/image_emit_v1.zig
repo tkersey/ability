@@ -496,42 +496,6 @@ pub fn ProgramImage(
     };
 }
 
-pub fn writeProgramImage(
-    comptime Reified: type,
-    writer: *std.Io.Writer,
-) std.Io.Writer.Error!void {
-    const Parts = ProgramImageParts(Reified);
-    var header: [image_v1.header_length]u8 =
-        [_]u8{0} ** image_v1.header_length;
-    @memcpy(header[0..image_v1.magic.len], &image_v1.magic);
-    writeAt(u16, &header, 8, image_v1.image_format_version);
-    writeAt(u16, &header, 10, image_v1.evaluator_semantics_version);
-    writeAt(u32, &header, 16, image_v1.header_length);
-    writeAt(u32, &header, 20, image_v1.section_count);
-    writeAt(u64, &header, 24, Parts.byte_length);
-    @memcpy(header[32..64], &Parts.program_transition_digest);
-    writeAt(
-        u64,
-        &header,
-        64,
-        Parts.maximum_kernel_scratch_bytes,
-    );
-    writeAt(u32, &header, 72, Parts.maximum_single_value_bytes);
-
-    var payload_offset: u64 = image_v1.header_length;
-    for (Parts.section_bytes, 0..) |section, index| {
-        const descriptor = image_v1.fixed_prefix_length +
-            index * image_v1.section_descriptor_length;
-        writeAt(u16, &header, descriptor, index + 1);
-        writeAt(u16, &header, descriptor + 2, 1);
-        writeAt(u64, &header, descriptor + 8, payload_offset);
-        writeAt(u64, &header, descriptor + 16, section.len);
-        payload_offset += section.len;
-    }
-    try writer.writeAll(&header);
-    for (Parts.section_bytes) |section| try writer.writeAll(section);
-}
-
 pub const RuntimeError = error{
     OutputCapacity,
     SectionCapacity,
