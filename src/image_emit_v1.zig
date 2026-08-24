@@ -786,23 +786,15 @@ fn RuntimeConstants(comptime Reified: type) type {
                     };
                     const value = Reified.Body.constants[constant_index];
                     const Value = @TypeOf(value);
-                    const value_length = comptime portable_value.encodedSize(
-                        Value,
-                        value,
-                    ) catch unreachable;
+                    const Canonical = EncodedPortableValue(Value, value);
+                    const value_length = Canonical.bytes.len;
                     const dense_value = Reified.semantic_canonicalization.valueId(
                         instruction.result,
                     );
                     const schema_id = schemas_state.root_ids[
                         RuntimeSchemas(Reified).value_root_start + dense_value
                     ];
-                    var canonical: [value_length]u8 = undefined;
-                    const encoded_length = portable_value.encode(
-                        Value,
-                        value,
-                        &canonical,
-                    ) catch unreachable;
-                    std.debug.assert(encoded_length == value_length);
+                    const canonical = &Canonical.bytes;
                     var canonical_id: ?u32 = null;
                     for (0..count) |existing| {
                         if (schemas[existing] != schema_id or
@@ -814,7 +806,7 @@ fn RuntimeConstants(comptime Reified: type) type {
                         if (std.mem.eql(
                             u8,
                             writer.bytes[offset .. offset + value_length],
-                            canonical[0..value_length],
+                            canonical,
                         )) {
                             canonical_id = @intCast(existing);
                             break;
@@ -829,7 +821,7 @@ fn RuntimeConstants(comptime Reified: type) type {
                         lengths[count] = @intCast(value_length);
                         schemas[count] = schema_id;
                         self.source_to_canonical[constant_index] = @intCast(count);
-                        try writer.copy(canonical[0..value_length]);
+                        try writer.copy(canonical);
                         count += 1;
                     }
                 }
@@ -837,6 +829,19 @@ fn RuntimeConstants(comptime Reified: type) type {
             writer.patch(u32, count_offset, count);
             return self;
         }
+    };
+}
+
+fn EncodedPortableValue(comptime T: type, comptime value: T) type {
+    const length = portable_value.encodedSize(T, value) catch unreachable;
+    const encoded = comptime blk: {
+        var bytes: [length]u8 = undefined;
+        const written = portable_value.encode(T, value, &bytes) catch unreachable;
+        if (written != length) @compileError("portable value encoded length drifted");
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
     };
 }
 
