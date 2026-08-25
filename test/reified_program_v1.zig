@@ -362,16 +362,15 @@ test "Program.image has no Machine options parameter" {
     try std.testing.expectEqual(@as(usize, 0), info.params.len);
 }
 
-test "Program.encodeImage fills an exact buffer with duplicate schema roots" {
+test "canonical encoder fills an exact buffer with duplicate schema roots" {
     const envelope = try image_v1.validateEnvelope(&Image.bytes);
     try std.testing.expect(std.mem.readInt(
         u32,
         envelope.section(.schemas)[0..4],
         .little,
     ) < 5);
-    try std.testing.expect(Program.maximum_image_bytes >= Image.bytes.len);
     var output: [Image.bytes.len]u8 = undefined;
-    const length = try Program.encodeImage(&output);
+    const length = try image_emit_v1.encodeProgramImage(Reified, &output);
     try std.testing.expectEqual(Image.bytes.len, length);
     try std.testing.expectEqualSlices(u8, &Image.bytes, output[0..length]);
 }

@@ -314,7 +314,7 @@ const SumMachine = SumProgram.compile(.{
 });
 const SumImage = SumProgram.image();
 
-test "Program.encodeImage reports capacity while writing constructor invariants" {
+test "canonical encoder reports capacity while writing constructor invariants" {
     const envelope = try image_v1.validateEnvelope(&SumImage.bytes);
     const constructors = envelope.section(.constructors);
     var cursor: usize = 4;
@@ -333,9 +333,13 @@ test "Program.encodeImage reports capacity while writing constructor invariants"
     }
     const capacity = (invariant_start orelse return error.TestUnexpectedResult) + 1;
     var output: [SumImage.bytes.len]u8 = undefined;
+    const SumReified = compiler.ReifiedFor(
+        "sum-case-constructor-invariant",
+        SumBody,
+    );
     try std.testing.expectError(
         error.OutputCapacity,
-        SumProgram.encodeImage(output[0..capacity]),
+        image_emit_v1.encodeProgramImage(SumReified, output[0..capacity]),
     );
 }
 
