@@ -1541,6 +1541,14 @@ pub fn build(b: *std.Build) void {
         install_one_effect_runtime_image,
         install_one_effect_runtime_profile,
     }) |installation| emit_kernel_assets_step.dependOn(&installation.step);
+    const emit_unrelated_pair_step = b.step(
+        "emit-boundary-unrelated-pair",
+        "Emit the unrelated BPI1 and MachineV2Profile validation pair.",
+    );
+    inline for (.{
+        install_one_effect_runtime_image,
+        install_one_effect_runtime_profile,
+    }) |installation| emit_unrelated_pair_step.dependOn(&installation.step);
     const emit_reification_assets_step = b.step(
         "emit-boundary-reification-assets",
         "Emit BPI1 examples, fixed kernel, checksums, and receipt.",
