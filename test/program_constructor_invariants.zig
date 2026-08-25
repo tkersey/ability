@@ -33,13 +33,6 @@ test "BPI1 emits the admitted constructor invariant families" {
         LocalTextBody,
         RelationBody,
     }) |Body| {
-        const Reified = compiler.ReifiedFor(Body.control_ir.label, Body);
-        const Schemas = image_emit_v1.ProgramSchemaSet(Reified);
-        const Constructors = image_emit_v1.ProgramConstructors(
-            Reified,
-            Schemas,
-        );
-        try std.testing.expect(Constructors.bytes.len > 4);
         const Program = program_v2.program(Body.control_ir.label, Body);
         const Image = Program.image();
         var workspace: image_v1.ValidationWorkspace = .{};
@@ -320,6 +313,36 @@ const SumMachine = SumProgram.compile(.{
     .maximum_machine_fuel = 32,
 });
 const SumImage = SumProgram.image();
+
+test "canonical encoder reports capacity while writing constructor invariants" {
+    const envelope = try image_v1.validateEnvelope(&SumImage.bytes);
+    const constructors = envelope.section(.constructors);
+    var cursor: usize = 4;
+    var invariant_start: ?usize = null;
+    while (cursor < constructors.len) {
+        const record_length = std.mem.readInt(u32, constructors[cursor..][0..4], .little);
+        const activation_len = std.mem.readInt(u16, constructors[cursor + 16 ..][0..2], .little);
+        const environment_len = std.mem.readInt(u16, constructors[cursor + 18 ..][0..2], .little);
+        const invariant_len = std.mem.readInt(u16, constructors[cursor + 20 ..][0..2], .little);
+        if (invariant_len != 0) {
+            invariant_start = @intCast(envelope.sections[8].offset + cursor + 24 +
+                (@as(usize, activation_len) + environment_len) * 8);
+            break;
+        }
+        cursor += record_length;
+    }
+    const capacity = (invariant_start orelse return error.TestUnexpectedResult) + 1;
+    var output: [SumImage.bytes.len]u8 = undefined;
+    const SumReified = compiler.ReifiedFor(
+        "sum-case-constructor-invariant",
+        SumBody,
+    );
+    try std.testing.expectError(
+        error.OutputCapacity,
+        image_emit_v1.encodeProgramImage(SumReified, output[0..capacity]),
+    );
+}
+
 const SumProfile = SumProgram.machineV2Profile(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,

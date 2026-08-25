@@ -1517,6 +1517,38 @@ pub fn build(b: *std.Build) void {
         .prefix,
         "boundary-reification-v1-receipt.json",
     );
+    const install_kernel_runtime_asset = b.addInstallFileWithDir(
+        kernel_wasm_executable.getEmittedBin(),
+        .prefix,
+        "boundary-machine-v2-kernel-v1.wasm",
+    );
+    const install_one_effect_runtime_image = b.addInstallFileWithDir(
+        one_effect_image,
+        .prefix,
+        "one-effect.boundary-program-image",
+    );
+    const install_one_effect_runtime_profile = b.addInstallFileWithDir(
+        one_effect_profile,
+        .prefix,
+        "one-effect.machine-v2-profile",
+    );
+    const emit_kernel_assets_step = b.step(
+        "emit-boundary-kernel-assets",
+        "Emit the fixed kernel and unrelated validation pair without release receipts.",
+    );
+    inline for (.{
+        install_kernel_runtime_asset,
+        install_one_effect_runtime_image,
+        install_one_effect_runtime_profile,
+    }) |installation| emit_kernel_assets_step.dependOn(&installation.step);
+    const emit_unrelated_pair_step = b.step(
+        "emit-boundary-unrelated-pair",
+        "Emit the unrelated BPI1 and MachineV2Profile validation pair.",
+    );
+    inline for (.{
+        install_one_effect_runtime_image,
+        install_one_effect_runtime_profile,
+    }) |installation| emit_unrelated_pair_step.dependOn(&installation.step);
     const emit_reification_assets_step = b.step(
         "emit-boundary-reification-assets",
         "Emit BPI1 examples, fixed kernel, checksums, and receipt.",

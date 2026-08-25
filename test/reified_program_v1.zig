@@ -61,23 +61,6 @@ const ProgramMachine = Program.compile(options);
 const KernelMachine = Program.kernelMachineV2(options);
 const Image = Program.image();
 const Profile = Program.machineV2Profile(options);
-const ProgramSchemas = image_emit_v1.ProgramSchemaSet(Reified);
-const ProgramRoots = image_emit_v1.ProgramRoots(Reified, ProgramSchemas);
-const ProgramFailures = image_emit_v1.ProgramFailures(Reified);
-const ProgramEffects = image_emit_v1.ProgramEffects(Reified, ProgramSchemas);
-const ProgramConstants = image_emit_v1.ProgramConstants(Reified, ProgramSchemas);
-const ProgramValues = image_emit_v1.ProgramValues(Reified, ProgramSchemas);
-const ProgramFunctions = image_emit_v1.ProgramFunctions(Reified, ProgramSchemas);
-const ProgramSegments = image_emit_v1.ProgramSegments(
-    Reified,
-    ProgramSchemas,
-    ProgramConstants,
-);
-const ProgramTransitions = image_emit_v1.ProgramEntryTransitions(Reified);
-const ProgramConstructors = image_emit_v1.ProgramConstructors(
-    Reified,
-    ProgramSchemas,
-);
 
 pub const ReificationReceiptWitness = struct {
     image_profile_invariance_passed: bool,
@@ -301,30 +284,41 @@ test "direct specialization consumes the exact Reified Program" {
         @as(u64, 1),
         MachineV2Lowering.effective_block_costs[0],
     );
-    try std.testing.expectEqual(@as(u32, 2), ProgramSchemas.node_count);
+    const envelope = try image_v1.validateEnvelope(&Image.bytes);
+    const schemas = envelope.section(.schemas);
+    const roots = envelope.section(.roots);
+    const failures = envelope.section(.failures);
+    const effects = envelope.section(.effects);
+    const constants = envelope.section(.constants);
+    const values = envelope.section(.values);
+    const functions = envelope.section(.functions);
+    const segments = envelope.section(.segments);
+    const constructors = envelope.section(.constructors);
+    const transitions = envelope.section(.entry_transitions);
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, schemas[0..4], .little));
     try std.testing.expectEqual(
-        ProgramSchemas.root_ids[0],
-        ProgramSchemas.root_ids[1],
+        std.mem.readInt(u32, roots[0..4], .little),
+        std.mem.readInt(u32, roots[4..8], .little),
     );
-    try std.testing.expectEqual(@as(usize, 28), ProgramRoots.bytes.len);
+    try std.testing.expectEqual(@as(usize, 28), roots.len);
     try std.testing.expectEqual(
         Reified.initial_constructor_id,
-        std.mem.readInt(u32, ProgramRoots.bytes[16..20], .little),
+        std.mem.readInt(u32, roots[16..20], .little),
     );
-    try std.testing.expectEqual(@as(usize, 20), ProgramFailures.bytes.len);
-    try std.testing.expectEqual(@as(usize, 4), ProgramEffects.bytes.len);
-    try std.testing.expectEqual(@as(usize, 4), ProgramConstants.bytes.len);
-    try std.testing.expectEqual(@as(usize, 8), ProgramValues.bytes.len);
-    try std.testing.expectEqual(@as(usize, 12), ProgramFunctions.bytes.len);
-    try std.testing.expectEqual(@as(usize, 34), ProgramSegments.bytes.len);
+    try std.testing.expectEqual(@as(usize, 20), failures.len);
+    try std.testing.expectEqual(@as(usize, 4), effects.len);
+    try std.testing.expectEqual(@as(usize, 4), constants.len);
+    try std.testing.expectEqual(@as(usize, 8), values.len);
+    try std.testing.expectEqual(@as(usize, 12), functions.len);
+    try std.testing.expectEqual(@as(usize, 34), segments.len);
     try std.testing.expectEqual(
         @as(u32, 30),
-        std.mem.readInt(u32, ProgramSegments.bytes[4..8], .little),
+        std.mem.readInt(u32, segments[4..8], .little),
     );
-    try std.testing.expectEqual(@as(u8, 3), ProgramSegments.bytes[26]);
-    try std.testing.expectEqual(@as(usize, 4), ProgramTransitions.bytes.len);
-    try std.testing.expectEqual(@as(usize, 36), ProgramConstructors.bytes.len);
-    try std.testing.expectEqual(@as(u8, 0), ProgramConstructors.bytes[12]);
+    try std.testing.expectEqual(@as(u8, 3), segments[26]);
+    try std.testing.expectEqual(@as(usize, 4), transitions.len);
+    try std.testing.expectEqual(@as(usize, 36), constructors.len);
+    try std.testing.expectEqual(@as(u8, 0), constructors[12]);
     try std.testing.expectEqualSlices(
         u8,
         &Program.program_transition_digest,
@@ -366,6 +360,19 @@ test "BPI1 is invariant across Machine v2 profiles and metering annotations" {
 test "Program.image has no Machine options parameter" {
     const info = @typeInfo(@TypeOf(Program.image)).@"fn";
     try std.testing.expectEqual(@as(usize, 0), info.params.len);
+}
+
+test "canonical encoder fills an exact buffer with duplicate schema roots" {
+    const envelope = try image_v1.validateEnvelope(&Image.bytes);
+    try std.testing.expect(std.mem.readInt(
+        u32,
+        envelope.section(.schemas)[0..4],
+        .little,
+    ) < 5);
+    var output: [Image.bytes.len]u8 = undefined;
+    const length = try image_emit_v1.encodeProgramImage(Reified, &output);
+    try std.testing.expectEqual(Image.bytes.len, length);
+    try std.testing.expectEqualSlices(u8, &Image.bytes, output[0..length]);
 }
 
 test "non-unit root result rejects valueless completion" {
@@ -1180,21 +1187,6 @@ test "Reified constants emit in canonical first-use order" {
             .result_type = u32_type,
         };
     };
-    const ConstantReified = compiler.ReifiedFor(
-        "constant-image-proof",
-        ConstantBody,
-    );
-    const Schemas = image_emit_v1.ProgramSchemaSet(ConstantReified);
-    const Constants = image_emit_v1.ProgramConstants(
-        ConstantReified,
-        Schemas,
-    );
-    try std.testing.expectEqual(@as(u32, 1), Constants.constant_count);
-    try std.testing.expectEqual(@as(usize, 16), Constants.bytes.len);
-    try std.testing.expectEqual(
-        @as(u32, 42),
-        std.mem.readInt(u32, Constants.bytes[12..16], .little),
-    );
     const ConstantProgram = program_v2.program(
         "constant-image-proof",
         ConstantBody,
@@ -1205,6 +1197,13 @@ test "Reified constants emit in canonical first-use order" {
     const parsed = try image_v1.validateImage(
         &ConstantImage.bytes,
         &workspace,
+    );
+    const constants = parsed.catalogs.envelope.section(.constants);
+    try std.testing.expectEqual(@as(u32, 1), parsed.catalogs.constant_count);
+    try std.testing.expectEqual(@as(usize, 16), constants.len);
+    try std.testing.expectEqual(
+        @as(u32, 42),
+        std.mem.readInt(u32, constants[12..16], .little),
     );
     const validated = try kernel_v1.bindMachineV2(
         parsed,
