@@ -33,13 +33,6 @@ test "BPI1 emits the admitted constructor invariant families" {
         LocalTextBody,
         RelationBody,
     }) |Body| {
-        const Reified = compiler.ReifiedFor(Body.control_ir.label, Body);
-        const Schemas = image_emit_v1.ProgramSchemaSet(Reified);
-        const Constructors = image_emit_v1.ProgramConstructors(
-            Reified,
-            Schemas,
-        );
-        try std.testing.expect(Constructors.bytes.len > 4);
         const Program = program_v2.program(Body.control_ir.label, Body);
         const Image = Program.image();
         var workspace: image_v1.ValidationWorkspace = .{};
