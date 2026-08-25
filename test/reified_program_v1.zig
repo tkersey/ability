@@ -370,6 +370,7 @@ test "Program.image has no Machine options parameter" {
 
 test "Program.encodeImage fills an exact buffer with duplicate schema roots" {
     try std.testing.expect(ProgramSchemas.node_count < 5);
+    try std.testing.expect(Program.maximum_image_bytes >= Image.bytes.len);
     var output: [Image.bytes.len]u8 = undefined;
     const length = try Program.encodeImage(&output);
     try std.testing.expectEqual(Image.bytes.len, length);

@@ -62,6 +62,9 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
         /// Compile-time-only whole-program value catalog size for proof.
         pub const reachable_value_catalog_bytes =
             Definition.reachable_value_catalog_bytes;
+        /// Caller-owned storage ceiling accepted by `encodeImage` without
+        /// materializing `Program.image().bytes`.
+        pub const maximum_image_bytes = image_emit_v1.maximum_image_bytes;
 
         /// Compile this program to its sole direct Boundary Machine.
         pub fn compileV2(comptime options: machine.Options) type {

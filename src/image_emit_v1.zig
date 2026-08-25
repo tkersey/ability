@@ -7,7 +7,7 @@ const std = @import("std");
 const maximum_nodes = 1024;
 const schema_bucket_count = maximum_nodes * 2;
 const maximum_bytes = 1 << 20;
-const maximum_image_bytes = 16 << 20;
+pub const maximum_image_bytes = 16 << 20;
 
 pub fn assertSchemaMemberCount(comptime count: usize) void {
     if (count > dynamic_value_v1.maximum_schema_members) {
