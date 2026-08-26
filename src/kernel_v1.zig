@@ -629,105 +629,40 @@ fn validateStackPair(
     child_constructor: []const u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
-    if (!isAwaitCallConstructor(image, parent_constructor)) {
-        return error.InvalidState;
-    }
+    const parent_environment_length = readInt(
+        u32,
+        state,
+        parent_offset + 4,
+    );
+    const parent_environment = state[parent_offset + 8 ..][0..parent_environment_length];
+    const child_environment_length = readInt(
+        u32,
+        state,
+        child_offset + 4,
+    );
+    const child_environment = state[child_offset + 8 ..][0..child_environment_length];
     const parent_segment_id = readInt(u16, parent_constructor, 12);
     const parent_segment = try segmentRecord(image, parent_segment_id);
-    const terminator = segmentTerminatorOffset(parent_segment);
-    const payload = terminator + 8;
-    const callee_function = readInt(u16, parent_segment, payload + 8);
-    const callee = suspensionCallee(parent_segment, terminator);
-    if (callee.len < 4) return error.InvalidState;
-    const target_segment_id = readInt(u16, callee, 0);
-    const child_segment = try segmentRecord(
-        image,
-        readInt(u16, child_constructor, 12),
+    const callee = suspensionCallee(
+        parent_segment,
+        segmentTerminatorOffset(parent_segment),
     );
-    if (readInt(u16, child_segment, 6) != callee_function or
-        readInt(u16, child_constructor, 10) & 1 == 0)
-    {
-        return error.InvalidState;
-    }
-    const child_environment_length = readInt(u32, state, child_offset + 4);
-    const child_environment = state[child_offset + 8 ..][0..child_environment_length];
-    if (child_environment.len < 4) return error.InvalidState;
-    const call_entry_constructor = try transitionConstructor(
+    if (callee.len < 4) return error.InvalidState;
+    const expected_call_entry = try transitionConstructor(
         image,
         parent_segment_id,
         3,
-        target_segment_id,
+        readInt(u16, callee, 0),
     );
-    if (readInt(u32, child_environment, 0) != call_entry_constructor) {
-        return error.InvalidState;
-    }
-
-    var parent_slots = [_]Slot{.{}} ** 1024;
-    var child_slots = [_]Slot{.{}} ** 1024;
-    var child_activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &parent_slots);
-    try initializeZeroWidthSlots(image, &child_slots);
-    try initializeZeroWidthSlots(image, &child_activation_slots);
-    try loadFrameEnvironment(
+    try reducer_clause_v1.validateStackPair(
         image,
-        state,
-        parent_offset,
         parent_constructor,
-        &parent_slots,
-        workspace,
-    );
-    try loadActivationSlots(
-        image,
-        state,
-        child_offset,
+        parent_environment,
         child_constructor,
-        &child_activation_slots,
+        child_environment,
+        expected_call_entry,
         workspace,
     );
-    try loadFrameEnvironment(
-        image,
-        state,
-        child_offset,
-        child_constructor,
-        &child_slots,
-        workspace,
-    );
-    const target_segment = try segmentRecord(image, target_segment_id);
-    const count = readInt(u16, callee, 2);
-    if (count != readInt(u16, target_segment, 10)) return error.InvalidState;
-    for (0..count) |index| {
-        const argument = 4 + index * 4;
-        if (callee[argument] != 0) return error.InvalidState;
-        const source_value = readInt(u16, callee, argument + 2);
-        const target_value = readInt(u16, target_segment, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsActivationValue(
-            child_constructor,
-            target_value,
-        )) continue;
-        if (!parent_slots[source_value].initialized or
-            !child_activation_slots[target_value].initialized or
-            !std.mem.eql(
-                u8,
-                parent_slots[source_value].bytes,
-                child_activation_slots[target_value].bytes,
-            ))
-        {
-            return error.InvalidState;
-        }
-    }
-}
-
-fn constructorRetainsActivationValue(
-    constructor: []const u8,
-    value: u16,
-) bool {
-    const activation_count = readInt(u16, constructor, 16);
-    var cursor: usize = 24;
-    for (0..activation_count) |_| {
-        if (readInt(u16, constructor, cursor) == value) return true;
-        cursor += 8;
-    }
-    return false;
 }
 
 fn currentValidated(

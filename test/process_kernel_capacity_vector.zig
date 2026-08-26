@@ -53,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     base_memory += 2 * 64 * 1024;
     base_memory += 1024 * 1024;
     base_memory += 4 * 1024;
+    base_memory += @sizeOf(boundary.image.ValidationWorkspace);
     var output_storage: [56]u8 = undefined;
     const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,

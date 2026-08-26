@@ -3,6 +3,7 @@ const image_v1 = @import("image_v1");
 const process_advance_v1 = @import("process_advance_v1");
 const process_state_v1 = @import("process_state_v1");
 const std = @import("std");
+const slicesOverlap = process_state_v1.slicesOverlap;
 
 pub const magic = "ABL_CAP1".*;
 pub const format_version: u16 = 1;
@@ -201,15 +202,4 @@ fn appendInt(
 
 fn readInt(comptime T: type, bytes: []const u8, offset: usize) T {
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
-}
-
-fn slicesOverlap(left: []const u8, right: []const u8) bool {
-    if (left.len == 0 or right.len == 0) return false;
-    const left_start = @intFromPtr(left.ptr);
-    const right_start = @intFromPtr(right.ptr);
-    const left_end = std.math.add(usize, left_start, left.len) catch
-        return true;
-    const right_end = std.math.add(usize, right_start, right.len) catch
-        return true;
-    return left_start < right_end and right_start < left_end;
 }

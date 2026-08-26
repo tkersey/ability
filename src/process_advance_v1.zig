@@ -231,7 +231,24 @@ pub fn encodeOutcomeForCapacity(
     output: []u8,
 ) Error![]const u8 {
     const required_output = try outcomeEncodedLength(outcome);
-    return encodeOutcome(outcome, output) catch |err| switch (err) {
+    const admitted_outcome: Outcome = switch (outcome) {
+        .needs_capacity => |requirement| .{ .needs_capacity = .{
+            .minimum_input_bytes = requirement.minimum_input_bytes,
+            .minimum_output_bytes = requirement.minimum_output_bytes,
+            .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
+            .minimum_memory_pages = @max(
+                requirement.minimum_memory_pages,
+                @as(u64, @intCast(
+                    (saturatingAdd(
+                        base_memory_without_output,
+                        @intCast(requirement.minimum_output_bytes),
+                    ) +| 65535) / 65536,
+                )),
+            ),
+        } },
+        else => outcome,
+    };
+    return encodeOutcome(admitted_outcome, output) catch |err| switch (err) {
         error.OutputCapacity => encodeOutcome(
             .{ .needs_capacity = .{
                 .minimum_input_bytes = @intCast(input_length),
@@ -277,6 +294,7 @@ fn writeOutcomeHeader(
 }
 
 const Slot = reducer_clause_v1.Slot;
+const slicesOverlap = process_state_v1.slicesOverlap;
 
 const LoadedEnvironment = struct {
     activation_entry: ?u32,
@@ -495,11 +513,14 @@ fn capacityRequirement(
     const all_output_arenas = std.math.mul(
         usize,
         minimum_output,
-        6,
+        7,
     ) catch std.math.maxInt(usize);
     const total = saturatingAdd(
         saturatingAdd(input, all_output_arenas),
-        minimum_scratch,
+        saturatingAdd(
+            minimum_scratch,
+            @sizeOf(image_v1.ValidationWorkspace),
+        ),
     );
     return .{
         .minimum_input_bytes = @intCast(input),
@@ -542,17 +563,6 @@ fn validateBufferOwnership(
             if (slicesOverlap(output, other)) return error.InvalidBuffers;
         }
     }
-}
-
-fn slicesOverlap(left: []const u8, right: []const u8) bool {
-    if (left.len == 0 or right.len == 0) return false;
-    const left_start = @intFromPtr(left.ptr);
-    const right_start = @intFromPtr(right.ptr);
-    const left_end = std.math.add(usize, left_start, left.len) catch
-        return true;
-    const right_end = std.math.add(usize, right_start, right.len) catch
-        return true;
-    return left_start < right_end and right_start < left_end;
 }
 
 fn saturatingAdd(left: usize, right: usize) usize {
@@ -1234,90 +1244,31 @@ fn validateStackPair(
     child_constructor: []const u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
-    if (!isAwaitCallConstructor(image, parent_constructor)) {
-        return error.InvalidProcessState;
-    }
     const parent_segment_id = readInt(u16, parent_constructor, 12);
     const parent_segment = try image_v1.evaluatorSegmentRecord(
         image,
         parent_segment_id,
     );
-    const terminator = image_v1.evaluatorSegmentTerminator(parent_segment);
-    const payload = terminator + 8;
-    const callee_function = readInt(u16, parent_segment, payload + 8);
-    const callee = suspensionCallee(parent_segment, terminator);
+    const callee = suspensionCallee(
+        parent_segment,
+        image_v1.evaluatorSegmentTerminator(parent_segment),
+    );
     if (callee.len < 4) return error.InvalidProcessState;
-    const target_segment_id = readInt(u16, callee, 0);
-    const child_segment = try image_v1.evaluatorSegmentRecord(
-        image,
-        readInt(u16, child_constructor, 12),
-    );
-    const target_segment = try image_v1.evaluatorSegmentRecord(
-        image,
-        target_segment_id,
-    );
-    if (readInt(u16, child_segment, 6) != callee_function or
-        readInt(u16, child_constructor, 10) & 1 == 0 or
-        child.environment.len < 4)
-    {
-        return error.InvalidProcessState;
-    }
-    const call_entry_constructor = try image_v1.evaluatorTransitionConstructor(
+    const expected_call_entry = try image_v1.evaluatorTransitionConstructor(
         image,
         parent_segment_id,
         3,
-        target_segment_id,
+        readInt(u16, callee, 0),
     );
-    if (readInt(u32, child.environment, 0) != call_entry_constructor) {
-        return error.InvalidProcessState;
-    }
-
-    var parent_slots = [_]Slot{.{}} ** 1024;
-    var child_slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &parent_slots);
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &child_slots);
-    _ = try loadEnvironment(
+    reducer_clause_v1.validateStackPair(
         image,
         parent_constructor,
         parent.environment,
-        &parent_slots,
-        workspace,
-    );
-    _ = try loadEnvironment(
-        image,
         child_constructor,
         child.environment,
-        &child_slots,
+        expected_call_entry,
         workspace,
-    );
-    const argument_count = readInt(u16, callee, 2);
-    if (argument_count != readInt(u16, target_segment, 10)) {
-        return error.InvalidProcessState;
-    }
-    for (0..argument_count) |argument_index| {
-        const argument = 4 + argument_index * 4;
-        if (callee[argument] != 0) return error.InvalidProcessState;
-        const source_value = readInt(u16, callee, argument + 2);
-        const target_value = readInt(
-            u16,
-            target_segment,
-            image_v1.segment_prefix_length + argument_index * 2,
-        );
-        if (!constructorRetainsActivationValue(
-            child_constructor,
-            target_value,
-        )) continue;
-        if (!parent_slots[source_value].initialized or
-            !child_slots[target_value].initialized or
-            !std.mem.eql(
-                u8,
-                parent_slots[source_value].bytes,
-                child_slots[target_value].bytes,
-            ))
-        {
-            return error.InvalidProcessState;
-        }
-    }
+    ) catch return error.InvalidProcessState;
 }
 
 fn isAwaitCallConstructor(
@@ -1333,19 +1284,6 @@ fn isAwaitCallConstructor(
     ) catch return false;
     const terminator = image_v1.evaluatorSegmentTerminator(segment);
     return segment[terminator + 4] == 2 and segment[terminator + 8] == 1;
-}
-
-fn constructorRetainsActivationValue(
-    constructor: []const u8,
-    value: u16,
-) bool {
-    const activation_count = readInt(u16, constructor, 16);
-    var cursor: usize = 24;
-    for (0..activation_count) |_| {
-        if (readInt(u16, constructor, cursor) == value) return true;
-        cursor += 8;
-    }
-    return false;
 }
 
 fn loadEnvironment(

@@ -74,6 +74,176 @@ fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
     return false;
 }
 
+/// Validate the semantic relationship between one parked call parent and its
+/// active child. Callers provide the ABI-specific call-entry constructor id;
+/// all remaining stack-pair meaning is shared across Machine and Process.
+pub fn validateStackPair(
+    image: anytype,
+    parent_constructor: []const u8,
+    parent_environment: []const u8,
+    child_constructor: []const u8,
+    child_environment: []const u8,
+    expected_call_entry_constructor: u32,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    if (parent_constructor.len < 24 or
+        parent_constructor[8] != 4 or
+        parent_constructor[9] != 2 or
+        child_environment.len < 4)
+    {
+        return error.InvalidState;
+    }
+    const parent_segment_id = readInt(u16, parent_constructor, 12);
+    const parent_segment = try segmentRecord(image, parent_segment_id);
+    const terminator = segmentTerminatorOffset(parent_segment);
+    if (parent_segment[terminator + 4] != 2 or
+        parent_segment[terminator + 8] != 1)
+    {
+        return error.InvalidState;
+    }
+    const payload = terminator + 8;
+    const callee_function = readInt(u16, parent_segment, payload + 8);
+    const callee = suspensionCallee(parent_segment, terminator);
+    if (callee.len < 4) return error.InvalidState;
+    const target_segment_id = readInt(u16, callee, 0);
+    const child_segment = try segmentRecord(
+        image,
+        readInt(u16, child_constructor, 12),
+    );
+    const target_segment = try segmentRecord(image, target_segment_id);
+    if (readInt(u16, child_segment, 6) != callee_function or
+        readInt(u16, child_constructor, 10) & 1 == 0 or
+        readInt(u32, child_environment, 0) !=
+            expected_call_entry_constructor)
+    {
+        return error.InvalidState;
+    }
+
+    var parent_slots = [_]Slot{.{}} ** 1024;
+    var child_activation_slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &parent_slots);
+    try initializeZeroWidthSlots(image, &child_activation_slots);
+    try loadConstructorSlots(
+        image,
+        parent_constructor,
+        parent_environment,
+        &parent_slots,
+        workspace,
+    );
+    try loadActivationSlots(
+        image,
+        child_constructor,
+        child_environment,
+        &child_activation_slots,
+        workspace,
+    );
+    const count = readInt(u16, callee, 2);
+    if (count != readInt(u16, target_segment, 10)) {
+        return error.InvalidState;
+    }
+    for (0..count) |index| {
+        const argument = 4 + index * 4;
+        if (callee[argument] != 0) return error.InvalidState;
+        const source_value = readInt(u16, callee, argument + 2);
+        const target_value = readInt(
+            u16,
+            target_segment,
+            image_v1.segment_prefix_length + index * 2,
+        );
+        if (!constructorRetainsActivationValue(
+            child_constructor,
+            target_value,
+        )) continue;
+        if (!parent_slots[source_value].initialized or
+            !child_activation_slots[target_value].initialized or
+            !std.mem.eql(
+                u8,
+                parent_slots[source_value].bytes,
+                child_activation_slots[target_value].bytes,
+            ))
+        {
+            return error.InvalidState;
+        }
+    }
+}
+
+fn loadActivationSlots(
+    image: anytype,
+    constructor: []const u8,
+    environment: []const u8,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    if (readInt(u16, constructor, 10) & 1 == 0 or environment.len < 4) {
+        return error.InvalidState;
+    }
+    var value_cursor: usize = 4;
+    var field_cursor: usize = 24;
+    for (0..readInt(u16, constructor, 16)) |_| {
+        const value = readInt(u16, constructor, field_cursor);
+        const schema = readInt(u32, constructor, field_cursor + 4);
+        const consumed = dynamic_value_v1.validateValuePrefix(
+            image.catalogs.schemas,
+            schema,
+            environment[value_cursor..],
+            &workspace.value_tasks,
+        ) catch return error.InvalidState;
+        slots[value] = .{
+            .bytes = environment[value_cursor .. value_cursor + consumed],
+            .initialized = true,
+        };
+        value_cursor += consumed;
+        field_cursor += 8;
+    }
+}
+
+fn loadConstructorSlots(
+    image: anytype,
+    constructor: []const u8,
+    environment: []const u8,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    var value_cursor: usize = if (readInt(u16, constructor, 10) & 1 != 0)
+        4
+    else
+        0;
+    if (value_cursor > environment.len) return error.InvalidState;
+    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+        readInt(u16, constructor, 18);
+    var field_cursor: usize = 24;
+    for (0..field_count) |_| {
+        const value = readInt(u16, constructor, field_cursor);
+        const schema = readInt(u32, constructor, field_cursor + 4);
+        const consumed = dynamic_value_v1.validateValuePrefix(
+            image.catalogs.schemas,
+            schema,
+            environment[value_cursor..],
+            &workspace.value_tasks,
+        ) catch return error.InvalidState;
+        slots[value] = .{
+            .bytes = environment[value_cursor .. value_cursor + consumed],
+            .initialized = true,
+        };
+        value_cursor += consumed;
+        field_cursor += 8;
+    }
+    if (value_cursor != environment.len) return error.InvalidState;
+}
+
+fn constructorRetainsActivationValue(
+    constructor: []const u8,
+    value: u16,
+) bool {
+    const activation_count = readInt(u16, constructor, 16);
+    var cursor: usize = 24;
+    for (0..activation_count) |_| {
+        if (readInt(u16, constructor, cursor) == value) return true;
+        cursor += 8;
+    }
+    return false;
+}
+
 pub fn productConstructMatches(
     expected: []const u8,
     operand_bytes: []const u8,
@@ -261,7 +431,7 @@ pub fn evaluateClause(
 }
 
 pub fn initializeZeroWidthSlots(
-    image: image_v1.ValidatedImage,
+    image: anytype,
     slots: *[1024]Slot,
 ) Error!void {
     for (0..image.catalogs.value_count) |value| {

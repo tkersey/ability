@@ -146,6 +146,7 @@ fn execute(input: []const u8) !u32 {
     base_memory +|= environment_capacity;
     base_memory +|= scratch_capacity;
     base_memory +|= error_capacity;
+    base_memory +|= @sizeOf(image_v1.ValidationWorkspace);
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,

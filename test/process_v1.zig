@@ -59,6 +59,47 @@ test "ABL_PST1 rejects non-minimal naturals and wrong program binding" {
     );
 }
 
+test "Process codecs reject output overlap with source bytes" {
+    const digest = [_]u8{0x33} ** 32;
+    var state_storage: [128]u8 = undefined;
+    @memset(state_storage[0..4], 0x44);
+    const frames = [_]process_state_v1.Frame{.{
+        .constructor_id = 1,
+        .environment = state_storage[0..4],
+    }};
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        process_state_v1.encode(digest, &frames, &state_storage),
+    );
+
+    var request_storage: [512]u8 = undefined;
+    @memset(request_storage[400..404], 0x55);
+    try std.testing.expectError(
+        error.InvalidRequest,
+        process_effect_v1.encodeRequest(.{
+            .program_transition_digest = [_]u8{1} ** 32,
+            .pre_request_state_digest = [_]u8{2} ** 32,
+            .effect_site_semantic_digest = [_]u8{3} ** 32,
+            .payload_schema_digest = [_]u8{4} ** 32,
+            .resume_schema_digest = [_]u8{5} ** 32,
+            .continuation_digest = [_]u8{6} ** 32,
+            .effect_semantic_identity = "fixture.effect.v1",
+            .payload = request_storage[400..404],
+        }, &request_storage),
+    );
+
+    var result_storage: [128]u8 = undefined;
+    @memset(result_storage[120..124], 0x66);
+    try std.testing.expectError(
+        error.InvalidResult,
+        process_effect_v1.encodeResult(.{
+            .request_identity_digest = [_]u8{7} ** 32,
+            .resume_schema_digest = [_]u8{8} ** 32,
+            .@"resume" = result_storage[120..124],
+        }, &result_storage),
+    );
+}
+
 test "ABL_ERQ1 and ABL_ERS1 bind the current request and resume schema" {
     const input: process_effect_v1.RequestInput = .{
         .program_transition_digest = [_]u8{1} ** 32,

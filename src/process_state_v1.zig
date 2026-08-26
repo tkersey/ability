@@ -143,6 +143,14 @@ pub fn encode(
     frames: []const Frame,
     output: []u8,
 ) Error![]const u8 {
+    if (slicesOverlap(output, std.mem.sliceAsBytes(frames))) {
+        return error.InvalidEncoding;
+    }
+    for (frames) |frame| {
+        if (slicesOverlap(output, frame.environment)) {
+            return error.InvalidEncoding;
+        }
+    }
     const required = try encodedLength(frames);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
@@ -312,6 +320,17 @@ pub fn artifactDigest(bytes: []const u8) [32]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     return digest;
+}
+
+pub fn slicesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_start = @intFromPtr(left.ptr);
+    const right_start = @intFromPtr(right.ptr);
+    const left_end = std.math.add(usize, left_start, left.len) catch
+        return true;
+    const right_end = std.math.add(usize, right_start, right.len) catch
+        return true;
+    return left_start < right_end and right_start < left_end;
 }
 
 pub fn naturalEncodedLength(value: anytype) usize {

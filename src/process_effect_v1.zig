@@ -97,6 +97,12 @@ pub fn requestEncodedLength(input: RequestInput) Error!usize {
 }
 
 pub fn encodeRequest(input: RequestInput, output: []u8) Error![]const u8 {
+    if (process_state_v1.slicesOverlap(
+        output,
+        input.effect_semantic_identity,
+    ) or process_state_v1.slicesOverlap(output, input.payload)) {
+        return error.InvalidRequest;
+    }
     const required = try requestEncodedLength(input);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
@@ -209,6 +215,9 @@ pub fn resultEncodedLength(input: ResultInput) Error!usize {
 }
 
 pub fn encodeResult(input: ResultInput, output: []u8) Error![]const u8 {
+    if (process_state_v1.slicesOverlap(output, input.@"resume")) {
+        return error.InvalidResult;
+    }
     const required = try resultEncodedLength(input);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;

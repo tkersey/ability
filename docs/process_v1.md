@@ -12,8 +12,10 @@ input State.
 
 For the native buffer API, allocate at least `minimum_output_bytes` for each
 output/candidate/environment arena and at least `minimum_scratch_bytes` for the
-scratch arena before retrying the same input. Buffer arenas and input bytes
-must be pairwise disjoint; aliased calls reject before writing.
+scratch arena before retrying the same input. Every mutable output, scratch,
+and validation arena must be disjoint from all source bytes and from every
+other mutable arena; readonly source slices may overlap. Invalid mutable
+aliases reject before writing.
 
 `ABL_PST1` stores the program transition digest and a minimally encoded frame
 sequence. Each frame contains its continuation-constructor identity and exact
