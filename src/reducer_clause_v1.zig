@@ -364,6 +364,73 @@ pub const LoadedEnvironment = struct {
     activation_entry: ?u32,
 };
 
+pub fn environmentEncodedLength(
+    constructor: []const u8,
+    activation_entry: ?u32,
+    activation_slots: *const [1024]Slot,
+    slots: *const [1024]Slot,
+) Error!usize {
+    const flags = readInt(u16, constructor, 10);
+    var length: usize = if (flags & 1 != 0) blk: {
+        _ = activation_entry orelse return error.InvalidState;
+        break :blk 4;
+    } else 0;
+    const activation_count = readInt(u16, constructor, 16);
+    const field_count = @as(u32, activation_count) +
+        readInt(u16, constructor, 18);
+    var field_cursor: usize = 24;
+    for (0..field_count) |index| {
+        const value = readInt(u16, constructor, field_cursor);
+        const slot = if (index < activation_count)
+            activation_slots[value]
+        else
+            slots[value];
+        if (!slot.initialized) return error.InvalidState;
+        length = std.math.add(usize, length, slot.bytes.len) catch
+            return error.OutputCapacity;
+        field_cursor += 8;
+    }
+    return length;
+}
+
+/// Encode one canonical constructor environment from its two semantic slot
+/// projections. This is the inverse owner of `loadEnvironmentSlots`.
+pub fn encodeEnvironmentSlots(
+    constructor: []const u8,
+    activation_entry: ?u32,
+    activation_slots: *const [1024]Slot,
+    slots: *const [1024]Slot,
+    output: []u8,
+) Error![]const u8 {
+    const required = try environmentEncodedLength(
+        constructor,
+        activation_entry,
+        activation_slots,
+        slots,
+    );
+    if (output.len < required) return error.OutputCapacity;
+    var cursor: usize = 0;
+    if (readInt(u16, constructor, 10) & 1 != 0) {
+        std.mem.writeInt(u32, output[0..4], activation_entry.?, .little);
+        cursor = 4;
+    }
+    const activation_count = readInt(u16, constructor, 16);
+    const field_count = @as(u32, activation_count) +
+        readInt(u16, constructor, 18);
+    var field_cursor: usize = 24;
+    for (0..field_count) |index| {
+        const value = readInt(u16, constructor, field_cursor);
+        const slot = if (index < activation_count)
+            activation_slots[value]
+        else
+            slots[value];
+        @memcpy(output[cursor..][0..slot.bytes.len], slot.bytes);
+        cursor += slot.bytes.len;
+        field_cursor += 8;
+    }
+    return output[0..required];
+}
+
 /// Decode one canonical constructor environment into the shared slot carrier.
 /// ABI-specific callers remain responsible only for resolving the optional
 /// activation constructor identity through their own constructor mapping.

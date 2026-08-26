@@ -2035,68 +2035,33 @@ pub fn build(b: *std.Build) void {
     deletion_step.dependOn(&deletion_command.step);
 
     const source_topology_proof = b.addWriteFiles();
+    var topology: std.Io.Writer.Allocating = .init(b.allocator);
+    topology.writer.print(
+        "core_module_count={d}\nsource_module root support src/root.zig\n",
+        .{std.meta.fields(CoreModules).len},
+    ) catch |err| std.process.fatal(
+        "failed to render Boundary module topology: {s}",
+        .{@errorName(err)},
+    );
+    inline for (std.meta.fields(CoreModuleId)) |field| {
+        const module: CoreModuleId = @enumFromInt(field.value);
+        topology.writer.print(
+            "source_module {s} {s} {s}\n",
+            .{
+                field.name,
+                @tagName(coreModuleRole(module)),
+                coreModulePath(module),
+            },
+        ) catch |err| std.process.fatal(
+            "failed to render Boundary module topology: {s}",
+            .{@errorName(err)},
+        );
+    }
     const topology_receipt = source_topology_proof.add(
         "boundary-core-module-topology.txt",
-        b.fmt(
-            "core_module_count={d}\n" ++
-                "source_module root support src/root.zig\n" ++
-                "source_module agent_profile {s} {s}\n" ++
-                "source_module compiler {s} {s}\n" ++
-                "source_module control_ir {s} {s}\n" ++
-                "source_module driver {s} {s}\n" ++
-                "source_module dynamic_value_v1 {s} {s}\n" ++
-                "source_module effect_v2 {s} {s}\n" ++
-                "source_module image_v1 {s} {s}\n" ++
-                "source_module image_emit_v1 {s} {s}\n" ++
-                "source_module kernel_v1 {s} {s}\n" ++
-                "source_module kernel_machine_v1 image_runtime_semantics src/kernel_machine_v1.zig\n" ++
-                "source_module kernel_wasm_v1 image_runtime_semantics src/kernel_wasm_v1.zig\n" ++
-                "source_module machine {s} {s}\n" ++
-                "source_module machine_v2_metering_v1 direct_runtime_semantics src/machine_v2_metering_v1.zig\n" ++
-                "source_module machine_v2_profile_v1 image_runtime_semantics src/machine_v2_profile_v1.zig\n" ++
-                "source_module portable_value {s} {s}\n" ++
-                "source_module process_advance_v1 image_runtime_semantics src/process_advance_v1.zig\n" ++
-                "source_module process_capsule_v1 image_runtime_semantics src/process_capsule_v1.zig\n" ++
-                "source_module process_effect_v1 image_runtime_semantics src/process_effect_v1.zig\n" ++
-                "source_module process_kernel_wasm_v1 image_runtime_semantics src/process_kernel_wasm_v1.zig\n" ++
-                "source_module process_state_v1 image_runtime_semantics src/process_state_v1.zig\n" ++
-                "source_module process_v1 support src/process_v1.zig\n" ++
-                "source_module program_semantics_v1 shared_runtime_semantics src/program_semantics_v1.zig\n" ++
-                "source_module program_v2 {s} {s}\n" ++
-                "source_module reducer_clause_v1 image_runtime_semantics src/reducer_clause_v1.zig\n" ++
-                "source_module reified_program_v1 {s} {s}\n" ++
-                "source_module rnf {s} {s}\n",
-            .{
-                std.meta.fields(CoreModules).len,
-                @tagName(coreModuleRole(.agent_profile)),
-                coreModulePath(.agent_profile),
-                @tagName(coreModuleRole(.compiler)),
-                coreModulePath(.compiler),
-                @tagName(coreModuleRole(.control_ir)),
-                coreModulePath(.control_ir),
-                @tagName(coreModuleRole(.driver)),
-                coreModulePath(.driver),
-                @tagName(coreModuleRole(.dynamic_value_v1)),
-                coreModulePath(.dynamic_value_v1),
-                @tagName(coreModuleRole(.effect_v2)),
-                coreModulePath(.effect_v2),
-                @tagName(coreModuleRole(.image_v1)),
-                coreModulePath(.image_v1),
-                @tagName(coreModuleRole(.image_emit_v1)),
-                coreModulePath(.image_emit_v1),
-                @tagName(coreModuleRole(.kernel_v1)),
-                coreModulePath(.kernel_v1),
-                @tagName(coreModuleRole(.machine)),
-                coreModulePath(.machine),
-                @tagName(coreModuleRole(.portable_value)),
-                coreModulePath(.portable_value),
-                @tagName(coreModuleRole(.program_v2)),
-                coreModulePath(.program_v2),
-                @tagName(coreModuleRole(.reified_program_v1)),
-                coreModulePath(.reified_program_v1),
-                @tagName(coreModuleRole(.rnf)),
-                coreModulePath(.rnf),
-            },
+        topology.toOwnedSlice() catch |err| std.process.fatal(
+            "failed to finalize Boundary module topology: {s}",
+            .{@errorName(err)},
         ),
     );
 

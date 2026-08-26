@@ -1293,7 +1293,6 @@ fn encodeTopFrame(
         activation_entry = readInt(u32, current_environment, 0);
     }
     const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
     var activation_slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &activation_slots);
     if (activation_count != 0) {
@@ -1306,22 +1305,15 @@ fn encodeTopFrame(
             workspace,
         );
     }
-    var environment_length: usize = if (activation_entry != null) 4 else 0;
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        if (!slot.initialized) return error.InvalidState;
-        environment_length = std.math.add(
-            usize,
-            environment_length,
-            slot.bytes.len,
-        ) catch return error.InvalidState;
-        field_cursor += 8;
-    }
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+    ) catch |err| switch (err) {
+        error.OutputCapacity => return error.OutputCapacity,
+        else => return error.InvalidState,
+    };
     const frame_length = std.math.add(
         usize,
         frame_header_length,
@@ -1343,17 +1335,15 @@ fn encodeTopFrame(
     var cursor = top_offset;
     appendInt(u32, output, &cursor, constructor_id);
     appendInt(u32, output, &cursor, environment_length);
-    if (activation_entry) |entry| appendInt(u32, output, &cursor, entry);
-    field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        appendBytes(output, &cursor, slot.bytes);
-        field_cursor += 8;
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+        output[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
+    if (cursor != required) return error.InvalidState;
     return output[0..required];
 }
 
@@ -1715,7 +1705,6 @@ fn replaceFrameAndTruncate(
         activation_entry = readInt(u32, current_environment, 0);
     }
     const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
     var activation_slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &activation_slots);
     if (activation_count != 0) {
@@ -1728,22 +1717,15 @@ fn replaceFrameAndTruncate(
             workspace,
         );
     }
-    var environment_length: usize = if (activation_entry != null) 4 else 0;
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        if (!slot.initialized) return error.InvalidState;
-        environment_length = std.math.add(
-            usize,
-            environment_length,
-            slot.bytes.len,
-        ) catch return error.OutputCapacity;
-        field_cursor += 8;
-    }
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+    ) catch |err| switch (err) {
+        error.OutputCapacity => return error.OutputCapacity,
+        else => return error.InvalidState,
+    };
     const frame_length = std.math.add(
         usize,
         frame_header_length,
@@ -1765,17 +1747,15 @@ fn replaceFrameAndTruncate(
     var cursor = frame_offset;
     appendInt(u32, output, &cursor, constructor_id);
     appendInt(u32, output, &cursor, environment_length);
-    if (activation_entry) |entry| appendInt(u32, output, &cursor, entry);
-    field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        appendBytes(output, &cursor, slot.bytes);
-        field_cursor += 8;
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+        output[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
+    if (cursor != required) return error.InvalidState;
     return output[0..required];
 }
 

@@ -58,15 +58,12 @@ pub fn main(init: std.process.Init) !void {
         .validation_workspace_bytes = @sizeOf(@TypeOf(workspace)),
     }).baseMemoryWithoutOutput(input.len);
     var output_storage: [56]u8 = undefined;
-    const base_memory = @max(
-        declared_base_memory,
-        (4 * 1024 * 1024) - output_storage.len,
-    );
     const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,
         1024 * 1024,
-        base_memory,
+        declared_base_memory,
+        64,
         &output_storage,
     );
     if ((try process_advance_v1.outcomeEncodedLength(outcome)) <=

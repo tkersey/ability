@@ -269,6 +269,7 @@ pub fn encodeOutcomeForCapacity(
     input_length: usize,
     minimum_scratch_bytes: usize,
     base_memory_without_output: usize,
+    minimum_memory_pages_floor: u64,
     output: []u8,
 ) Error![]const u8 {
     const required_output = try outcomeEncodedLength(outcome);
@@ -279,12 +280,15 @@ pub fn encodeOutcomeForCapacity(
             .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
             .minimum_memory_pages = @max(
                 requirement.minimum_memory_pages,
-                @as(u64, @intCast(
-                    (saturatingAdd(
-                        base_memory_without_output,
-                        @intCast(requirement.minimum_output_bytes),
-                    ) +| 65535) / 65536,
-                )),
+                @max(
+                    minimum_memory_pages_floor,
+                    @as(u64, @intCast(
+                        (saturatingAdd(
+                            base_memory_without_output,
+                            @intCast(requirement.minimum_output_bytes),
+                        ) +| 65535) / 65536,
+                    )),
+                ),
             ),
         } },
         else => outcome,
@@ -295,11 +299,14 @@ pub fn encodeOutcomeForCapacity(
                 .minimum_input_bytes = @intCast(input_length),
                 .minimum_output_bytes = @intCast(required_output),
                 .minimum_scratch_bytes = @intCast(minimum_scratch_bytes),
-                .minimum_memory_pages = @intCast(
-                    (saturatingAdd(
-                        base_memory_without_output,
-                        required_output,
-                    ) +| 65535) / 65536,
+                .minimum_memory_pages = @max(
+                    minimum_memory_pages_floor,
+                    @as(u64, @intCast(
+                        (saturatingAdd(
+                            base_memory_without_output,
+                            required_output,
+                        ) +| 65535) / 65536,
+                    )),
                 ),
             } },
             output,
@@ -1481,31 +1488,16 @@ fn encodeEnvironment(
     slots: *const [1024]Slot,
     output: []u8,
 ) Error![]const u8 {
-    const flags = readInt(u16, constructor, 10);
-    var cursor: usize = 0;
-    if (flags & 1 != 0) {
-        const entry = activation_entry orelse return error.InvalidProcessState;
-        if (output.len < 4) return error.OutputCapacity;
-        appendInt(u32, output, &cursor, entry);
-    }
-    const activation_count = readInt(u16, constructor, 16);
-    const field_count = @as(u32, activation_count) +
-        readInt(u16, constructor, 18);
-    var field_cursor: usize = 24;
-    for (0..field_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        if (!slot.initialized) return error.InvalidProcessState;
-        const bytes = slot.bytes;
-        if (output.len - cursor < bytes.len) return error.OutputCapacity;
-        @memcpy(output[cursor..][0..bytes.len], bytes);
-        cursor += bytes.len;
-        field_cursor += 8;
-    }
-    return output[0..cursor];
+    return reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        activation_entry,
+        activation_slots,
+        slots,
+        output,
+    ) catch |err| switch (err) {
+        error.InvalidState => return error.InvalidProcessState,
+        else => return err,
+    };
 }
 
 fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
