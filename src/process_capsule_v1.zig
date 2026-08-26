@@ -107,7 +107,9 @@ pub fn validate(
         return error.InvalidCapsule;
     }
     const view = try decode(bytes);
-    if (view.required_kernel_semantic_version != 1) {
+    if (view.required_kernel_semantic_version !=
+        process_advance_v1.kernel_semantic_version)
+    {
         return error.UnsupportedKernelSemanticVersion;
     }
     switch (view.instance_kind) {

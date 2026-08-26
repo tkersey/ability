@@ -177,6 +177,11 @@ pub fn encodeOutcome(outcome: Outcome, output: []u8) Error![]const u8 {
                 return output[0 .. outcome_header_length + 32];
             },
         };
+    if (slicesOverlap(output, fields.primary) or
+        slicesOverlap(output, fields.secondary))
+    {
+        return error.InvalidBuffers;
+    }
     const primary_length = std.math.cast(u32, fields.primary.len) orelse
         return error.OutputCapacity;
     const secondary_length = std.math.cast(u32, fields.secondary.len) orelse
@@ -753,18 +758,29 @@ fn stepState(
             &slots,
             buffers,
         ) },
-        .return_to_caller => |return_value| .{
-            .progressed = try returnToCaller(
+        .return_to_caller => |return_value| blk: {
+            const stable_return = try stabilizeValue(
+                return_value,
+                buffers.output_value,
+            );
+            break :blk .{ .progressed = try returnToCaller(
                 image,
                 state,
-                return_value,
+                stable_return,
                 buffers,
                 workspace,
-            ),
+            ) };
         },
     };
     try validateOutcomeStates(image, outcome, workspace);
     return outcome;
+}
+
+fn stabilizeValue(value: []const u8, output: []u8) Error![]const u8 {
+    if (slicesOverlap(value, output)) return value;
+    if (output.len < value.len) return error.OutputCapacity;
+    @memcpy(output[0..value.len], value);
+    return output[0..value.len];
 }
 
 fn validateOutcomeStates(
@@ -1038,7 +1054,7 @@ fn makeRequest(
     const request = try process_effect_v1.encodeRequest(.{
         .program_transition_digest = image.catalogs.envelope.header.program_transition_digest,
         .pre_request_state_digest = state_digest,
-        .effect_site_semantic_digest = effect.ordinal_digest,
+        .effect_site_semantic_digest = effect.semantic_digest,
         .payload_schema_digest = payload_schema_digest,
         .resume_schema_digest = resume_schema_digest,
         .continuation_digest = continuation_digest,

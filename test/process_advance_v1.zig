@@ -381,6 +381,19 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
         requested.request,
         Image.program_transition_digest,
     );
+    var image_workspace: boundary.image.ValidationWorkspace = .{};
+    const validated_image = try boundary.image.validateImageView(
+        &Image.bytes,
+        &image_workspace,
+    );
+    const effects = validated_image.catalogs.envelope.section(.effects);
+    const identity_length = std.mem.readInt(u32, effects[8..12], .little);
+    const semantic_digest_offset: usize = 12 + identity_length + 12;
+    try std.testing.expectEqualSlices(
+        u8,
+        effects[semantic_digest_offset..][0..32],
+        &request.effect_site_semantic_digest,
+    );
     var resume_value: [4]u8 = undefined;
     std.mem.writeInt(u32, &resume_value, 99, .little);
     var result_storage: [128]u8 = undefined;
@@ -838,6 +851,18 @@ test "Process rejects aliased kernel-input encoding" {
             storage[0..Image.bytes.len],
             .{ .initial_args = &initial_args },
             null,
+            &storage,
+        ),
+    );
+}
+
+test "Process rejects aliased kernel-outcome encoding" {
+    var storage: [128]u8 = undefined;
+    @memset(storage[96..100], 0x77);
+    try std.testing.expectError(
+        error.InvalidBuffers,
+        process_advance_v1.encodeOutcome(
+            .{ .progressed = storage[96..100] },
             &storage,
         ),
     );
