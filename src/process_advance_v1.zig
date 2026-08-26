@@ -19,6 +19,7 @@ pub const Error = image_v1.Error ||
     UnexpectedEffectResult,
     UnsupportedTransition,
     InvalidBuffers,
+    InvalidKernelInput,
 };
 
 pub const Instance = union(enum) {
@@ -62,6 +63,74 @@ pub const kernel_input_magic = "ABL_PKI1".*;
 pub const kernel_input_format_version: u16 = 1;
 pub const kernel_input_header_length: usize = 28;
 
+pub const KernelInputView = struct {
+    image: []const u8,
+    instance: Instance,
+    effect_result: ?[]const u8,
+};
+
+pub fn encodeKernelInputHeader(
+    instance_kind: u8,
+    result_present: bool,
+    image_length: u32,
+    instance_length: u32,
+    result_length: u32,
+    output: []u8,
+) Error![]const u8 {
+    if (instance_kind > 1 or (!result_present and result_length != 0)) {
+        return error.InvalidKernelInput;
+    }
+    if (output.len < kernel_input_header_length) return error.OutputCapacity;
+    @memcpy(output[0..8], &kernel_input_magic);
+    std.mem.writeInt(u16, output[8..10], kernel_input_format_version, .little);
+    output[10] = instance_kind;
+    output[11] = @intFromBool(result_present);
+    std.mem.writeInt(u32, output[12..16], image_length, .little);
+    std.mem.writeInt(u32, output[16..20], instance_length, .little);
+    std.mem.writeInt(u32, output[20..24], result_length, .little);
+    @memset(output[24..28], 0);
+    return output[0..kernel_input_header_length];
+}
+
+pub fn validateKernelInput(input: []const u8) Error!KernelInputView {
+    if (input.len < kernel_input_header_length or
+        !std.mem.eql(u8, input[0..8], &kernel_input_magic) or
+        readInt(u16, input, 8) != kernel_input_format_version or
+        input[10] > 1 or input[11] & ~@as(u8, 1) != 0 or
+        !allZero(input[24..28]))
+    {
+        return error.InvalidKernelInput;
+    }
+    const image_length = readInt(u32, input, 12);
+    const instance_length = readInt(u32, input, 16);
+    const result_length = readInt(u32, input, 20);
+    const result_present = input[11] & 1 != 0;
+    if (!result_present and result_length != 0) return error.InvalidKernelInput;
+    var expected = std.math.add(usize, kernel_input_header_length, image_length) catch
+        return error.InvalidKernelInput;
+    expected = std.math.add(usize, expected, instance_length) catch
+        return error.InvalidKernelInput;
+    expected = std.math.add(usize, expected, result_length) catch
+        return error.InvalidKernelInput;
+    if (expected != input.len) return error.InvalidKernelInput;
+    var cursor: usize = kernel_input_header_length;
+    const image = input[cursor..][0..image_length];
+    cursor += image_length;
+    const instance_bytes = input[cursor..][0..instance_length];
+    cursor += instance_length;
+    return .{
+        .image = image,
+        .instance = if (input[10] == 0)
+            .{ .initial_args = instance_bytes }
+        else
+            .{ .process_state = instance_bytes },
+        .effect_result = if (result_present)
+            input[cursor..][0..result_length]
+        else
+            null,
+    };
+}
+
 pub fn encodeKernelInput(
     image: []const u8,
     instance: Instance,
@@ -99,19 +168,14 @@ pub fn encodeKernelInput(
     required = std.math.add(usize, required, result.len) catch
         return error.OutputCapacity;
     if (output.len < required) return error.OutputCapacity;
-    @memcpy(output[0..8], &kernel_input_magic);
-    std.mem.writeInt(
-        u16,
-        output[8..10],
-        kernel_input_format_version,
-        .little,
+    _ = try encodeKernelInputHeader(
+        instance_kind,
+        effect_result != null,
+        image_length,
+        instance_length,
+        result_length,
+        output,
     );
-    output[10] = instance_kind;
-    output[11] = @intFromBool(effect_result != null);
-    std.mem.writeInt(u32, output[12..16], image_length, .little);
-    std.mem.writeInt(u32, output[16..20], instance_length, .little);
-    std.mem.writeInt(u32, output[20..24], result_length, .little);
-    @memset(output[24..28], 0);
     var cursor: usize = kernel_input_header_length;
     @memcpy(output[cursor..][0..image.len], image);
     cursor += image.len;
@@ -560,57 +624,68 @@ fn capacityRequirement(
     buffers: Buffers,
     err: anyerror,
 ) CapacityRequirement {
-    const instance_length = switch (instance) {
-        .initial_args => |bytes| bytes.len,
-        .process_state => |bytes| bytes.len,
+    const instance_length: u64 = switch (instance) {
+        .initial_args => |bytes| @intCast(bytes.len),
+        .process_state => |bytes| @intCast(bytes.len),
     };
-    const result_length = if (effect_result) |bytes| bytes.len else 0;
-    const input = saturatingAdd(
+    const result_length: u64 = if (effect_result) |bytes|
+        @intCast(bytes.len)
+    else
+        0;
+    const input = saturatingAddU64(
         kernel_input_header_length,
-        saturatingAdd(
-            saturatingAdd(image_bytes.len, instance_length),
+        saturatingAddU64(
+            saturatingAddU64(image_bytes.len, instance_length),
             result_length,
         ),
     );
     const envelope = image_v1.validateEnvelope(image_bytes) catch null;
-    const maximum_value = if (envelope) |view|
-        @as(usize, view.header.maximum_single_value_bytes)
+    const maximum_value: u64 = if (envelope) |view|
+        view.header.maximum_single_value_bytes
     else
-        saturatingAdd(buffers.output_value.len, 1);
-    const maximum_environment = saturatingAdd(
+        @as(u64, @intCast(buffers.output_value.len)) +| 1;
+    const maximum_environment = saturatingAddU64(
         4,
-        std.math.mul(usize, maximum_value, 2048) catch
-            std.math.maxInt(usize),
+        std.math.mul(u64, maximum_value, 2048) catch
+            std.math.maxInt(u64),
     );
     const maximum_call_environments = std.math.mul(
-        usize,
+        u64,
         maximum_environment,
         2,
-    ) catch std.math.maxInt(usize);
-    const maximum_state = saturatingAdd(
-        saturatingAdd(instance_length, maximum_call_environments),
+    ) catch std.math.maxInt(u64);
+    const maximum_state = saturatingAddU64(
+        saturatingAddU64(instance_length, maximum_call_environments),
         256,
     );
-    const maximum_request = saturatingAdd(
-        saturatingAdd(image_bytes.len, maximum_value),
+    const maximum_request = saturatingAddU64(
+        saturatingAddU64(image_bytes.len, maximum_value),
         512,
     );
-    const required_output = saturatingAdd(
-        saturatingAdd(maximum_state, maximum_request),
+    const required_output = saturatingAddU64(
+        saturatingAddU64(maximum_state, maximum_request),
         outcome_header_length,
     );
-    const current_output = @max(
-        buffers.output_state.len,
-        buffers.output_value.len,
-        buffers.output_request.len,
-        buffers.candidate_state.len,
-        buffers.environment.len,
-        buffers.auxiliary_environment.len,
+    const current_output: u64 = @max(
+        @as(u64, @intCast(buffers.output_state.len)),
+        @max(
+            @as(u64, @intCast(buffers.output_value.len)),
+            @max(
+                @as(u64, @intCast(buffers.output_request.len)),
+                @max(
+                    @as(u64, @intCast(buffers.candidate_state.len)),
+                    @max(
+                        @as(u64, @intCast(buffers.environment.len)),
+                        @as(u64, @intCast(buffers.auxiliary_environment.len)),
+                    ),
+                ),
+            ),
+        ),
     );
     const minimum_output = @max(
         required_output,
         if (err == error.OutputCapacity)
-            saturatingAdd(current_output, 1)
+            current_output +| 1
         else
             current_output,
     );
@@ -626,22 +701,21 @@ fn capacityRequirement(
         else
             current_scratch,
     );
-    const minimum_output_u64: u64 = @intCast(minimum_output);
     const all_output_arenas = std.math.mul(
         u64,
-        minimum_output_u64,
+        minimum_output,
         7,
     ) catch std.math.maxInt(u64);
     const total = saturatingAddU64(
-        saturatingAddU64(@intCast(input), all_output_arenas),
+        saturatingAddU64(input, all_output_arenas),
         saturatingAddU64(
             minimum_scratch +| (4 << 10),
             @intCast(@sizeOf(image_v1.ValidationWorkspace)),
         ),
     );
     return .{
-        .minimum_input_bytes = @intCast(input),
-        .minimum_output_bytes = minimum_output_u64,
+        .minimum_input_bytes = input,
+        .minimum_output_bytes = minimum_output,
         .minimum_scratch_bytes = minimum_scratch,
         .minimum_memory_pages = bytesToPages(total),
     };
@@ -697,37 +771,23 @@ fn initialState(
     environment_output: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error![]const u8 {
-    dynamic_value_v1.validateValue(
-        image.catalogs.schemas,
-        image.catalogs.initial_args_schema_id,
-        initial_args,
-        &workspace.value_tasks,
-    ) catch return error.InvalidInitialArgs;
     const constructor = try image_v1.evaluatorConstructorRecord(
         image,
         image.catalogs.initial_constructor_id,
     );
-    const flags = readInt(u16, constructor, 10);
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    if (flags & 1 != 0 or activation_count != 0 or environment_count > 1) {
-        return error.InvalidInitialArgs;
-    }
     var slots = [_]Slot{.{}} ** 1024;
     var activation_slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &activation_slots);
-    if (environment_count == 1) {
-        const value = readInt(u16, constructor, 24);
-        const schema = readInt(u32, constructor, 28);
-        if (image.catalogs.entry_parameter_count != 1 or
-            value != image.catalogs.entry_parameter_value_id or
-            schema != image.catalogs.initial_args_schema_id)
-        {
-            return error.InvalidInitialArgs;
-        }
-        slots[value] = .{ .bytes = initial_args, .initialized = true };
-    }
+    reducer_clause_v1.bindInitialEnvironment(
+        image,
+        constructor,
+        initial_args,
+        &slots,
+        &activation_slots,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        else => return error.InvalidInitialArgs,
+    };
     const environment = reducer_clause_v1.encodeEnvironmentSlots(
         constructor,
         null,
@@ -1297,7 +1357,7 @@ fn resumePending(
     const terminator = image_v1.evaluatorSegmentTerminator(segment);
     const effect = try image_v1.evaluatorEffect(
         image,
-        readInt(u32, segment, terminator + 12),
+        parts.site_ordinal,
     );
     dynamic_value_v1.validateValue(
         image.catalogs.schemas,
@@ -1572,4 +1632,9 @@ fn appendInt(
 
 fn readInt(comptime T: type, bytes: []const u8, offset: usize) T {
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
+}
+
+fn allZero(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0) return false;
+    return true;
 }

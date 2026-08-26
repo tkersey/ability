@@ -22,17 +22,6 @@ const instance = fs.readFileSync(statePath ?? initialPath);
 const result = options.has("--result")
   ? fs.readFileSync(options.get("--result"))
   : Buffer.alloc(0);
-const input = Buffer.alloc(28 + image.length + instance.length + result.length);
-input.write("ABL_PKI1", 0, "ascii");
-input.writeUInt16LE(1, 8);
-input.writeUInt8(statePath === undefined ? 0 : 1, 10);
-input.writeUInt8(options.has("--result") ? 1 : 0, 11);
-input.writeUInt32LE(image.length, 12);
-input.writeUInt32LE(instance.length, 16);
-input.writeUInt32LE(result.length, 20);
-image.copy(input, 28);
-instance.copy(input, 28 + image.length);
-result.copy(input, 28 + image.length + instance.length);
 
 const module = await WebAssembly.compile(fs.readFileSync(kernelPath));
 if (WebAssembly.Module.imports(module).length !== 0) {
@@ -44,12 +33,22 @@ if (typeof exports.boundary_process_kernel_abi_version !== "function" ||
     exports.boundary_process_kernel_abi_version() !== 1) {
   throw new Error("unsupported Boundary Process kernel ABI");
 }
-if (exports.boundary_process_kernel_reserve(input.length) !== 1) {
-  throw new Error("kernel cannot reserve the required operational input capacity");
-}
+const inputLength = exports.boundary_process_kernel_prepare_input(
+  statePath === undefined ? 0 : 1,
+  image.length,
+  instance.length,
+  options.has("--result") ? 1 : 0,
+  result.length,
+);
+if (inputLength === 0) throw new Error("kernel cannot prepare the Process input");
 const memory = new Uint8Array(exports.memory.buffer);
-memory.set(input, exports.boundary_process_kernel_input_ptr());
-const status = exports.boundary_process_kernel_execute(input.length);
+let payload = exports.boundary_process_kernel_input_payload_ptr();
+memory.set(image, payload);
+payload += image.length;
+memory.set(instance, payload);
+payload += instance.length;
+memory.set(result, payload);
+const status = exports.boundary_process_kernel_execute(inputLength);
 if (status !== 0) {
   const start = exports.boundary_process_kernel_error_ptr();
   const length = exports.boundary_process_kernel_error_len();

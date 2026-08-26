@@ -50,6 +50,37 @@ pub export fn boundary_process_kernel_input_capacity() u32 {
     return input_capacity;
 }
 
+pub export fn boundary_process_kernel_input_payload_ptr() u32 {
+    return @intCast(@intFromPtr(&input_storage) + input_header_length);
+}
+
+pub export fn boundary_process_kernel_prepare_input(
+    instance_kind: u32,
+    image_length: u32,
+    instance_length: u32,
+    result_present: u32,
+    result_length: u32,
+) u32 {
+    if (instance_kind > 1 or result_present > 1) return 0;
+    var total = std.math.add(
+        usize,
+        input_header_length,
+        image_length,
+    ) catch return 0;
+    total = std.math.add(usize, total, instance_length) catch return 0;
+    total = std.math.add(usize, total, result_length) catch return 0;
+    if (total > input_storage.len) return 0;
+    _ = process_advance_v1.encodeKernelInputHeader(
+        @intCast(instance_kind),
+        result_present == 1,
+        image_length,
+        instance_length,
+        result_length,
+        &input_storage,
+    ) catch return 0;
+    return @intCast(total);
+}
+
 pub export fn boundary_process_kernel_output_ptr() u32 {
     return @intCast(@intFromPtr(&output_storage));
 }
@@ -80,52 +111,14 @@ pub export fn boundary_process_kernel_execute(input_length: u32) u32 {
 }
 
 fn execute(input: []const u8) !u32 {
-    if (input.len < input_header_length or
-        !std.mem.eql(u8, input[0..8], &input_magic) or
-        readInt(u16, input, 8) != input_format_version or
-        input[10] > 1 or
-        input[11] & ~@as(u8, 1) != 0 or
-        !allZero(input[24..28]))
-    {
+    const decoded = process_advance_v1.validateKernelInput(input) catch
         return error.MalformedKernelInput;
-    }
-    const image_length = readInt(u32, input, 12);
-    const instance_length = readInt(u32, input, 16);
-    const result_length = readInt(u32, input, 20);
-    const result_present = input[11] & 1 != 0;
-    if (!result_present and result_length != 0) {
-        return error.MalformedKernelInput;
-    }
-    var expected = std.math.add(
-        usize,
-        input_header_length,
-        image_length,
-    ) catch return error.MalformedKernelInput;
-    expected = std.math.add(usize, expected, instance_length) catch
-        return error.MalformedKernelInput;
-    expected = std.math.add(usize, expected, result_length) catch
-        return error.MalformedKernelInput;
-    if (expected != input.len) return error.MalformedKernelInput;
-
-    var cursor: usize = input_header_length;
-    const image = input[cursor .. cursor + image_length];
-    cursor += image_length;
-    const instance_bytes = input[cursor .. cursor + instance_length];
-    cursor += instance_length;
-    const effect_result = if (result_present)
-        input[cursor .. cursor + result_length]
-    else
-        null;
-    const instance: process_advance_v1.Instance = if (input[10] == 0)
-        .{ .initial_args = instance_bytes }
-    else
-        .{ .process_state = instance_bytes };
 
     validation_workspace = .{};
     const outcome = try process_advance_v1.advance(
-        image,
-        instance,
-        effect_result,
+        decoded.image,
+        decoded.instance,
+        decoded.effect_result,
         .{
             .output_state = &state_storage,
             .output_value = &value_storage,
@@ -164,13 +157,4 @@ fn setError(message: []const u8) void {
     const length = @min(message.len, error_storage.len);
     @memcpy(error_storage[0..length], message[0..length]);
     error_length = @intCast(length);
-}
-
-fn allZero(bytes: []const u8) bool {
-    for (bytes) |byte| if (byte != 0) return false;
-    return true;
-}
-
-fn readInt(comptime T: type, bytes: []const u8, offset: usize) T {
-    return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
 }

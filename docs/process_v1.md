@@ -31,8 +31,9 @@ environment and path invariant against the supplied BPI1 before execution.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic
-`scripts/boundary-process-step.mjs` adapter builds one byte input, invokes one
-kernel operation, writes the canonical outcome bytes, and exits.
+`scripts/boundary-process-step.mjs` adapter asks the kernel to prepare its
+canonical input header, copies only the BPI1 and instance/result payload bytes,
+invokes one kernel operation, writes the canonical outcome bytes, and exits.
 
 Run:
 

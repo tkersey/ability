@@ -364,6 +364,41 @@ pub const LoadedEnvironment = struct {
     activation_entry: ?u32,
 };
 
+/// Validate and bind InitialArgs to the canonical initial constructor slot map.
+pub fn bindInitialEnvironment(
+    image: anytype,
+    constructor: []const u8,
+    initial_args: []const u8,
+    slots: *[1024]Slot,
+    activation_slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    try initializeZeroWidthSlots(image, slots);
+    try initializeZeroWidthSlots(image, activation_slots);
+    dynamic_value_v1.validateValue(
+        image.catalogs.schemas,
+        image.catalogs.initial_args_schema_id,
+        initial_args,
+        &workspace.value_tasks,
+    ) catch return error.InvalidBindings;
+    const flags = readInt(u16, constructor, 10);
+    const activation_count = readInt(u16, constructor, 16);
+    const environment_count = readInt(u16, constructor, 18);
+    if (flags & 1 != 0 or activation_count != 0 or environment_count > 1) {
+        return error.InvalidImage;
+    }
+    if (environment_count == 0) return;
+    const value = readInt(u16, constructor, 24);
+    const schema = readInt(u32, constructor, 28);
+    if (image.catalogs.entry_parameter_count != 1 or
+        value != image.catalogs.entry_parameter_value_id or
+        schema != image.catalogs.initial_args_schema_id)
+    {
+        return error.InvalidImage;
+    }
+    slots[value] = .{ .bytes = initial_args, .initialized = true };
+}
+
 pub fn environmentEncodedLength(
     constructor: []const u8,
     activation_entry: ?u32,

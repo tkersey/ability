@@ -116,6 +116,10 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
         "boundary_process_kernel_input_capacity",
         process_v1.fixed_kernel_abi.exports.input_capacity,
     );
+    try std.testing.expectEqualStrings(
+        "boundary_process_kernel_prepare_input",
+        process_v1.fixed_kernel_abi.exports.prepare_input,
+    );
     try std.testing.expect(!@hasDecl(machine_v2, "profile"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "preflightStep"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "StepAdmission"));

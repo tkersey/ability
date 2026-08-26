@@ -422,39 +422,24 @@ fn initialValidated(
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
-    dynamic_value_v1.validateValue(
-        image.catalogs.schemas,
-        image.catalogs.initial_args_schema_id,
-        initial_args,
-        &workspace.value_tasks,
-    ) catch return error.InvalidInitialArgs;
     const constructor = constructorRecord(
         image,
         image.profile.initial_constructor_id,
     ) catch return error.InvalidImage;
-    const flags = readInt(u16, constructor, 10);
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    if (flags & 1 != 0 or activation_count != 0 or environment_count > 1) {
-        return error.InvalidImage;
-    }
     var slots = [_]Slot{.{}} ** 1024;
     var activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
-    try initializeZeroWidthSlots(image, &activation_slots);
-    if (environment_count == 1) {
-        const value_id = readInt(u16, constructor, 24);
-        const schema_id = readInt(u32, constructor, 28);
-        if (image.catalogs.entry_parameter_count != 1 or
-            value_id != image.catalogs.entry_parameter_value_id or
-            schema_id != image.catalogs.initial_args_schema_id)
-        {
-            return error.InvalidImage;
-        }
-        slots[value_id] = .{ .bytes = initial_args, .initialized = true };
-    } else if (image.catalogs.entry_parameter_count == 1) {
-        // An unused entry argument is intentionally absent from RNF State.
-    }
+    reducer_clause_v1.bindInitialEnvironment(
+        image,
+        constructor,
+        initial_args,
+        &slots,
+        &activation_slots,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        error.InvalidBindings => return error.InvalidInitialArgs,
+        else => return error.InvalidImage,
+    };
     const environment_length = reducer_clause_v1.environmentEncodedLength(
         constructor,
         null,

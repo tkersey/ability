@@ -17,6 +17,8 @@ const requiredExports = [
   "boundary_process_kernel_reserve",
   "boundary_process_kernel_input_ptr",
   "boundary_process_kernel_input_capacity",
+  "boundary_process_kernel_input_payload_ptr",
+  "boundary_process_kernel_prepare_input",
   "boundary_process_kernel_execute",
   "boundary_process_kernel_output_ptr",
   "boundary_process_kernel_output_len",

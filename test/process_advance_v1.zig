@@ -976,6 +976,31 @@ test "Process rejects aliased kernel-input encoding" {
     );
 }
 
+test "Process kernel-input codec has one canonical round trip" {
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 23, .little);
+    var storage: [128 * 1024]u8 = undefined;
+    const encoded = try process_advance_v1.encodeKernelInput(
+        &Image.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        &storage,
+    );
+    const decoded = try process_advance_v1.validateKernelInput(encoded);
+    try std.testing.expectEqualSlices(u8, &Image.bytes, decoded.image);
+    try std.testing.expectEqualSlices(
+        u8,
+        &initial_args,
+        decoded.instance.initial_args,
+    );
+    try std.testing.expect(decoded.effect_result == null);
+    storage[24] = 1;
+    try std.testing.expectError(
+        error.InvalidKernelInput,
+        process_advance_v1.validateKernelInput(storage[0..encoded.len]),
+    );
+}
+
 test "Process rejects aliased kernel-outcome encoding" {
     var storage: [128]u8 = undefined;
     @memset(storage[96..100], 0x77);
