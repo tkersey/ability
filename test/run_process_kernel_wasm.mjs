@@ -29,6 +29,7 @@ const count = vectorBytes.readUInt32LE(cursor);
 cursor += 4;
 let comparisons = 0;
 const observedKinds = new Set();
+let emptyResultInput = null;
 for (let index = 0; index < count; index += 1) {
   const inputLength = vectorBytes.readUInt32LE(cursor);
   const expectedLength = vectorBytes.readUInt32LE(cursor + 4);
@@ -38,6 +39,9 @@ for (let index = 0; index < count; index += 1) {
   const expected = vectorBytes.subarray(cursor, cursor + expectedLength);
   cursor += expectedLength;
   observedKinds.add(expected[10]);
+  if (input[10] === 1 && input[11] === 0 && emptyResultInput === null) {
+    emptyResultInput = Buffer.from(input);
+  }
 
   // Every finite reduction deliberately receives a fresh instance.
   const instance = await WebAssembly.instantiate(module, {});
@@ -74,6 +78,22 @@ if (cursor !== vectorBytes.length) throw new Error("trailing Process vectors");
 if (observedKinds.size !== expectedKinds.size ||
     [...observedKinds].some((kind) => !expectedKinds.has(kind))) {
   throw new Error("Process outcome-kind coverage mismatch");
+}
+if (emptyResultInput !== null) {
+  emptyResultInput[11] = 1;
+  const emptyResultInstance = await WebAssembly.instantiate(module, {});
+  const emptyResultMemory = new Uint8Array(
+    emptyResultInstance.exports.memory.buffer,
+  );
+  emptyResultMemory.set(
+    emptyResultInput,
+    emptyResultInstance.exports.boundary_process_kernel_input_ptr(),
+  );
+  if (emptyResultInstance.exports.boundary_process_kernel_execute(
+    emptyResultInput.length,
+  ) === 0) {
+    throw new Error("present-but-empty EffectResult was accepted");
+  }
 }
 
 const malformedInstance = await WebAssembly.instantiate(module, {});

@@ -53,6 +53,16 @@ try {
           index,
       );
     }
+    if (input[10] === 1 && resultLength === 0) {
+      fs.writeFileSync(resultPath, Buffer.alloc(0));
+      const emptyResult = spawnSync(
+        process.execPath,
+        [...argumentsList, "--result", resultPath],
+      );
+      if (emptyResult.status === 0) {
+        throw new Error("relay accepted a present-but-empty EffectResult");
+      }
+    }
   }
   const emptyImage = path.join(temporary, "empty.bpi1");
   const emptyInitial = path.join(temporary, "empty.initial");

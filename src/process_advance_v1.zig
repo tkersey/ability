@@ -77,6 +77,12 @@ pub fn encodeKernelInput(
         .process_state => 1,
     };
     const result = effect_result orelse &.{};
+    if (slicesOverlap(output, image) or
+        slicesOverlap(output, instance_bytes) or
+        slicesOverlap(output, result))
+    {
+        return error.InvalidBuffers;
+    }
     const image_length = std.math.cast(u32, image.len) orelse
         return error.OutputCapacity;
     const instance_length = std.math.cast(u32, instance_bytes.len) orelse
@@ -101,7 +107,7 @@ pub fn encodeKernelInput(
         .little,
     );
     output[10] = instance_kind;
-    output[11] = 0;
+    output[11] = @intFromBool(effect_result != null);
     std.mem.writeInt(u32, output[12..16], image_length, .little);
     std.mem.writeInt(u32, output[16..20], instance_length, .little);
     std.mem.writeInt(u32, output[20..24], result_length, .little);
@@ -203,6 +209,58 @@ pub fn encodeOutcome(outcome: Outcome, output: []u8) Error![]const u8 {
     return output[0..required];
 }
 
+pub fn outcomeEncodedLength(outcome: Outcome) Error!usize {
+    return switch (outcome) {
+        .progressed => |state| addOutcomeLength(state.len, 0),
+        .requested => |requested| addOutcomeLength(
+            requested.state.len,
+            requested.request.len,
+        ),
+        .explicitly_yielded => |state| addOutcomeLength(state.len, 0),
+        .completed => |result| addOutcomeLength(result.len, 0),
+        .authored_failure => |failure| addOutcomeLength(failure.len, 0),
+        .needs_capacity => outcome_header_length + 32,
+    };
+}
+
+pub fn encodeOutcomeForCapacity(
+    outcome: Outcome,
+    input_length: usize,
+    minimum_scratch_bytes: usize,
+    base_memory_without_output: usize,
+    output: []u8,
+) Error![]const u8 {
+    const required_output = try outcomeEncodedLength(outcome);
+    return encodeOutcome(outcome, output) catch |err| switch (err) {
+        error.OutputCapacity => encodeOutcome(
+            .{ .needs_capacity = .{
+                .minimum_input_bytes = @intCast(input_length),
+                .minimum_output_bytes = @intCast(required_output),
+                .minimum_scratch_bytes = @intCast(minimum_scratch_bytes),
+                .minimum_memory_pages = @intCast(
+                    (saturatingAdd(
+                        base_memory_without_output,
+                        required_output,
+                    ) +| 65535) / 65536,
+                ),
+            } },
+            output,
+        ),
+        else => err,
+    };
+}
+
+fn addOutcomeLength(primary: usize, secondary: usize) Error!usize {
+    var length = std.math.add(
+        usize,
+        outcome_header_length,
+        primary,
+    ) catch return error.OutputCapacity;
+    length = std.math.add(usize, length, secondary) catch
+        return error.OutputCapacity;
+    return length;
+}
+
 fn writeOutcomeHeader(
     output: []u8,
     kind: u8,
@@ -287,6 +345,43 @@ pub fn validateState(
     ) catch return error.InvalidProcessState;
     try validateFrames(image, state, workspace);
     return state;
+}
+
+pub fn validateInitialArgs(
+    image_bytes: []const u8,
+    initial_args: []const u8,
+    output_state: []u8,
+    invariant_scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    const workspace_bytes = std.mem.asBytes(workspace);
+    const arenas = [_][]const u8{
+        image_bytes,
+        initial_args,
+        output_state,
+        invariant_scratch,
+        workspace_bytes,
+    };
+    for (arenas, 0..) |arena, index| {
+        for (arenas[index + 1 ..]) |other| {
+            if (slicesOverlap(arena, other)) return error.InvalidBuffers;
+        }
+    }
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = prior_invariant_result;
+    const image = try image_v1.validateImage(image_bytes, workspace);
+    const encoded = try initialState(
+        image,
+        initial_args,
+        output_state,
+        workspace,
+    );
+    const state = try process_state_v1.validate(
+        encoded,
+        image.catalogs.envelope.header.program_transition_digest,
+    );
+    try validateFrames(image, state, workspace);
 }
 
 fn advanceFinite(
@@ -378,10 +473,13 @@ fn capacityRequirement(
         buffers.environment.len,
         buffers.auxiliary_environment.len,
     );
-    const minimum_output = if (err == error.OutputCapacity)
-        @max(required_output, saturatingAdd(current_output, 1))
-    else
-        current_output;
+    const minimum_output = @max(
+        required_output,
+        if (err == error.OutputCapacity)
+            saturatingAdd(current_output, 1)
+        else
+            current_output,
+    );
     const required_scratch = if (envelope) |view|
         std.math.cast(usize, view.header.maximum_kernel_scratch_bytes) orelse
             std.math.maxInt(usize)
@@ -554,6 +652,7 @@ fn stepState(
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    try validateFrames(image, state, workspace);
     const top = try process_state_v1.topFrame(state);
     const constructor = try image_v1.evaluatorConstructorRecord(
         image,
@@ -577,7 +676,7 @@ fn stepState(
         buffers.scratch,
         workspace,
     );
-    return switch (clause) {
+    const outcome: Outcome = switch (clause) {
         .progressed => |progressed| .{ .progressed = try transitionState(
             image,
             state,
@@ -654,6 +753,28 @@ fn stepState(
             ),
         },
     };
+    try validateOutcomeStates(image, outcome, workspace);
+    return outcome;
+}
+
+fn validateOutcomeStates(
+    image: image_v1.ValidatedImage,
+    outcome: Outcome,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    const state_bytes: ?[]const u8 = switch (outcome) {
+        .progressed => |state| state,
+        .requested => |requested| requested.state,
+        .explicitly_yielded => |state| state,
+        .completed, .authored_failure, .needs_capacity => null,
+    };
+    if (state_bytes) |bytes| {
+        const state = process_state_v1.validate(
+            bytes,
+            image.catalogs.envelope.header.program_transition_digest,
+        ) catch return error.InvalidProcessState;
+        try validateFrames(image, state, workspace);
+    }
 }
 
 fn callState(

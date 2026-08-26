@@ -26,6 +26,7 @@ const input = Buffer.alloc(28 + image.length + instance.length + result.length);
 input.write("ABL_PKI1", 0, "ascii");
 input.writeUInt16LE(1, 8);
 input.writeUInt8(statePath === undefined ? 0 : 1, 10);
+input.writeUInt8(options.has("--result") ? 1 : 0, 11);
 input.writeUInt32LE(image.length, 12);
 input.writeUInt32LE(instance.length, 16);
 input.writeUInt32LE(result.length, 20);

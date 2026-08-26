@@ -400,6 +400,19 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
     );
     const resumed_state = resumed.progressed;
 
+    var empty_result_storage: Storage = .{};
+    var empty_result_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidResult,
+        process_advance_v1.advance(
+            &Image.bytes,
+            .{ .process_state = requested.state },
+            &.{},
+            empty_result_storage.buffers(),
+            &empty_result_workspace,
+        ),
+    );
+
     var duplicate_storage: Storage = .{};
     var duplicate_workspace: boundary.image.ValidationWorkspace = .{};
     try std.testing.expectError(
@@ -814,6 +827,22 @@ test "Process rejects aliased input and output arenas transactionally" {
     );
 }
 
+test "Process rejects aliased kernel-input encoding" {
+    var storage: [128 * 1024]u8 = undefined;
+    @memcpy(storage[0..Image.bytes.len], &Image.bytes);
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 23, .little);
+    try std.testing.expectError(
+        error.InvalidBuffers,
+        process_advance_v1.encodeKernelInput(
+            storage[0..Image.bytes.len],
+            .{ .initial_args = &initial_args },
+            null,
+            &storage,
+        ),
+    );
+}
+
 test "Process Capsule admits only a compatible image and bound instance" {
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 31, .little);
@@ -904,6 +933,24 @@ test "Process Capsule admits only a compatible image and bound instance" {
             alias_bytes,
             &scratch,
             &alias_workspace,
+        ),
+    );
+
+    var scratch_alias_image = Image.bytes;
+    var scratch_alias_storage: [128 * 1024]u8 = undefined;
+    var scratch_alias_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        boundary.process_v1.capsule.encode(
+            .{
+                .required_kernel_semantic_version = 1,
+                .image = &scratch_alias_image,
+                .instance_kind = .initial_args,
+                .instance = &initial_args,
+            },
+            &scratch_alias_storage,
+            &scratch_alias_image,
+            &scratch_alias_workspace,
         ),
     );
 

@@ -6,7 +6,7 @@ const std = @import("std");
 const Storage = struct {
     state: [64 * 1024]u8 = undefined,
     value: [64 * 1024]u8 = undefined,
-    request: [0]u8 = .{},
+    request: [64 * 1024]u8 = undefined,
     candidate: [64 * 1024]u8 = undefined,
     environment: [64 * 1024]u8 = undefined,
     auxiliary_environment: [64 * 1024]u8 = undefined,
@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
         storage.buffers(),
         &workspace,
     );
-    _ = outcome.needs_capacity;
+    _ = outcome.requested;
 
     var input_storage: [128 * 1024]u8 = undefined;
     const input = try process_advance_v1.encodeKernelInput(
@@ -46,11 +46,26 @@ pub fn main(init: std.process.Init) !void {
         null,
         &input_storage,
     );
-    var output_storage: [128 * 1024]u8 = undefined;
-    const output = try process_advance_v1.encodeOutcome(
+    var base_memory = input.len;
+    base_memory += 2 * 64 * 1024;
+    base_memory += 64 * 1024;
+    base_memory += 64 * 1024;
+    base_memory += 2 * 64 * 1024;
+    base_memory += 1024 * 1024;
+    base_memory += 4 * 1024;
+    var output_storage: [56]u8 = undefined;
+    const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
+        input.len,
+        1024 * 1024,
+        base_memory,
         &output_storage,
     );
+    if ((try process_advance_v1.outcomeEncodedLength(outcome)) <=
+        output_storage.len or output[10] != 5)
+    {
+        return error.ExpectedSerializationCapacity;
+    }
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);

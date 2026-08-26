@@ -1462,7 +1462,7 @@ pub fn build(b: *std.Build) void {
     constrained_process_kernel_options.addOption(
         usize,
         "output_capacity",
-        1 << 20,
+        56,
     );
     constrained_process_kernel_options.addOption(
         usize,
@@ -1474,7 +1474,11 @@ pub fn build(b: *std.Build) void {
         "value_capacity",
         64 << 10,
     );
-    constrained_process_kernel_options.addOption(usize, "request_capacity", 0);
+    constrained_process_kernel_options.addOption(
+        usize,
+        "request_capacity",
+        64 << 10,
+    );
     constrained_process_kernel_options.addOption(
         usize,
         "environment_capacity",

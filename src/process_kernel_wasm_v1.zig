@@ -84,7 +84,7 @@ fn execute(input: []const u8) !u32 {
         !std.mem.eql(u8, input[0..8], &input_magic) or
         readInt(u16, input, 8) != input_format_version or
         input[10] > 1 or
-        input[11] != 0 or
+        input[11] & ~@as(u8, 1) != 0 or
         !allZero(input[24..28]))
     {
         return error.MalformedKernelInput;
@@ -92,6 +92,10 @@ fn execute(input: []const u8) !u32 {
     const image_length = readInt(u32, input, 12);
     const instance_length = readInt(u32, input, 16);
     const result_length = readInt(u32, input, 20);
+    const result_present = input[11] & 1 != 0;
+    if (!result_present and result_length != 0) {
+        return error.MalformedKernelInput;
+    }
     var expected = std.math.add(
         usize,
         input_header_length,
@@ -108,10 +112,10 @@ fn execute(input: []const u8) !u32 {
     cursor += image_length;
     const instance_bytes = input[cursor .. cursor + instance_length];
     cursor += instance_length;
-    const effect_result = if (result_length == 0)
-        null
+    const effect_result = if (result_present)
+        input[cursor .. cursor + result_length]
     else
-        input[cursor .. cursor + result_length];
+        null;
     const instance: process_advance_v1.Instance = if (input[10] == 0)
         .{ .initial_args = instance_bytes }
     else
@@ -133,8 +137,20 @@ fn execute(input: []const u8) !u32 {
         },
         &validation_workspace,
     );
-    const encoded = try process_advance_v1.encodeOutcome(
+    var base_memory = input.len;
+    base_memory +|= state_capacity;
+    base_memory +|= state_capacity;
+    base_memory +|= value_capacity;
+    base_memory +|= request_capacity;
+    base_memory +|= environment_capacity;
+    base_memory +|= environment_capacity;
+    base_memory +|= scratch_capacity;
+    base_memory +|= error_capacity;
+    const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
+        input.len,
+        scratch_capacity,
+        base_memory,
         &output_storage,
     );
     output_length = @intCast(encoded.len);
