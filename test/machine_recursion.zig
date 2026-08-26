@@ -833,7 +833,7 @@ const HelperBackedgeBody = struct {
     };
 };
 
-const HelperBackedgeProgram = program_v2.program(
+pub const HelperBackedgeProgram = program_v2.program(
     "helper-entry-backedge",
     HelperBackedgeBody,
 );

@@ -383,6 +383,24 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
         &encode_workspace,
     );
     try std.testing.expectEqualSlices(u8, requested.state, encoded.bytes);
+    var alias_workspace: boundary.image.ValidationWorkspace = .{};
+    const aliased_frames = @as(
+        [*]boundary.process_v1.state.Frame,
+        @ptrCast(&alias_workspace),
+    )[0..frame_count];
+    @memcpy(aliased_frames, frames[0..frame_count]);
+    var alias_state: [4096]u8 = undefined;
+    var alias_scratch: [4096]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidBuffers,
+        boundary.process_v1.state.encode(
+            &Image.bytes,
+            aliased_frames,
+            &alias_state,
+            &alias_scratch,
+            &alias_workspace,
+        ),
+    );
     frames[frame_count - 1].constructor_id = std.math.maxInt(u32);
     var forged_state: [4096]u8 = undefined;
     var forged_scratch: [4096]u8 = undefined;
@@ -576,6 +594,43 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
             &malformed_workspace,
         ),
     );
+}
+
+test "Process preserves activation across helper-entry backedges" {
+    const BackedgeImage = recursion_fixture.HelperBackedgeProgram.image();
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 2, .little);
+
+    var call_storage: Storage = .{};
+    var call_workspace: boundary.image.ValidationWorkspace = .{};
+    const call = try boundary.process_v1.advance(
+        &BackedgeImage.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        call_storage.buffers(),
+        &call_workspace,
+    );
+
+    var branch_storage: Storage = .{};
+    var branch_workspace: boundary.image.ValidationWorkspace = .{};
+    const branch = try boundary.process_v1.advance(
+        &BackedgeImage.bytes,
+        .{ .process_state = call.progressed },
+        null,
+        branch_storage.buffers(),
+        &branch_workspace,
+    );
+
+    var yield_storage: Storage = .{};
+    var yield_workspace: boundary.image.ValidationWorkspace = .{};
+    const yielded = try boundary.process_v1.advance(
+        &BackedgeImage.bytes,
+        .{ .process_state = branch.progressed },
+        null,
+        yield_storage.buffers(),
+        &yield_workspace,
+    );
+    try std.testing.expect(yielded.explicitly_yielded.len != 0);
 }
 
 test "Process advance preserves a call stack and returns one segment at a time" {

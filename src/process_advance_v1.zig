@@ -413,6 +413,7 @@ pub fn encodeState(
     workspace: *image_v1.ValidationWorkspace,
 ) Error!process_state_v1.StateView {
     const workspace_bytes = std.mem.asBytes(workspace);
+    const frame_descriptor_bytes = std.mem.sliceAsBytes(frames);
     const mutable_arenas = [_][]const u8{
         output_state,
         invariant_scratch,
@@ -420,6 +421,9 @@ pub fn encodeState(
     };
     for (mutable_arenas, 0..) |arena, index| {
         if (slicesOverlap(image_bytes, arena)) return error.InvalidBuffers;
+        if (slicesOverlap(frame_descriptor_bytes, arena)) {
+            return error.InvalidBuffers;
+        }
         for (mutable_arenas[index + 1 ..]) |other| {
             if (slicesOverlap(arena, other)) return error.InvalidBuffers;
         }
@@ -751,13 +755,14 @@ fn stepState(
         top.frame.constructor_id,
     );
     var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
     try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
     const loaded = try loadEnvironment(
         image,
         constructor,
         top.frame.environment,
         &slots,
-        null,
+        &activation_slots,
         workspace,
     );
     const segment_id = readInt(u16, constructor, 12);
@@ -777,6 +782,7 @@ fn stepState(
             progressed.edge_kind,
             progressed.edge,
             loaded.activation_entry,
+            &activation_slots,
             &slots,
             buffers,
         ) },
@@ -793,6 +799,7 @@ fn stepState(
             const environment = try encodeEnvironment(
                 await_constructor,
                 loaded.activation_entry,
+                &activation_slots,
                 &slots,
                 buffers.environment,
             );
@@ -821,6 +828,7 @@ fn stepState(
                 4,
                 continuation,
                 loaded.activation_entry,
+                &activation_slots,
                 &slots,
                 buffers,
             ),
@@ -833,6 +841,7 @@ fn stepState(
             segment_id,
             callee,
             loaded.activation_entry,
+            &activation_slots,
             &slots,
             buffers,
         ) },
@@ -887,6 +896,7 @@ fn callState(
     source_segment_id: u16,
     callee: []const u8,
     activation_entry: ?u32,
+    activation_slots: *const [1024]Slot,
     slots: *[1024]Slot,
     buffers: Buffers,
 ) Error![]const u8 {
@@ -902,6 +912,7 @@ fn callState(
     const parent_environment = try encodeEnvironment(
         return_constructor,
         activation_entry,
+        activation_slots,
         slots,
         buffers.environment,
     );
@@ -934,6 +945,7 @@ fn callState(
     const child_environment = try encodeEnvironment(
         child_constructor,
         child_constructor_id,
+        slots,
         slots,
         buffers.auxiliary_environment,
     );
@@ -1009,13 +1021,14 @@ fn returnToCaller(
         return error.InvalidProcessState;
     }
     var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
     try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
     const loaded = try loadEnvironment(
         image,
         parent_constructor,
         parent.frame.environment,
         &slots,
-        null,
+        &activation_slots,
         workspace,
     );
     const parent_segment_id = readInt(u16, parent_constructor, 12);
@@ -1052,6 +1065,7 @@ fn returnToCaller(
     const environment = try encodeEnvironment(
         next_constructor,
         loaded.activation_entry,
+        &activation_slots,
         &slots,
         buffers.environment,
     );
@@ -1074,13 +1088,14 @@ fn currentRequest(
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
     var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
     try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
     _ = try loadEnvironment(
         image,
         constructor,
         top.frame.environment,
         &slots,
-        null,
+        &activation_slots,
         workspace,
     );
     const parts = try pendingRequestParts(
@@ -1195,13 +1210,14 @@ fn resumePending(
     workspace: *image_v1.ValidationWorkspace,
 ) Error!process_state_v1.StateView {
     var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
     try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
     const loaded = try loadEnvironment(
         image,
         constructor,
         top.frame.environment,
         &slots,
-        null,
+        &activation_slots,
         workspace,
     );
     const parts = try pendingRequestParts(
@@ -1267,6 +1283,7 @@ fn resumePending(
     const environment = try encodeEnvironment(
         target_constructor,
         loaded.activation_entry,
+        &activation_slots,
         &slots,
         buffers.environment,
     );
@@ -1293,6 +1310,7 @@ fn transitionState(
     edge_kind: u8,
     edge: []const u8,
     activation_entry: ?u32,
+    activation_slots: *const [1024]Slot,
     slots: *[1024]Slot,
     buffers: Buffers,
 ) Error![]const u8 {
@@ -1315,6 +1333,7 @@ fn transitionState(
     const environment = try encodeEnvironment(
         constructor,
         activation_entry,
+        activation_slots,
         slots,
         buffers.environment,
     );
@@ -1458,6 +1477,7 @@ fn loadEnvironment(
 fn encodeEnvironment(
     constructor: []const u8,
     activation_entry: ?u32,
+    activation_slots: *const [1024]Slot,
     slots: *const [1024]Slot,
     output: []u8,
 ) Error![]const u8 {
@@ -1468,13 +1488,18 @@ fn encodeEnvironment(
         if (output.len < 4) return error.OutputCapacity;
         appendInt(u32, output, &cursor, entry);
     }
-    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+    const activation_count = readInt(u16, constructor, 16);
+    const field_count = @as(u32, activation_count) +
         readInt(u16, constructor, 18);
     var field_cursor: usize = 24;
-    for (0..field_count) |_| {
+    for (0..field_count) |index| {
         const value = readInt(u16, constructor, field_cursor);
-        if (!slots[value].initialized) return error.InvalidProcessState;
-        const bytes = slots[value].bytes;
+        const slot = if (index < activation_count)
+            activation_slots[value]
+        else
+            slots[value];
+        if (!slot.initialized) return error.InvalidProcessState;
+        const bytes = slot.bytes;
         if (output.len - cursor < bytes.len) return error.OutputCapacity;
         @memcpy(output[cursor..][0..bytes.len], bytes);
         cursor += bytes.len;
