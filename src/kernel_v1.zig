@@ -438,7 +438,10 @@ fn initialValidated(
     if (flags & 1 != 0 or activation_count != 0 or environment_count > 1) {
         return error.InvalidImage;
     }
-    var environment_length: usize = 0;
+    var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &slots);
+    try initializeZeroWidthSlots(image, &activation_slots);
     if (environment_count == 1) {
         const value_id = readInt(u16, constructor, 24);
         const schema_id = readInt(u32, constructor, 28);
@@ -448,11 +451,16 @@ fn initialValidated(
         {
             return error.InvalidImage;
         }
-        environment_length = initial_args.len;
+        slots[value_id] = .{ .bytes = initial_args, .initialized = true };
     } else if (image.catalogs.entry_parameter_count == 1) {
         // An unused entry argument is intentionally absent from RNF State.
-        environment_length = 0;
     }
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        null,
+        &activation_slots,
+        &slots,
+    ) catch return error.InvalidImage;
     const required = state_header_length + frame_header_length +
         environment_length;
     if (required > image.profile.maximum_state_bytes) {
@@ -489,9 +497,14 @@ fn initialValidated(
         image.profile.initial_constructor_id,
     );
     appendInt(u32, output_state, &cursor, environment_length);
-    if (environment_length != 0) {
-        appendBytes(output_state, &cursor, initial_args);
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        null,
+        &activation_slots,
+        &slots,
+        output_state[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
     if (cursor != required) return error.InvalidImage;
     try validateStateValidated(image, output_state[0..required], workspace);
     return required;
@@ -1398,13 +1411,7 @@ fn awaitCallConstructor(
     return error.InvalidImage;
 }
 
-fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
-    const payload = terminator + 8;
-    const request_count = readInt(u16, segment, payload + 10);
-    const cursor = payload + 12 + @as(usize, request_count) * 2;
-    if (segment[cursor] != 1) return &.{};
-    return segment[cursor + 4 ..];
-}
+const suspensionCallee = reducer_clause_v1.suspensionCallee;
 
 fn applyValueEdge(
     image: ValidatedProgram,
@@ -1646,9 +1653,7 @@ fn hashInt(
     hasher.update(&bytes);
 }
 
-fn edgeLength(edge: []const u8) usize {
-    return 4 + @as(usize, readInt(u16, edge, 2)) * 4;
-}
+const edgeLength = reducer_clause_v1.edgeLength;
 
 fn topFrameOffset(state: []const u8) Error!usize {
     const frame_count = readInt(u32, state, 60);
@@ -1869,15 +1874,7 @@ fn segmentTerminatorOffset(segment: []const u8) usize {
     return cursor;
 }
 
-fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
-    const payload = terminator + 8;
-    const request_count = readInt(u16, segment, payload + 10);
-    var cursor = payload + 12 + @as(usize, request_count) * 2;
-    const callee_present = segment[cursor] == 1;
-    cursor += 4;
-    if (callee_present) cursor += edgeLength(segment[cursor..]);
-    return segment[cursor..];
-}
+const suspensionContinuation = reducer_clause_v1.suspensionContinuation;
 
 fn validateEnvironment(
     image: anytype,

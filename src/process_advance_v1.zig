@@ -331,7 +331,7 @@ fn capacityPages(
 }
 
 fn bytesToPages(bytes: u64) u64 {
-    return (bytes +| 65535) / 65536;
+    return bytes / 65536 + @intFromBool(bytes % 65536 != 0);
 }
 
 fn addOutcomeLength(primary: usize, secondary: usize) Error!usize {
@@ -455,7 +455,8 @@ pub fn encodeState(
         }
     }
     for (frames) |frame| {
-        if (slicesOverlap(frame.environment, invariant_scratch) or
+        if (slicesOverlap(frame.environment, output_state) or
+            slicesOverlap(frame.environment, invariant_scratch) or
             slicesOverlap(frame.environment, workspace_bytes))
         {
             return error.InvalidBuffers;
@@ -506,6 +507,7 @@ pub fn validateInitialArgs(
         image,
         initial_args,
         output_state,
+        invariant_scratch,
         workspace,
     );
     const state = try process_state_v1.validate(
@@ -530,6 +532,7 @@ fn advanceFinite(
                 image,
                 initial_args,
                 buffers.candidate_state,
+                buffers.environment,
                 workspace,
             );
             break :blk try advanceState(
@@ -691,6 +694,7 @@ fn initialState(
     image: image_v1.ValidatedImage,
     initial_args: []const u8,
     output: []u8,
+    environment_output: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error![]const u8 {
     dynamic_value_v1.validateValue(
@@ -709,7 +713,11 @@ fn initialState(
     if (flags & 1 != 0 or activation_count != 0 or environment_count > 1) {
         return error.InvalidInitialArgs;
     }
-    const environment = if (environment_count == 0) &.{} else blk: {
+    var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
+    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
+    try reducer_clause_v1.initializeZeroWidthSlots(image, &activation_slots);
+    if (environment_count == 1) {
         const value = readInt(u16, constructor, 24);
         const schema = readInt(u32, constructor, 28);
         if (image.catalogs.entry_parameter_count != 1 or
@@ -718,7 +726,17 @@ fn initialState(
         {
             return error.InvalidInitialArgs;
         }
-        break :blk initial_args;
+        slots[value] = .{ .bytes = initial_args, .initialized = true };
+    }
+    const environment = reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        null,
+        &activation_slots,
+        &slots,
+        environment_output,
+    ) catch |err| switch (err) {
+        error.OutputCapacity => return error.OutputCapacity,
+        else => return error.InvalidInitialArgs,
     };
     const frames = [_]process_state_v1.Frame{.{
         .constructor_id = image.catalogs.initial_constructor_id,
@@ -1535,27 +1553,9 @@ fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
     return false;
 }
 
-fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
-    const payload = terminator + 8;
-    const request_count = readInt(u16, segment, payload + 10);
-    var cursor = payload + 12 + @as(usize, request_count) * 2;
-    const callee_present = segment[cursor] == 1;
-    cursor += 4;
-    if (callee_present) cursor += edgeLength(segment[cursor..]);
-    return segment[cursor..];
-}
-
-fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
-    const payload = terminator + 8;
-    const request_count = readInt(u16, segment, payload + 10);
-    const cursor = payload + 12 + @as(usize, request_count) * 2;
-    if (segment[cursor] != 1) return &.{};
-    return segment[cursor + 4 ..];
-}
-
-fn edgeLength(edge: []const u8) usize {
-    return 4 + @as(usize, readInt(u16, edge, 2)) * 4;
-}
+const suspensionContinuation = reducer_clause_v1.suspensionContinuation;
+const suspensionCallee = reducer_clause_v1.suspensionCallee;
+const edgeLength = reducer_clause_v1.edgeLength;
 
 fn appendInt(
     comptime T: type,

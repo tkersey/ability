@@ -401,6 +401,21 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
             &alias_workspace,
         ),
     );
+    var output_alias_frames = frames;
+    output_alias_frames[frame_count - 1].environment =
+        alias_state[0..frames[frame_count - 1].environment.len];
+    var output_alias_scratch: [4096]u8 = undefined;
+    var output_alias_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidBuffers,
+        boundary.process_v1.state.encode(
+            &Image.bytes,
+            output_alias_frames[0..frame_count],
+            &alias_state,
+            &output_alias_scratch,
+            &output_alias_workspace,
+        ),
+    );
     frames[frame_count - 1].constructor_id = std.math.maxInt(u32);
     var forged_state: [4096]u8 = undefined;
     var forged_scratch: [4096]u8 = undefined;
@@ -1236,5 +1251,26 @@ test "Process rejects schema-valid forged constructor invariants" {
             &capsule_scratch,
             &capsule_workspace,
         ),
+    );
+}
+
+test "NeedsCapacity page ceiling preserves saturated u64 totals" {
+    var output: [56]u8 = undefined;
+    const encoded = try process_advance_v1.encodeOutcomeForCapacity(
+        .{ .needs_capacity = .{
+            .minimum_input_bytes = 1,
+            .minimum_output_bytes = std.math.maxInt(u64),
+            .minimum_scratch_bytes = std.math.maxInt(u64),
+            .minimum_memory_pages = 0,
+        } },
+        1,
+        1,
+        1,
+        0,
+        &output,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 281474976710656),
+        std.mem.readInt(u64, encoded[48..56], .little),
     );
 }

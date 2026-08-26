@@ -482,7 +482,7 @@ pub fn loadEnvironmentSlots(
     return .{ .activation_entry = activation_entry };
 }
 
-fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
+pub fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
     const payload = terminator + 8;
     const request_count = readInt(u16, segment, payload + 10);
     const cursor = payload + 12 + @as(usize, request_count) * 2;
@@ -490,7 +490,7 @@ fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
     return segment[cursor + 4 ..];
 }
 
-fn edgeLength(edge: []const u8) usize {
+pub fn edgeLength(edge: []const u8) usize {
     return 4 + @as(usize, readInt(u16, edge, 2)) * 4;
 }
 
@@ -518,7 +518,7 @@ fn segmentTerminatorOffset(segment: []const u8) usize {
     return cursor;
 }
 
-fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
+pub fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
     const payload = terminator + 8;
     const request_count = readInt(u16, segment, payload + 10);
     var cursor = payload + 12 + @as(usize, request_count) * 2;
