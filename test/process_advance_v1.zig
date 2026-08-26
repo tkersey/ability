@@ -403,12 +403,21 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
         .@"resume" = &resume_value,
     }, &result_storage);
     var final_storage: Storage = .{};
+    var no_resume_request_output: [0]u8 = .{};
     var final_workspace: boundary.image.ValidationWorkspace = .{};
     const resumed = try process_advance_v1.advance(
         &Image.bytes,
         .{ .process_state = requested.state },
         result,
-        final_storage.buffers(),
+        .{
+            .output_state = &final_storage.state,
+            .output_value = &final_storage.value,
+            .output_request = &no_resume_request_output,
+            .candidate_state = &final_storage.candidate,
+            .environment = &final_storage.environment,
+            .auxiliary_environment = &final_storage.auxiliary_environment,
+            .scratch = &final_storage.scratch,
+        },
         &final_workspace,
     );
     const resumed_state = resumed.progressed;

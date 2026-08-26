@@ -3,7 +3,8 @@
 `boundary.machine_v2.kernel` is the fixed compatibility evaluator of validated
 BPI1, `ABL_MV2P1` MachineV2Profile, and canonical `ABL_RNF2` bytes. It retains
 no authoritative State and invokes no callback. It is not the future generic
-Boundary Process kernel.
+Boundary Process kernel; that separate import-free artifact is
+`boundary-process-kernel-v1.wasm`.
 The raw clause evaluator beneath it is internal and has no package-root alias.
 
 The profile carries only v2 policy deltas: hard limits, segment costs, and the

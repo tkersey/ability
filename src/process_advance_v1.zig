@@ -667,7 +667,6 @@ fn stepState(
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
-    try validateFrames(image, state, workspace);
     const top = try process_state_v1.topFrame(state);
     const constructor = try image_v1.evaluatorConstructorRecord(
         image,
@@ -994,6 +993,33 @@ fn currentRequest(
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    const parts = try pendingRequestParts(
+        image,
+        top,
+        constructor,
+        workspace,
+    );
+    return makeRequest(
+        image,
+        state.bytes,
+        parts.site_ordinal,
+        parts.payload,
+        buffers.output_request,
+        workspace,
+    );
+}
+
+const PendingRequestParts = struct {
+    site_ordinal: u32,
+    payload: []const u8,
+};
+
+fn pendingRequestParts(
+    image: image_v1.ValidatedImage,
+    top: process_state_v1.FrameSpan,
+    constructor: []const u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!PendingRequestParts {
     const segment_id = readInt(u16, constructor, 12);
     const segment = try image_v1.evaluatorSegmentRecord(image, segment_id);
     const terminator = image_v1.evaluatorSegmentTerminator(segment);
@@ -1016,14 +1042,10 @@ fn currentRequest(
         workspace,
     );
     if (!slots[request_value].initialized) return error.InvalidProcessState;
-    return makeRequest(
-        image,
-        state.bytes,
-        site_ordinal,
-        slots[request_value].bytes,
-        buffers.output_request,
-        workspace,
-    );
+    return .{
+        .site_ordinal = site_ordinal,
+        .payload = slots[request_value].bytes,
+    };
 }
 
 fn makeRequest(
@@ -1034,6 +1056,27 @@ fn makeRequest(
     output: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    const request_input = try requestInput(
+        image,
+        parked_state,
+        site_ordinal,
+        payload,
+        workspace,
+    );
+    const request = try process_effect_v1.encodeRequest(
+        request_input,
+        output,
+    );
+    return .{ .requested = .{ .state = parked_state, .request = request } };
+}
+
+fn requestInput(
+    image: image_v1.ValidatedImage,
+    parked_state: []const u8,
+    site_ordinal: u32,
+    payload: []const u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!process_effect_v1.RequestInput {
     const effect = try image_v1.evaluatorEffect(image, site_ordinal);
     const payload_schema_digest = try dynamic_value_v1.schemaDigest(
         image.catalogs.schemas,
@@ -1051,7 +1094,7 @@ fn makeRequest(
     continuation_hasher.update(parked_state);
     var continuation_digest: [32]u8 = undefined;
     continuation_hasher.final(&continuation_digest);
-    const request = try process_effect_v1.encodeRequest(.{
+    return .{
         .program_transition_digest = image.catalogs.envelope.header.program_transition_digest,
         .pre_request_state_digest = state_digest,
         .effect_site_semantic_digest = effect.semantic_digest,
@@ -1060,8 +1103,7 @@ fn makeRequest(
         .continuation_digest = continuation_digest,
         .effect_semantic_identity = effect.semantic_identity,
         .payload = payload,
-    }, output);
-    return .{ .requested = .{ .state = parked_state, .request = request } };
+    };
 }
 
 fn resumePending(
@@ -1073,27 +1115,29 @@ fn resumePending(
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!process_state_v1.StateView {
-    const request_outcome = try currentRequest(
+    const parts = try pendingRequestParts(
         image,
-        state,
         top,
         constructor,
-        buffers,
         workspace,
     );
-    const request = try process_effect_v1.validateRequest(
-        request_outcome.requested.request,
-        image.catalogs.envelope.header.program_transition_digest,
+    const request_input = try requestInput(
+        image,
+        state.bytes,
+        parts.site_ordinal,
+        parts.payload,
+        workspace,
     );
+    const request_identity = process_effect_v1.requestIdentity(request_input);
     const result = try process_effect_v1.validateResult(result_bytes);
     if (!std.mem.eql(
         u8,
-        &request.request_identity_digest,
+        &request_identity,
         &result.request_identity_digest,
     )) return error.ResultRequestMismatch;
     if (!std.mem.eql(
         u8,
-        &request.resume_schema_digest,
+        &request_input.resume_schema_digest,
         &result.resume_schema_digest,
     )) return error.ResultSchemaMismatch;
     const segment_id = readInt(u16, constructor, 12);
@@ -1155,10 +1199,12 @@ fn resumePending(
         },
         buffers.candidate_state,
     );
-    return process_state_v1.validate(
+    const successor_state = try process_state_v1.validate(
         successor,
         image.catalogs.envelope.header.program_transition_digest,
     );
+    try validateFrames(image, successor_state, workspace);
+    return successor_state;
 }
 
 fn transitionState(

@@ -6,9 +6,12 @@ validates those bytes and evaluates exactly one finite BPI1 reducer segment.
 
 Outcomes are progressed State, a self-contained `ABL_ERQ1` Effect Request,
 explicitly yielded State, completed Result, authored Failure, or transactional
-operational `NeedsCapacity`. Matching resumes use `ABL_ERS1`; wrong, stale,
-duplicate-on-successor, malformed, or wrong-schema results do not mutate the
-input State.
+operational `NeedsCapacity`. Matching resumes use `ABL_ERS1`; wrong-request,
+wrong-schema, malformed, or results applied to a distinct successor State do
+not mutate the input State. Request identity is content-addressed: a recurrence
+with byte-identical State, site, continuation, and payload intentionally has the
+same identity. Programs requiring occurrence distinction must author a counter
+or nonce in portable State; exactly-once effects are not claimed.
 
 For the native buffer API, allocate at least `minimum_output_bytes` for each
 output/candidate/environment arena and at least `minimum_scratch_bytes` for the
