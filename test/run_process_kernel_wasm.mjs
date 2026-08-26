@@ -74,9 +74,13 @@ for (let index = 0; index < count; index += 1) {
   }
   if (actual[10] === 5) {
     const actualMemoryPages = memory.buffer.byteLength / 65536;
+    const minimumOutputBytes = Number(actual.readBigUInt64LE(32));
     const reportedMinimumPages = Number(actual.readBigUInt64LE(48));
-    if (reportedMinimumPages < actualMemoryPages) {
-      throw new Error("NeedsCapacity under-reported actual WASM memory pages");
+    const outputGrowthPages = Math.ceil(
+      Math.max(0, minimumOutputBytes - 56) / 65536,
+    );
+    if (reportedMinimumPages < actualMemoryPages + outputGrowthPages) {
+      throw new Error("NeedsCapacity under-reported live WASM growth pages");
     }
   }
   comparisons += 1;

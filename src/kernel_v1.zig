@@ -1437,20 +1437,15 @@ fn appendFrame(
     }
     const constructor = try constructorRecord(image, constructor_id);
     if (readInt(u16, constructor, 10) & 1 == 0) return error.InvalidImage;
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var environment_length: usize = 4;
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        if (!slots[value].initialized) return error.InvalidState;
-        environment_length = std.math.add(
-            usize,
-            environment_length,
-            slots[value].bytes.len,
-        ) catch return error.OutputCapacity;
-        field_cursor += 8;
-    }
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        constructor_id,
+        slots,
+        slots,
+    ) catch |err| switch (err) {
+        error.OutputCapacity => return error.OutputCapacity,
+        else => return error.InvalidState,
+    };
     const frame_length = std.math.add(
         usize,
         frame_header_length,
@@ -1470,13 +1465,15 @@ fn appendFrame(
     var cursor = parent.len;
     appendInt(u32, output, &cursor, constructor_id);
     appendInt(u32, output, &cursor, environment_length);
-    appendInt(u32, output, &cursor, constructor_id);
-    field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        appendBytes(output, &cursor, slots[value].bytes);
-        field_cursor += 8;
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        constructor_id,
+        slots,
+        slots,
+        output[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
+    if (cursor != required) return error.InvalidState;
     return output[0..required];
 }
 
@@ -1796,28 +1793,17 @@ fn loadFrameEnvironment(
 ) Error!void {
     const environment_length = readInt(u32, state, frame_offset + 4);
     const environment = state[frame_offset + 8 ..][0..environment_length];
-    var value_cursor: usize = 0;
-    if (readInt(u16, constructor, 10) & 1 != 0) value_cursor = 4;
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema_id = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema_id,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        const encoded = environment[value_cursor .. value_cursor + consumed];
-        slots[value] = .{
-            .bytes = encoded,
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
+    _ = reducer_clause_v1.loadEnvironmentSlots(
+        image,
+        constructor,
+        environment,
+        slots,
+        null,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        else => return error.InvalidState,
+    };
 }
 
 fn loadActivationSlots(
@@ -1830,25 +1816,19 @@ fn loadActivationSlots(
 ) Error!void {
     const environment_length = readInt(u32, state, frame_offset + 4);
     const environment = state[frame_offset + 8 ..][0..environment_length];
-    var value_cursor: usize = 0;
-    if (readInt(u16, constructor, 10) & 1 != 0) value_cursor = 4;
-    var field_cursor: usize = 24;
-    for (0..readInt(u16, constructor, 16)) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema_id = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema_id,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        slots[value] = .{
-            .bytes = environment[value_cursor .. value_cursor + consumed],
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
+    var current_slots = [_]Slot{.{}} ** 1024;
+    try initializeZeroWidthSlots(image, &current_slots);
+    _ = reducer_clause_v1.loadEnvironmentSlots(
+        image,
+        constructor,
+        environment,
+        &current_slots,
+        slots,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        else => return error.InvalidState,
+    };
 }
 
 fn topConstructorId(state: []const u8) Error!u32 {

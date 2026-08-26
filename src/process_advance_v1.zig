@@ -280,14 +280,11 @@ pub fn encodeOutcomeForCapacity(
             .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
             .minimum_memory_pages = @max(
                 requirement.minimum_memory_pages,
-                @max(
+                capacityPages(
+                    base_memory_without_output,
+                    output.len,
+                    requirement.minimum_output_bytes,
                     minimum_memory_pages_floor,
-                    @as(u64, @intCast(
-                        (saturatingAdd(
-                            base_memory_without_output,
-                            @intCast(requirement.minimum_output_bytes),
-                        ) +| 65535) / 65536,
-                    )),
                 ),
             ),
         } },
@@ -299,20 +296,42 @@ pub fn encodeOutcomeForCapacity(
                 .minimum_input_bytes = @intCast(input_length),
                 .minimum_output_bytes = @intCast(required_output),
                 .minimum_scratch_bytes = @intCast(minimum_scratch_bytes),
-                .minimum_memory_pages = @max(
+                .minimum_memory_pages = capacityPages(
+                    base_memory_without_output,
+                    output.len,
+                    @intCast(required_output),
                     minimum_memory_pages_floor,
-                    @as(u64, @intCast(
-                        (saturatingAdd(
-                            base_memory_without_output,
-                            required_output,
-                        ) +| 65535) / 65536,
-                    )),
                 ),
             } },
             output,
         ),
         else => err,
     };
+}
+
+fn capacityPages(
+    base_memory_without_output: usize,
+    current_output_bytes: usize,
+    required_output_bytes: u64,
+    live_memory_pages: u64,
+) u64 {
+    const declared_total = saturatingAddU64(
+        @intCast(base_memory_without_output),
+        required_output_bytes,
+    );
+    const live_bytes = std.math.mul(
+        u64,
+        live_memory_pages,
+        65536,
+    ) catch std.math.maxInt(u64);
+    const growth = required_output_bytes -|
+        @as(u64, @intCast(current_output_bytes));
+    const live_grown = saturatingAddU64(live_bytes, growth);
+    return @max(bytesToPages(declared_total), bytesToPages(live_grown));
+}
+
+fn bytesToPages(bytes: u64) u64 {
+    return (bytes +| 65535) / 65536;
 }
 
 fn addOutcomeLength(primary: usize, secondary: usize) Error!usize {
@@ -592,35 +611,36 @@ fn capacityRequirement(
         else
             current_output,
     );
-    const required_scratch = if (envelope) |view|
-        std.math.cast(usize, view.header.maximum_kernel_scratch_bytes) orelse
-            std.math.maxInt(usize)
+    const current_scratch: u64 = @intCast(buffers.scratch.len);
+    const required_scratch: u64 = if (envelope) |view|
+        view.header.maximum_kernel_scratch_bytes
     else
-        saturatingAdd(buffers.scratch.len, 1);
+        current_scratch +| 1;
     const minimum_scratch = @max(
         required_scratch,
         if (err == error.ScratchCapacity or err == error.CapacityExceeded)
-            saturatingAdd(buffers.scratch.len, 1)
+            current_scratch +| 1
         else
-            buffers.scratch.len,
+            current_scratch,
     );
+    const minimum_output_u64: u64 = @intCast(minimum_output);
     const all_output_arenas = std.math.mul(
-        usize,
-        minimum_output,
+        u64,
+        minimum_output_u64,
         7,
-    ) catch std.math.maxInt(usize);
-    const total = saturatingAdd(
-        saturatingAdd(input, all_output_arenas),
-        saturatingAdd(
-            saturatingAdd(minimum_scratch, 4 << 10),
-            @sizeOf(image_v1.ValidationWorkspace),
+    ) catch std.math.maxInt(u64);
+    const total = saturatingAddU64(
+        saturatingAddU64(@intCast(input), all_output_arenas),
+        saturatingAddU64(
+            minimum_scratch +| (4 << 10),
+            @intCast(@sizeOf(image_v1.ValidationWorkspace)),
         ),
     );
     return .{
         .minimum_input_bytes = @intCast(input),
-        .minimum_output_bytes = @intCast(minimum_output),
-        .minimum_scratch_bytes = @intCast(minimum_scratch),
-        .minimum_memory_pages = @intCast((total +| 65535) / 65536),
+        .minimum_output_bytes = minimum_output_u64,
+        .minimum_scratch_bytes = minimum_scratch,
+        .minimum_memory_pages = bytesToPages(total),
     };
 }
 
@@ -660,6 +680,10 @@ fn validateBufferOwnership(
 }
 
 fn saturatingAdd(left: usize, right: usize) usize {
+    return left +| right;
+}
+
+fn saturatingAddU64(left: u64, right: u64) u64 {
     return left +| right;
 }
 
