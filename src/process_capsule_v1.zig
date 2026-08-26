@@ -97,6 +97,12 @@ pub fn validate(
     invariant_scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!View {
+    if (slicesOverlap(bytes, invariant_scratch) or
+        slicesOverlap(bytes, std.mem.asBytes(workspace)) or
+        slicesOverlap(invariant_scratch, std.mem.asBytes(workspace)))
+    {
+        return error.InvalidCapsule;
+    }
     const view = try decode(bytes);
     if (view.required_kernel_semantic_version != 1) {
         return error.UnsupportedKernelSemanticVersion;

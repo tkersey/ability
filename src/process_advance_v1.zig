@@ -350,12 +350,17 @@ fn capacityRequirement(
         saturatingAdd(buffers.output_value.len, 1);
     const maximum_environment = saturatingAdd(
         4,
-        std.math.mul(usize, maximum_value, 1024) catch
+        std.math.mul(usize, maximum_value, 2048) catch
             std.math.maxInt(usize),
     );
+    const maximum_call_environments = std.math.mul(
+        usize,
+        maximum_environment,
+        2,
+    ) catch std.math.maxInt(usize);
     const maximum_state = saturatingAdd(
-        saturatingAdd(instance_length, maximum_environment),
-        128,
+        saturatingAdd(instance_length, maximum_call_environments),
+        256,
     );
     const maximum_request = saturatingAdd(
         saturatingAdd(image_bytes.len, maximum_value),
@@ -382,11 +387,13 @@ fn capacityRequirement(
             std.math.maxInt(usize)
     else
         saturatingAdd(buffers.scratch.len, 1);
-    const minimum_scratch = if (err == error.ScratchCapacity or
-        err == error.CapacityExceeded)
-        @max(required_scratch, saturatingAdd(buffers.scratch.len, 1))
-    else
-        buffers.scratch.len;
+    const minimum_scratch = @max(
+        required_scratch,
+        if (err == error.ScratchCapacity or err == error.CapacityExceeded)
+            saturatingAdd(buffers.scratch.len, 1)
+        else
+            buffers.scratch.len,
+    );
     const all_output_arenas = std.math.mul(
         usize,
         minimum_output,
@@ -748,35 +755,17 @@ fn applyEdge(
     injected_value: ?[]const u8,
     slots: *[1024]Slot,
 ) Error!void {
-    const argument_count = readInt(u16, edge, 2);
-    if (argument_count != readInt(u16, target_segment, 10)) {
-        return error.InvalidProcessState;
-    }
-    const source_slots = slots.*;
-    for (0..argument_count) |index| {
-        const argument = 4 + index * 4;
-        const target_value = readInt(
-            u16,
-            target_segment,
-            image_v1.segment_prefix_length + index * 2,
-        );
-        if (!constructorRetainsValue(constructor, target_value)) continue;
-        switch (edge[argument]) {
-            0 => {
-                const source_value = readInt(u16, edge, argument + 2);
-                if (!source_slots[source_value].initialized) {
-                    return error.InvalidProcessState;
-                }
-                slots[target_value] = source_slots[source_value];
-            },
-            1 => slots[target_value] = .{
-                .bytes = injected_value orelse
-                    return error.UnsupportedTransition,
-                .initialized = true,
-            },
-            else => return error.UnsupportedTransition,
-        }
-    }
+    reducer_clause_v1.applyEdge(
+        constructor,
+        target_segment,
+        edge,
+        injected_value,
+        slots,
+    ) catch |err| switch (err) {
+        error.InvalidState, error.InvalidImage => return error.InvalidProcessState,
+        error.UnsupportedOperation => return error.UnsupportedTransition,
+        else => return err,
+    };
 }
 
 fn returnToCaller(

@@ -819,8 +819,6 @@ fn resumeValidated(
     const continuation = suspensionContinuation(segment, terminator);
     const target_segment = readInt(u16, continuation, 0);
     const target = try segmentRecord(image, target_segment);
-    const argument_count = readInt(u16, continuation, 2);
-    if (argument_count != readInt(u16, target, 10)) return error.InvalidImage;
     const next_constructor = try transitionConstructor(
         image,
         segment_id,
@@ -831,25 +829,13 @@ fn resumeValidated(
         image,
         next_constructor,
     );
-    for (0..argument_count) |index| {
-        const argument_offset = 4 + index * 4;
-        const target_value = readInt(u16, target, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(next_constructor_record, target_value)) {
-            continue;
-        }
-        switch (continuation[argument_offset]) {
-            0 => {
-                const source_value = readInt(u16, continuation, argument_offset + 2);
-                if (!slots[source_value].initialized) return error.InvalidState;
-                slots[target_value] = slots[source_value];
-            },
-            1 => slots[target_value] = .{
-                .bytes = response,
-                .initialized = true,
-            },
-            else => return error.InvalidImage,
-        }
-    }
+    try reducer_clause_v1.applyEdge(
+        next_constructor_record,
+        target,
+        continuation,
+        response,
+        &slots,
+    );
     const successor = try encodeTopFrame(
         image,
         state,
@@ -1316,10 +1302,7 @@ fn transitionState(
     workspace: *image_v1.ValidationWorkspace,
 ) Error![]const u8 {
     const target_segment = readInt(u16, edge, 0);
-    const argument_count = readInt(u16, edge, 2);
     const target = try segmentRecord(image, target_segment);
-    const parameter_count = readInt(u16, target, 10);
-    if (argument_count != parameter_count) return error.InvalidImage;
     const constructor_id = try transitionConstructor(
         image,
         source_segment,
@@ -1327,15 +1310,13 @@ fn transitionState(
         target_segment,
     );
     const constructor = try constructorRecord(image, constructor_id);
-    for (0..argument_count) |index| {
-        const argument_offset = 4 + index * 4;
-        if (edge[argument_offset] != 0) return error.UnsupportedOperation;
-        const source_value = readInt(u16, edge, argument_offset + 2);
-        const target_value = readInt(u16, target, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(constructor, target_value)) continue;
-        if (!slots[source_value].initialized) return error.InvalidState;
-        slots[target_value] = slots[source_value];
-    }
+    try reducer_clause_v1.applyEdge(
+        constructor,
+        target,
+        edge,
+        null,
+        slots,
+    );
     return encodeTopFrame(
         image,
         state,
@@ -1520,17 +1501,13 @@ fn applyValueEdge(
 ) Error!void {
     const target = try segmentRecord(image, target_segment);
     const constructor = try constructorRecord(image, target_constructor);
-    const count = readInt(u16, edge, 2);
-    if (count != readInt(u16, target, 10)) return error.InvalidImage;
-    for (0..count) |index| {
-        const argument = 4 + index * 4;
-        if (edge[argument] != 0) return error.InvalidImage;
-        const source_value = readInt(u16, edge, argument + 2);
-        const target_value = readInt(u16, target, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(constructor, target_value)) continue;
-        if (!slots[source_value].initialized) return error.InvalidState;
-        slots[target_value] = slots[source_value];
-    }
+    try reducer_clause_v1.applyEdge(
+        constructor,
+        target,
+        edge,
+        null,
+        slots,
+    );
 }
 
 fn appendFrame(
@@ -1623,10 +1600,6 @@ fn returnToCaller(
     );
     const target_segment_id = readInt(u16, continuation, 0);
     const target_segment = try segmentRecord(image, target_segment_id);
-    const argument_count = readInt(u16, continuation, 2);
-    if (argument_count != readInt(u16, target_segment, 10)) {
-        return error.InvalidImage;
-    }
     const next_constructor = try transitionConstructor(
         image,
         parent_segment_id,
@@ -1637,25 +1610,13 @@ fn returnToCaller(
         image,
         next_constructor,
     );
-    for (0..argument_count) |index| {
-        const argument = 4 + index * 4;
-        const target_value = readInt(u16, target_segment, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(next_constructor_record, target_value)) {
-            continue;
-        }
-        switch (continuation[argument]) {
-            0 => {
-                const source_value = readInt(u16, continuation, argument + 2);
-                if (!slots[source_value].initialized) return error.InvalidState;
-                slots[target_value] = slots[source_value];
-            },
-            1 => slots[target_value] = .{
-                .bytes = return_value,
-                .initialized = true,
-            },
-            else => return error.InvalidImage,
-        }
-    }
+    try reducer_clause_v1.applyEdge(
+        next_constructor_record,
+        target_segment,
+        continuation,
+        return_value,
+        &slots,
+    );
     return replaceFrameAndTruncate(
         image,
         state,

@@ -23,6 +23,57 @@ pub const Slot = struct {
     initialized: bool = false,
 };
 
+/// Apply one Control IR edge as a parallel assignment from the pre-edge slot
+/// store. Resume/call-return edges may inject exactly one supplied value.
+pub fn applyEdge(
+    constructor: []const u8,
+    target_segment: []const u8,
+    edge: []const u8,
+    injected_value: ?[]const u8,
+    slots: *[1024]Slot,
+) Error!void {
+    const argument_count = readInt(u16, edge, 2);
+    if (argument_count != readInt(u16, target_segment, 10)) {
+        return error.InvalidImage;
+    }
+    const source_slots = slots.*;
+    for (0..argument_count) |index| {
+        const argument = 4 + index * 4;
+        const target_value = readInt(
+            u16,
+            target_segment,
+            image_v1.segment_prefix_length + index * 2,
+        );
+        if (!constructorRetainsValue(constructor, target_value)) continue;
+        switch (edge[argument]) {
+            0 => {
+                const source_value = readInt(u16, edge, argument + 2);
+                if (!source_slots[source_value].initialized) {
+                    return error.InvalidState;
+                }
+                slots[target_value] = source_slots[source_value];
+            },
+            1 => slots[target_value] = .{
+                .bytes = injected_value orelse
+                    return error.UnsupportedOperation,
+                .initialized = true,
+            },
+            else => return error.UnsupportedOperation,
+        }
+    }
+}
+
+fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
+    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+        readInt(u16, constructor, 18);
+    var cursor: usize = 24;
+    for (0..field_count) |_| {
+        if (readInt(u16, constructor, cursor) == value) return true;
+        cursor += 8;
+    }
+    return false;
+}
+
 pub fn productConstructMatches(
     expected: []const u8,
     operand_bytes: []const u8,

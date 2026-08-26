@@ -672,6 +672,10 @@ test "Process NeedsCapacity is transactional and retryable" {
             Image.bytes.len + pending.state.len),
         requirement.minimum_input_bytes,
     );
+    try std.testing.expect(
+        requirement.minimum_output_bytes >= pending.state.len +
+            4096 * 4 + 256,
+    );
     const output_capacity: usize = @intCast(requirement.minimum_output_bytes);
     const scratch_capacity: usize = @intCast(requirement.minimum_scratch_bytes);
     const retry_state = try std.testing.allocator.alloc(u8, output_capacity);
@@ -713,6 +717,29 @@ test "Process NeedsCapacity is transactional and retryable" {
         u8,
         pending.request,
         retry.requested.request,
+    );
+
+    var no_capacity: [0]u8 = .{};
+    var hidden_workspace: boundary.image.ValidationWorkspace = .{};
+    const hidden = try process_advance_v1.advance(
+        &Image.bytes,
+        .{ .process_state = pending.state },
+        null,
+        .{
+            .output_state = &no_capacity,
+            .output_value = &no_capacity,
+            .output_request = &no_capacity,
+            .candidate_state = &no_capacity,
+            .environment = &no_capacity,
+            .auxiliary_environment = &no_capacity,
+            .scratch = &no_capacity,
+        },
+        &hidden_workspace,
+    );
+    const image_envelope = try boundary.image.validateEnvelope(&Image.bytes);
+    try std.testing.expectEqual(
+        image_envelope.header.maximum_kernel_scratch_bytes,
+        hidden.needs_capacity.minimum_scratch_bytes,
     );
 }
 
@@ -877,6 +904,18 @@ test "Process Capsule admits only a compatible image and bound instance" {
             alias_bytes,
             &scratch,
             &alias_workspace,
+        ),
+    );
+
+    var direct_alias_workspace: boundary.image.ValidationWorkspace = .{};
+    const direct_alias_bytes = std.mem.asBytes(&direct_alias_workspace);
+    @memcpy(direct_alias_bytes[0..encoded.len], encoded);
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        boundary.process_v1.capsule.validate(
+            direct_alias_bytes[0..encoded.len],
+            &scratch,
+            &direct_alias_workspace,
         ),
     );
 }
