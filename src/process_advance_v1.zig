@@ -18,6 +18,7 @@ pub const Error = image_v1.Error ||
     ResultSchemaMismatch,
     UnexpectedEffectResult,
     UnsupportedTransition,
+    InvalidBuffers,
 };
 
 pub const Instance = union(enum) {
@@ -31,6 +32,7 @@ pub const Buffers = struct {
     output_request: []u8,
     candidate_state: []u8,
     environment: []u8,
+    auxiliary_environment: []u8,
     scratch: []u8,
 };
 
@@ -229,6 +231,15 @@ pub fn advance(
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    try validateBufferOwnership(
+        image_bytes,
+        instance,
+        effect_result,
+        buffers,
+    );
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = buffers.scratch;
+    defer workspace.invariant_result = prior_invariant_result;
     return advanceFinite(
         image_bytes,
         instance,
@@ -248,6 +259,29 @@ pub fn advance(
         ) },
         else => err,
     };
+}
+
+pub fn validateState(
+    image_bytes: []const u8,
+    state_bytes: []const u8,
+    invariant_scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!process_state_v1.StateView {
+    if (slicesOverlap(image_bytes, invariant_scratch) or
+        slicesOverlap(state_bytes, invariant_scratch))
+    {
+        return error.InvalidBuffers;
+    }
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = prior_invariant_result;
+    const image = try image_v1.validateImage(image_bytes, workspace);
+    const state = process_state_v1.validate(
+        state_bytes,
+        image.catalogs.envelope.header.program_transition_digest,
+    ) catch return error.InvalidProcessState;
+    try validateFrames(image, state, workspace);
+    return state;
 }
 
 fn advanceFinite(
@@ -301,28 +335,57 @@ fn capacityRequirement(
         saturatingAdd(image_bytes.len, instance_length),
         result_length,
     );
-    const output = saturatingAdd(
-        saturatingAdd(
-            saturatingAdd(buffers.output_state.len, buffers.output_value.len),
-            saturatingAdd(
-                buffers.output_request.len,
-                buffers.candidate_state.len,
-            ),
-        ),
-        buffers.environment.len,
-    );
-    const scratch = buffers.scratch.len;
-    const minimum_output = if (err == error.OutputCapacity)
-        saturatingAdd(output, 1)
+    const envelope = image_v1.validateEnvelope(image_bytes) catch null;
+    const maximum_value = if (envelope) |view|
+        @as(usize, view.header.maximum_single_value_bytes)
     else
-        output;
+        saturatingAdd(buffers.output_value.len, 1);
+    const maximum_environment = saturatingAdd(
+        4,
+        std.math.mul(usize, maximum_value, 1024) catch
+            std.math.maxInt(usize),
+    );
+    const maximum_state = saturatingAdd(
+        saturatingAdd(instance_length, maximum_environment),
+        128,
+    );
+    const maximum_request = saturatingAdd(
+        saturatingAdd(image_bytes.len, maximum_value),
+        512,
+    );
+    const required_output = saturatingAdd(
+        saturatingAdd(maximum_state, maximum_request),
+        outcome_header_length,
+    );
+    const current_output = @max(
+        buffers.output_state.len,
+        buffers.output_value.len,
+        buffers.output_request.len,
+        buffers.candidate_state.len,
+        buffers.environment.len,
+        buffers.auxiliary_environment.len,
+    );
+    const minimum_output = if (err == error.OutputCapacity)
+        @max(required_output, saturatingAdd(current_output, 1))
+    else
+        current_output;
+    const required_scratch = if (envelope) |view|
+        std.math.cast(usize, view.header.maximum_kernel_scratch_bytes) orelse
+            std.math.maxInt(usize)
+    else
+        saturatingAdd(buffers.scratch.len, 1);
     const minimum_scratch = if (err == error.ScratchCapacity or
         err == error.CapacityExceeded)
-        saturatingAdd(scratch, 1)
+        @max(required_scratch, saturatingAdd(buffers.scratch.len, 1))
     else
-        scratch;
+        buffers.scratch.len;
+    const all_output_arenas = std.math.mul(
+        usize,
+        minimum_output,
+        6,
+    ) catch std.math.maxInt(usize);
     const total = saturatingAdd(
-        saturatingAdd(input, minimum_output),
+        saturatingAdd(input, all_output_arenas),
         minimum_scratch,
     );
     return .{
@@ -331,6 +394,50 @@ fn capacityRequirement(
         .minimum_scratch_bytes = @intCast(minimum_scratch),
         .minimum_memory_pages = @intCast((total +| 65535) / 65536),
     };
+}
+
+fn validateBufferOwnership(
+    image_bytes: []const u8,
+    instance: Instance,
+    effect_result: ?[]const u8,
+    buffers: Buffers,
+) Error!void {
+    const inputs = [_][]const u8{
+        image_bytes,
+        switch (instance) {
+            .initial_args => |bytes| bytes,
+            .process_state => |bytes| bytes,
+        },
+        effect_result orelse &.{},
+    };
+    const outputs = [_][]u8{
+        buffers.output_state,
+        buffers.output_value,
+        buffers.output_request,
+        buffers.candidate_state,
+        buffers.environment,
+        buffers.auxiliary_environment,
+        buffers.scratch,
+    };
+    for (outputs, 0..) |output, index| {
+        for (inputs) |input| {
+            if (slicesOverlap(output, input)) return error.InvalidBuffers;
+        }
+        for (outputs[index + 1 ..]) |other| {
+            if (slicesOverlap(output, other)) return error.InvalidBuffers;
+        }
+    }
+}
+
+fn slicesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_start = @intFromPtr(left.ptr);
+    const right_start = @intFromPtr(right.ptr);
+    const left_end = std.math.add(usize, left_start, left.len) catch
+        return true;
+    const right_end = std.math.add(usize, right_start, right.len) catch
+        return true;
+    return left_start < right_end and right_start < left_end;
 }
 
 fn saturatingAdd(left: usize, right: usize) usize {
@@ -586,7 +693,7 @@ fn callState(
         child_constructor,
         child_constructor_id,
         slots,
-        buffers.candidate_state,
+        buffers.auxiliary_environment,
     );
     return process_state_v1.replaceTopAndAppend(
         state,
@@ -1189,6 +1296,15 @@ fn loadEnvironment(
         field_cursor += 8;
     }
     if (cursor != environment.len) return error.InvalidProcessState;
+    reducer_clause_v1.validatePathInvariants(
+        image,
+        constructor,
+        slots,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        else => return error.InvalidProcessState,
+    };
     return .{ .activation_entry = activation_entry };
 }
 

@@ -6,37 +6,69 @@ import { spawnSync } from "node:child_process";
 const kernel = process.argv[2];
 const vector = fs.readFileSync(process.argv[3]);
 const adapter = process.argv[4];
-let cursor = 4;
-const inputLength = vector.readUInt32LE(cursor);
-const outputLength = vector.readUInt32LE(cursor + 4);
-cursor += 8;
-const input = vector.subarray(cursor, cursor + inputLength);
-const expected = vector.subarray(
-  cursor + inputLength,
-  cursor + inputLength + outputLength,
-);
-const imageLength = input.readUInt32LE(12);
-const instanceLength = input.readUInt32LE(16);
+const wrongKernel = process.argv[5];
+let cursor = 0;
+const vectorCount = vector.readUInt32LE(cursor);
+cursor += 4;
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "boundary-process-step-"));
 try {
-  const imagePath = path.join(temporary, "system.bpi1");
-  const initialPath = path.join(temporary, "initial.bin");
-  fs.writeFileSync(imagePath, input.subarray(28, 28 + imageLength));
-  fs.writeFileSync(
-    initialPath,
-    input.subarray(28 + imageLength, 28 + imageLength + instanceLength),
-  );
-  const execution = spawnSync(process.execPath, [
-    adapter,
-    "--kernel", kernel,
-    "--image", imagePath,
-    "--initial-args", initialPath,
-  ]);
-  if (execution.status !== 0) {
-    throw new Error(execution.stderr.toString("utf8"));
+  for (let index = 0; index < vectorCount; index += 1) {
+    const inputLength = vector.readUInt32LE(cursor);
+    const outputLength = vector.readUInt32LE(cursor + 4);
+    cursor += 8;
+    const input = vector.subarray(cursor, cursor + inputLength);
+    cursor += inputLength;
+    const expected = vector.subarray(cursor, cursor + outputLength);
+    cursor += outputLength;
+    const imageLength = input.readUInt32LE(12);
+    const instanceLength = input.readUInt32LE(16);
+    const resultLength = input.readUInt32LE(20);
+    const imagePath = path.join(temporary, "system-" + index + ".bpi1");
+    const instancePath = path.join(temporary, "instance-" + index + ".bin");
+    const resultPath = path.join(temporary, "result-" + index + ".ers1");
+    const imageEnd = 28 + imageLength;
+    const instanceEnd = imageEnd + instanceLength;
+    fs.writeFileSync(imagePath, input.subarray(28, imageEnd));
+    fs.writeFileSync(instancePath, input.subarray(imageEnd, instanceEnd));
+    const argumentsList = [
+      adapter,
+      "--kernel", kernel,
+      "--image", imagePath,
+      input[10] === 0 ? "--initial-args" : "--state", instancePath,
+    ];
+    if (resultLength !== 0) {
+      fs.writeFileSync(
+        resultPath,
+        input.subarray(instanceEnd, instanceEnd + resultLength),
+      );
+      argumentsList.push("--result", resultPath);
+    }
+    const execution = spawnSync(process.execPath, argumentsList);
+    if (execution.status !== 0) {
+      throw new Error(execution.stderr.toString("utf8"));
+    }
+    if (!execution.stdout.equals(expected)) {
+      throw new Error(
+        "boundary-process-step changed canonical kernel output at vector " +
+          index,
+      );
+    }
   }
-  if (!execution.stdout.equals(expected)) {
-    throw new Error("boundary-process-step changed canonical kernel output");
+  const emptyImage = path.join(temporary, "empty.bpi1");
+  const emptyInitial = path.join(temporary, "empty.initial");
+  fs.writeFileSync(emptyImage, Buffer.alloc(0));
+  fs.writeFileSync(emptyInitial, Buffer.alloc(0));
+  const wrongAbi = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", wrongKernel,
+    "--image", emptyImage,
+    "--initial-args", emptyInitial,
+  ]);
+  if (wrongAbi.status === 0 ||
+      !wrongAbi.stderr.toString("utf8").includes(
+        "unsupported Boundary Process kernel ABI",
+      )) {
+    throw new Error("boundary-process-step accepted a different kernel ABI");
   }
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

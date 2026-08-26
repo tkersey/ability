@@ -60,6 +60,16 @@ pub fn requestIdentity(input: RequestInput) [32]u8 {
     hasher.update(&input.program_transition_digest);
     hasher.update(&input.pre_request_state_digest);
     hasher.update(&input.effect_site_semantic_digest);
+    var identity_length: [8]u8 = undefined;
+    std.mem.writeInt(
+        u64,
+        &identity_length,
+        @intCast(input.effect_semantic_identity.len),
+        .little,
+    );
+    hasher.update(&identity_length);
+    hasher.update(input.effect_semantic_identity);
+    hasher.update(&input.payload_schema_digest);
     hasher.update(&payload_digest);
     hasher.update(&input.continuation_digest);
     hasher.update(&input.resume_schema_digest);

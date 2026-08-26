@@ -527,6 +527,8 @@ fn addCoreModules(
         .target = target,
         .optimize = optimize,
     });
+    process_capsule_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    process_capsule_v1.addImport("image_v1", image_v1);
     process_capsule_v1.addImport("process_state_v1", process_state_v1);
     const process_effect_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.process_effect_v1)),
@@ -544,6 +546,7 @@ fn addCoreModules(
     process_advance_v1.addImport("process_effect_v1", process_effect_v1);
     process_advance_v1.addImport("process_state_v1", process_state_v1);
     process_advance_v1.addImport("reducer_clause_v1", reducer_clause_v1);
+    process_capsule_v1.addImport("process_advance_v1", process_advance_v1);
     const process_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.process_v1)),
         .target = target,
@@ -1465,6 +1468,7 @@ pub fn build(b: *std.Build) void {
     kernel_wasm_executable.rdynamic = true;
     kernel_wasm_executable.export_memory = true;
     kernel_wasm_executable.max_memory = 128 << 20;
+    check_process_step.addFileArg(kernel_wasm_executable.getEmittedBin());
     const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
     const kernel_wasm_reproducible = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1-reproducible",

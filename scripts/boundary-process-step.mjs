@@ -39,6 +39,10 @@ if (WebAssembly.Module.imports(module).length !== 0) {
 }
 const instanceWasm = await WebAssembly.instantiate(module, {});
 const exports = instanceWasm.exports;
+if (typeof exports.boundary_process_kernel_abi_version !== "function" ||
+    exports.boundary_process_kernel_abi_version() !== 1) {
+  throw new Error("unsupported Boundary Process kernel ABI");
+}
 if (exports.boundary_process_kernel_reserve(input.length) !== 1) {
   throw new Error("kernel cannot reserve the required operational input capacity");
 }

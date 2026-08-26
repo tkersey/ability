@@ -1,3 +1,6 @@
+const dynamic_value_v1 = @import("dynamic_value_v1");
+const image_v1 = @import("image_v1");
+const process_advance_v1 = @import("process_advance_v1");
 const process_state_v1 = @import("process_state_v1");
 const std = @import("std");
 
@@ -5,8 +8,12 @@ pub const magic = "ABL_CAP1".*;
 pub const format_version: u16 = 1;
 pub const fixed_header_length: usize = magic.len + 2 + 2 + 2 + 1 + 1;
 
-pub const Error = process_state_v1.Error || error{
+pub const Error = process_advance_v1.Error ||
+    dynamic_value_v1.Error ||
+    image_v1.Error ||
+    process_state_v1.Error || error{
     InvalidCapsule,
+    UnsupportedKernelSemanticVersion,
 };
 
 pub const InstanceKind = enum(u8) {
@@ -43,7 +50,18 @@ pub fn encodedLength(input: Input) Error!usize {
     return addLength(length, input.instance.len);
 }
 
-pub fn encode(input: Input, output: []u8) Error![]const u8 {
+pub fn encode(
+    input: Input,
+    output: []u8,
+    invariant_scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error![]const u8 {
+    if (slicesOverlap(output, input.image) or
+        slicesOverlap(output, input.instance) or
+        slicesOverlap(output, invariant_scratch))
+    {
+        return error.InvalidCapsule;
+    }
     const required = try encodedLength(input);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
@@ -66,11 +84,38 @@ pub fn encode(input: Input, output: []u8) Error![]const u8 {
     append(output, &cursor, input.instance);
     if (cursor != required) return error.InvalidCapsule;
     const encoded = output[0..required];
-    _ = try validate(encoded);
+    _ = try validate(encoded, invariant_scratch, workspace);
     return encoded;
 }
 
-pub fn validate(bytes: []const u8) Error!View {
+pub fn validate(
+    bytes: []const u8,
+    invariant_scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!View {
+    const view = try decode(bytes);
+    if (view.required_kernel_semantic_version != 1) {
+        return error.UnsupportedKernelSemanticVersion;
+    }
+    const image = try image_v1.validateImage(view.image, workspace);
+    switch (view.instance_kind) {
+        .process_state => _ = try process_advance_v1.validateState(
+            view.image,
+            view.instance,
+            invariant_scratch,
+            workspace,
+        ),
+        .initial_args => dynamic_value_v1.validateValue(
+            image.catalogs.schemas,
+            image.catalogs.initial_args_schema_id,
+            view.instance,
+            &workspace.value_tasks,
+        ) catch return error.InvalidCapsule,
+    }
+    return view;
+}
+
+fn decode(bytes: []const u8) Error!View {
     if (bytes.len < fixed_header_length + 2 or
         !std.mem.eql(u8, bytes[0..magic.len], &magic))
     {
@@ -131,4 +176,15 @@ fn appendInt(
 
 fn readInt(comptime T: type, bytes: []const u8, offset: usize) T {
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
+}
+
+fn slicesOverlap(left: []const u8, right: []const u8) bool {
+    if (left.len == 0 or right.len == 0) return false;
+    const left_start = @intFromPtr(left.ptr);
+    const right_start = @intFromPtr(right.ptr);
+    const left_end = std.math.add(usize, left_start, left.len) catch
+        return true;
+    const right_end = std.math.add(usize, right_start, right.len) catch
+        return true;
+    return left_start < right_end and right_start < left_end;
 }

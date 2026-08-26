@@ -23,6 +23,7 @@ var value_storage: [value_capacity]u8 align(16) = undefined;
 var request_storage: [request_capacity]u8 align(16) = undefined;
 var candidate_storage: [state_capacity]u8 align(16) = undefined;
 var environment_storage: [environment_capacity]u8 align(16) = undefined;
+var auxiliary_environment_storage: [environment_capacity]u8 align(16) = undefined;
 var scratch_storage: [scratch_capacity]u8 align(16) = undefined;
 var error_storage: [error_capacity]u8 align(16) = undefined;
 var validation_workspace: image_v1.ValidationWorkspace = .{};
@@ -126,6 +127,7 @@ fn execute(input: []const u8) !u32 {
             .output_request = &request_storage,
             .candidate_state = &candidate_storage,
             .environment = &environment_storage,
+            .auxiliary_environment = &auxiliary_environment_storage,
             .scratch = &scratch_storage,
         },
         &validation_workspace,

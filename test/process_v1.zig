@@ -1,4 +1,3 @@
-const process_capsule_v1 = @import("process_capsule_v1");
 const process_effect_v1 = @import("process_effect_v1");
 const process_state_v1 = @import("process_state_v1");
 const std = @import("std");
@@ -90,6 +89,32 @@ test "ABL_ERQ1 and ABL_ERS1 bind the current request and resume schema" {
         request.request_identity_digest,
     );
 
+    var forged_identity: [512]u8 = undefined;
+    @memcpy(forged_identity[0..request_bytes.len], request_bytes);
+    const semantic_offset = @intFromPtr(request.effect_semantic_identity.ptr) -
+        @intFromPtr(request_bytes.ptr);
+    forged_identity[semantic_offset] ^= 1;
+    try std.testing.expectError(
+        error.DigestMismatch,
+        process_effect_v1.validateRequest(
+            forged_identity[0..request_bytes.len],
+            input.program_transition_digest,
+        ),
+    );
+
+    var forged_payload_schema: [512]u8 = undefined;
+    @memcpy(forged_payload_schema[0..request_bytes.len], request_bytes);
+    const payload_schema_offset = process_effect_v1.request_magic.len +
+        4 + 4 * 32;
+    forged_payload_schema[payload_schema_offset] ^= 1;
+    try std.testing.expectError(
+        error.DigestMismatch,
+        process_effect_v1.validateRequest(
+            forged_payload_schema[0..request_bytes.len],
+            input.program_transition_digest,
+        ),
+    );
+
     const result_input: process_effect_v1.ResultInput = .{
         .request_identity_digest = request.request_identity_digest,
         .resume_schema_digest = request.resume_schema_digest,
@@ -122,32 +147,5 @@ test "ABL_ERQ1 and ABL_ERS1 bind the current request and resume schema" {
             request_storage[0..request_bytes.len],
             input.program_transition_digest,
         ),
-    );
-}
-
-test "ABL_CAP1 carries only image, instance, and Process semantic version" {
-    const input: process_capsule_v1.Input = .{
-        .required_kernel_semantic_version = 1,
-        .image = "canonical-bpi1",
-        .instance_kind = .process_state,
-        .instance = "canonical-pst1",
-    };
-    var storage: [128]u8 = undefined;
-    const encoded = try process_capsule_v1.encode(input, &storage);
-    const capsule = try process_capsule_v1.validate(encoded);
-    try std.testing.expectEqual(
-        input.required_kernel_semantic_version,
-        capsule.required_kernel_semantic_version,
-    );
-    try std.testing.expectEqual(input.instance_kind, capsule.instance_kind);
-    try std.testing.expectEqualSlices(u8, input.image, capsule.image);
-    try std.testing.expectEqualSlices(u8, input.instance, capsule.instance);
-    try std.testing.expect(std.mem.find(u8, encoded, "host") == null);
-    try std.testing.expect(std.mem.find(u8, encoded, "profile") == null);
-
-    storage[process_capsule_v1.magic.len + 7] = 1;
-    try std.testing.expectError(
-        error.UnknownFlags,
-        process_capsule_v1.validate(storage[0..encoded.len]),
     );
 }

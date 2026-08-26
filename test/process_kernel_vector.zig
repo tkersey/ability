@@ -50,6 +50,7 @@ const Storage = struct {
     request: [64 * 1024]u8 = undefined,
     candidate: [64 * 1024]u8 = undefined,
     environment: [64 * 1024]u8 = undefined,
+    auxiliary_environment: [64 * 1024]u8 = undefined,
     scratch: [512 * 1024]u8 = undefined,
 
     fn buffers(self: *@This()) process_advance_v1.Buffers {
@@ -59,6 +60,7 @@ const Storage = struct {
             .output_request = &self.request,
             .candidate_state = &self.candidate,
             .environment = &self.environment,
+            .auxiliary_environment = &self.auxiliary_environment,
             .scratch = &self.scratch,
         };
     }

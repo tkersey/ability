@@ -111,6 +111,56 @@ const CallBody = struct {
 
 const CallImage = boundary.program("process-call-return", CallBody).image();
 
+const LargeBytes = boundary.Bytes(256);
+const large_type: boundary.ir.ValueType = .{ .schema = 0 };
+const large_call_blocks = [_]boundary.ir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{ .target = 1, .arguments = &call_arguments },
+            .continuation = .{ .target = 2, .arguments = &return_arguments },
+            .resume_type = large_type,
+        } },
+    },
+    .{
+        .id = 1,
+        .function_id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .return_to_caller = 1 },
+    },
+    .{
+        .id = 2,
+        .role = .terminal_handoff,
+        .parameters = &.{2},
+        .terminator = .{ .return_value = 2 },
+    },
+};
+const LargeCallBody = struct {
+    pub const InitialArgs = LargeBytes;
+    pub const Result = LargeBytes;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{};
+    pub const schema_types = .{LargeBytes};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-large-call-return",
+        .value_types = &.{ large_type, large_type, large_type },
+        .blocks = &large_call_blocks,
+        .entry = 0,
+        .result_type = large_type,
+        .functions = &.{
+            .{ .id = 0, .entry = 0, .result_type = large_type },
+            .{ .id = 1, .entry = 1, .result_type = large_type },
+        },
+    };
+};
+const LargeCallImage = boundary.program(
+    "process-large-call-return",
+    LargeCallBody,
+).image();
+
 const forever_arguments = [_]boundary.ir.EdgeArgument{.{ .value = 0 }};
 const forever_blocks = [_]boundary.ir.Block{.{
     .id = 0,
@@ -144,6 +194,7 @@ const Storage = struct {
     request: [4096]u8 = undefined,
     candidate: [4096]u8 = undefined,
     environment: [4096]u8 = undefined,
+    auxiliary_environment: [4096]u8 = undefined,
     scratch: [64 * 1024]u8 = undefined,
 
     fn buffers(self: *@This()) process_advance_v1.Buffers {
@@ -153,6 +204,7 @@ const Storage = struct {
             .output_request = &self.request,
             .candidate_state = &self.candidate,
             .environment = &self.environment,
+            .auxiliary_environment = &self.auxiliary_environment,
             .scratch = &self.scratch,
         };
     }
@@ -164,6 +216,7 @@ const DeepStorage = struct {
     request: [64 * 1024]u8 = undefined,
     candidate: [128 * 1024]u8 = undefined,
     environment: [128 * 1024]u8 = undefined,
+    auxiliary_environment: [128 * 1024]u8 = undefined,
     scratch: [1024 * 1024]u8 = undefined,
 
     fn buffers(self: *@This()) process_advance_v1.Buffers {
@@ -173,6 +226,7 @@ const DeepStorage = struct {
             .output_request = &self.request,
             .candidate_state = &self.candidate,
             .environment = &self.environment,
+            .auxiliary_environment = &self.auxiliary_environment,
             .scratch = &self.scratch,
         };
     }
@@ -183,7 +237,7 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
     std.mem.writeInt(u32, &initial_args, 41, .little);
     var first_storage: Storage = .{};
     var first_workspace: boundary.image.ValidationWorkspace = .{};
-    const first = try process_advance_v1.advance(
+    const first = try boundary.process_v1.advance(
         &Image.bytes,
         .{ .initial_args = &initial_args },
         null,
@@ -387,6 +441,31 @@ test "Process advance preserves a call stack and returns one segment at a time" 
     try std.testing.expectEqualSlices(u8, &initial_args, done.completed);
 }
 
+test "Process keeps large child environments separate from predecessor state" {
+    var payload = [_]u8{0x5a} ** 192;
+    const input = try LargeBytes.fromSlice(&payload);
+    var initial_args: [512]u8 = undefined;
+    const initial_length = try boundary.schema.encode(
+        LargeBytes,
+        input,
+        &initial_args,
+    );
+    var storage: DeepStorage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const called = try process_advance_v1.advance(
+        &LargeCallImage.bytes,
+        .{ .initial_args = initial_args[0..initial_length] },
+        null,
+        storage.buffers(),
+        &workspace,
+    );
+    const state = try process_state_v1.validate(
+        called.progressed,
+        LargeCallImage.program_transition_digest,
+    );
+    try std.testing.expectEqual(@as(u64, 2), state.frame_count);
+}
+
 test "Process NeedsCapacity is transactional and retryable" {
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 11, .little);
@@ -415,6 +494,7 @@ test "Process NeedsCapacity is transactional and retryable" {
             .output_request = &no_request_capacity,
             .candidate_state = &constrained_storage.candidate,
             .environment = &constrained_storage.environment,
+            .auxiliary_environment = &constrained_storage.auxiliary_environment,
             .scratch = &constrained_storage.scratch,
         },
         &constrained_workspace,
@@ -427,13 +507,37 @@ test "Process NeedsCapacity is transactional and retryable" {
         process_state_v1.artifactDigest(pending.state),
     );
 
-    var retry_storage: Storage = .{};
+    const requirement = constrained.needs_capacity;
+    const output_capacity: usize = @intCast(requirement.minimum_output_bytes);
+    const scratch_capacity: usize = @intCast(requirement.minimum_scratch_bytes);
+    const retry_state = try std.testing.allocator.alloc(u8, output_capacity);
+    defer std.testing.allocator.free(retry_state);
+    const retry_value = try std.testing.allocator.alloc(u8, output_capacity);
+    defer std.testing.allocator.free(retry_value);
+    const retry_request = try std.testing.allocator.alloc(u8, output_capacity);
+    defer std.testing.allocator.free(retry_request);
+    const retry_candidate = try std.testing.allocator.alloc(u8, output_capacity);
+    defer std.testing.allocator.free(retry_candidate);
+    const retry_environment = try std.testing.allocator.alloc(u8, output_capacity);
+    defer std.testing.allocator.free(retry_environment);
+    const retry_auxiliary = try std.testing.allocator.alloc(u8, output_capacity);
+    defer std.testing.allocator.free(retry_auxiliary);
+    const retry_scratch = try std.testing.allocator.alloc(u8, scratch_capacity);
+    defer std.testing.allocator.free(retry_scratch);
     var retry_workspace: boundary.image.ValidationWorkspace = .{};
     const retry = try process_advance_v1.advance(
         &Image.bytes,
         .{ .process_state = pending.state },
         null,
-        retry_storage.buffers(),
+        .{
+            .output_state = retry_state,
+            .output_value = retry_value,
+            .output_request = retry_request,
+            .candidate_state = retry_candidate,
+            .environment = retry_environment,
+            .auxiliary_environment = retry_auxiliary,
+            .scratch = retry_scratch,
+        },
         &retry_workspace,
     );
     try std.testing.expectEqualSlices(
@@ -445,6 +549,128 @@ test "Process NeedsCapacity is transactional and retryable" {
         u8,
         pending.request,
         retry.requested.request,
+    );
+}
+
+test "Process rejects aliased input and output arenas transactionally" {
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 19, .little);
+    var initial_storage: Storage = .{};
+    var initial_workspace: boundary.image.ValidationWorkspace = .{};
+    const initial = try process_advance_v1.advance(
+        &Image.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        initial_storage.buffers(),
+        &initial_workspace,
+    );
+    const pending = initial.requested;
+    const before = process_state_v1.artifactDigest(pending.state);
+    var other: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidBuffers,
+        process_advance_v1.advance(
+            &Image.bytes,
+            .{ .process_state = pending.state },
+            null,
+            .{
+                .output_state = initial_storage.state[0..pending.state.len],
+                .output_value = &other.value,
+                .output_request = &other.request,
+                .candidate_state = &other.candidate,
+                .environment = &other.environment,
+                .auxiliary_environment = &other.auxiliary_environment,
+                .scratch = &other.scratch,
+            },
+            &workspace,
+        ),
+    );
+    try std.testing.expectEqual(
+        before,
+        process_state_v1.artifactDigest(pending.state),
+    );
+}
+
+test "Process Capsule admits only a compatible image and bound instance" {
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 31, .little);
+    const input: boundary.process_v1.capsule.Input = .{
+        .required_kernel_semantic_version = 1,
+        .image = &Image.bytes,
+        .instance_kind = .initial_args,
+        .instance = &initial_args,
+    };
+    var storage: [128 * 1024]u8 = undefined;
+    var scratch: [1024 * 1024]u8 = undefined;
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const encoded = try boundary.process_v1.capsule.encode(
+        input,
+        &storage,
+        &scratch,
+        &workspace,
+    );
+    workspace = .{};
+    const capsule = try boundary.process_v1.capsule.validate(
+        encoded,
+        &scratch,
+        &workspace,
+    );
+    try std.testing.expectEqualSlices(u8, &Image.bytes, capsule.image);
+    try std.testing.expectEqualSlices(u8, &initial_args, capsule.instance);
+    try std.testing.expect(std.mem.find(u8, encoded, "profile") == null);
+
+    var wrong_version_storage: [128 * 1024]u8 = undefined;
+    var wrong_version_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.UnsupportedKernelSemanticVersion,
+        boundary.process_v1.capsule.encode(
+            .{
+                .required_kernel_semantic_version = 2,
+                .image = &Image.bytes,
+                .instance_kind = .initial_args,
+                .instance = &initial_args,
+            },
+            &wrong_version_storage,
+            &scratch,
+            &wrong_version_workspace,
+        ),
+    );
+
+    var wrong_state_storage: [128 * 1024]u8 = undefined;
+    var wrong_state_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidProcessState,
+        boundary.process_v1.capsule.encode(
+            .{
+                .required_kernel_semantic_version = 1,
+                .image = &Image.bytes,
+                .instance_kind = .process_state,
+                .instance = &initial_args,
+            },
+            &wrong_state_storage,
+            &scratch,
+            &wrong_state_workspace,
+        ),
+    );
+
+    var corrupted_image = Image.bytes;
+    corrupted_image[0] ^= 1;
+    var corrupted_storage: [128 * 1024]u8 = undefined;
+    var corrupted_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidMagic,
+        boundary.process_v1.capsule.encode(
+            .{
+                .required_kernel_semantic_version = 1,
+                .image = &corrupted_image,
+                .instance_kind = .initial_args,
+                .instance = &initial_args,
+            },
+            &corrupted_storage,
+            &scratch,
+            &corrupted_workspace,
+        ),
     );
 }
 
@@ -527,4 +753,65 @@ test "Process recursive state exceeds the former frame ceiling and resumes" {
         }
     }
     return error.RecursiveProcessDidNotComplete;
+}
+
+test "Process rejects schema-valid forged constructor invariants" {
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 3, .little);
+    var initial_storage: DeepStorage = .{};
+    var initial_workspace: boundary.image.ValidationWorkspace = .{};
+    const first = try process_advance_v1.advance(
+        &RecursiveImage.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        initial_storage.buffers(),
+        &initial_workspace,
+    );
+    const authentic = first.progressed;
+    const authentic_view = try process_state_v1.validate(
+        authentic,
+        RecursiveImage.program_transition_digest,
+    );
+    const top = try process_state_v1.topFrame(authentic_view);
+    const environment_offset = @intFromPtr(top.frame.environment.ptr) -
+        @intFromPtr(authentic.ptr);
+    try std.testing.expect(top.frame.environment.len >= 8);
+    var forged: [128 * 1024]u8 = undefined;
+    @memcpy(forged[0..authentic.len], authentic);
+    std.mem.writeInt(
+        u32,
+        forged[environment_offset + 4 ..][0..4],
+        4,
+        .little,
+    );
+    var output: DeepStorage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidProcessState,
+        process_advance_v1.advance(
+            &RecursiveImage.bytes,
+            .{ .process_state = forged[0..authentic.len] },
+            null,
+            output.buffers(),
+            &workspace,
+        ),
+    );
+
+    var capsule_storage: [256 * 1024]u8 = undefined;
+    var capsule_scratch: [1024 * 1024]u8 = undefined;
+    var capsule_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidProcessState,
+        boundary.process_v1.capsule.encode(
+            .{
+                .required_kernel_semantic_version = 1,
+                .image = &RecursiveImage.bytes,
+                .instance_kind = .process_state,
+                .instance = forged[0..authentic.len],
+            },
+            &capsule_storage,
+            &capsule_scratch,
+            &capsule_workspace,
+        ),
+    );
 }
