@@ -1175,18 +1175,17 @@ fn pendingRequestParts(
     const segment_id = readInt(u16, constructor, 12);
     const segment = try image_v1.evaluatorSegmentRecord(image, segment_id);
     const terminator = image_v1.evaluatorSegmentTerminator(segment);
-    if (segment[terminator + 4] != 2 or segment[terminator + 8] != 0) {
+    const suspension = reducer_clause_v1.suspensionView(
+        segment,
+        terminator,
+    ) catch return error.InvalidProcessState;
+    if (suspension.kind != 0 or suspension.request_values.len != 2) {
         return error.InvalidProcessState;
     }
-    const payload = terminator + 8;
-    const site_ordinal = readInt(u32, segment, payload + 4);
-    if (readInt(u16, segment, payload + 10) != 1) {
-        return error.InvalidProcessState;
-    }
-    const request_value = readInt(u16, segment, payload + 12);
+    const request_value = readInt(u16, suspension.request_values, 0);
     if (!slots[request_value].initialized) return error.InvalidProcessState;
     return .{
-        .site_ordinal = site_ordinal,
+        .site_ordinal = suspension.site_ordinal,
         .payload = slots[request_value].bytes,
     };
 }
@@ -1494,7 +1493,11 @@ fn isAwaitCallConstructor(
         readInt(u16, constructor, 12),
     ) catch return false;
     const terminator = image_v1.evaluatorSegmentTerminator(segment);
-    return segment[terminator + 4] == 2 and segment[terminator + 8] == 1;
+    const suspension = reducer_clause_v1.suspensionView(
+        segment,
+        terminator,
+    ) catch return false;
+    return suspension.kind == 1;
 }
 
 fn loadEnvironment(

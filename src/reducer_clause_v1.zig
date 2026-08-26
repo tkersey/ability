@@ -482,12 +482,56 @@ pub fn loadEnvironmentSlots(
     return .{ .activation_entry = activation_entry };
 }
 
-pub fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
+pub const SuspensionView = struct {
+    kind: u8,
+    site_ordinal: u32,
+    request_values: []const u8,
+    callee: []const u8,
+    continuation: []const u8,
+};
+
+pub fn suspensionView(
+    segment: []const u8,
+    terminator: usize,
+) Error!SuspensionView {
+    if (terminator > segment.len or segment.len - terminator < 20 or
+        segment[terminator + 4] != 2)
+    {
+        return error.InvalidImage;
+    }
     const payload = terminator + 8;
     const request_count = readInt(u16, segment, payload + 10);
-    const cursor = payload + 12 + @as(usize, request_count) * 2;
-    if (segment[cursor] != 1) return &.{};
-    return segment[cursor + 4 ..];
+    const request_end = std.math.add(
+        usize,
+        payload + 12,
+        @as(usize, request_count) * 2,
+    ) catch return error.InvalidImage;
+    if (request_end > segment.len or segment.len - request_end < 4) {
+        return error.InvalidImage;
+    }
+    const callee_present = segment[request_end] == 1;
+    var continuation_start = request_end + 4;
+    const callee = if (callee_present) blk: {
+        const length = edgeLength(segment[continuation_start..]);
+        if (length > segment.len - continuation_start) {
+            return error.InvalidImage;
+        }
+        const edge = segment[continuation_start..][0..length];
+        continuation_start += length;
+        break :blk edge;
+    } else &.{};
+    if (continuation_start > segment.len) return error.InvalidImage;
+    return .{
+        .kind = segment[payload],
+        .site_ordinal = readInt(u32, segment, payload + 4),
+        .request_values = segment[payload + 12 .. request_end],
+        .callee = callee,
+        .continuation = segment[continuation_start..],
+    };
+}
+
+pub fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
+    return (suspensionView(segment, terminator) catch return &.{}).callee;
 }
 
 pub fn edgeLength(edge: []const u8) usize {
@@ -519,13 +563,7 @@ fn segmentTerminatorOffset(segment: []const u8) usize {
 }
 
 pub fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
-    const payload = terminator + 8;
-    const request_count = readInt(u16, segment, payload + 10);
-    var cursor = payload + 12 + @as(usize, request_count) * 2;
-    const callee_present = segment[cursor] == 1;
-    cursor += 4;
-    if (callee_present) cursor += edgeLength(segment[cursor..]);
-    return segment[cursor..];
+    return (suspensionView(segment, terminator) catch return &.{}).continuation;
 }
 
 pub fn constantBytes(

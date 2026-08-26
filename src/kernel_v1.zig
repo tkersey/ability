@@ -632,7 +632,11 @@ fn isAwaitCallConstructor(
         readInt(u16, constructor, 12),
     ) catch return false;
     const terminator = segmentTerminatorOffset(segment);
-    return segment[terminator + 4] == 2 and segment[terminator + 8] == 1;
+    const suspension = reducer_clause_v1.suspensionView(
+        segment,
+        terminator,
+    ) catch return false;
+    return suspension.kind == 1;
 }
 
 fn validateStackPair(
@@ -680,14 +684,14 @@ fn currentValidated(
     const segment_id = readInt(u16, constructor, 12);
     const segment = try segmentRecord(image, segment_id);
     const terminator = segmentTerminatorOffset(segment);
-    if (segment[terminator + 4] != 2 or segment[terminator + 8] != 0) {
+    const suspension = reducer_clause_v1.suspensionView(
+        segment,
+        terminator,
+    ) catch return error.InvalidState;
+    if (suspension.kind != 0 or suspension.request_values.len != 2) {
         return error.InvalidState;
     }
-    const payload = terminator + 8;
-    const site_ordinal = readInt(u32, segment, payload + 4);
-    const request_count = readInt(u16, segment, payload + 10);
-    if (request_count != 1) return error.InvalidImage;
-    const request_value = readInt(u16, segment, payload + 12);
+    const request_value = readInt(u16, suspension.request_values, 0);
     var slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
@@ -708,7 +712,7 @@ fn currentValidated(
             image,
             state,
             constructor_id,
-            site_ordinal,
+            suspension.site_ordinal,
             canonical_payload,
             sequence,
         ),
@@ -730,9 +734,14 @@ fn resumeValidated(
     const segment_id = readInt(u16, constructor, 12);
     const segment = try segmentRecord(image, segment_id);
     const terminator = segmentTerminatorOffset(segment);
-    const payload = terminator + 8;
-    const site_ordinal = readInt(u32, segment, payload + 4);
-    const request_value = readInt(u16, segment, payload + 12);
+    const suspension = reducer_clause_v1.suspensionView(
+        segment,
+        terminator,
+    ) catch return error.InvalidState;
+    if (suspension.kind != 0 or suspension.request_values.len != 2) {
+        return error.InvalidState;
+    }
+    const request_value = readInt(u16, suspension.request_values, 0);
     var slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
@@ -741,19 +750,19 @@ fn resumeValidated(
         image,
         state,
         constructor_id,
-        site_ordinal,
+        suspension.site_ordinal,
         slots[request_value].bytes,
         readInt(u64, state, 44),
     );
     if (!requestIdentityEqual(expected, identity)) return error.InvalidState;
-    const resume_schema = try effectResumeSchema(image, site_ordinal);
+    const resume_schema = try effectResumeSchema(image, suspension.site_ordinal);
     dynamic_value_v1.validateValue(
         image.catalogs.schemas,
         resume_schema,
         response,
         &workspace.value_tasks,
     ) catch return error.InvalidState;
-    const continuation = suspensionContinuation(segment, terminator);
+    const continuation = suspension.continuation;
     const target_segment = readInt(u16, continuation, 0);
     const target = try segmentRecord(image, target_segment);
     const next_constructor = try transitionConstructor(
