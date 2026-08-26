@@ -18,7 +18,7 @@ pub const state = struct {
     pub const format_version = state_codec.format_version;
     pub const Frame = state_codec.Frame;
     pub const StateView = state_codec.StateView;
-    pub const encode = state_codec.encode;
+    pub const encode = semantics.encodeState;
     pub const validateEncoding = state_codec.validate;
     pub const artifactDigest = state_codec.artifactDigest;
 };

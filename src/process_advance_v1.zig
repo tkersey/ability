@@ -404,6 +404,50 @@ pub fn validateState(
     return state;
 }
 
+/// Encode and semantically admit canonical Process State for one exact BPI1.
+pub fn encodeState(
+    image_bytes: []const u8,
+    frames: []const process_state_v1.Frame,
+    output_state: []u8,
+    invariant_scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!process_state_v1.StateView {
+    const workspace_bytes = std.mem.asBytes(workspace);
+    const mutable_arenas = [_][]const u8{
+        output_state,
+        invariant_scratch,
+        workspace_bytes,
+    };
+    for (mutable_arenas, 0..) |arena, index| {
+        if (slicesOverlap(image_bytes, arena)) return error.InvalidBuffers;
+        for (mutable_arenas[index + 1 ..]) |other| {
+            if (slicesOverlap(arena, other)) return error.InvalidBuffers;
+        }
+    }
+    for (frames) |frame| {
+        if (slicesOverlap(frame.environment, invariant_scratch) or
+            slicesOverlap(frame.environment, workspace_bytes))
+        {
+            return error.InvalidBuffers;
+        }
+    }
+    const prior_invariant_result = workspace.invariant_result;
+    workspace.invariant_result = invariant_scratch;
+    defer workspace.invariant_result = prior_invariant_result;
+    const image = try image_v1.validateImage(image_bytes, workspace);
+    const encoded = try process_state_v1.encode(
+        image.catalogs.envelope.header.program_transition_digest,
+        frames,
+        output_state,
+    );
+    const state = process_state_v1.validate(
+        encoded,
+        image.catalogs.envelope.header.program_transition_digest,
+    ) catch return error.InvalidProcessState;
+    try validateFrames(image, state, workspace);
+    return state;
+}
+
 pub fn validateInitialArgs(
     image_bytes: []const u8,
     initial_args: []const u8,
@@ -713,6 +757,7 @@ fn stepState(
         constructor,
         top.frame.environment,
         &slots,
+        null,
         workspace,
     );
     const segment_id = readInt(u16, constructor, 12);
@@ -970,6 +1015,7 @@ fn returnToCaller(
         parent_constructor,
         parent.frame.environment,
         &slots,
+        null,
         workspace,
     );
     const parent_segment_id = readInt(u16, parent_constructor, 12);
@@ -1034,6 +1080,7 @@ fn currentRequest(
         constructor,
         top.frame.environment,
         &slots,
+        null,
         workspace,
     );
     const parts = try pendingRequestParts(
@@ -1154,6 +1201,7 @@ fn resumePending(
         constructor,
         top.frame.environment,
         &slots,
+        null,
         workspace,
     );
     const parts = try pendingRequestParts(
@@ -1284,8 +1332,8 @@ fn validateFrames(
 ) Error!void {
     var iterator = state.iterator();
     var index: u64 = 0;
-    var previous: ?process_state_v1.Frame = null;
     var previous_constructor: []const u8 = &.{};
+    var previous_slots = [_]Slot{.{}} ** 1024;
     while (try iterator.next()) |frame| : (index += 1) {
         if (frame.constructor_id >= image.constructor_count) {
             return error.InvalidProcessState;
@@ -1295,12 +1343,14 @@ fn validateFrames(
             frame.constructor_id,
         );
         var slots = [_]Slot{.{}} ** 1024;
+        var activation_slots = [_]Slot{.{}} ** 1024;
         try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-        _ = try loadEnvironment(
+        const loaded = try loadEnvironment(
             image,
             constructor,
             frame.environment,
             &slots,
+            &activation_slots,
             workspace,
         );
         if (index == 0) {
@@ -1314,15 +1364,15 @@ fn validateFrames(
         } else {
             try validateStackPair(
                 image,
-                previous.?,
                 previous_constructor,
-                frame,
+                &previous_slots,
                 constructor,
-                workspace,
+                loaded.activation_entry,
+                &activation_slots,
             );
         }
-        previous = frame;
         previous_constructor = constructor;
+        previous_slots = slots;
     }
     if (isAwaitCallConstructor(image, previous_constructor)) {
         return error.InvalidProcessState;
@@ -1331,11 +1381,11 @@ fn validateFrames(
 
 fn validateStackPair(
     image: image_v1.ValidatedImage,
-    parent: process_state_v1.Frame,
     parent_constructor: []const u8,
-    child: process_state_v1.Frame,
+    parent_slots: *const [1024]Slot,
     child_constructor: []const u8,
-    workspace: *image_v1.ValidationWorkspace,
+    child_activation_entry: ?u32,
+    child_slots: *const [1024]Slot,
 ) Error!void {
     const parent_segment_id = readInt(u16, parent_constructor, 12);
     const parent_segment = try image_v1.evaluatorSegmentRecord(
@@ -1356,11 +1406,11 @@ fn validateStackPair(
     reducer_clause_v1.validateStackPair(
         image,
         parent_constructor,
-        parent.environment,
+        parent_slots,
         child_constructor,
-        child.environment,
+        child_activation_entry,
+        child_slots,
         expected_call_entry,
-        workspace,
     ) catch return error.InvalidProcessState;
 }
 
@@ -1384,6 +1434,7 @@ fn loadEnvironment(
     constructor: []const u8,
     environment: []const u8,
     slots: *[1024]Slot,
+    activation_slots: ?*[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
     const loaded = reducer_clause_v1.loadEnvironmentSlots(
@@ -1391,6 +1442,7 @@ fn loadEnvironment(
         constructor,
         environment,
         slots,
+        activation_slots,
         workspace,
     ) catch |err| switch (err) {
         error.ScratchCapacity => return error.ScratchCapacity,

@@ -72,6 +72,13 @@ for (let index = 0; index < count; index += 1) {
   if (!actual.equals(expected)) {
     throw new Error("native/WASM Process mismatch at vector " + index);
   }
+  if (actual[10] === 5) {
+    const actualMemoryPages = memory.buffer.byteLength / 65536;
+    const reportedMinimumPages = Number(actual.readBigUInt64LE(48));
+    if (reportedMinimumPages < actualMemoryPages) {
+      throw new Error("NeedsCapacity under-reported actual WASM memory pages");
+    }
+  }
   comparisons += 1;
 }
 if (cursor !== vectorBytes.length) throw new Error("trailing Process vectors");

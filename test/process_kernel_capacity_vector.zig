@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
         null,
         &input_storage,
     );
-    const base_memory = (process_advance_v1.KernelArenaLayout{
+    const declared_base_memory = (process_advance_v1.KernelArenaLayout{
         .state_bytes = @sizeOf(@TypeOf(storage.state)),
         .candidate_state_bytes = @sizeOf(@TypeOf(storage.candidate)),
         .value_bytes = @sizeOf(@TypeOf(storage.value)),
@@ -58,6 +58,10 @@ pub fn main(init: std.process.Init) !void {
         .validation_workspace_bytes = @sizeOf(@TypeOf(workspace)),
     }).baseMemoryWithoutOutput(input.len);
     var output_storage: [56]u8 = undefined;
+    const base_memory = @max(
+        declared_base_memory,
+        (4 * 1024 * 1024) - output_storage.len,
+    );
     const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,

@@ -80,16 +80,16 @@ fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
 pub fn validateStackPair(
     image: anytype,
     parent_constructor: []const u8,
-    parent_environment: []const u8,
+    parent_slots: *const [1024]Slot,
     child_constructor: []const u8,
-    child_environment: []const u8,
+    child_activation_entry: ?u32,
+    child_slots: *const [1024]Slot,
     expected_call_entry_constructor: u32,
-    workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     if (parent_constructor.len < 24 or
         parent_constructor[8] != 4 or
         parent_constructor[9] != 2 or
-        child_environment.len < 4)
+        child_activation_entry != expected_call_entry_constructor)
     {
         return error.InvalidState;
     }
@@ -112,31 +112,10 @@ pub fn validateStackPair(
     );
     const target_segment = try segmentRecord(image, target_segment_id);
     if (readInt(u16, child_segment, 6) != callee_function or
-        readInt(u16, child_constructor, 10) & 1 == 0 or
-        readInt(u32, child_environment, 0) !=
-            expected_call_entry_constructor)
+        readInt(u16, child_constructor, 10) & 1 == 0)
     {
         return error.InvalidState;
     }
-
-    var parent_slots = [_]Slot{.{}} ** 1024;
-    var child_activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &parent_slots);
-    try initializeZeroWidthSlots(image, &child_activation_slots);
-    try loadConstructorSlots(
-        image,
-        parent_constructor,
-        parent_environment,
-        &parent_slots,
-        workspace,
-    );
-    try loadActivationSlots(
-        image,
-        child_constructor,
-        child_environment,
-        &child_activation_slots,
-        workspace,
-    );
     const count = readInt(u16, callee, 2);
     if (count != readInt(u16, target_segment, 10)) {
         return error.InvalidState;
@@ -155,80 +134,16 @@ pub fn validateStackPair(
             target_value,
         )) continue;
         if (!parent_slots[source_value].initialized or
-            !child_activation_slots[target_value].initialized or
+            !child_slots[target_value].initialized or
             !std.mem.eql(
                 u8,
                 parent_slots[source_value].bytes,
-                child_activation_slots[target_value].bytes,
+                child_slots[target_value].bytes,
             ))
         {
             return error.InvalidState;
         }
     }
-}
-
-fn loadActivationSlots(
-    image: anytype,
-    constructor: []const u8,
-    environment: []const u8,
-    slots: *[1024]Slot,
-    workspace: *image_v1.ValidationWorkspace,
-) Error!void {
-    if (readInt(u16, constructor, 10) & 1 == 0 or environment.len < 4) {
-        return error.InvalidState;
-    }
-    var value_cursor: usize = 4;
-    var field_cursor: usize = 24;
-    for (0..readInt(u16, constructor, 16)) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        slots[value] = .{
-            .bytes = environment[value_cursor .. value_cursor + consumed],
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
-}
-
-fn loadConstructorSlots(
-    image: anytype,
-    constructor: []const u8,
-    environment: []const u8,
-    slots: *[1024]Slot,
-    workspace: *image_v1.ValidationWorkspace,
-) Error!void {
-    var value_cursor: usize = if (readInt(u16, constructor, 10) & 1 != 0)
-        4
-    else
-        0;
-    if (value_cursor > environment.len) return error.InvalidState;
-    const field_count = @as(u32, readInt(u16, constructor, 16)) +
-        readInt(u16, constructor, 18);
-    var field_cursor: usize = 24;
-    for (0..field_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        slots[value] = .{
-            .bytes = environment[value_cursor .. value_cursor + consumed],
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
-    if (value_cursor != environment.len) return error.InvalidState;
 }
 
 fn constructorRetainsActivationValue(
@@ -457,8 +372,12 @@ pub fn loadEnvironmentSlots(
     constructor: []const u8,
     environment: []const u8,
     slots: *[1024]Slot,
+    activation_slots: ?*[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
+    if (activation_slots) |activation| {
+        try initializeZeroWidthSlots(image, activation);
+    }
     const flags = readInt(u16, constructor, 10);
     var cursor: usize = 0;
     const activation_entry: ?u32 = if (flags & 1 != 0) blk: {
@@ -466,10 +385,11 @@ pub fn loadEnvironmentSlots(
         cursor = 4;
         break :blk readInt(u32, environment, 0);
     } else null;
-    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+    const activation_count = readInt(u16, constructor, 16);
+    const field_count = @as(u32, activation_count) +
         readInt(u16, constructor, 18);
     var field_cursor: usize = 24;
-    for (0..field_count) |_| {
+    for (0..field_count) |index| {
         const value = readInt(u16, constructor, field_cursor);
         const schema = readInt(u32, constructor, field_cursor + 4);
         const consumed = dynamic_value_v1.validateValuePrefix(
@@ -482,6 +402,11 @@ pub fn loadEnvironmentSlots(
             .bytes = environment[cursor .. cursor + consumed],
             .initialized = true,
         };
+        if (index < activation_count) {
+            if (activation_slots) |activation| {
+                activation[value] = slots[value];
+            }
+        }
         cursor += consumed;
         field_cursor += 8;
     }

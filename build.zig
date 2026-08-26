@@ -1519,6 +1519,7 @@ pub fn build(b: *std.Build) void {
     constrained_process_kernel.entry = .disabled;
     constrained_process_kernel.rdynamic = true;
     constrained_process_kernel.export_memory = true;
+    constrained_process_kernel.initial_memory = 4 << 20;
     constrained_process_kernel.max_memory = 32 << 20;
     const capacity_vector_module = b.createModule(.{
         .root_source_file = b.path("test/process_kernel_capacity_vector.zig"),

@@ -357,6 +357,47 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
     try std.testing.expect(requested.state.len != 0);
     try std.testing.expect(requested.request.len != 0);
 
+    var admitted_scratch: [4096]u8 = undefined;
+    var admitted_workspace: boundary.image.ValidationWorkspace = .{};
+    const admitted = try boundary.process_v1.validateState(
+        &Image.bytes,
+        requested.state,
+        &admitted_scratch,
+        &admitted_workspace,
+    );
+    var frames: [8]boundary.process_v1.state.Frame = undefined;
+    var frame_count: usize = 0;
+    var frame_iterator = admitted.iterator();
+    while (try frame_iterator.next()) |frame| {
+        frames[frame_count] = frame;
+        frame_count += 1;
+    }
+    var encoded_state: [4096]u8 = undefined;
+    var encode_scratch: [4096]u8 = undefined;
+    var encode_workspace: boundary.image.ValidationWorkspace = .{};
+    const encoded = try boundary.process_v1.state.encode(
+        &Image.bytes,
+        frames[0..frame_count],
+        &encoded_state,
+        &encode_scratch,
+        &encode_workspace,
+    );
+    try std.testing.expectEqualSlices(u8, requested.state, encoded.bytes);
+    frames[frame_count - 1].constructor_id = std.math.maxInt(u32);
+    var forged_state: [4096]u8 = undefined;
+    var forged_scratch: [4096]u8 = undefined;
+    var forged_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidProcessState,
+        boundary.process_v1.state.encode(
+            &Image.bytes,
+            frames[0..frame_count],
+            &forged_state,
+            &forged_scratch,
+            &forged_workspace,
+        ),
+    );
+
     var second_storage: Storage = .{};
     var second_workspace: boundary.image.ValidationWorkspace = .{};
     const second = try process_advance_v1.advance(

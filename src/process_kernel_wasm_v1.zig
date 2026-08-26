@@ -137,7 +137,7 @@ fn execute(input: []const u8) !u32 {
         },
         &validation_workspace,
     );
-    const base_memory = (process_advance_v1.KernelArenaLayout{
+    const declared_base_memory = (process_advance_v1.KernelArenaLayout{
         .state_bytes = @sizeOf(@TypeOf(state_storage)),
         .candidate_state_bytes = @sizeOf(@TypeOf(candidate_storage)),
         .value_bytes = @sizeOf(@TypeOf(value_storage)),
@@ -148,6 +148,15 @@ fn execute(input: []const u8) !u32 {
         .error_bytes = @sizeOf(@TypeOf(error_storage)),
         .validation_workspace_bytes = @sizeOf(@TypeOf(validation_workspace)),
     }).baseMemoryWithoutOutput(input.len);
+    const actual_memory_bytes = std.math.mul(
+        usize,
+        @wasmMemorySize(0),
+        65536,
+    ) catch std.math.maxInt(usize);
+    const base_memory = @max(
+        declared_base_memory,
+        actual_memory_bytes -| output_storage.len,
+    );
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,

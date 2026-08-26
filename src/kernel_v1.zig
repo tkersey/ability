@@ -508,20 +508,23 @@ fn validateStateValidated(
     const frame_count = readInt(u32, state, 60);
     var cursor: usize = state_header_length;
     var top_kind: u8 = 0;
-    var previous_offset: ?usize = null;
     var previous_constructor: []const u8 = &.{};
+    var previous_slots = [_]Slot{.{}} ** 1024;
     for (0..frame_count) |frame_index| {
-        const frame_offset = cursor;
         const constructor_id = readInt(u32, state, cursor);
         const environment_length = readInt(u32, state, cursor + 4);
         cursor += frame_header_length;
         const environment_end = cursor + environment_length;
         const constructor = try constructorRecord(image, constructor_id);
         top_kind = constructor[8];
-        validateEnvironment(
+        var slots = [_]Slot{.{}} ** 1024;
+        var activation_slots = [_]Slot{.{}} ** 1024;
+        const loaded = validateEnvironment(
             image,
             constructor,
             state[cursor..environment_end],
+            &slots,
+            &activation_slots,
             workspace,
         ) catch |err| switch (err) {
             error.ScratchCapacity => return error.ScratchCapacity,
@@ -536,16 +539,15 @@ fn validateStateValidated(
         } else {
             try validateStackPair(
                 image,
-                state,
-                previous_offset.?,
                 previous_constructor,
-                frame_offset,
+                &previous_slots,
                 constructor,
-                workspace,
+                loaded.activation_entry,
+                &activation_slots,
             );
         }
-        previous_offset = frame_offset;
         previous_constructor = constructor;
+        previous_slots = slots;
         cursor = environment_end;
     }
     if ((top_kind == 3 and sequence == 0) or
@@ -622,25 +624,12 @@ fn isAwaitCallConstructor(
 
 fn validateStackPair(
     image: ValidatedProgram,
-    state: []const u8,
-    parent_offset: usize,
     parent_constructor: []const u8,
-    child_offset: usize,
+    parent_slots: *const [1024]Slot,
     child_constructor: []const u8,
-    workspace: *image_v1.ValidationWorkspace,
+    child_activation_entry: ?u32,
+    child_slots: *const [1024]Slot,
 ) Error!void {
-    const parent_environment_length = readInt(
-        u32,
-        state,
-        parent_offset + 4,
-    );
-    const parent_environment = state[parent_offset + 8 ..][0..parent_environment_length];
-    const child_environment_length = readInt(
-        u32,
-        state,
-        child_offset + 4,
-    );
-    const child_environment = state[child_offset + 8 ..][0..child_environment_length];
     const parent_segment_id = readInt(u16, parent_constructor, 12);
     const parent_segment = try segmentRecord(image, parent_segment_id);
     const callee = suspensionCallee(
@@ -657,11 +646,11 @@ fn validateStackPair(
     try reducer_clause_v1.validateStackPair(
         image,
         parent_constructor,
-        parent_environment,
+        parent_slots,
         child_constructor,
-        child_environment,
+        child_activation_entry,
+        child_slots,
         expected_call_entry,
-        workspace,
     );
 }
 
@@ -1934,21 +1923,24 @@ fn validateEnvironment(
     image: anytype,
     constructor: []const u8,
     environment: []const u8,
+    slots: *[1024]Slot,
+    activation_slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
-) Error!void {
-    var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
+) Error!reducer_clause_v1.LoadedEnvironment {
+    try initializeZeroWidthSlots(image, slots);
     const loaded = try reducer_clause_v1.loadEnvironmentSlots(
         image,
         constructor,
         environment,
-        &slots,
+        slots,
+        activation_slots,
         workspace,
     );
     if (loaded.activation_entry) |entry_constructor| {
         _ = constructorRecord(image, entry_constructor) catch
             return error.InvalidState;
     }
+    return loaded;
 }
 
 fn constructorRecord(
