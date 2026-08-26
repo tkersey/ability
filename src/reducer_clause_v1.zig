@@ -445,6 +445,51 @@ pub fn initializeZeroWidthSlots(
     }
 }
 
+pub const LoadedEnvironment = struct {
+    activation_entry: ?u32,
+};
+
+/// Decode one canonical constructor environment into the shared slot carrier.
+/// ABI-specific callers remain responsible only for resolving the optional
+/// activation constructor identity through their own constructor mapping.
+pub fn loadEnvironmentSlots(
+    image: anytype,
+    constructor: []const u8,
+    environment: []const u8,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!LoadedEnvironment {
+    const flags = readInt(u16, constructor, 10);
+    var cursor: usize = 0;
+    const activation_entry: ?u32 = if (flags & 1 != 0) blk: {
+        if (environment.len < 4) return error.InvalidState;
+        cursor = 4;
+        break :blk readInt(u32, environment, 0);
+    } else null;
+    const field_count = @as(u32, readInt(u16, constructor, 16)) +
+        readInt(u16, constructor, 18);
+    var field_cursor: usize = 24;
+    for (0..field_count) |_| {
+        const value = readInt(u16, constructor, field_cursor);
+        const schema = readInt(u32, constructor, field_cursor + 4);
+        const consumed = dynamic_value_v1.validateValuePrefix(
+            image.catalogs.schemas,
+            schema,
+            environment[cursor..],
+            &workspace.value_tasks,
+        ) catch return error.InvalidState;
+        slots[value] = .{
+            .bytes = environment[cursor .. cursor + consumed],
+            .initialized = true,
+        };
+        cursor += consumed;
+        field_cursor += 8;
+    }
+    if (cursor != environment.len) return error.InvalidState;
+    try validatePathInvariants(image, constructor, slots, workspace);
+    return .{ .activation_entry = activation_entry };
+}
+
 fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
     const payload = terminator + 8;
     const request_count = readInt(u16, segment, payload + 10);

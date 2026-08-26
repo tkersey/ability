@@ -1936,44 +1936,19 @@ fn validateEnvironment(
     environment: []const u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
-    const flags = readInt(u16, constructor, 10);
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var field_cursor: usize = 24;
-    var value_cursor: usize = 0;
     var slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &slots);
-    if (flags & 1 != 0) {
-        if (environment.len < 4) return error.InvalidState;
-        const entry_constructor = readInt(u32, environment, 0);
-        _ = constructorRecord(image, entry_constructor) catch
-            return error.InvalidState;
-        value_cursor = 4;
-    }
-    const field_count = @as(u32, activation_count) + environment_count;
-    for (0..field_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema_id = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema_id,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        slots[value] = .{
-            .bytes = environment[value_cursor .. value_cursor + consumed],
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
-    if (value_cursor != environment.len) return error.InvalidState;
-    try reducer_clause_v1.validatePathInvariants(
+    const loaded = try reducer_clause_v1.loadEnvironmentSlots(
         image,
         constructor,
+        environment,
         &slots,
         workspace,
     );
+    if (loaded.activation_entry) |entry_constructor| {
+        _ = constructorRecord(image, entry_constructor) catch
+            return error.InvalidState;
+    }
 }
 
 fn constructorRecord(

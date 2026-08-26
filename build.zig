@@ -535,6 +535,7 @@ fn addCoreModules(
         .target = target,
         .optimize = optimize,
     });
+    process_effect_v1.addImport("image_v1", image_v1);
     process_effect_v1.addImport("process_state_v1", process_state_v1);
     const process_advance_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.process_advance_v1)),
@@ -1551,6 +1552,20 @@ pub fn build(b: *std.Build) void {
     run_process_kernel_wasm.addFileArg(process_kernel_vector);
     run_process_kernel_wasm.addArg("0,1,2,3,4");
     process_step.dependOn(&run_process_kernel_wasm.step);
+    const check_existing_repository_repair_bpi1 = b.addSystemCommand(&.{"node"});
+    check_existing_repository_repair_bpi1.addFileArg(
+        b.path("test/check_existing_repository_repair_bpi1.mjs"),
+    );
+    check_existing_repository_repair_bpi1.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    check_existing_repository_repair_bpi1.addFileArg(b.path(
+        "conformance/process-v1/repository-repair.agent.bpi1.base64",
+    ));
+    check_existing_repository_repair_bpi1.addFileArg(b.path(
+        "conformance/process-v1/repository-repair.initial-args.bin.base64",
+    ));
+    process_step.dependOn(&check_existing_repository_repair_bpi1.step);
     const run_constrained_process_kernel_wasm = b.addSystemCommand(&.{"node"});
     run_constrained_process_kernel_wasm.addFileArg(
         b.path("test/run_process_kernel_wasm.mjs"),

@@ -872,28 +872,42 @@ fn effectDigest(
     payload_schema: u32,
     resume_schema: u32,
 ) Error![32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    semanticHashBytes(
-        &hasher,
-        if (ordinal == null)
-            "boundary-effect-site-semantic-contract-v1"
-        else
-            "boundary-effect-site-contract-v1",
-    );
-    if (ordinal) |value| semanticHashU32(&hasher, value);
-    semanticHashBytes(&hasher, identity);
     const payload_digest = dynamic_value_v1.schemaDigest(
         schemas,
         payload_schema,
         hash_tasks,
     ) catch return error.InvalidSchema;
-    hasher.update(&payload_digest);
     const resume_digest = dynamic_value_v1.schemaDigest(
         schemas,
         resume_schema,
         hash_tasks,
     ) catch return error.InvalidSchema;
+    if (ordinal == null) {
+        return effectSemanticDigest(identity, payload_digest, resume_digest);
+    }
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    semanticHashBytes(&hasher, "boundary-effect-site-contract-v1");
+    semanticHashU32(&hasher, ordinal.?);
+    semanticHashBytes(&hasher, identity);
+    hasher.update(&payload_digest);
     hasher.update(&resume_digest);
+    semanticHashBytes(&hasher, "single-resume");
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+/// Derive the stable semantic contract identity carried by one effect site.
+pub fn effectSemanticDigest(
+    semantic_identity: []const u8,
+    payload_schema_digest: [32]u8,
+    resume_schema_digest: [32]u8,
+) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    semanticHashBytes(&hasher, "boundary-effect-site-semantic-contract-v1");
+    semanticHashBytes(&hasher, semantic_identity);
+    hasher.update(&payload_schema_digest);
+    hasher.update(&resume_schema_digest);
     semanticHashBytes(&hasher, "single-resume");
     var digest: [32]u8 = undefined;
     hasher.final(&digest);

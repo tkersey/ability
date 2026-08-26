@@ -74,14 +74,20 @@ test "Process codecs reject output overlap with source bytes" {
 
     var request_storage: [512]u8 = undefined;
     @memset(request_storage[400..404], 0x55);
+    const alias_payload_schema = [_]u8{4} ** 32;
+    const alias_resume_schema = [_]u8{5} ** 32;
     try std.testing.expectError(
         error.InvalidRequest,
         process_effect_v1.encodeRequest(.{
             .program_transition_digest = [_]u8{1} ** 32,
             .pre_request_state_digest = [_]u8{2} ** 32,
-            .effect_site_semantic_digest = [_]u8{3} ** 32,
-            .payload_schema_digest = [_]u8{4} ** 32,
-            .resume_schema_digest = [_]u8{5} ** 32,
+            .effect_site_semantic_digest = process_effect_v1.effectSemanticDigest(
+                "fixture.effect.v1",
+                alias_payload_schema,
+                alias_resume_schema,
+            ),
+            .payload_schema_digest = alias_payload_schema,
+            .resume_schema_digest = alias_resume_schema,
             .continuation_digest = [_]u8{6} ** 32,
             .effect_semantic_identity = "fixture.effect.v1",
             .payload = request_storage[400..404],
@@ -101,16 +107,32 @@ test "Process codecs reject output overlap with source bytes" {
 }
 
 test "ABL_ERQ1 and ABL_ERS1 bind the current request and resume schema" {
+    const payload_schema = [_]u8{4} ** 32;
+    const resume_schema = [_]u8{5} ** 32;
     const input: process_effect_v1.RequestInput = .{
         .program_transition_digest = [_]u8{1} ** 32,
         .pre_request_state_digest = [_]u8{2} ** 32,
-        .effect_site_semantic_digest = [_]u8{3} ** 32,
-        .payload_schema_digest = [_]u8{4} ** 32,
-        .resume_schema_digest = [_]u8{5} ** 32,
+        .effect_site_semantic_digest = process_effect_v1.effectSemanticDigest(
+            "fixture.effect.v1",
+            payload_schema,
+            resume_schema,
+        ),
+        .payload_schema_digest = payload_schema,
+        .resume_schema_digest = resume_schema,
         .continuation_digest = [_]u8{6} ** 32,
         .effect_semantic_identity = "fixture.effect.v1",
         .payload = &.{ 7, 8, 9 },
     };
+    var contradictory_input = input;
+    contradictory_input.effect_site_semantic_digest[0] ^= 1;
+    var contradictory_storage: [512]u8 = undefined;
+    try std.testing.expectError(
+        error.DigestMismatch,
+        process_effect_v1.encodeRequest(
+            contradictory_input,
+            &contradictory_storage,
+        ),
+    );
     var request_storage: [512]u8 = undefined;
     const request_bytes = try process_effect_v1.encodeRequest(
         input,

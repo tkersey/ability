@@ -1,3 +1,4 @@
+const image_v1 = @import("image_v1");
 const process_state_v1 = @import("process_state_v1");
 const std = @import("std");
 
@@ -52,6 +53,8 @@ pub const ResultView = struct {
     @"resume": []const u8,
 };
 
+pub const effectSemanticDigest = image_v1.effectSemanticDigest;
+
 pub fn requestIdentity(input: RequestInput) [32]u8 {
     var payload_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(input.payload, &payload_digest, .{});
@@ -103,6 +106,16 @@ pub fn encodeRequest(input: RequestInput, output: []u8) Error![]const u8 {
     ) or process_state_v1.slicesOverlap(output, input.payload)) {
         return error.InvalidRequest;
     }
+    const expected_site_digest = effectSemanticDigest(
+        input.effect_semantic_identity,
+        input.payload_schema_digest,
+        input.resume_schema_digest,
+    );
+    if (!std.mem.eql(
+        u8,
+        &expected_site_digest,
+        &input.effect_site_semantic_digest,
+    )) return error.DigestMismatch;
     const required = try requestEncodedLength(input);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
@@ -178,6 +191,14 @@ pub fn validateRequest(
     const payload_end = try addLength(cursor, value_length);
     if (payload_end != bytes.len) return error.InvalidRequest;
     const payload = bytes[cursor..payload_end];
+    const expected_site_digest = effectSemanticDigest(
+        semantic_identity,
+        payload_schema,
+        resume_schema,
+    );
+    if (!std.mem.eql(u8, &site, &expected_site_digest)) {
+        return error.DigestMismatch;
+    }
     const expected_identity = requestIdentity(.{
         .program_transition_digest = program,
         .pre_request_state_digest = state,

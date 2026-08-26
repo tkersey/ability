@@ -228,6 +228,42 @@ pub fn outcomeEncodedLength(outcome: Outcome) Error!usize {
     };
 }
 
+/// Physical arenas retained by one fixed Process-kernel invocation.
+///
+/// The kernel and native capacity witness both derive accounting from their
+/// actual storage objects through this one formula. Output is excluded because
+/// `encodeOutcomeForCapacity` substitutes the minimum required output size.
+pub const KernelArenaLayout = struct {
+    state_bytes: usize,
+    candidate_state_bytes: usize,
+    value_bytes: usize,
+    request_bytes: usize,
+    environment_bytes: usize,
+    auxiliary_environment_bytes: usize,
+    scratch_bytes: usize,
+    error_bytes: usize,
+    validation_workspace_bytes: usize,
+
+    pub fn baseMemoryWithoutOutput(
+        self: @This(),
+        input_bytes: usize,
+    ) usize {
+        var total = input_bytes;
+        inline for (.{
+            self.state_bytes,
+            self.candidate_state_bytes,
+            self.value_bytes,
+            self.request_bytes,
+            self.environment_bytes,
+            self.auxiliary_environment_bytes,
+            self.scratch_bytes,
+            self.error_bytes,
+            self.validation_workspace_bytes,
+        }) |bytes| total = saturatingAdd(total, bytes);
+        return total;
+    }
+};
+
 pub fn encodeOutcomeForCapacity(
     outcome: Outcome,
     input_length: usize,
@@ -301,9 +337,7 @@ fn writeOutcomeHeader(
 const Slot = reducer_clause_v1.Slot;
 const slicesOverlap = process_state_v1.slicesOverlap;
 
-const LoadedEnvironment = struct {
-    activation_entry: ?u32,
-};
+const LoadedEnvironment = reducer_clause_v1.LoadedEnvironment;
 
 pub fn advance(
     image_bytes: []const u8,
@@ -993,11 +1027,19 @@ fn currentRequest(
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
+    var slots = [_]Slot{.{}} ** 1024;
+    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
+    _ = try loadEnvironment(
+        image,
+        constructor,
+        top.frame.environment,
+        &slots,
+        workspace,
+    );
     const parts = try pendingRequestParts(
         image,
-        top,
         constructor,
-        workspace,
+        &slots,
     );
     return makeRequest(
         image,
@@ -1016,9 +1058,8 @@ const PendingRequestParts = struct {
 
 fn pendingRequestParts(
     image: image_v1.ValidatedImage,
-    top: process_state_v1.FrameSpan,
     constructor: []const u8,
-    workspace: *image_v1.ValidationWorkspace,
+    slots: *const [1024]Slot,
 ) Error!PendingRequestParts {
     const segment_id = readInt(u16, constructor, 12);
     const segment = try image_v1.evaluatorSegmentRecord(image, segment_id);
@@ -1032,15 +1073,6 @@ fn pendingRequestParts(
         return error.InvalidProcessState;
     }
     const request_value = readInt(u16, segment, payload + 12);
-    var slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-    _ = try loadEnvironment(
-        image,
-        constructor,
-        top.frame.environment,
-        &slots,
-        workspace,
-    );
     if (!slots[request_value].initialized) return error.InvalidProcessState;
     return .{
         .site_ordinal = site_ordinal,
@@ -1115,11 +1147,19 @@ fn resumePending(
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!process_state_v1.StateView {
+    var slots = [_]Slot{.{}} ** 1024;
+    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
+    const loaded = try loadEnvironment(
+        image,
+        constructor,
+        top.frame.environment,
+        &slots,
+        workspace,
+    );
     const parts = try pendingRequestParts(
         image,
-        top,
         constructor,
-        workspace,
+        &slots,
     );
     const request_input = try requestInput(
         image,
@@ -1153,15 +1193,6 @@ fn resumePending(
         result.@"resume",
         &workspace.value_tasks,
     ) catch return error.InvalidResult;
-    var slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-    const loaded = try loadEnvironment(
-        image,
-        constructor,
-        top.frame.environment,
-        &slots,
-        workspace,
-    );
     const continuation = suspensionContinuation(segment, terminator);
     const target_segment_id = readInt(u16, continuation, 0);
     const target_segment = try image_v1.evaluatorSegmentRecord(
@@ -1355,45 +1386,21 @@ fn loadEnvironment(
     slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
-    const flags = readInt(u16, constructor, 10);
-    var cursor: usize = 0;
-    const activation_entry: ?u32 = if (flags & 1 != 0) blk: {
-        if (environment.len < 4) return error.InvalidProcessState;
-        const entry = readInt(u32, environment, 0);
-        _ = try image_v1.evaluatorConstructorRecord(image, entry);
-        cursor = 4;
-        break :blk entry;
-    } else null;
-    const field_count = @as(u32, readInt(u16, constructor, 16)) +
-        readInt(u16, constructor, 18);
-    var field_cursor: usize = 24;
-    for (0..field_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema,
-            environment[cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidProcessState;
-        slots[value] = .{
-            .bytes = environment[cursor .. cursor + consumed],
-            .initialized = true,
-        };
-        cursor += consumed;
-        field_cursor += 8;
-    }
-    if (cursor != environment.len) return error.InvalidProcessState;
-    reducer_clause_v1.validatePathInvariants(
+    const loaded = reducer_clause_v1.loadEnvironmentSlots(
         image,
         constructor,
+        environment,
         slots,
         workspace,
     ) catch |err| switch (err) {
         error.ScratchCapacity => return error.ScratchCapacity,
         else => return error.InvalidProcessState,
     };
-    return .{ .activation_entry = activation_entry };
+    if (loaded.activation_entry) |entry| {
+        _ = image_v1.evaluatorConstructorRecord(image, entry) catch
+            return error.InvalidProcessState;
+    }
+    return loaded;
 }
 
 fn encodeEnvironment(

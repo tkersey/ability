@@ -69,11 +69,11 @@ test "Program exposes one generic pre-RNF component projection" {
     try std.testing.expect(Component.InitialArgs == Body.InitialArgs);
     try std.testing.expect(Component.Result == Body.Result);
     try std.testing.expect(Component.Failure == Body.Failure);
-    try std.testing.expectEqualStrings("typed-lookup", Component.program_label);
+    try std.testing.expect(Component == Body);
     try std.testing.expectEqual(Body.effect_sites.len, Component.effect_sites.len);
     try std.testing.expectEqual(Body.control_ir.blocks.len, Component.control_ir.blocks.len);
-    try std.testing.expectEqual(@as(usize, 0), Component.effect_handlers.len);
-    try std.testing.expectEqual(@as(usize, 0), Component.effect_morphisms.len);
+    try std.testing.expect(!@hasDecl(Component, "effect_handlers"));
+    try std.testing.expect(!@hasDecl(Component, "effect_morphisms"));
 }
 
 const CanonicalTextLookup = struct {
