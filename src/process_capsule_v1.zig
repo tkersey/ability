@@ -58,7 +58,11 @@ pub fn encode(
 ) Error![]const u8 {
     if (slicesOverlap(output, input.image) or
         slicesOverlap(output, input.instance) or
-        slicesOverlap(output, invariant_scratch))
+        slicesOverlap(output, invariant_scratch) or
+        slicesOverlap(output, std.mem.asBytes(workspace)) or
+        slicesOverlap(input.image, std.mem.asBytes(workspace)) or
+        slicesOverlap(input.instance, std.mem.asBytes(workspace)) or
+        slicesOverlap(invariant_scratch, std.mem.asBytes(workspace)))
     {
         return error.InvalidCapsule;
     }
@@ -97,7 +101,6 @@ pub fn validate(
     if (view.required_kernel_semantic_version != 1) {
         return error.UnsupportedKernelSemanticVersion;
     }
-    const image = try image_v1.validateImage(view.image, workspace);
     switch (view.instance_kind) {
         .process_state => _ = try process_advance_v1.validateState(
             view.image,
@@ -105,12 +108,15 @@ pub fn validate(
             invariant_scratch,
             workspace,
         ),
-        .initial_args => dynamic_value_v1.validateValue(
-            image.catalogs.schemas,
-            image.catalogs.initial_args_schema_id,
-            view.instance,
-            &workspace.value_tasks,
-        ) catch return error.InvalidCapsule,
+        .initial_args => {
+            const image = try image_v1.validateImage(view.image, workspace);
+            dynamic_value_v1.validateValue(
+                image.catalogs.schemas,
+                image.catalogs.initial_args_schema_id,
+                view.instance,
+                &workspace.value_tasks,
+            ) catch return error.InvalidCapsule;
+        },
     }
     return view;
 }

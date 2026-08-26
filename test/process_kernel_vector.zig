@@ -43,6 +43,102 @@ const Body = struct {
     };
 };
 const Image = boundary.program("process-kernel-vector", Body).image();
+pub const CapacityImage = Image;
+
+const forward_arguments = [_]boundary.ir.EdgeArgument{.{ .value = 0 }};
+const progressed_blocks = [_]boundary.ir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .jump = .{
+            .target = 1,
+            .arguments = &forward_arguments,
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .return_value = 1 },
+    },
+};
+const ProgressedBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-kernel-progressed",
+        .value_types = &.{ u32_type, u32_type },
+        .blocks = &progressed_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+const ProgressedImage = boundary.program(
+    "process-kernel-progressed",
+    ProgressedBody,
+).image();
+
+const yielded_blocks = [_]boundary.ir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .terminator = .{ .@"suspend" = .{
+            .kind = .explicit_yield,
+            .continuation = .{
+                .target = 1,
+                .arguments = &forward_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{1},
+        .terminator = .{ .return_value = 1 },
+    },
+};
+const YieldedBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-kernel-yielded",
+        .value_types = &.{ u32_type, u32_type },
+        .blocks = &yielded_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+const YieldedImage = boundary.program(
+    "process-kernel-yielded",
+    YieldedBody,
+).image();
+
+const failed_blocks = [_]boundary.ir.Block{.{
+    .id = 0,
+    .terminator = .{ .fail = 0 },
+}};
+const FailedBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = void;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-kernel-failed",
+        .value_types = &.{},
+        .blocks = &failed_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .unit },
+    };
+};
+const FailedImage = boundary.program(
+    "process-kernel-failed",
+    FailedBody,
+).image();
 
 const Storage = struct {
     state: [64 * 1024]u8 = undefined,
@@ -112,10 +208,40 @@ pub fn main(init: std.process.Init) !void {
         third_storage.buffers(),
         &third_workspace,
     );
+    var fourth_storage: Storage = .{};
+    var fourth_workspace: boundary.image.ValidationWorkspace = .{};
+    const fourth = try process_advance_v1.advance(
+        &ProgressedImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        fourth_storage.buffers(),
+        &fourth_workspace,
+    );
+    var fifth_storage: Storage = .{};
+    var fifth_workspace: boundary.image.ValidationWorkspace = .{};
+    const fifth = try process_advance_v1.advance(
+        &YieldedImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        fifth_storage.buffers(),
+        &fifth_workspace,
+    );
+    var sixth_storage: Storage = .{};
+    var sixth_workspace: boundary.image.ValidationWorkspace = .{};
+    const sixth = try process_advance_v1.advance(
+        &FailedImage.bytes,
+        .{ .initial_args = &.{} },
+        null,
+        sixth_storage.buffers(),
+        &sixth_workspace,
+    );
 
     var input_one_storage: [128 * 1024]u8 = undefined;
     var input_two_storage: [128 * 1024]u8 = undefined;
     var input_three_storage: [128 * 1024]u8 = undefined;
+    var input_four_storage: [128 * 1024]u8 = undefined;
+    var input_five_storage: [128 * 1024]u8 = undefined;
+    var input_six_storage: [128 * 1024]u8 = undefined;
     const inputs = [_][]const u8{
         try process_advance_v1.encodeKernelInput(
             &Image.bytes,
@@ -135,20 +261,44 @@ pub fn main(init: std.process.Init) !void {
             result,
             &input_three_storage,
         ),
+        try process_advance_v1.encodeKernelInput(
+            &ProgressedImage.bytes,
+            .{ .initial_args = &initial },
+            null,
+            &input_four_storage,
+        ),
+        try process_advance_v1.encodeKernelInput(
+            &YieldedImage.bytes,
+            .{ .initial_args = &initial },
+            null,
+            &input_five_storage,
+        ),
+        try process_advance_v1.encodeKernelInput(
+            &FailedImage.bytes,
+            .{ .initial_args = &.{} },
+            null,
+            &input_six_storage,
+        ),
     };
     var output_one_storage: [128 * 1024]u8 = undefined;
     var output_two_storage: [128 * 1024]u8 = undefined;
     var output_three_storage: [128 * 1024]u8 = undefined;
+    var output_four_storage: [128 * 1024]u8 = undefined;
+    var output_five_storage: [128 * 1024]u8 = undefined;
+    var output_six_storage: [128 * 1024]u8 = undefined;
     const outputs = [_][]const u8{
         try process_advance_v1.encodeOutcome(first, &output_one_storage),
         try process_advance_v1.encodeOutcome(second, &output_two_storage),
         try process_advance_v1.encodeOutcome(third, &output_three_storage),
+        try process_advance_v1.encodeOutcome(fourth, &output_four_storage),
+        try process_advance_v1.encodeOutcome(fifth, &output_five_storage),
+        try process_advance_v1.encodeOutcome(sixth, &output_six_storage),
     };
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    try writeInt(stdout, 3);
+    try writeInt(stdout, @intCast(inputs.len));
     for (inputs, outputs) |input, output| {
         try writeInt(stdout, @intCast(input.len));
         try writeInt(stdout, @intCast(output.len));

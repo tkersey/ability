@@ -188,6 +188,115 @@ const ForeverBody = struct {
 const ForeverImage = boundary.program("process-forever", ForeverBody).image();
 const RecursiveImage = recursion_fixture.ProcessRecursionProgram.image();
 
+const SwapPair = struct { left: u32, right: u32 };
+const swap_entry_arguments = [_]boundary.ir.EdgeArgument{
+    .{ .value = 1 },
+    .{ .value = 2 },
+    .{ .value = 10 },
+};
+const swap_backedge_arguments = [_]boundary.ir.EdgeArgument{
+    .{ .value = 4 },
+    .{ .value = 3 },
+    .{ .value = 9 },
+};
+const swap_done_arguments = [_]boundary.ir.EdgeArgument{
+    .{ .value = 3 },
+    .{ .value = 4 },
+};
+const swap_entry_instructions = [_]boundary.ir.Instruction{
+    .{
+        .kind = .pure,
+        .result = 1,
+        .operands = &.{0},
+        .operation = .{ .product_extract = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{0},
+        .operation = .{ .product_extract = 1 },
+    },
+    .{
+        .kind = .constant,
+        .result = 10,
+        .operation = .{ .constant = 0 },
+    },
+};
+const swap_loop_instructions = [_]boundary.ir.Instruction{.{
+    .kind = .constant,
+    .result = 9,
+    .operation = .{ .constant = 1 },
+}};
+const swap_result_instructions = [_]boundary.ir.Instruction{.{
+    .kind = .pure,
+    .result = 8,
+    .operands = &.{ 6, 7 },
+    .operation = .product_construct,
+}};
+const swap_blocks = [_]boundary.ir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &swap_entry_instructions,
+        .terminator = .{ .jump = .{
+            .target = 1,
+            .arguments = &swap_entry_arguments,
+        } },
+    },
+    .{
+        .id = 1,
+        .role = .loop_header,
+        .parameters = &.{ 3, 4, 5 },
+        .instructions = &swap_loop_instructions,
+        .terminator = .{ .branch = .{
+            .condition = 5,
+            .then_edge = .{
+                .target = 2,
+                .arguments = &swap_done_arguments,
+            },
+            .else_edge = .{
+                .target = 1,
+                .arguments = &swap_backedge_arguments,
+            },
+        } },
+    },
+    .{
+        .id = 2,
+        .role = .terminal_handoff,
+        .parameters = &.{ 6, 7 },
+        .instructions = &swap_result_instructions,
+        .terminator = .{ .return_value = 8 },
+    },
+};
+const SwapBody = struct {
+    pub const InitialArgs = SwapPair;
+    pub const Result = SwapPair;
+    pub const Failure = enum { rejected };
+    pub const constants = .{ false, true };
+    pub const effect_sites = .{};
+    pub const schema_types = .{SwapPair};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-parallel-swap",
+        .value_types = &.{
+            .{ .schema = 0 },
+            u32_type,
+            u32_type,
+            u32_type,
+            u32_type,
+            .{ .scalar = .boolean },
+            u32_type,
+            u32_type,
+            .{ .schema = 0 },
+            .{ .scalar = .boolean },
+            .{ .scalar = .boolean },
+        },
+        .blocks = &swap_blocks,
+        .entry = 0,
+        .result_type = .{ .schema = 0 },
+    };
+};
+const SwapImage = boundary.program("process-parallel-swap", SwapBody).image();
+
 const Storage = struct {
     state: [4096]u8 = undefined,
     value: [4096]u8 = undefined,
@@ -466,6 +575,56 @@ test "Process keeps large child environments separate from predecessor state" {
     try std.testing.expectEqual(@as(u64, 2), state.frame_count);
 }
 
+test "Process applies overlapping edge arguments in parallel" {
+    var initial: [8]u8 = undefined;
+    std.mem.writeInt(u32, initial[0..4], 7, .little);
+    std.mem.writeInt(u32, initial[4..8], 11, .little);
+    var first_storage: Storage = .{};
+    var first_workspace: boundary.image.ValidationWorkspace = .{};
+    const first = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        first_storage.buffers(),
+        &first_workspace,
+    );
+    var second_storage: Storage = .{};
+    var second_workspace: boundary.image.ValidationWorkspace = .{};
+    const second = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .process_state = first.progressed },
+        null,
+        second_storage.buffers(),
+        &second_workspace,
+    );
+    var third_storage: Storage = .{};
+    var third_workspace: boundary.image.ValidationWorkspace = .{};
+    const third = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .process_state = second.progressed },
+        null,
+        third_storage.buffers(),
+        &third_workspace,
+    );
+    var fourth_storage: Storage = .{};
+    var fourth_workspace: boundary.image.ValidationWorkspace = .{};
+    const fourth = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .process_state = third.progressed },
+        null,
+        fourth_storage.buffers(),
+        &fourth_workspace,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 11),
+        std.mem.readInt(u32, fourth.completed[0..4], .little),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 7),
+        std.mem.readInt(u32, fourth.completed[4..8], .little),
+    );
+}
+
 test "Process NeedsCapacity is transactional and retryable" {
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 11, .little);
@@ -508,6 +667,11 @@ test "Process NeedsCapacity is transactional and retryable" {
     );
 
     const requirement = constrained.needs_capacity;
+    try std.testing.expectEqual(
+        @as(u64, process_advance_v1.kernel_input_header_length +
+            Image.bytes.len + pending.state.len),
+        requirement.minimum_input_bytes,
+    );
     const output_capacity: usize = @intCast(requirement.minimum_output_bytes);
     const scratch_capacity: usize = @intCast(requirement.minimum_scratch_bytes);
     const retry_state = try std.testing.allocator.alloc(u8, output_capacity);
@@ -590,6 +754,37 @@ test "Process rejects aliased input and output arenas transactionally" {
         before,
         process_state_v1.artifactDigest(pending.state),
     );
+
+    var workspace_alias: boundary.image.ValidationWorkspace = .{};
+    const workspace_bytes = std.mem.asBytes(&workspace_alias);
+    try std.testing.expect(workspace_bytes.len >= 4096);
+    try std.testing.expectError(
+        error.InvalidBuffers,
+        process_advance_v1.advance(
+            &Image.bytes,
+            .{ .process_state = pending.state },
+            null,
+            .{
+                .output_state = workspace_bytes[0..4096],
+                .output_value = &other.value,
+                .output_request = &other.request,
+                .candidate_state = &other.candidate,
+                .environment = &other.environment,
+                .auxiliary_environment = &other.auxiliary_environment,
+                .scratch = &other.scratch,
+            },
+            &workspace_alias,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidBuffers,
+        process_advance_v1.validateState(
+            &Image.bytes,
+            pending.state,
+            workspace_bytes[0..4096],
+            &workspace_alias,
+        ),
+    );
 }
 
 test "Process Capsule admits only a compatible image and bound instance" {
@@ -670,6 +865,18 @@ test "Process Capsule admits only a compatible image and bound instance" {
             &corrupted_storage,
             &scratch,
             &corrupted_workspace,
+        ),
+    );
+
+    var alias_workspace: boundary.image.ValidationWorkspace = .{};
+    const alias_bytes = std.mem.asBytes(&alias_workspace);
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        boundary.process_v1.capsule.encode(
+            input,
+            alias_bytes,
+            &scratch,
+            &alias_workspace,
         ),
     );
 }

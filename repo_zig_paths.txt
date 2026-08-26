@@ -67,6 +67,7 @@ test/machine_recursion.zig
 test/machine_v2_metering_v1.zig
 test/machine_yield.zig
 test/process_advance_v1.zig
+test/process_kernel_capacity_vector.zig
 test/process_kernel_vector.zig
 test/process_v1.zig
 test/program_algebraic_collection_operations.zig

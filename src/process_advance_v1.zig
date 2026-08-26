@@ -236,6 +236,7 @@ pub fn advance(
         instance,
         effect_result,
         buffers,
+        std.mem.asBytes(workspace),
     );
     const prior_invariant_result = workspace.invariant_result;
     workspace.invariant_result = buffers.scratch;
@@ -267,8 +268,12 @@ pub fn validateState(
     invariant_scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!process_state_v1.StateView {
+    const workspace_bytes = std.mem.asBytes(workspace);
     if (slicesOverlap(image_bytes, invariant_scratch) or
-        slicesOverlap(state_bytes, invariant_scratch))
+        slicesOverlap(state_bytes, invariant_scratch) or
+        slicesOverlap(image_bytes, workspace_bytes) or
+        slicesOverlap(state_bytes, workspace_bytes) or
+        slicesOverlap(invariant_scratch, workspace_bytes))
     {
         return error.InvalidBuffers;
     }
@@ -332,8 +337,11 @@ fn capacityRequirement(
     };
     const result_length = if (effect_result) |bytes| bytes.len else 0;
     const input = saturatingAdd(
-        saturatingAdd(image_bytes.len, instance_length),
-        result_length,
+        kernel_input_header_length,
+        saturatingAdd(
+            saturatingAdd(image_bytes.len, instance_length),
+            result_length,
+        ),
     );
     const envelope = image_v1.validateEnvelope(image_bytes) catch null;
     const maximum_value = if (envelope) |view|
@@ -401,6 +409,7 @@ fn validateBufferOwnership(
     instance: Instance,
     effect_result: ?[]const u8,
     buffers: Buffers,
+    workspace_bytes: []u8,
 ) Error!void {
     const inputs = [_][]const u8{
         image_bytes,
@@ -418,6 +427,7 @@ fn validateBufferOwnership(
         buffers.environment,
         buffers.auxiliary_environment,
         buffers.scratch,
+        workspace_bytes,
     };
     for (outputs, 0..) |output, index| {
         for (inputs) |input| {
@@ -712,23 +722,7 @@ fn applyValueEdge(
     edge: []const u8,
     slots: *[1024]Slot,
 ) Error!void {
-    const argument_count = readInt(u16, edge, 2);
-    if (argument_count != readInt(u16, target_segment, 10)) {
-        return error.InvalidProcessState;
-    }
-    for (0..argument_count) |index| {
-        const argument = 4 + index * 4;
-        if (edge[argument] != 0) return error.UnsupportedTransition;
-        const source_value = readInt(u16, edge, argument + 2);
-        const target_value = readInt(
-            u16,
-            target_segment,
-            image_v1.segment_prefix_length + index * 2,
-        );
-        if (!constructorRetainsValue(constructor, target_value)) continue;
-        if (!slots[source_value].initialized) return error.InvalidProcessState;
-        slots[target_value] = slots[source_value];
-    }
+    return applyEdge(constructor, target_segment, edge, null, slots);
 }
 
 fn applyResumeEdge(
@@ -738,10 +732,27 @@ fn applyResumeEdge(
     resume_value: []const u8,
     slots: *[1024]Slot,
 ) Error!void {
+    return applyEdge(
+        constructor,
+        target_segment,
+        edge,
+        resume_value,
+        slots,
+    );
+}
+
+fn applyEdge(
+    constructor: []const u8,
+    target_segment: []const u8,
+    edge: []const u8,
+    injected_value: ?[]const u8,
+    slots: *[1024]Slot,
+) Error!void {
     const argument_count = readInt(u16, edge, 2);
     if (argument_count != readInt(u16, target_segment, 10)) {
         return error.InvalidProcessState;
     }
+    const source_slots = slots.*;
     for (0..argument_count) |index| {
         const argument = 4 + index * 4;
         const target_value = readInt(
@@ -753,13 +764,14 @@ fn applyResumeEdge(
         switch (edge[argument]) {
             0 => {
                 const source_value = readInt(u16, edge, argument + 2);
-                if (!slots[source_value].initialized) {
+                if (!source_slots[source_value].initialized) {
                     return error.InvalidProcessState;
                 }
-                slots[target_value] = slots[source_value];
+                slots[target_value] = source_slots[source_value];
             },
             1 => slots[target_value] = .{
-                .bytes = resume_value,
+                .bytes = injected_value orelse
+                    return error.UnsupportedTransition,
                 .initialized = true,
             },
             else => return error.UnsupportedTransition,
@@ -976,10 +988,6 @@ fn resumePending(
         image,
         target_segment_id,
     );
-    const argument_count = readInt(u16, continuation, 2);
-    if (argument_count != readInt(u16, target_segment, 10)) {
-        return error.InvalidProcessState;
-    }
     const target_constructor_id = try image_v1.evaluatorTransitionConstructor(
         image,
         segment_id,
@@ -990,27 +998,13 @@ fn resumePending(
         image,
         target_constructor_id,
     );
-    for (0..argument_count) |index| {
-        const argument = 4 + index * 4;
-        const target_value = readInt(
-            u16,
-            target_segment,
-            image_v1.segment_prefix_length + index * 2,
-        );
-        if (!constructorRetainsValue(target_constructor, target_value)) continue;
-        switch (continuation[argument]) {
-            0 => {
-                const source_value = readInt(u16, continuation, argument + 2);
-                if (!slots[source_value].initialized) return error.InvalidProcessState;
-                slots[target_value] = slots[source_value];
-            },
-            1 => slots[target_value] = .{
-                .bytes = result.@"resume",
-                .initialized = true,
-            },
-            else => return error.UnsupportedTransition,
-        }
-    }
+    try applyEdge(
+        target_constructor,
+        target_segment,
+        continuation,
+        result.@"resume",
+        &slots,
+    );
     const environment = try encodeEnvironment(
         target_constructor,
         loaded.activation_entry,
@@ -1046,10 +1040,6 @@ fn transitionState(
         image,
         target_segment_id,
     );
-    const argument_count = readInt(u16, edge, 2);
-    if (argument_count != readInt(u16, target_segment, 10)) {
-        return error.InvalidProcessState;
-    }
     const constructor_id = try image_v1.evaluatorTransitionConstructor(
         image,
         source_segment_id,
@@ -1060,19 +1050,7 @@ fn transitionState(
         image,
         constructor_id,
     );
-    for (0..argument_count) |index| {
-        const argument = 4 + index * 4;
-        if (edge[argument] != 0) return error.UnsupportedTransition;
-        const source_value = readInt(u16, edge, argument + 2);
-        const target_value = readInt(
-            u16,
-            target_segment,
-            image_v1.segment_prefix_length + index * 2,
-        );
-        if (!constructorRetainsValue(constructor, target_value)) continue;
-        if (!slots[source_value].initialized) return error.InvalidProcessState;
-        slots[target_value] = slots[source_value];
-    }
+    try applyEdge(constructor, target_segment, edge, null, slots);
     const environment = try encodeEnvironment(
         constructor,
         activation_entry,

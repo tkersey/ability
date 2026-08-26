@@ -3,6 +3,9 @@ import fs from "node:fs";
 
 const wasmBytes = fs.readFileSync(process.argv[2]);
 const vectorBytes = fs.readFileSync(process.argv[3]);
+const expectedKinds = new Set(
+  (process.argv[4] ?? "").split(",").filter(Boolean).map(Number),
+);
 const module = await WebAssembly.compile(wasmBytes);
 if (WebAssembly.Module.imports(module).length !== 0) {
   throw new Error("Boundary Process kernel must be import-free");
@@ -25,6 +28,7 @@ let cursor = 0;
 const count = vectorBytes.readUInt32LE(cursor);
 cursor += 4;
 let comparisons = 0;
+const observedKinds = new Set();
 for (let index = 0; index < count; index += 1) {
   const inputLength = vectorBytes.readUInt32LE(cursor);
   const expectedLength = vectorBytes.readUInt32LE(cursor + 4);
@@ -33,6 +37,7 @@ for (let index = 0; index < count; index += 1) {
   cursor += inputLength;
   const expected = vectorBytes.subarray(cursor, cursor + expectedLength);
   cursor += expectedLength;
+  observedKinds.add(expected[10]);
 
   // Every finite reduction deliberately receives a fresh instance.
   const instance = await WebAssembly.instantiate(module, {});
@@ -66,6 +71,10 @@ for (let index = 0; index < count; index += 1) {
   comparisons += 1;
 }
 if (cursor !== vectorBytes.length) throw new Error("trailing Process vectors");
+if (observedKinds.size !== expectedKinds.size ||
+    [...observedKinds].some((kind) => !expectedKinds.has(kind))) {
+  throw new Error("Process outcome-kind coverage mismatch");
+}
 
 const malformedInstance = await WebAssembly.instantiate(module, {});
 const malformed = Buffer.alloc(28);
@@ -88,4 +97,5 @@ process.stdout.write(JSON.stringify({
   imports: 0,
   fresh_instances: comparisons,
   byte_identical_native_wasm_outcomes: comparisons,
+  outcome_kinds: [...observedKinds].sort(),
 }) + "\n");

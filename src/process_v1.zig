@@ -5,7 +5,6 @@ const state_codec = @import("process_state_v1");
 
 pub const advance = semantics.advance;
 pub const encodeKernelInput = semantics.encodeKernelInput;
-pub const encodeOutcome = semantics.encodeOutcome;
 pub const validateState = semantics.validateState;
 pub const Buffers = semantics.Buffers;
 pub const CapacityRequirement = semantics.CapacityRequirement;
@@ -35,6 +34,7 @@ pub const fixed_kernel_abi = struct {
         pub const abi_version = "boundary_process_kernel_abi_version";
         pub const reserve = "boundary_process_kernel_reserve";
         pub const input_ptr = "boundary_process_kernel_input_ptr";
+        pub const input_capacity = "boundary_process_kernel_input_capacity";
         pub const execute = "boundary_process_kernel_execute";
         pub const output_ptr = "boundary_process_kernel_output_ptr";
         pub const output_len = "boundary_process_kernel_output_len";

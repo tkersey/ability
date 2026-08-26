@@ -611,10 +611,23 @@ fn addCoreModules(
         .target = target,
         .optimize = optimize,
     });
+    const process_kernel_options = b.addOptions();
+    process_kernel_options.addOption(usize, "input_capacity", 32 << 20);
+    process_kernel_options.addOption(usize, "output_capacity", 16 << 20);
+    process_kernel_options.addOption(usize, "state_capacity", 8 << 20);
+    process_kernel_options.addOption(usize, "value_capacity", 4 << 20);
+    process_kernel_options.addOption(usize, "request_capacity", 4 << 20);
+    process_kernel_options.addOption(usize, "environment_capacity", 8 << 20);
+    process_kernel_options.addOption(usize, "scratch_capacity", 64 << 20);
+    process_kernel_options.addOption(usize, "error_capacity", 4 << 10);
     process_kernel_wasm_v1.addImport("image_v1", image_v1);
     process_kernel_wasm_v1.addImport(
         "process_advance_v1",
         process_advance_v1,
+    );
+    process_kernel_wasm_v1.addOptions(
+        "process_kernel_options",
+        process_kernel_options,
     );
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
@@ -1440,6 +1453,90 @@ pub fn build(b: *std.Build) void {
     const process_kernel_vector = run_process_kernel_vector.captureStdOut(.{
         .basename = "boundary-process-kernel-vector.bin",
     });
+    const constrained_process_kernel_options = b.addOptions();
+    constrained_process_kernel_options.addOption(
+        usize,
+        "input_capacity",
+        1 << 20,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "output_capacity",
+        1 << 20,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "state_capacity",
+        64 << 10,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "value_capacity",
+        64 << 10,
+    );
+    constrained_process_kernel_options.addOption(usize, "request_capacity", 0);
+    constrained_process_kernel_options.addOption(
+        usize,
+        "environment_capacity",
+        64 << 10,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "scratch_capacity",
+        1 << 20,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "error_capacity",
+        4 << 10,
+    );
+    const constrained_process_kernel_module = b.createModule(.{
+        .root_source_file = b.path("src/process_kernel_wasm_v1.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    constrained_process_kernel_module.addImport(
+        "image_v1",
+        wasm_core.image_v1,
+    );
+    constrained_process_kernel_module.addImport(
+        "process_advance_v1",
+        wasm_core.process_advance_v1,
+    );
+    constrained_process_kernel_module.addOptions(
+        "process_kernel_options",
+        constrained_process_kernel_options,
+    );
+    const constrained_process_kernel = b.addExecutable(.{
+        .name = "boundary-process-kernel-v1-constrained",
+        .root_module = constrained_process_kernel_module,
+    });
+    constrained_process_kernel.entry = .disabled;
+    constrained_process_kernel.rdynamic = true;
+    constrained_process_kernel.export_memory = true;
+    constrained_process_kernel.max_memory = 32 << 20;
+    const capacity_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/process_kernel_capacity_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    capacity_vector_module.addImport("boundary", host_boundary);
+    capacity_vector_module.addImport(
+        "process_advance_v1",
+        host_core.process_advance_v1,
+    );
+    capacity_vector_module.addImport(
+        "process_kernel_fixture",
+        process_kernel_vector_module,
+    );
+    const capacity_vector_executable = b.addExecutable(.{
+        .name = "boundary-process-kernel-capacity-vector",
+        .root_module = capacity_vector_module,
+    });
+    const run_capacity_vector = b.addRunArtifact(capacity_vector_executable);
+    const capacity_vector = run_capacity_vector.captureStdOut(.{
+        .basename = "boundary-process-kernel-capacity-vector.bin",
+    });
     const run_process_kernel_wasm = b.addSystemCommand(&.{"node"});
     run_process_kernel_wasm.addFileArg(
         b.path("test/run_process_kernel_wasm.mjs"),
@@ -1448,7 +1545,18 @@ pub fn build(b: *std.Build) void {
         process_kernel_wasm_executable.getEmittedBin(),
     );
     run_process_kernel_wasm.addFileArg(process_kernel_vector);
+    run_process_kernel_wasm.addArg("0,1,2,3,4");
     process_step.dependOn(&run_process_kernel_wasm.step);
+    const run_constrained_process_kernel_wasm = b.addSystemCommand(&.{"node"});
+    run_constrained_process_kernel_wasm.addFileArg(
+        b.path("test/run_process_kernel_wasm.mjs"),
+    );
+    run_constrained_process_kernel_wasm.addFileArg(
+        constrained_process_kernel.getEmittedBin(),
+    );
+    run_constrained_process_kernel_wasm.addFileArg(capacity_vector);
+    run_constrained_process_kernel_wasm.addArg("5");
+    process_step.dependOn(&run_constrained_process_kernel_wasm.step);
     const check_process_step = b.addSystemCommand(&.{"node"});
     check_process_step.addFileArg(b.path("test/check_process_step.mjs"));
     check_process_step.addFileArg(
@@ -1459,6 +1567,18 @@ pub fn build(b: *std.Build) void {
         b.path("scripts/boundary-process-step.mjs"),
     );
     process_step.dependOn(&check_process_step.step);
+    const check_constrained_process_step = b.addSystemCommand(&.{"node"});
+    check_constrained_process_step.addFileArg(
+        b.path("test/check_process_step.mjs"),
+    );
+    check_constrained_process_step.addFileArg(
+        constrained_process_kernel.getEmittedBin(),
+    );
+    check_constrained_process_step.addFileArg(capacity_vector);
+    check_constrained_process_step.addFileArg(
+        b.path("scripts/boundary-process-step.mjs"),
+    );
+    process_step.dependOn(&check_constrained_process_step.step);
 
     const kernel_wasm_executable = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1",
@@ -1469,6 +1589,9 @@ pub fn build(b: *std.Build) void {
     kernel_wasm_executable.export_memory = true;
     kernel_wasm_executable.max_memory = 128 << 20;
     check_process_step.addFileArg(kernel_wasm_executable.getEmittedBin());
+    check_constrained_process_step.addFileArg(
+        kernel_wasm_executable.getEmittedBin(),
+    );
     const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
     const kernel_wasm_reproducible = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1-reproducible",

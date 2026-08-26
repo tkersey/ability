@@ -1,5 +1,6 @@
 const image_v1 = @import("image_v1");
 const process_advance_v1 = @import("process_advance_v1");
+const process_kernel_options = @import("process_kernel_options");
 const std = @import("std");
 
 pub const abi_version: u32 = 1;
@@ -7,14 +8,14 @@ pub const input_magic = process_advance_v1.kernel_input_magic;
 pub const input_format_version = process_advance_v1.kernel_input_format_version;
 pub const input_header_length = process_advance_v1.kernel_input_header_length;
 
-const input_capacity = 32 << 20;
-const output_capacity = 16 << 20;
-const state_capacity = 8 << 20;
-const value_capacity = 4 << 20;
-const request_capacity = 4 << 20;
-const environment_capacity = 8 << 20;
-const scratch_capacity = 64 << 20;
-const error_capacity = 4 << 10;
+const input_capacity = process_kernel_options.input_capacity;
+const output_capacity = process_kernel_options.output_capacity;
+const state_capacity = process_kernel_options.state_capacity;
+const value_capacity = process_kernel_options.value_capacity;
+const request_capacity = process_kernel_options.request_capacity;
+const environment_capacity = process_kernel_options.environment_capacity;
+const scratch_capacity = process_kernel_options.scratch_capacity;
+const error_capacity = process_kernel_options.error_capacity;
 
 var input_storage: [input_capacity]u8 align(16) = undefined;
 var output_storage: [output_capacity]u8 align(16) = undefined;
