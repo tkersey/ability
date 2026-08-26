@@ -523,7 +523,7 @@ fn capacityRequirement(
     const total = saturatingAdd(
         saturatingAdd(input, all_output_arenas),
         saturatingAdd(
-            minimum_scratch,
+            saturatingAdd(minimum_scratch, 4 << 10),
             @sizeOf(image_v1.ValidationWorkspace),
         ),
     );
