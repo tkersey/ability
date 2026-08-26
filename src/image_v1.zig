@@ -145,6 +145,103 @@ pub const ValidatedImage = struct {
     artifact_sha256: [32]u8,
 };
 
+/// Internal effect descriptor used by fixed image evaluators.
+/// The package root intentionally does not expose this byte-level surface.
+pub const EvaluatorEffect = struct {
+    ordinal: u32,
+    semantic_identity: []const u8,
+    payload_schema: u32,
+    resume_schema: u32,
+    semantic_digest: [32]u8,
+    ordinal_digest: [32]u8,
+};
+
+/// Borrow one validated segment record for an internal evaluator.
+pub fn evaluatorSegmentRecord(
+    image: ValidatedImage,
+    target: u16,
+) Error![]const u8 {
+    return imageSegmentRecord(image.catalogs, target);
+}
+
+/// Borrow one validated constructor record for an internal evaluator.
+pub fn evaluatorConstructorRecord(
+    image: ValidatedImage,
+    target: u32,
+) Error![]const u8 {
+    return imageConstructorRecord(image.catalogs, target);
+}
+
+/// Resolve one validated edge to its canonical continuation constructor.
+pub fn evaluatorTransitionConstructor(
+    image: ValidatedImage,
+    source: u16,
+    edge_kind: u8,
+    target: u16,
+) Error!u32 {
+    return transitionConstructorId(image.catalogs, source, edge_kind, target);
+}
+
+/// Locate the unique validated suspension constructor of one semantic kind.
+pub fn evaluatorSuspensionConstructor(
+    image: ValidatedImage,
+    source_segment: u16,
+    constructor_kind: u8,
+) Error!u32 {
+    for (0..image.constructor_count) |candidate| {
+        const constructor = try imageConstructorRecord(
+            image.catalogs,
+            @intCast(candidate),
+        );
+        if (constructor[8] == constructor_kind and
+            constructor[9] == 2 and
+            readInt(u16, constructor, 12) == source_segment)
+        {
+            return @intCast(candidate);
+        }
+    }
+    return error.InvalidConstructor;
+}
+
+/// Return the terminator offset of one already validated segment record.
+pub fn evaluatorSegmentTerminator(segment: []const u8) usize {
+    return imageSegmentTerminator(segment);
+}
+
+/// Borrow one validated residual-effect descriptor by dense ordinal.
+pub fn evaluatorEffect(
+    image: ValidatedImage,
+    target: u32,
+) Error!EvaluatorEffect {
+    const bytes = image.catalogs.envelope.section(.effects);
+    var cursor: usize = 4;
+    for (0..image.catalogs.effect_count) |ordinal| {
+        const encoded_ordinal = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const identity_length = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const identity_end = cursor + identity_length;
+        const identity = bytes[cursor..identity_end];
+        cursor = identity_end;
+        const payload_schema = readInt(u32, bytes, cursor);
+        const resume_schema = readInt(u32, bytes, cursor + 4);
+        cursor += 12;
+        const semantic_digest = bytes[cursor..][0..32].*;
+        cursor += 32;
+        const ordinal_digest = bytes[cursor..][0..32].*;
+        cursor += 32;
+        if (ordinal == target) return .{
+            .ordinal = encoded_ordinal,
+            .semantic_identity = identity,
+            .payload_schema = payload_schema,
+            .resume_schema = resume_schema,
+            .semantic_digest = semantic_digest,
+            .ordinal_digest = ordinal_digest,
+        };
+    }
+    return error.InvalidEffect;
+}
+
 pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (image.len < header_length) return error.InvalidHeaderLength;
     if (!std.mem.eql(u8, image[0..magic.len], &magic)) {

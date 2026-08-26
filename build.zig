@@ -18,6 +18,12 @@ const CoreModules = struct {
     machine_v2_metering_v1: *std.Build.Module,
     machine_v2_profile_v1: *std.Build.Module,
     portable_value: *std.Build.Module,
+    process_advance_v1: *std.Build.Module,
+    process_capsule_v1: *std.Build.Module,
+    process_effect_v1: *std.Build.Module,
+    process_kernel_wasm_v1: *std.Build.Module,
+    process_state_v1: *std.Build.Module,
+    process_v1: *std.Build.Module,
     program_semantics_v1: *std.Build.Module,
     program_v2: *std.Build.Module,
     reducer_clause_v1: *std.Build.Module,
@@ -41,6 +47,12 @@ const CoreModuleId = enum {
     machine_v2_metering_v1,
     machine_v2_profile_v1,
     portable_value,
+    process_advance_v1,
+    process_capsule_v1,
+    process_effect_v1,
+    process_kernel_wasm_v1,
+    process_state_v1,
+    process_v1,
     program_semantics_v1,
     program_v2,
     reducer_clause_v1,
@@ -72,6 +84,12 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .machine_v2_metering_v1 => "src/machine_v2_metering_v1.zig",
         .machine_v2_profile_v1 => "src/machine_v2_profile_v1.zig",
         .portable_value => "src/portable_value.zig",
+        .process_advance_v1 => "src/process_advance_v1.zig",
+        .process_capsule_v1 => "src/process_capsule_v1.zig",
+        .process_effect_v1 => "src/process_effect_v1.zig",
+        .process_kernel_wasm_v1 => "src/process_kernel_wasm_v1.zig",
+        .process_state_v1 => "src/process_state_v1.zig",
+        .process_v1 => "src/process_v1.zig",
         .program_semantics_v1 => "src/program_semantics_v1.zig",
         .program_v2 => "src/program_v2.zig",
         .reducer_clause_v1 => "src/reducer_clause_v1.zig",
@@ -90,6 +108,11 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .kernel_machine_v1,
         .kernel_wasm_v1,
         .machine_v2_profile_v1,
+        .process_advance_v1,
+        .process_capsule_v1,
+        .process_effect_v1,
+        .process_kernel_wasm_v1,
+        .process_state_v1,
         => .image_runtime_semantics,
         .program_semantics_v1 => .shared_runtime_semantics,
         .agent_profile,
@@ -98,6 +121,7 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .effect_v2,
         .image_emit_v1,
         .portable_value,
+        .process_v1,
         .program_v2,
         .reified_program_v1,
         .rnf,
@@ -493,6 +517,42 @@ fn addCoreModules(
     const program_semantics_v1 = pure.program_semantics_v1;
     const image_v1 = pure.image_v1;
     const reducer_clause_v1 = pure.reducer_clause_v1;
+    const process_state_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_state_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    const process_capsule_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_capsule_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_capsule_v1.addImport("process_state_v1", process_state_v1);
+    const process_effect_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_effect_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_effect_v1.addImport("process_state_v1", process_state_v1);
+    const process_advance_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_advance_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_advance_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    process_advance_v1.addImport("image_v1", image_v1);
+    process_advance_v1.addImport("process_effect_v1", process_effect_v1);
+    process_advance_v1.addImport("process_state_v1", process_state_v1);
+    process_advance_v1.addImport("reducer_clause_v1", reducer_clause_v1);
+    const process_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_v1.addImport("process_capsule_v1", process_capsule_v1);
+    process_v1.addImport("process_advance_v1", process_advance_v1);
+    process_v1.addImport("process_effect_v1", process_effect_v1);
+    process_v1.addImport("process_state_v1", process_state_v1);
     const machine = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.machine)),
         .target = target,
@@ -543,6 +603,16 @@ fn addCoreModules(
     });
     kernel_wasm_v1.addImport("image_v1", image_v1);
     kernel_wasm_v1.addImport("kernel_v1", kernel_v1);
+    const process_kernel_wasm_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_kernel_wasm_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_kernel_wasm_v1.addImport("image_v1", image_v1);
+    process_kernel_wasm_v1.addImport(
+        "process_advance_v1",
+        process_advance_v1,
+    );
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
         .target = target,
@@ -619,6 +689,12 @@ fn addCoreModules(
         .machine_v2_metering_v1 = machine_v2_metering_v1,
         .machine_v2_profile_v1 = machine_v2_profile_v1,
         .portable_value = portable_value,
+        .process_advance_v1 = process_advance_v1,
+        .process_capsule_v1 = process_capsule_v1,
+        .process_effect_v1 = process_effect_v1,
+        .process_kernel_wasm_v1 = process_kernel_wasm_v1,
+        .process_state_v1 = process_state_v1,
+        .process_v1 = process_v1,
         .program_semantics_v1 = program_semantics_v1,
         .program_v2 = program_v2,
         .reducer_clause_v1 = reducer_clause_v1,
@@ -636,6 +712,7 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("kernel_v1", core.kernel_v1);
     module.addImport("machine", core.machine);
     module.addImport("portable_value", core.portable_value);
+    module.addImport("process_v1", core.process_v1);
     module.addImport("program_v2", core.program_v2);
 }
 
@@ -1022,6 +1099,44 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     image_test.addImport("image_v1", host_core.image_v1);
+    const process_test = b.createModule(.{
+        .root_source_file = b.path("test/process_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    process_test.addImport("process_effect_v1", host_core.process_effect_v1);
+    process_test.addImport("process_capsule_v1", host_core.process_capsule_v1);
+    process_test.addImport("process_state_v1", host_core.process_state_v1);
+    const process_advance_test = b.createModule(.{
+        .root_source_file = b.path("test/process_advance_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    process_advance_test.addImport("boundary", host_boundary);
+    process_advance_test.addImport(
+        "process_advance_v1",
+        host_core.process_advance_v1,
+    );
+    process_advance_test.addImport(
+        "process_state_v1",
+        host_core.process_state_v1,
+    );
+    const process_recursion_fixture = programTestModule(
+        b,
+        host_core,
+        "test/machine_recursion.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    process_recursion_fixture.addImport("image_v1", host_core.image_v1);
+    process_recursion_fixture.addImport("kernel_v1", host_core.kernel_v1);
+    process_recursion_fixture.addImport("machine", host_core.machine);
+    process_advance_test.addImport(
+        "recursion_fixture",
+        process_recursion_fixture,
+    );
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -1080,16 +1195,19 @@ pub fn build(b: *std.Build) void {
         "machine_v2_profile_v1",
         host_core.machine_v2_profile_v1,
     );
-    const agent_loop = programTestModule(
+    const effectful_decision_loop = programTestModule(
         b,
         host_core,
-        "test/agent_loop.zig",
+        "test/effectful_decision_loop.zig",
         b.graph.host,
         optimize,
         false,
         false,
     );
-    agent_loop.addImport("agent_profile", host_core.agent_profile);
+    effectful_decision_loop.addImport(
+        "agent_profile",
+        host_core.agent_profile,
+    );
 
     const performance_core = addCoreModules(
         b,
@@ -1136,6 +1254,20 @@ pub fn build(b: *std.Build) void {
     addTestArtifact(b, image_step, host_core.dynamic_value_v1);
     addTestArtifact(b, image_step, host_core.image_emit_v1);
     addTestArtifact(b, image_step, image_test);
+
+    const process_step = b.step(
+        "check-boundary-process-v1",
+        "Check canonical Process State and residual-effect records.",
+    );
+    addTestArtifact(b, process_step, process_test);
+    addTestArtifact(b, process_step, process_advance_test);
+    addTestArtifact(b, process_step, program_compile);
+    const process_surface_guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "if rg -n 'MachineV2Profile|machine_v2|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded|ABL_RNF2' src/process_*.zig; then exit 1; fi; if rg -n '@import\\(\"(machine|machine_v2|kernel)' src/process_*.zig; then exit 1; fi",
+    });
+    process_step.dependOn(&process_surface_guard.step);
 
     const control_step = b.step(
         "check-boundary-rnf-control",
@@ -1212,7 +1344,7 @@ pub fn build(b: *std.Build) void {
         "check-boundary-agent-loop",
         "Check the typed model/tool agent loop across fresh instances.",
     );
-    addTestArtifact(b, agent_step, agent_loop);
+    addTestArtifact(b, agent_step, effectful_decision_loop);
 
     const parity_native_witness = programTestModule(
         b,
@@ -1266,6 +1398,65 @@ pub fn build(b: *std.Build) void {
     performance_wasm_executable.rdynamic = true;
 
     const wasm_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const process_kernel_wasm_executable = b.addExecutable(.{
+        .name = "boundary-process-kernel-v1",
+        .root_module = wasm_core.process_kernel_wasm_v1,
+    });
+    process_kernel_wasm_executable.entry = .disabled;
+    process_kernel_wasm_executable.rdynamic = true;
+    process_kernel_wasm_executable.export_memory = true;
+    process_kernel_wasm_executable.max_memory = 256 << 20;
+    const install_process_kernel = b.addInstallFileWithDir(
+        process_kernel_wasm_executable.getEmittedBin(),
+        .prefix,
+        "boundary-process-kernel-v1.wasm",
+    );
+    const emit_process_kernel_step = b.step(
+        "emit-boundary-process-kernel-v1",
+        "Emit the fixed import-free Boundary Process kernel.",
+    );
+    emit_process_kernel_step.dependOn(&install_process_kernel.step);
+    process_step.dependOn(&process_kernel_wasm_executable.step);
+    const process_kernel_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/process_kernel_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    process_kernel_vector_module.addImport("boundary", host_boundary);
+    process_kernel_vector_module.addImport(
+        "process_advance_v1",
+        host_core.process_advance_v1,
+    );
+    const process_kernel_vector_executable = b.addExecutable(.{
+        .name = "boundary-process-kernel-vector",
+        .root_module = process_kernel_vector_module,
+    });
+    const run_process_kernel_vector = b.addRunArtifact(
+        process_kernel_vector_executable,
+    );
+    const process_kernel_vector = run_process_kernel_vector.captureStdOut(.{
+        .basename = "boundary-process-kernel-vector.bin",
+    });
+    const run_process_kernel_wasm = b.addSystemCommand(&.{"node"});
+    run_process_kernel_wasm.addFileArg(
+        b.path("test/run_process_kernel_wasm.mjs"),
+    );
+    run_process_kernel_wasm.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    run_process_kernel_wasm.addFileArg(process_kernel_vector);
+    process_step.dependOn(&run_process_kernel_wasm.step);
+    const check_process_step = b.addSystemCommand(&.{"node"});
+    check_process_step.addFileArg(b.path("test/check_process_step.mjs"));
+    check_process_step.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    check_process_step.addFileArg(process_kernel_vector);
+    check_process_step.addFileArg(
+        b.path("scripts/boundary-process-step.mjs"),
+    );
+    process_step.dependOn(&check_process_step.step);
+
     const kernel_wasm_executable = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1",
         .root_module = wasm_core.kernel_wasm_v1,
@@ -1717,6 +1908,12 @@ pub fn build(b: *std.Build) void {
                 "source_module machine_v2_metering_v1 direct_runtime_semantics src/machine_v2_metering_v1.zig\n" ++
                 "source_module machine_v2_profile_v1 image_runtime_semantics src/machine_v2_profile_v1.zig\n" ++
                 "source_module portable_value {s} {s}\n" ++
+                "source_module process_advance_v1 image_runtime_semantics src/process_advance_v1.zig\n" ++
+                "source_module process_capsule_v1 image_runtime_semantics src/process_capsule_v1.zig\n" ++
+                "source_module process_effect_v1 image_runtime_semantics src/process_effect_v1.zig\n" ++
+                "source_module process_kernel_wasm_v1 image_runtime_semantics src/process_kernel_wasm_v1.zig\n" ++
+                "source_module process_state_v1 image_runtime_semantics src/process_state_v1.zig\n" ++
+                "source_module process_v1 support src/process_v1.zig\n" ++
                 "source_module program_semantics_v1 shared_runtime_semantics src/program_semantics_v1.zig\n" ++
                 "source_module program_v2 {s} {s}\n" ++
                 "source_module reducer_clause_v1 image_runtime_semantics src/reducer_clause_v1.zig\n" ++
@@ -2056,7 +2253,7 @@ pub fn build(b: *std.Build) void {
         recursion,
         after,
         machine_yield,
-        agent_loop,
+        effectful_decision_loop,
     }) |integration_module| {
         addTestArtifactWithArgs(b, test_step, integration_module, test_args);
     }
@@ -2387,9 +2584,11 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Run the full Boundary Machine proof.");
     check_step.dependOn(release_proof_step);
     check_step.dependOn(receipt_step);
+    check_step.dependOn(process_step);
 
     requireDirectDependency(&receipt_command.step, release_proof_step);
     requireDirectDependency(receipt_step, &receipt_command.step);
     requireDirectDependency(check_step, release_proof_step);
     requireDirectDependency(check_step, receipt_step);
+    requireDirectDependency(check_step, process_step);
 }

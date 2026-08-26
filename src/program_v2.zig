@@ -36,6 +36,34 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
     const MachineV2Lowering = compiler.MachineV2LoweringFor(Reified);
     const Definition = compiler.DirectDefinitionFor(MachineV2Lowering);
     return struct {
+        /// Generic pre-RNF component projection for compile-time system linking.
+        pub const Component = struct {
+            pub const program_label = label;
+            pub const InitialArgs = Body.InitialArgs;
+            pub const Result = Body.Result;
+            pub const Failure = Body.Failure;
+            pub const schema_types = Body.schema_types;
+            pub const constants = if (@hasDecl(Body, "constants"))
+                Body.constants
+            else
+                .{};
+            pub const effect_sites = if (@hasDecl(Body, "effect_sites"))
+                Body.effect_sites
+            else
+                .{};
+            pub const effect_handlers = if (@hasDecl(Body, "effect_handlers"))
+                Body.effect_handlers
+            else
+                .{};
+            pub const effect_morphisms = if (@hasDecl(Body, "effect_morphisms"))
+                Body.effect_morphisms
+            else
+                .{};
+            pub const compiler_limits = Reified.compiler_limits;
+            pub const control_ir = Body.control_ir;
+            pub const functions = Body.control_ir.functions;
+        };
+
         /// Diagnostic source label excluded from Machine semantic identity.
         pub const program_label = label;
         /// Private typed source/control program.
@@ -62,6 +90,11 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
         /// Compile-time-only whole-program value catalog size for proof.
         pub const reachable_value_catalog_bytes =
             Definition.reachable_value_catalog_bytes;
+
+        /// Return the generic validated compiler input used by World linking.
+        pub fn component() type {
+            return Component;
+        }
 
         /// Compile this program to its sole direct Boundary Machine.
         pub fn compileV2(comptime options: machine.Options) type {

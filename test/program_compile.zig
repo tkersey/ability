@@ -64,6 +64,18 @@ const CompiledMachine = Program.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+test "Program exposes one generic pre-RNF component projection" {
+    const Component = Program.component();
+    try std.testing.expect(Component.InitialArgs == Body.InitialArgs);
+    try std.testing.expect(Component.Result == Body.Result);
+    try std.testing.expect(Component.Failure == Body.Failure);
+    try std.testing.expectEqualStrings("typed-lookup", Component.program_label);
+    try std.testing.expectEqual(Body.effect_sites.len, Component.effect_sites.len);
+    try std.testing.expectEqual(Body.control_ir.blocks.len, Component.control_ir.blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), Component.effect_handlers.len);
+    try std.testing.expectEqual(@as(usize, 0), Component.effect_morphisms.len);
+}
+
 const CanonicalTextLookup = struct {
     pub const id: u32 = 0;
     pub const semantic_identity = "test.canonical-text.v1";

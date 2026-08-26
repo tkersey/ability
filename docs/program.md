@@ -59,14 +59,16 @@ lowers the source effect to a statically typed helper call before RNF. The
 helper receives the source payload, returns the source resume type, and leaves
 no runtime dispatch surface.
 
-Programs have one executable route: `Program.compile`. There is no
-`Program.run`, `Program.Session`, runtime interpreter, loaded module, or
-fallback backend.
+Boundary has no source-language interpreter, runtime Zig-definition loader,
+callback registry, or host-owned continuation. `Program.compile` remains the
+direct specialization route; canonical BPI1 may also be evaluated one finite
+reducer segment at a time by `boundary.process_v1.advance` or the fixed
+import-free Process kernel.
 
 For local use, instantiate `boundary.Driver(Machine)`. The Driver owns only
 Machine state and handler-local resources; it repeatedly calls `Machine.step`
 and `Machine.resume`, so it cannot diverge semantically from World execution.
 
-`boundary.Agent.program` is an optional profile over this same compiler. Agent
-loops use ordinary typed sums, products, branches, budgets, and residual effect
-sites; they do not introduce an agent runtime or second reducer.
+`boundary.Agent` is deprecated compatibility surface. New agent-specific
+authoring belongs in the separate Agent package; both direct and Agent-authored
+programs lower to the same Boundary program semantics.

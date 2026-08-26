@@ -1,14 +1,19 @@
 # Boundary
 
-Boundary is a Zig compiler for portable, defunctionalized algebraic effects.
-It separates one canonical program meaning from bounded Machine ABI v2 policy:
+Boundary is a Zig compiler and fixed Process interpreter for portable,
+defunctionalized algebraic effects. It separates one canonical program meaning
+from both open Process semantics and bounded Machine ABI v2 compatibility:
 
 ```text
 typed source -> Control IR -> semantic RNF -> Reified Program -> BPI1
                                          |                     |
-                                         + MachineV2Profile    + MachineV2Profile
-                                         v                     v
-                                      direct v2             kernel v2
+                         +---------------+---------------------+
+                         |                                     |
+                         v                                     v
+                BPI1 + Process State                  BPI1 + MachineV2Profile
+                         |                                     |
+                         v                                     v
+                fixed Process kernel              direct v2 or kernel v2
 ```
 
 The direct reducer remains the default specialized engine. `Program.image()`
@@ -28,9 +33,12 @@ native callback.
 - `boundary.ir` exposes advanced typed source/control authoring.
 - `boundary.program` declares a source program.
 - `boundary.image` validates canonical BPI1 bytes.
+- `boundary.process_v1` validates portable Process records and advances one
+  finite BPI1 reducer segment.
 - `boundary.machine_v2.kernel` executes BPI1 plus a MachineV2Profile.
 - `boundary.Driver` drives the compiled Machine locally.
-- `boundary.Agent` is an optional profile over the same compiler.
+- `boundary.Agent` is deprecated compatibility surface; Agent-specific
+  authoring belongs in the separate Agent package.
 - `boundary.Bytes`, `boundary.Text`, and `boundary.Vector` are bounded portable
   values.
 
@@ -54,10 +62,10 @@ const KernelMachine = Program.kernelMachineV2(machine_options);
 ```
 
 Fuel, frame ceilings, State-byte ceilings, caller checkpoints, and cumulative
-budgets belong to `Profile` and Machine ABI v2. They are not Program Image
-semantics. Reification v1 does not yet provide the later open Process ABI.
-Boundary's finite BPI1 clause evaluator is an internal proof and implementation
-seam; no raw evaluator is exported from the package root.
+budgets belong to `Profile` and Machine ABI v2. They are not Program Image or
+Process semantics. Process ABI v1 carries exact future-live continuations in
+canonical `ABL_PST1` State and performs exactly one finite reducer segment per
+invocation. No raw BPI1 clause evaluator is exported from the package root.
 
 ## Portable language
 
@@ -84,6 +92,7 @@ authority crosses the Machine boundary.
 - [Boundary Reification](docs/reification.md)
 - [Boundary Program Image v1](docs/boundary_executable_image_v1.md)
 - [Machine v2 Kernel v1](docs/boundary_kernel_v1.md)
+- [Process ABI v1](docs/process_v1.md)
 - [Specialization equivalence](docs/specialization_equivalence.md)
 - [Migration to Boundary 1.6](docs/migration_to_1_6.md)
 - [Migration from Boundary 0.7](docs/migration_from_0_7.md)
@@ -102,7 +111,8 @@ Focused gates include `check-boundary-machine`, `check-boundary-rnf`,
 `check-boundary-machine-state`, `check-boundary-machine-malformed`,
 `check-boundary-machine-native-wasm`,
 `check-boundary-machine-no-interpreter`, and
-`check-boundary-machine-deletion`. The aggregate also runs the real v0.7
+`check-boundary-machine-deletion`. Process conformance is available through
+`check-boundary-process-v1` and `emit-boundary-process-kernel-v1`. The aggregate also runs the real v0.7
 performance comparison and emits the Boundary-owned completion fields through
 `check-boundary-machine-receipt`.
 

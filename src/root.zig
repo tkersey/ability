@@ -6,6 +6,7 @@ const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
 const portable_value = @import("portable_value");
+const process_v1_module = @import("process_v1");
 const program_v2 = @import("program_v2");
 
 /// Published Boundary package identity.
@@ -55,6 +56,8 @@ pub const machine_v2 = struct {
         pub const step = kernel_v1.step;
     };
 };
+/// Portable Boundary Process ABI v1 records and semantic operations.
+pub const process_v1 = process_v1_module;
 /// Public canonical portable-value and codec namespace.
 pub const schema = portable_value;
 /// Advanced typed source/control authoring namespace.
@@ -63,7 +66,8 @@ pub const ir = control_ir;
 pub const program = program_v2.program;
 /// Local driver over the same compiled Machine used by World.
 pub const Driver = driver.Driver;
-/// Optional agent profile over the sole Program compiler.
+/// Deprecated compatibility profile. Agent-specific authoring belongs in the
+/// separate Agent package and will be removed in the next major release.
 pub const Agent = agent_profile;
 /// Canonical bounded byte sequence.
 pub const Bytes = portable_value.Bytes;
@@ -106,6 +110,7 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(!@hasDecl(@This(), "program_evaluator"));
     try std.testing.expect(!@hasDecl(@This(), "internal_evaluator"));
     try std.testing.expect(@hasDecl(@This(), "machine_v2"));
+    try std.testing.expect(@hasDecl(@This(), "process_v1"));
     try std.testing.expect(!@hasDecl(machine_v2, "profile"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "preflightStep"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "StepAdmission"));

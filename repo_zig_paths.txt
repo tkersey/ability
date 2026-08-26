@@ -15,13 +15,18 @@ src/machine.zig
 src/machine_v2_metering_v1.zig
 src/machine_v2_profile_v1.zig
 src/portable_value.zig
+src/process_advance_v1.zig
+src/process_capsule_v1.zig
+src/process_effect_v1.zig
+src/process_kernel_wasm_v1.zig
+src/process_state_v1.zig
+src/process_v1.zig
 src/program_semantics_v1.zig
 src/program_v2.zig
 src/reducer_clause_v1.zig
 src/reified_program_v1.zig
 src/rnf.zig
 src/root.zig
-test/agent_loop.zig
 test/compile_fail/dead_control_malformed_constant.zig
 test/compile_fail/dead_control_schema_reference.zig
 test/compile_fail/driver_response_type_mismatch.zig
@@ -47,6 +52,7 @@ test/compile_fail/portable_sentinel_array.zig
 test/compile_fail/portable_usize.zig
 test/compile_fail/undersized_machine_state.zig
 test/compile_fail/vector_uninhabited_element.zig
+test/effectful_decision_loop.zig
 test/emit_one_effect_image.zig
 test/emit_one_effect_profile.zig
 test/emit_portable_values_image.zig
@@ -60,6 +66,9 @@ test/machine_performance.zig
 test/machine_recursion.zig
 test/machine_v2_metering_v1.zig
 test/machine_yield.zig
+test/process_advance_v1.zig
+test/process_kernel_vector.zig
+test/process_v1.zig
 test/program_algebraic_collection_operations.zig
 test/program_compile.zig
 test/program_constructor_invariants.zig
