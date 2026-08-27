@@ -62,6 +62,30 @@ const Body = struct {
 const Program = boundary.program("process-one-effect", Body);
 const Image = Program.image();
 
+const completed_blocks = [_]boundary.ir.Block{.{
+    .id = 0,
+    .parameters = &.{0},
+    .terminator = .{ .return_value = 0 },
+}};
+const CompletedBody = struct {
+    pub const InitialArgs = u32;
+    pub const Result = u32;
+    pub const Failure = enum { rejected };
+    pub const effect_sites = .{};
+    pub const schema_types = .{};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-completed",
+        .value_types = &.{u32_type},
+        .blocks = &completed_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+    };
+};
+const CompletedImage = boundary.program(
+    "process-completed",
+    CompletedBody,
+).image();
+
 const call_arguments = [_]boundary.ir.EdgeArgument{.{ .value = 0 }};
 const return_arguments = [_]boundary.ir.EdgeArgument{.@"resume"};
 const call_blocks = [_]boundary.ir.Block{
@@ -1907,6 +1931,15 @@ test "public native advance enforces input and serialized output arenas" {
         .environment = 4096,
         .scratch = 64 * 1024,
     });
+    const BelowCapacityRecordStorage = boundary.process_v1.CapacityStorage(.{
+        .input = 128 * 1024,
+        .output = 32,
+        .state = 4096,
+        .value = 4096,
+        .request = 4096,
+        .environment = 4096,
+        .scratch = 64 * 1024,
+    });
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 17, .little);
 
@@ -1956,6 +1989,19 @@ test "public native advance enforces input and serialized output arenas" {
     try std.testing.expectEqual(
         @as(u64, input_capacity),
         output_constrained.needs_capacity.minimum_input_bytes,
+    );
+
+    var below_record_storage: BelowCapacityRecordStorage = .{};
+    var below_record_workspace: boundary.image.ValidationWorkspace = .{};
+    const below_record = try below_record_storage.advance(
+        &CompletedImage.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        &below_record_workspace,
+    );
+    try std.testing.expectEqual(
+        @as(u64, process_advance_v1.needs_capacity_encoded_length),
+        below_record.needs_capacity.minimum_output_bytes,
     );
 }
 

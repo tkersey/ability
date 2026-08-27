@@ -520,6 +520,10 @@ fn projectOutcomeForCapacity(
     evidence.noteU64(.input, input_length);
     const required_output = try outcomeEncodedLength(outcome);
     evidence.note(.output, required_output);
+    const output_shortage = available_output < required_output;
+    if (output_shortage) {
+        evidence.note(.output, needs_capacity_encoded_length);
+    }
     const minimum_pages = minimumMemoryPagesForStorage(
         storage,
         evidence,
@@ -545,7 +549,7 @@ fn projectOutcomeForCapacity(
                 minimum_pages,
             ),
         } },
-        else => if (available_output < required_output)
+        else => if (output_shortage)
             .{ .needs_capacity = .{
                 .minimum_input_bytes = evidence.requiredFor(.input),
                 .minimum_output_bytes = evidence.maximumOutput(),
