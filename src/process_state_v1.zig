@@ -181,7 +181,7 @@ pub fn replaceTop(
     state: StateView,
     replacement: Frame,
     output: []u8,
-) Error![]const u8 {
+) Error!StateView {
     const top = try topFrame(state);
     var required = fixed_header_length;
     required = try addLength(
@@ -215,8 +215,7 @@ pub fn replaceTop(
     append(output, &cursor, replacement.environment);
     if (cursor != required) return error.InvalidEncoding;
     const encoded = output[0..required];
-    _ = try validate(encoded, state.program_transition_digest);
-    return encoded;
+    return validate(encoded, state.program_transition_digest);
 }
 
 pub fn replaceTopAndAppend(
@@ -224,7 +223,7 @@ pub fn replaceTopAndAppend(
     replacement: Frame,
     appended: Frame,
     output: []u8,
-) Error![]const u8 {
+) Error!StateView {
     const top = try topFrame(state);
     const frame_count = std.math.add(u64, state.frame_count, 1) catch
         return error.LengthOverflow;
@@ -246,15 +245,14 @@ pub fn replaceTopAndAppend(
     try appendFrame(output, &cursor, appended);
     if (cursor != required) return error.InvalidEncoding;
     const encoded = output[0..required];
-    _ = try validate(encoded, state.program_transition_digest);
-    return encoded;
+    return validate(encoded, state.program_transition_digest);
 }
 
 pub fn replaceParentAndDropTop(
     state: StateView,
     replacement: Frame,
     output: []u8,
-) Error![]const u8 {
+) Error!StateView {
     if (state.frame_count < 2) return error.InvalidState;
     var iterator = state.iterator();
     var parent: ?FrameSpan = null;
@@ -288,8 +286,7 @@ pub fn replaceParentAndDropTop(
     try appendFrame(output, &cursor, replacement);
     if (cursor != required) return error.InvalidEncoding;
     const encoded = output[0..required];
-    _ = try validate(encoded, state.program_transition_digest);
-    return encoded;
+    return validate(encoded, state.program_transition_digest);
 }
 
 pub fn parentFrame(state: StateView) Error!FrameSpan {

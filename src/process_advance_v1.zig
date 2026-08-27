@@ -319,6 +319,19 @@ pub const KernelArenaLayout = struct {
         requirement: CapacityRequirement,
         live_memory_pages: u64,
     ) u64 {
+        const live_bytes = std.math.mul(
+            u64,
+            live_memory_pages,
+            65536,
+        ) catch std.math.maxInt(u64);
+        return self.minimumMemoryPagesFromBytes(requirement, live_bytes);
+    }
+
+    fn minimumMemoryPagesFromBytes(
+        self: @This(),
+        requirement: CapacityRequirement,
+        live_memory_bytes: u64,
+    ) u64 {
         var growth: u64 = 0;
         inline for (.{
             self.input_bytes,
@@ -344,12 +357,7 @@ pub const KernelArenaLayout = struct {
             requirement.minimum_scratch_bytes -|
                 @as(u64, @intCast(self.scratch_bytes)),
         );
-        const live_bytes = std.math.mul(
-            u64,
-            live_memory_pages,
-            65536,
-        ) catch std.math.maxInt(u64);
-        return bytesToPages(saturatingAddU64(live_bytes, growth));
+        return bytesToPages(saturatingAddU64(live_memory_bytes, growth));
     }
 };
 
@@ -526,9 +534,13 @@ pub const testing = if (@import("builtin").is_test) struct {
         workspace.invariant_result = invariant_scratch;
         defer workspace.invariant_result = prior_invariant_result;
         const image = try image_v1.validateImage(image_bytes, workspace);
+        const state = process_state_v1.validate(
+            state_bytes,
+            image.catalogs.envelope.header.program_transition_digest,
+        ) catch return error.InvalidProcessState;
         _ = try admitProducedSuffix(
             image,
-            state_bytes,
+            state,
             expected_constructor_ids,
             workspace,
         );
@@ -763,23 +775,35 @@ fn capacityRequirement(
         else
             current_scratch,
     );
-    const all_output_arenas = std.math.mul(
-        u64,
-        minimum_output,
-        7,
-    ) catch std.math.maxInt(u64);
-    const total = saturatingAddU64(
-        saturatingAddU64(input, all_output_arenas),
-        saturatingAddU64(
-            minimum_scratch +| (4 << 10),
-            @intCast(@sizeOf(image_v1.ValidationWorkspace)),
-        ),
-    );
-    return .{
+    const requirement: CapacityRequirement = .{
         .minimum_input_bytes = input,
         .minimum_output_bytes = minimum_output,
         .minimum_scratch_bytes = minimum_scratch,
-        .minimum_memory_pages = bytesToPages(total),
+        .minimum_memory_pages = 0,
+    };
+    const layout: KernelArenaLayout = .{
+        .input_bytes = 0,
+        .output_bytes = 0,
+        .state_bytes = 0,
+        .candidate_state_bytes = 0,
+        .value_bytes = 0,
+        .request_bytes = 0,
+        .environment_bytes = 0,
+        .auxiliary_environment_bytes = 0,
+        .scratch_bytes = 0,
+    };
+    const fixed_bytes = saturatingAddU64(
+        4 << 10,
+        @intCast(@sizeOf(image_v1.ValidationWorkspace)),
+    );
+    return .{
+        .minimum_input_bytes = requirement.minimum_input_bytes,
+        .minimum_output_bytes = requirement.minimum_output_bytes,
+        .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
+        .minimum_memory_pages = layout.minimumMemoryPagesFromBytes(
+            requirement,
+            fixed_bytes,
+        ),
     };
 }
 
@@ -1056,22 +1080,12 @@ fn callState(
         image,
         child_constructor_id,
     );
-    const parent_slots = slots.*;
     try applyValueEdge(
         child_constructor,
         target_segment,
         callee,
         slots,
     );
-    reducer_clause_v1.validateStackPair(
-        image,
-        return_constructor,
-        &parent_slots,
-        child_constructor,
-        child_constructor_id,
-        slots,
-        child_constructor_id,
-    ) catch return error.InvalidProcessState;
     const parent_frame = process_state_v1.Frame{
         .constructor_id = return_constructor_id,
         .environment = parent_environment,
@@ -1524,14 +1538,10 @@ fn replaceParentAndDropTopAdmitted(
 
 fn admitProducedSuffix(
     image: image_v1.ValidatedImage,
-    state_bytes: []const u8,
+    state: process_state_v1.StateView,
     expected_constructor_ids: []const u32,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!AdmittedState {
-    const state = process_state_v1.validate(
-        state_bytes,
-        image.catalogs.envelope.header.program_transition_digest,
-    ) catch return error.InvalidProcessState;
     if (expected_constructor_ids.len == 0 or
         expected_constructor_ids.len > state.frame_count)
     {

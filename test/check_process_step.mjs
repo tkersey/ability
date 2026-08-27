@@ -109,6 +109,18 @@ try {
       wide.stdout.readBigUInt64LE(32) !== BigInt(wideLength + 40)) {
     throw new Error("relay materialized wide input before NeedsCapacity");
   }
+  const nonRegular = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", kernel,
+    "--image", emptyImage,
+    "--initial-args", temporary,
+  ]);
+  if (nonRegular.status === 0 ||
+      !nonRegular.stderr.toString("utf8").includes(
+        "instance must be a regular file",
+      )) {
+    throw new Error("relay accepted a non-regular payload source");
+  }
   const wrongAbi = spawnSync(process.execPath, [
     adapter,
     "--kernel", wrongKernel,

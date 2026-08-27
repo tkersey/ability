@@ -40,8 +40,10 @@ canonical bytes.
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic
 `scripts/boundary-process-step.mjs` adapter asks the kernel to prepare its
-canonical input header from `u64` file sizes before reading payload files,
-copies only admitted BPI1 and instance/result bytes, invokes one kernel
+canonical input header from `u64` sizes obtained from open regular-file
+descriptors before reading payload bytes. When preparation admits the input,
+the adapter reads exactly those bytes through the same descriptors, rejects a
+changed length, copies only BPI1 and instance/result bytes, invokes one kernel
 operation, writes the canonical outcome bytes, and exits.
 If the fixed input arena cannot hold those payloads, preparation returns a
 canonical transactional `NeedsCapacity` outcome before any payload copy.
