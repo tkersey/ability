@@ -21,7 +21,10 @@ occupied-byte watermark, supplies all mutable reducer buffers, and is the sole
 owner of `minimum_memory_pages`; semantic reduction records each arena's byte
 demand. It rejects a canonical kernel input larger than its declared input
 arena before reduction, and every `NeedsCapacity` reserves the 64-byte PKO1
-record required to report that outcome.
+record required to report that outcome. Native `CapacityStorage.advance` also
+admits the complete successful PKO1 length against its declared output arena,
+so its typed outcome classification matches the fixed kernel without forcing a
+serialize/decode round trip.
 Allocate at least `minimum_output_bytes` for any generic output arena and at
 least `minimum_scratch_bytes` for the scratch arena before retrying the same
 input. Every mutable output, scratch, and validation arena must be
@@ -34,6 +37,8 @@ output producer and reducer scratch allocation before a capacity error.
 `NeedsCapacity` therefore preserves the current reduction requirement rather
 than reconstructing a global maximum from BPI1 schema bounds or substituting
 an unrelated arena's existing capacity.
+Physical page projection widens aggregate bytes internally before rounding, so
+an exact near-`u64` arena demand retains existing occupied-storage pages.
 Internally, one `ReductionAttempt` carries the outcome and that capacity
 evidence together through final PKO1 serialization. The generated storage's
 `advance` method attaches page evidence and projects only the normative outcome.

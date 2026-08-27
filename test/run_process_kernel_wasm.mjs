@@ -188,6 +188,17 @@ if (maximumOutput[10] !== 5 ||
     maximumOutput.readBigUInt64LE(32) !== maximumU64) {
   throw new Error("maximum Process input total lost exact capacity");
 }
+const maximumOccupied =
+  maximumInstance.exports.boundary_process_kernel_occupied_memory_bytes();
+const maximumInputCapacity = BigInt(
+  maximumInstance.exports.boundary_process_kernel_input_capacity(),
+);
+const maximumRequiredPages = (
+  maximumOccupied + (maximumU64 + 1n - maximumInputCapacity) + 65535n
+) / 65536n;
+if (maximumOutput.readBigUInt64LE(56) !== maximumRequiredPages) {
+  throw new Error("maximum Process input total lost occupied page demand");
+}
 
 const overflowInstance = await WebAssembly.instantiate(module, {});
 if (overflowInstance.exports.boundary_process_kernel_prepare_input(

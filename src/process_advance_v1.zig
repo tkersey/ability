@@ -445,11 +445,9 @@ pub fn CapacityStorage(comptime capacities: StorageCapacities) type {
             effect_result: ?[]const u8,
             workspace: *image_v1.ValidationWorkspace,
         ) Error!Outcome {
-            const occupied_memory_bytes = saturatingAddU64(
-                @sizeOf(@This()),
-                @sizeOf(image_v1.ValidationWorkspace),
-            );
-            return (try advanceAttemptForPhysicalStorage(
+            const occupied_memory_bytes: u64 = @sizeOf(@This()) +
+                @sizeOf(image_v1.ValidationWorkspace);
+            const attempt = try advanceAttemptForPhysicalStorage(
                 capacities,
                 image_bytes,
                 instance,
@@ -458,7 +456,16 @@ pub fn CapacityStorage(comptime capacities: StorageCapacities) type {
                 bytesToPages(occupied_memory_bytes),
                 occupied_memory_bytes,
                 workspace,
-            )).outcome;
+            );
+            return projectOutcomeForCapacity(
+                attempt.outcome,
+                attempt.capacity,
+                try kernelInputLength(image_bytes, instance, effect_result),
+                self,
+                bytesToPages(occupied_memory_bytes),
+                occupied_memory_bytes,
+                self.output.bytes.len,
+            );
         }
     };
 }
@@ -470,35 +477,84 @@ pub fn minimumMemoryPagesForStorage(
     occupied_memory_bytes: u64,
 ) u64 {
     const Storage = @typeInfo(@TypeOf(storage)).pointer.child;
-    var growth: u64 = 0;
+    var growth: u128 = 0;
     inline for (std.meta.fields(Storage)) |field| {
         const arena = &@field(storage.*, field.name);
         const required = capacity.requiredFor(@field(CapacityArenaId, field.name));
         const current_logical: u64 = @intCast(arena.bytes.len);
-        const current_physical: u64 = @sizeOf(field.type);
+        const current_physical: u128 = @sizeOf(field.type);
         const required_physical = if (required <= current_logical)
             current_physical
         else
             alignedArenaBytes(required, @alignOf(field.type));
-        growth = saturatingAddU64(
-            growth,
-            required_physical -| current_physical,
-        );
+        growth += required_physical - current_physical;
     }
     const storage_pages = bytesToPages(@sizeOf(Storage));
     const effective_live_pages = @max(live_memory_pages, storage_pages);
-    const occupied = @max(occupied_memory_bytes, @as(u64, @sizeOf(Storage)));
+    const occupied: u128 = @max(
+        occupied_memory_bytes,
+        @as(u64, @sizeOf(Storage)),
+    );
     return @max(
         effective_live_pages,
-        bytesToPages(saturatingAddU64(occupied, growth)),
+        bytesToPages(occupied + growth),
     );
 }
 
-fn alignedArenaBytes(bytes: u64, alignment: comptime_int) u64 {
-    const mask: u64 = alignment - 1;
-    const added = std.math.add(u64, bytes, mask) catch
-        return std.math.maxInt(u64);
+fn alignedArenaBytes(bytes: u64, alignment: comptime_int) u128 {
+    const mask: u128 = alignment - 1;
+    const added = @as(u128, bytes) + mask;
     return added & ~mask;
+}
+
+fn projectOutcomeForCapacity(
+    outcome: Outcome,
+    capacity: CapacityEvidence,
+    input_length: u64,
+    storage: anytype,
+    minimum_memory_pages_floor: u64,
+    occupied_memory_bytes: u64,
+    available_output: usize,
+) Error!Outcome {
+    var evidence = capacity;
+    evidence.noteU64(.input, input_length);
+    const required_output = try outcomeEncodedLength(outcome);
+    evidence.note(.output, required_output);
+    const minimum_pages = minimumMemoryPagesForStorage(
+        storage,
+        evidence,
+        minimum_memory_pages_floor,
+        occupied_memory_bytes,
+    );
+    return switch (outcome) {
+        .needs_capacity => |requirement| .{ .needs_capacity = .{
+            .minimum_input_bytes = @max(
+                requirement.minimum_input_bytes,
+                evidence.requiredFor(.input),
+            ),
+            .minimum_output_bytes = @max(
+                requirement.minimum_output_bytes,
+                evidence.maximumOutput(),
+            ),
+            .minimum_scratch_bytes = @max(
+                requirement.minimum_scratch_bytes,
+                evidence.requiredFor(.scratch),
+            ),
+            .minimum_memory_pages = @max(
+                requirement.minimum_memory_pages,
+                minimum_pages,
+            ),
+        } },
+        else => if (available_output < required_output)
+            .{ .needs_capacity = .{
+                .minimum_input_bytes = evidence.requiredFor(.input),
+                .minimum_output_bytes = evidence.maximumOutput(),
+                .minimum_scratch_bytes = evidence.requiredFor(.scratch),
+                .minimum_memory_pages = minimum_pages,
+            } }
+        else
+            outcome,
+    };
 }
 
 pub fn encodeOutcomeForCapacity(
@@ -510,50 +566,22 @@ pub fn encodeOutcomeForCapacity(
     occupied_memory_bytes: u64,
     output: []u8,
 ) Error![]const u8 {
-    var evidence = capacity;
-    evidence.note(.input, input_length);
-    const required_output = try outcomeEncodedLength(outcome);
-    evidence.note(.output, required_output);
-    const admitted_outcome: Outcome = switch (outcome) {
-        .needs_capacity => |requirement| .{ .needs_capacity = .{
-            .minimum_input_bytes = requirement.minimum_input_bytes,
-            .minimum_output_bytes = @max(
-                requirement.minimum_output_bytes,
-                evidence.maximumOutput(),
-            ),
-            .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
-            .minimum_memory_pages = @max(
-                requirement.minimum_memory_pages,
-                minimumMemoryPagesForStorage(
-                    storage,
-                    evidence,
-                    minimum_memory_pages_floor,
-                    occupied_memory_bytes,
-                ),
-            ),
-        } },
-        else => outcome,
-    };
-    return encodeOutcome(admitted_outcome, output) catch |err| switch (err) {
-        error.OutputCapacity => blk: {
-            break :blk encodeOutcome(.{ .needs_capacity = .{
-                .minimum_input_bytes = evidence.requiredFor(.input),
-                .minimum_output_bytes = evidence.maximumOutput(),
-                .minimum_scratch_bytes = evidence.requiredFor(.scratch),
-                .minimum_memory_pages = minimumMemoryPagesForStorage(
-                    storage,
-                    evidence,
-                    minimum_memory_pages_floor,
-                    occupied_memory_bytes,
-                ),
-            } }, output);
-        },
-        else => return err,
-    };
+    const projected = try projectOutcomeForCapacity(
+        outcome,
+        capacity,
+        input_length,
+        storage,
+        minimum_memory_pages_floor,
+        occupied_memory_bytes,
+        output.len,
+    );
+    return encodeOutcome(projected, output);
 }
 
-fn bytesToPages(bytes: u64) u64 {
-    return bytes / 65536 + @intFromBool(bytes % 65536 != 0);
+fn bytesToPages(bytes: anytype) u64 {
+    const wide: u128 = @intCast(bytes);
+    const pages = wide / 65536 + @intFromBool(wide % 65536 != 0);
+    return std.math.cast(u64, pages) orelse std.math.maxInt(u64);
 }
 
 fn addOutcomeLength(primary: usize, secondary: usize) Error!usize {
@@ -1033,10 +1061,6 @@ fn validateBufferOwnership(
 }
 
 fn saturatingAdd(left: usize, right: usize) usize {
-    return left +| right;
-}
-
-fn saturatingAddU64(left: u64, right: u64) u64 {
     return left +| right;
 }
 

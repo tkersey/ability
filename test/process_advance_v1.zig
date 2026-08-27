@@ -1723,7 +1723,7 @@ test "Process rejects schema-valid forged constructor invariants" {
     try std.testing.expect(std.mem.allEqual(u8, &capsule_storage, 0xa5));
 }
 
-test "NeedsCapacity page ceiling preserves saturated u64 totals" {
+test "NeedsCapacity page ceiling preserves aggregate totals beyond u64" {
     var output: [64]u8 = undefined;
     var storage: ZeroCapacityStorage = .{};
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
@@ -1741,7 +1741,7 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
         &output,
     );
     try std.testing.expectEqual(
-        @as(u64, 281474976710656),
+        @as(u64, 2251799813685249),
         std.mem.readInt(u64, encoded[56..64], .little),
     );
 }
@@ -1877,7 +1877,7 @@ test "public native advance derives pages from its physical storage" {
     );
 }
 
-test "public native advance enforces its physical input arena" {
+test "public native advance enforces input and serialized output arenas" {
     const input_capacity = process_advance_v1.kernel_input_header_length +
         Image.bytes.len + @sizeOf(u32);
     const ConstrainedInputStorage = boundary.process_v1.CapacityStorage(.{
@@ -1890,6 +1890,15 @@ test "public native advance enforces its physical input arena" {
         .scratch = 64 * 1024,
     });
     const ExactInputStorage = boundary.process_v1.CapacityStorage(.{
+        .input = input_capacity,
+        .output = 4096,
+        .state = 4096,
+        .value = 4096,
+        .request = 4096,
+        .environment = 4096,
+        .scratch = 64 * 1024,
+    });
+    const ConstrainedOutputStorage = boundary.process_v1.CapacityStorage(.{
         .input = input_capacity,
         .output = process_advance_v1.needs_capacity_encoded_length,
         .state = 4096,
@@ -1931,6 +1940,23 @@ test "public native advance enforces its physical input arena" {
         &exact_workspace,
     );
     try std.testing.expect(exact == .requested);
+
+    var output_storage: ConstrainedOutputStorage = .{};
+    var output_workspace: boundary.image.ValidationWorkspace = .{};
+    const output_constrained = try output_storage.advance(
+        &Image.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        &output_workspace,
+    );
+    try std.testing.expectEqual(
+        @as(u64, try process_advance_v1.outcomeEncodedLength(exact)),
+        output_constrained.needs_capacity.minimum_output_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(u64, input_capacity),
+        output_constrained.needs_capacity.minimum_input_bytes,
+    );
 }
 
 test "capacity storage fold includes per-arena alignment" {
