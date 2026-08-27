@@ -23,6 +23,21 @@ pub const Slot = struct {
     initialized: bool = false,
 };
 
+/// Invocation-local operational capacity evidence. Semantic evaluation records
+/// the exact bytes required at the producer before returning a capacity error.
+pub const CapacityTracker = struct {
+    output_bytes: u64 = 0,
+
+    pub fn requireOutput(
+        self: *@This(),
+        available: usize,
+        required: usize,
+    ) Error!void {
+        self.output_bytes = @max(self.output_bytes, required);
+        if (available < required) return error.OutputCapacity;
+    }
+};
+
 /// Apply one Control IR edge as a parallel assignment from the pre-edge slot
 /// store. Resume/call-return edges may inject exactly one supplied value.
 pub fn applyEdge(
@@ -210,6 +225,7 @@ pub fn evaluateClause(
     output_value: []u8,
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: ?*CapacityTracker,
 ) Error!ClauseOutcome {
     try initializeZeroWidthSlots(image, slots);
     const segment = segmentRecord(image, segment_id) catch
@@ -259,7 +275,7 @@ pub fn evaluateClause(
             else => return error.UnsupportedOperation,
         };
         if (failure) |failure_tag| {
-            if (output_value.len < 4) return error.OutputCapacity;
+            try requireOutput(capacity, output_value.len, 4);
             std.mem.writeInt(u32, output_value[0..4], failure_tag, .little);
             return .{ .authored_failure = output_value[0..4] };
         }
@@ -292,7 +308,7 @@ pub fn evaluateClause(
                         return error.InvalidBindings;
                     }
                     const bytes = slots[effect.request_value].bytes;
-                    if (output_value.len < bytes.len) return error.OutputCapacity;
+                    try requireOutput(capacity, output_value.len, bytes.len);
                     @memcpy(output_value[0..bytes.len], bytes);
                     break :request .{ .requested = .{
                         .site_ordinal = effect.site_ordinal,
@@ -310,7 +326,7 @@ pub fn evaluateClause(
             const value = readInt(u16, segment, payload + 2);
             if (!slots[value].initialized) return error.InvalidBindings;
             const bytes = slots[value].bytes;
-            if (output_value.len < bytes.len) return error.OutputCapacity;
+            try requireOutput(capacity, output_value.len, bytes.len);
             @memcpy(output_value[0..bytes.len], bytes);
             break :blk .{ .completed = output_value[0..bytes.len] };
         },
@@ -320,7 +336,7 @@ pub fn evaluateClause(
             break :blk .{ .return_to_caller = slots[value].bytes };
         },
         5 => blk: {
-            if (output_value.len < 4) return error.OutputCapacity;
+            try requireOutput(capacity, output_value.len, 4);
             std.mem.writeInt(
                 u32,
                 output_value[0..4],
@@ -333,12 +349,21 @@ pub fn evaluateClause(
             const value = readInt(u16, segment, payload);
             if (!slots[value].initialized) return error.InvalidBindings;
             const bytes = slots[value].bytes;
-            if (output_value.len < bytes.len) return error.OutputCapacity;
+            try requireOutput(capacity, output_value.len, bytes.len);
             @memcpy(output_value[0..bytes.len], bytes);
             break :blk .{ .authored_failure = output_value[0..bytes.len] };
         },
         else => error.UnsupportedOperation,
     };
+}
+
+fn requireOutput(
+    capacity: ?*CapacityTracker,
+    available: usize,
+    required: usize,
+) Error!void {
+    if (capacity) |tracker| return tracker.requireOutput(available, required);
+    if (available < required) return error.OutputCapacity;
 }
 
 pub fn initializeZeroWidthSlots(

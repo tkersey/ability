@@ -57,18 +57,18 @@ for (let index = 0; index < count; index += 1) {
     throw new Error("conformance input was not admitted");
   }
   const memory = new Uint8Array(instance.exports.memory.buffer);
-  const inputPtr = instance.exports.boundary_process_kernel_input_ptr();
+  const inputPtr = instance.exports.boundary_process_kernel_input_ptr() >>> 0;
   memory.set(input, inputPtr);
   const status = instance.exports.boundary_process_kernel_execute(input.length);
   if (status !== 0) {
-    const errorPtr = instance.exports.boundary_process_kernel_error_ptr();
+    const errorPtr = instance.exports.boundary_process_kernel_error_ptr() >>> 0;
     const errorLength = instance.exports.boundary_process_kernel_error_len();
     const message = Buffer.from(
       memory.subarray(errorPtr, errorPtr + errorLength),
     ).toString("utf8");
     throw new Error("Process kernel rejected vector " + index + ": " + message);
   }
-  const outputPtr = instance.exports.boundary_process_kernel_output_ptr();
+  const outputPtr = instance.exports.boundary_process_kernel_output_ptr() >>> 0;
   const outputLength = Number(instance.exports.boundary_process_kernel_output_len());
   const actual = Buffer.from(memory.subarray(outputPtr, outputPtr + outputLength));
   if (!actual.equals(expected)) {
@@ -100,7 +100,7 @@ if (emptyResultInput !== null) {
   );
   emptyResultMemory.set(
     emptyResultInput,
-    emptyResultInstance.exports.boundary_process_kernel_input_ptr(),
+    emptyResultInstance.exports.boundary_process_kernel_input_ptr() >>> 0,
   );
   if (emptyResultInstance.exports.boundary_process_kernel_execute(
     emptyResultInput.length,
@@ -123,7 +123,7 @@ if (oversizedInstance.exports.boundary_process_kernel_prepare_input(
 }
 const oversizedMemory = new Uint8Array(oversizedInstance.exports.memory.buffer);
 const oversizedOutputPtr =
-  oversizedInstance.exports.boundary_process_kernel_output_ptr();
+  oversizedInstance.exports.boundary_process_kernel_output_ptr() >>> 0;
 const oversizedOutputLength = Number(
   oversizedInstance.exports.boundary_process_kernel_output_len(),
 );
@@ -148,7 +148,8 @@ if (wideInstance.exports.boundary_process_kernel_prepare_input(
   throw new Error("physically unaddressable Process input was admitted");
 }
 const wideMemory = new Uint8Array(wideInstance.exports.memory.buffer);
-const wideOutputPtr = wideInstance.exports.boundary_process_kernel_output_ptr();
+const wideOutputPtr =
+  wideInstance.exports.boundary_process_kernel_output_ptr() >>> 0;
 const wideOutputLength = Number(
   wideInstance.exports.boundary_process_kernel_output_len(),
 );
@@ -169,7 +170,7 @@ malformed.writeUInt32LE(1, 36);
 const malformedMemory = new Uint8Array(malformedInstance.exports.memory.buffer);
 malformedMemory.set(
   malformed,
-  malformedInstance.exports.boundary_process_kernel_input_ptr(),
+  malformedInstance.exports.boundary_process_kernel_input_ptr() >>> 0,
 );
 if (malformedInstance.exports.boundary_process_kernel_execute(malformed.length) === 0) {
   throw new Error("malformed Process input was accepted");

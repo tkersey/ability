@@ -992,6 +992,7 @@ fn stepSegment(
         output_value,
         scratch,
         workspace,
+        null,
     ) catch |err| return switch (err) {
         error.InvalidBindings => error.InvalidState,
         else => err,

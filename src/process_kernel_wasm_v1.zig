@@ -17,15 +17,26 @@ const environment_capacity = process_kernel_options.environment_capacity;
 const scratch_capacity = process_kernel_options.scratch_capacity;
 const error_capacity = process_kernel_options.error_capacity;
 
-var input_storage: [input_capacity]u8 align(16) = undefined;
-var output_storage: [output_capacity]u8 align(16) = undefined;
-var state_storage: [state_capacity]u8 align(16) = undefined;
-var value_storage: [value_capacity]u8 align(16) = undefined;
-var request_storage: [request_capacity]u8 align(16) = undefined;
-var candidate_storage: [state_capacity]u8 align(16) = undefined;
-var environment_storage: [environment_capacity]u8 align(16) = undefined;
-var auxiliary_environment_storage: [environment_capacity]u8 align(16) = undefined;
-var scratch_storage: [scratch_capacity]u8 align(16) = undefined;
+const Arena = process_advance_v1.CapacityArena;
+const KernelStorage = struct {
+    input: Arena(.input, input_capacity) = .{},
+    output: Arena(.output, output_capacity) = .{},
+    state: Arena(.output, state_capacity) = .{},
+    value: Arena(.output, value_capacity) = .{},
+    request: Arena(.output, request_capacity) = .{},
+    candidate: Arena(.output, state_capacity) = .{},
+    environment: Arena(.output, environment_capacity) = .{},
+    auxiliary_environment: Arena(.output, environment_capacity) = .{},
+    scratch: Arena(.scratch, scratch_capacity) = .{},
+};
+
+comptime {
+    if (process_advance_v1.capacityArenaCount(KernelStorage) != 9) {
+        @compileError("Process kernel capacity arena topology changed");
+    }
+}
+
+var storage: KernelStorage = .{};
 var error_storage: [error_capacity]u8 align(16) = undefined;
 var validation_workspace: image_v1.ValidationWorkspace = .{};
 var output_length: u32 = 0;
@@ -43,7 +54,7 @@ pub export fn boundary_process_kernel_reserve(required_input_bytes: u64) u32 {
 }
 
 pub export fn boundary_process_kernel_input_ptr() u32 {
-    return @intCast(@intFromPtr(&input_storage));
+    return @intCast(@intFromPtr(&storage.input.bytes));
 }
 
 pub export fn boundary_process_kernel_input_capacity() u32 {
@@ -51,7 +62,7 @@ pub export fn boundary_process_kernel_input_capacity() u32 {
 }
 
 pub export fn boundary_process_kernel_input_payload_ptr() u32 {
-    return @intCast(@intFromPtr(&input_storage) + input_header_length);
+    return @intCast(@intFromPtr(&storage.input.bytes) + input_header_length);
 }
 
 pub export fn boundary_process_kernel_prepare_input(
@@ -72,7 +83,7 @@ pub export fn boundary_process_kernel_prepare_input(
         image_length +|
         instance_length +|
         result_length;
-    if (required_input > input_storage.len) {
+    if (required_input > storage.input.bytes.len) {
         reportInputCapacity(required_input);
         return 0;
     }
@@ -83,13 +94,13 @@ pub export fn boundary_process_kernel_prepare_input(
         image_length,
         instance_length,
         result_length,
-        &input_storage,
+        &storage.input.bytes,
     ) catch return 0;
     return @intCast(total);
 }
 
 pub export fn boundary_process_kernel_output_ptr() u32 {
-    return @intCast(@intFromPtr(&output_storage));
+    return @intCast(@intFromPtr(&storage.output.bytes));
 }
 
 pub export fn boundary_process_kernel_output_len() u64 {
@@ -107,11 +118,11 @@ pub export fn boundary_process_kernel_error_len() u32 {
 pub export fn boundary_process_kernel_execute(input_length: u32) u32 {
     output_length = 0;
     error_length = 0;
-    if (input_length > input_storage.len) {
+    if (input_length > storage.input.bytes.len) {
         setError("MalformedKernelInput");
         return 1;
     }
-    return execute(input_storage[0..input_length]) catch |err| {
+    return execute(storage.input.bytes[0..input_length]) catch |err| {
         setError(@errorName(err));
         return 2;
     };
@@ -127,33 +138,22 @@ fn execute(input: []const u8) !u32 {
         decoded.instance,
         decoded.effect_result,
         .{
-            .output_state = &state_storage,
-            .output_value = &value_storage,
-            .output_request = &request_storage,
-            .candidate_state = &candidate_storage,
-            .environment = &environment_storage,
-            .auxiliary_environment = &auxiliary_environment_storage,
-            .scratch = &scratch_storage,
+            .output_state = &storage.state.bytes,
+            .output_value = &storage.value.bytes,
+            .output_request = &storage.request.bytes,
+            .candidate_state = &storage.candidate.bytes,
+            .environment = &storage.environment.bytes,
+            .auxiliary_environment = &storage.auxiliary_environment.bytes,
+            .scratch = &storage.scratch.bytes,
         },
         &validation_workspace,
     );
-    const layout: process_advance_v1.KernelArenaLayout = .{
-        .input_bytes = @sizeOf(@TypeOf(input_storage)),
-        .output_bytes = @sizeOf(@TypeOf(output_storage)),
-        .state_bytes = @sizeOf(@TypeOf(state_storage)),
-        .candidate_state_bytes = @sizeOf(@TypeOf(candidate_storage)),
-        .value_bytes = @sizeOf(@TypeOf(value_storage)),
-        .request_bytes = @sizeOf(@TypeOf(request_storage)),
-        .environment_bytes = @sizeOf(@TypeOf(environment_storage)),
-        .auxiliary_environment_bytes = @sizeOf(@TypeOf(auxiliary_environment_storage)),
-        .scratch_bytes = @sizeOf(@TypeOf(scratch_storage)),
-    };
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,
-        layout,
+        &storage,
         @wasmMemorySize(0),
-        &output_storage,
+        &storage.output.bytes,
     );
     output_length = @intCast(encoded.len);
     return 0;
@@ -166,18 +166,25 @@ fn setError(message: []const u8) void {
 }
 
 fn reportInputCapacity(required_input: u64) void {
-    const growth = required_input - input_storage.len;
-    const page_bytes: u64 = 64 * 1024;
-    const growth_pages = growth / page_bytes + @intFromBool(growth % page_bytes != 0);
-    const minimum_pages = @as(u64, @wasmMemorySize(0)) +| growth_pages;
+    const requirement: process_advance_v1.CapacityRequirement = .{
+        .minimum_input_bytes = required_input,
+        .minimum_output_bytes = process_advance_v1.outcome_header_length + 32,
+        .minimum_scratch_bytes = 0,
+        .minimum_memory_pages = 0,
+    };
+    const minimum_pages = process_advance_v1.minimumMemoryPagesForStorage(
+        &storage,
+        requirement,
+        @wasmMemorySize(0),
+    );
     const encoded = process_advance_v1.encodeOutcome(
         .{ .needs_capacity = .{
-            .minimum_input_bytes = required_input,
-            .minimum_output_bytes = process_advance_v1.outcome_header_length + 32,
-            .minimum_scratch_bytes = 0,
+            .minimum_input_bytes = requirement.minimum_input_bytes,
+            .minimum_output_bytes = requirement.minimum_output_bytes,
+            .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
             .minimum_memory_pages = minimum_pages,
         } },
-        &output_storage,
+        &storage.output.bytes,
     ) catch return;
     output_length = @intCast(encoded.len);
 }

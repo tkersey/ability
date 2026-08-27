@@ -143,6 +143,20 @@ pub fn encode(
     frames: []const Frame,
     output: []u8,
 ) Error![]const u8 {
+    return encodeTracked(
+        program_transition_digest,
+        frames,
+        output,
+        null,
+    );
+}
+
+pub fn encodeTracked(
+    program_transition_digest: [32]u8,
+    frames: []const Frame,
+    output: []u8,
+    required_output: ?*u64,
+) Error![]const u8 {
     if (slicesOverlap(output, std.mem.sliceAsBytes(frames))) {
         return error.InvalidEncoding;
     }
@@ -152,6 +166,7 @@ pub fn encode(
         }
     }
     const required = try encodedLength(frames);
+    noteRequired(required_output, required);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
     append(output, &cursor, &magic);
@@ -182,6 +197,16 @@ pub fn replaceTop(
     replacement: Frame,
     output: []u8,
 ) Error!StateView {
+    return replaceTopTracked(state, replacement, output, null);
+}
+
+pub fn replaceTopTracked(
+    state: StateView,
+    replacement: Frame,
+    output: []u8,
+    required_output: ?*u64,
+) Error!StateView {
+    try rejectMutationAliases(output, state.bytes, &.{replacement});
     const top = try topFrame(state);
     var required = fixed_header_length;
     required = try addLength(
@@ -198,6 +223,7 @@ pub fn replaceTop(
         naturalEncodedLength(replacement.environment.len),
     );
     required = try addLength(required, replacement.environment.len);
+    noteRequired(required_output, required);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
     append(output, &cursor, &magic);
@@ -224,6 +250,27 @@ pub fn replaceTopAndAppend(
     appended: Frame,
     output: []u8,
 ) Error!StateView {
+    return replaceTopAndAppendTracked(
+        state,
+        replacement,
+        appended,
+        output,
+        null,
+    );
+}
+
+pub fn replaceTopAndAppendTracked(
+    state: StateView,
+    replacement: Frame,
+    appended: Frame,
+    output: []u8,
+    required_output: ?*u64,
+) Error!StateView {
+    try rejectMutationAliases(
+        output,
+        state.bytes,
+        &.{ replacement, appended },
+    );
     const top = try topFrame(state);
     const frame_count = std.math.add(u64, state.frame_count, 1) catch
         return error.LengthOverflow;
@@ -232,6 +279,7 @@ pub fn replaceTopAndAppend(
     required = try addLength(required, top.start - state.frames_offset);
     required = try addFrameLength(required, replacement);
     required = try addFrameLength(required, appended);
+    noteRequired(required_output, required);
     if (output.len < required) return error.OutputCapacity;
 
     var cursor: usize = 0;
@@ -253,6 +301,16 @@ pub fn replaceParentAndDropTop(
     replacement: Frame,
     output: []u8,
 ) Error!StateView {
+    return replaceParentAndDropTopTracked(state, replacement, output, null);
+}
+
+pub fn replaceParentAndDropTopTracked(
+    state: StateView,
+    replacement: Frame,
+    output: []u8,
+    required_output: ?*u64,
+) Error!StateView {
+    try rejectMutationAliases(output, state.bytes, &.{replacement});
     if (state.frame_count < 2) return error.InvalidState;
     var iterator = state.iterator();
     var parent: ?FrameSpan = null;
@@ -270,6 +328,7 @@ pub fn replaceParentAndDropTop(
         parent_span.start - state.frames_offset,
     );
     required = try addFrameLength(required, replacement);
+    noteRequired(required_output, required);
     if (output.len < required) return error.OutputCapacity;
 
     var cursor: usize = 0;
@@ -305,6 +364,23 @@ fn addFrameLength(length: usize, frame: Frame) Error!usize {
     var result = try addLength(length, naturalEncodedLength(frame.constructor_id));
     result = try addLength(result, naturalEncodedLength(frame.environment.len));
     return addLength(result, frame.environment.len);
+}
+
+fn rejectMutationAliases(
+    output: []u8,
+    state_bytes: []const u8,
+    frames: []const Frame,
+) Error!void {
+    if (slicesOverlap(output, state_bytes)) return error.InvalidEncoding;
+    for (frames) |frame| {
+        if (slicesOverlap(output, frame.environment)) {
+            return error.InvalidEncoding;
+        }
+    }
+}
+
+fn noteRequired(required_output: ?*u64, required: usize) void {
+    if (required_output) |value| value.* = @max(value.*, required);
 }
 
 fn appendFrame(output: []u8, cursor: *usize, frame: Frame) Error!void {

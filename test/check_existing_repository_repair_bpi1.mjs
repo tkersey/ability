@@ -40,16 +40,16 @@ for (; reductions < 128; reductions += 1) {
     throw new Error("fixed Process kernel rejected landed BPI1 input");
   }
   const memory = new Uint8Array(exports.memory.buffer);
-  let payload = exports.boundary_process_kernel_input_payload_ptr();
+  let payload = exports.boundary_process_kernel_input_payload_ptr() >>> 0;
   memory.set(image, payload);
   payload += image.length;
   memory.set(current, payload);
   if (exports.boundary_process_kernel_execute(inputLength) !== 0) {
-    const start = exports.boundary_process_kernel_error_ptr();
+    const start = exports.boundary_process_kernel_error_ptr() >>> 0;
     const length = exports.boundary_process_kernel_error_len();
     throw new Error(Buffer.from(memory.subarray(start, start + length)).toString("utf8"));
   }
-  const outputStart = exports.boundary_process_kernel_output_ptr();
+  const outputStart = exports.boundary_process_kernel_output_ptr() >>> 0;
   const outputLength = Number(exports.boundary_process_kernel_output_len());
   const output = Buffer.from(
     memory.subarray(outputStart, outputStart + outputLength),

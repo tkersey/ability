@@ -106,6 +106,64 @@ test "Process codecs reject output overlap with source bytes" {
     );
 }
 
+test "Process State mutation codecs reject every source alias before writing" {
+    const digest = [_]u8{0x71} ** 32;
+    const frames = [_]process_state_v1.Frame{
+        .{ .constructor_id = 1, .environment = &.{1} },
+        .{ .constructor_id = 2, .environment = &.{ 2, 3 } },
+    };
+    var state_storage: [192]u8 = undefined;
+    const encoded = try process_state_v1.encode(
+        digest,
+        &frames,
+        &state_storage,
+    );
+    const state = try process_state_v1.validate(encoded, digest);
+    var before: [192]u8 = undefined;
+    @memcpy(before[0..encoded.len], encoded);
+    const replacement: process_state_v1.Frame = .{
+        .constructor_id = 3,
+        .environment = &.{ 4, 5, 6 },
+    };
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        process_state_v1.replaceTop(
+            state,
+            replacement,
+            state_storage[1..],
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        process_state_v1.replaceTopAndAppend(
+            state,
+            replacement,
+            replacement,
+            state_storage[1..],
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        process_state_v1.replaceParentAndDropTop(
+            state,
+            replacement,
+            state_storage[1..],
+        ),
+    );
+    try std.testing.expectEqualSlices(u8, before[0..encoded.len], encoded);
+
+    var output: [192]u8 = undefined;
+    @memset(output[160..164], 0x99);
+    try std.testing.expectError(
+        error.InvalidEncoding,
+        process_state_v1.replaceTop(
+            state,
+            .{ .constructor_id = 3, .environment = output[160..164] },
+            &output,
+        ),
+    );
+}
+
 test "ABL_ERQ1 and ABL_ERS1 bind the current request and resume schema" {
     const payload_schema = [_]u8{4} ** 32;
     const resume_schema = [_]u8{5} ** 32;

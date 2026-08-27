@@ -100,6 +100,14 @@ pub fn requestEncodedLength(input: RequestInput) Error!usize {
 }
 
 pub fn encodeRequest(input: RequestInput, output: []u8) Error![]const u8 {
+    return encodeRequestTracked(input, output, null);
+}
+
+pub fn encodeRequestTracked(
+    input: RequestInput,
+    output: []u8,
+    required_output: ?*u64,
+) Error![]const u8 {
     if (process_state_v1.slicesOverlap(
         output,
         input.effect_semantic_identity,
@@ -117,6 +125,7 @@ pub fn encodeRequest(input: RequestInput, output: []u8) Error![]const u8 {
         &input.effect_site_semantic_digest,
     )) return error.DigestMismatch;
     const required = try requestEncodedLength(input);
+    if (required_output) |value| value.* = @max(value.*, required);
     if (output.len < required) return error.OutputCapacity;
     var cursor: usize = 0;
     append(output, &cursor, &request_magic);

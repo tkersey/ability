@@ -57,7 +57,9 @@ try {
     const result = resultFile === null
       ? Buffer.alloc(0)
       : readExact(resultFile, "result");
-    let payload = exports.boundary_process_kernel_input_payload_ptr();
+    let payload = wasmOffset(
+      exports.boundary_process_kernel_input_payload_ptr(),
+    );
     memory.set(image, payload);
     payload += image.length;
     memory.set(instance, payload);
@@ -65,7 +67,7 @@ try {
     memory.set(result, payload);
     const status = exports.boundary_process_kernel_execute(inputLength);
     if (status !== 0) {
-      const start = exports.boundary_process_kernel_error_ptr();
+      const start = wasmOffset(exports.boundary_process_kernel_error_ptr());
       const length = exports.boundary_process_kernel_error_len();
       throw new Error(
         Buffer.from(memory.subarray(start, start + length)).toString("utf8"),
@@ -78,9 +80,13 @@ try {
 }
 
 function kernelOutput(exports, memory) {
-  const start = exports.boundary_process_kernel_output_ptr();
+  const start = wasmOffset(exports.boundary_process_kernel_output_ptr());
   const length = Number(exports.boundary_process_kernel_output_len());
   return Buffer.from(memory.subarray(start, start + length));
+}
+
+function wasmOffset(value) {
+  return value >>> 0;
 }
 
 function openPayload(path, label) {

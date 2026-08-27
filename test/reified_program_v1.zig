@@ -420,6 +420,7 @@ test "direct unmetered clause and BPI1 evaluator have one transition meaning" {
         &output,
         &scratch,
         &workspace,
+        null,
     );
     const bytes = switch (evaluated) {
         .completed => |value| value,

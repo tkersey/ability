@@ -111,7 +111,7 @@ const CallBody = struct {
 
 const CallImage = boundary.program("process-call-return", CallBody).image();
 
-const LargeBytes = boundary.Bytes(256);
+const LargeBytes = boundary.Bytes(1024 * 1024);
 const large_type: boundary.ir.ValueType = .{ .schema = 0 };
 const large_call_blocks = [_]boundary.ir.Block{
     .{
@@ -725,6 +725,39 @@ test "Process keeps large child environments separate from predecessor state" {
     try std.testing.expectEqual(@as(u64, 2), state.frame_count);
 }
 
+test "NeedsCapacity preserves the current large-value requirement" {
+    const payload = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 0x5a);
+    const input = try LargeBytes.fromSlice(payload);
+    const initial_args = try std.testing.allocator.alloc(
+        u8,
+        payload.len + 4,
+    );
+    defer std.testing.allocator.free(initial_args);
+    const initial_length = try boundary.schema.encode(
+        LargeBytes,
+        input,
+        initial_args,
+    );
+    var storage: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const outcome = try process_advance_v1.advance(
+        &LargeCallImage.bytes,
+        .{ .initial_args = initial_args[0..initial_length] },
+        null,
+        storage.buffers(),
+        &workspace,
+    );
+    const requirement = outcome.needs_capacity;
+    try std.testing.expect(
+        requirement.minimum_output_bytes >= initial_length,
+    );
+    try std.testing.expect(
+        requirement.minimum_output_bytes < 2 * 1024 * 1024,
+    );
+}
+
 test "Process applies overlapping edge arguments in parallel" {
     var initial: [8]u8 = undefined;
     std.mem.writeInt(u32, initial[0..4], 7, .little);
@@ -823,8 +856,11 @@ test "Process NeedsCapacity is transactional and retryable" {
         requirement.minimum_input_bytes,
     );
     try std.testing.expect(
-        requirement.minimum_output_bytes >= pending.state.len +
-            4096 * 4 + 256,
+        requirement.minimum_output_bytes >= pending.request.len,
+    );
+    try std.testing.expectEqual(
+        @as(u64, constrained_storage.state.len),
+        requirement.minimum_output_bytes,
     );
     const output_capacity: usize = @intCast(requirement.minimum_output_bytes);
     const scratch_capacity: usize = @intCast(requirement.minimum_scratch_bytes);
@@ -890,6 +926,65 @@ test "Process NeedsCapacity is transactional and retryable" {
     try std.testing.expectEqual(
         image_envelope.header.maximum_kernel_scratch_bytes,
         hidden.needs_capacity.minimum_scratch_bytes,
+    );
+}
+
+test "NeedsCapacity preserves the reducer output requirement" {
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 41, .little);
+    var first_storage: Storage = .{};
+    var first_workspace: boundary.image.ValidationWorkspace = .{};
+    const first = try process_advance_v1.advance(
+        &Image.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        first_storage.buffers(),
+        &first_workspace,
+    );
+    const pending = first.requested;
+    const request = try boundary.process_v1.effect.validateRequest(
+        pending.request,
+        Image.program_transition_digest,
+    );
+    var resume_value: [4]u8 = undefined;
+    std.mem.writeInt(u32, &resume_value, 99, .little);
+    var result_storage: [256]u8 = undefined;
+    const result = try boundary.process_v1.effect.encodeResult(.{
+        .request_identity_digest = request.request_identity_digest,
+        .resume_schema_digest = request.resume_schema_digest,
+        .@"resume" = &resume_value,
+    }, &result_storage);
+    var second_storage: Storage = .{};
+    var second_workspace: boundary.image.ValidationWorkspace = .{};
+    const second = try process_advance_v1.advance(
+        &Image.bytes,
+        .{ .process_state = pending.state },
+        result,
+        second_storage.buffers(),
+        &second_workspace,
+    );
+
+    var no_output: [0]u8 = .{};
+    var scratch: [64 * 1024]u8 = undefined;
+    var final_workspace: boundary.image.ValidationWorkspace = .{};
+    const final = try process_advance_v1.advance(
+        &Image.bytes,
+        .{ .process_state = second.progressed },
+        null,
+        .{
+            .output_state = &no_output,
+            .output_value = &no_output,
+            .output_request = &no_output,
+            .candidate_state = &no_output,
+            .environment = &no_output,
+            .auxiliary_environment = &no_output,
+            .scratch = &scratch,
+        },
+        &final_workspace,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @sizeOf(u32)),
+        final.needs_capacity.minimum_output_bytes,
     );
 }
 
@@ -1468,17 +1563,7 @@ test "Process rejects schema-valid forged constructor invariants" {
 
 test "NeedsCapacity page ceiling preserves saturated u64 totals" {
     var output: [64]u8 = undefined;
-    const layout: process_advance_v1.KernelArenaLayout = .{
-        .input_bytes = 0,
-        .output_bytes = 0,
-        .state_bytes = 0,
-        .candidate_state_bytes = 0,
-        .value_bytes = 0,
-        .request_bytes = 0,
-        .environment_bytes = 0,
-        .auxiliary_environment_bytes = 0,
-        .scratch_bytes = 0,
-    };
+    var storage: ZeroCapacityStorage = .{};
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         .{ .needs_capacity = .{
             .minimum_input_bytes = 1,
@@ -1487,7 +1572,7 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
             .minimum_memory_pages = 0,
         } },
         1,
-        layout,
+        &storage,
         0,
         &output,
     );
@@ -1498,20 +1583,11 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
 }
 
 test "NeedsCapacity adds every arena growth delta to live pages" {
-    const layout: process_advance_v1.KernelArenaLayout = .{
-        .input_bytes = 0,
-        .output_bytes = 0,
-        .state_bytes = 0,
-        .candidate_state_bytes = 0,
-        .value_bytes = 0,
-        .request_bytes = 0,
-        .environment_bytes = 0,
-        .auxiliary_environment_bytes = 0,
-        .scratch_bytes = 0,
-    };
+    var storage: ZeroCapacityStorage = .{};
     try std.testing.expectEqual(
         @as(u64, 10),
-        layout.minimumMemoryPages(
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
             .{
                 .minimum_input_bytes = 65536,
                 .minimum_output_bytes = 65536,
@@ -1522,3 +1598,50 @@ test "NeedsCapacity adds every arena growth delta to live pages" {
         ),
     );
 }
+
+test "capacity storage fold cannot omit a newly declared arena" {
+    var storage: ExtendedCapacityStorage = .{};
+    try std.testing.expectEqual(
+        @as(usize, 10),
+        process_advance_v1.capacityArenaCount(ExtendedCapacityStorage),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 11),
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
+            .{
+                .minimum_input_bytes = 65536,
+                .minimum_output_bytes = 65536,
+                .minimum_scratch_bytes = 65536,
+                .minimum_memory_pages = 0,
+            },
+            1,
+        ),
+    );
+}
+
+const ZeroArena = process_advance_v1.CapacityArena;
+const ZeroCapacityStorage = struct {
+    input: ZeroArena(.input, 0) = .{},
+    output: ZeroArena(.output, 0) = .{},
+    state: ZeroArena(.output, 0) = .{},
+    candidate: ZeroArena(.output, 0) = .{},
+    value: ZeroArena(.output, 0) = .{},
+    request: ZeroArena(.output, 0) = .{},
+    environment: ZeroArena(.output, 0) = .{},
+    auxiliary_environment: ZeroArena(.output, 0) = .{},
+    scratch: ZeroArena(.scratch, 0) = .{},
+};
+
+const ExtendedCapacityStorage = struct {
+    input: ZeroArena(.input, 0) = .{},
+    output: ZeroArena(.output, 0) = .{},
+    state: ZeroArena(.output, 0) = .{},
+    candidate: ZeroArena(.output, 0) = .{},
+    value: ZeroArena(.output, 0) = .{},
+    request: ZeroArena(.output, 0) = .{},
+    environment: ZeroArena(.output, 0) = .{},
+    auxiliary_environment: ZeroArena(.output, 0) = .{},
+    future_arena: ZeroArena(.output, 0) = .{},
+    scratch: ZeroArena(.scratch, 0) = .{},
+};

@@ -20,6 +20,10 @@ and validation arena must be disjoint from all source bytes and from every
 other mutable arena; readonly source slices may overlap. Invalid mutable
 aliases reject before writing. Every State-bearing outcome is returned from the
 supplied output-State arena, including byte-identical pending-request recovery.
+An invocation-local capacity tracker records the exact bytes required at each
+output producer before a capacity error. `NeedsCapacity` therefore preserves
+the current reduction requirement rather than reconstructing a global maximum
+from BPI1 schema bounds.
 
 `ABL_PST1` stores the program transition digest and a minimally encoded frame
 sequence. Each frame contains its continuation-constructor identity and exact
@@ -51,9 +55,11 @@ Kernel-input and kernel-outcome framing uses `u64` component lengths. The
 wasm32 kernel accepts those lengths as scalar preflight data, so a larger finite
 State reports capacity without truncation even though that instance cannot
 address the State itself.
-The fixed-kernel page requirement starts from live WebAssembly pages and adds
-the growth delta for input, serialized output, State, candidate State, value,
-request, both environment arenas, and scratch.
+The relay normalizes exported wasm32 pointers to unsigned offsets before
+indexing linear memory. Fixed-kernel storage declares input, serialized output,
+State, candidate State, value, request, both environments, and scratch as typed
+capacity arenas. Page accounting folds over that actual storage product, so a
+new arena cannot be omitted from the calculation or its omission witness.
 
 Run:
 

@@ -3,24 +3,27 @@ const fixture = @import("process_kernel_fixture");
 const process_advance_v1 = @import("process_advance_v1");
 const std = @import("std");
 
+const Arena = process_advance_v1.CapacityArena;
 const Storage = struct {
-    state: [64 * 1024]u8 = undefined,
-    value: [64 * 1024]u8 = undefined,
-    request: [64 * 1024]u8 = undefined,
-    candidate: [64 * 1024]u8 = undefined,
-    environment: [64 * 1024]u8 = undefined,
-    auxiliary_environment: [64 * 1024]u8 = undefined,
-    scratch: [1024 * 1024]u8 = undefined,
+    input: Arena(.input, 128 * 1024) = .{},
+    output: Arena(.output, 64) = .{},
+    state: Arena(.output, 64 * 1024) = .{},
+    value: Arena(.output, 64 * 1024) = .{},
+    request: Arena(.output, 64 * 1024) = .{},
+    candidate: Arena(.output, 64 * 1024) = .{},
+    environment: Arena(.output, 64 * 1024) = .{},
+    auxiliary_environment: Arena(.output, 64 * 1024) = .{},
+    scratch: Arena(.scratch, 1024 * 1024) = .{},
 
     fn buffers(self: *@This()) process_advance_v1.Buffers {
         return .{
-            .output_state = &self.state,
-            .output_value = &self.value,
-            .output_request = &self.request,
-            .candidate_state = &self.candidate,
-            .environment = &self.environment,
-            .auxiliary_environment = &self.auxiliary_environment,
-            .scratch = &self.scratch,
+            .output_state = &self.state.bytes,
+            .output_value = &self.value.bytes,
+            .output_request = &self.request.bytes,
+            .candidate_state = &self.candidate.bytes,
+            .environment = &self.environment.bytes,
+            .auxiliary_environment = &self.auxiliary_environment.bytes,
+            .scratch = &self.scratch.bytes,
         };
     }
 };
@@ -39,34 +42,21 @@ pub fn main(init: std.process.Init) !void {
     );
     _ = outcome.requested;
 
-    var input_storage: [128 * 1024]u8 = undefined;
     const input = try process_advance_v1.encodeKernelInput(
         &fixture.CapacityImage.bytes,
         .{ .initial_args = &initial },
         null,
-        &input_storage,
+        &storage.input.bytes,
     );
-    const layout: process_advance_v1.KernelArenaLayout = .{
-        .input_bytes = @sizeOf(@TypeOf(input_storage)),
-        .output_bytes = 64,
-        .state_bytes = @sizeOf(@TypeOf(storage.state)),
-        .candidate_state_bytes = @sizeOf(@TypeOf(storage.candidate)),
-        .value_bytes = @sizeOf(@TypeOf(storage.value)),
-        .request_bytes = @sizeOf(@TypeOf(storage.request)),
-        .environment_bytes = @sizeOf(@TypeOf(storage.environment)),
-        .auxiliary_environment_bytes = @sizeOf(@TypeOf(storage.auxiliary_environment)),
-        .scratch_bytes = @sizeOf(@TypeOf(storage.scratch)),
-    };
-    var output_storage: [64]u8 = undefined;
     const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,
-        layout,
+        &storage,
         64,
-        &output_storage,
+        &storage.output.bytes,
     );
     if ((try process_advance_v1.outcomeEncodedLength(outcome)) <=
-        output_storage.len or output[10] != 5)
+        storage.output.bytes.len or output[10] != 5)
     {
         return error.ExpectedSerializationCapacity;
     }

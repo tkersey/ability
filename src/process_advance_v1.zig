@@ -298,73 +298,81 @@ pub fn outcomeEncodedLength(outcome: Outcome) Error!usize {
     };
 }
 
-/// Physical arenas retained by one fixed Process-kernel invocation.
-///
-/// The kernel and native capacity witness both derive accounting from their
-/// actual storage objects through this one formula. The public output minimum
-/// applies to every output/candidate/environment arena, including serialized
-/// kernel output.
-pub const KernelArenaLayout = struct {
-    input_bytes: usize,
-    output_bytes: usize,
-    state_bytes: usize,
-    candidate_state_bytes: usize,
-    value_bytes: usize,
-    request_bytes: usize,
-    environment_bytes: usize,
-    auxiliary_environment_bytes: usize,
-    scratch_bytes: usize,
-    pub fn minimumMemoryPages(
-        self: @This(),
-        requirement: CapacityRequirement,
-        live_memory_pages: u64,
-    ) u64 {
-        const live_bytes = std.math.mul(
-            u64,
-            live_memory_pages,
-            65536,
-        ) catch std.math.maxInt(u64);
-        return self.minimumMemoryPagesFromBytes(requirement, live_bytes);
-    }
+pub const CapacityClass = enum { input, output, scratch };
 
-    fn minimumMemoryPagesFromBytes(
-        self: @This(),
-        requirement: CapacityRequirement,
-        live_memory_bytes: u64,
-    ) u64 {
-        var growth: u64 = 0;
-        inline for (.{
-            self.input_bytes,
-            self.output_bytes,
-            self.state_bytes,
-            self.candidate_state_bytes,
-            self.value_bytes,
-            self.request_bytes,
-            self.environment_bytes,
-            self.auxiliary_environment_bytes,
-        }, 0..) |current, index| {
-            const required = if (index == 0)
-                requirement.minimum_input_bytes
-            else
-                requirement.minimum_output_bytes;
-            growth = saturatingAddU64(
-                growth,
-                required -| @as(u64, @intCast(current)),
-            );
+/// A physical interpreter arena that carries its accounting class in its type.
+/// Generic storage folds therefore include every declared arena automatically.
+pub fn CapacityArena(
+    comptime class: CapacityClass,
+    comptime capacity: usize,
+) type {
+    return struct {
+        pub const capacity_class = class;
+        bytes: [capacity]u8 align(16) = undefined,
+    };
+}
+
+pub fn capacityArenaCount(comptime Storage: type) usize {
+    var count: usize = 0;
+    inline for (std.meta.fields(Storage)) |field| {
+        if (!@hasDecl(field.type, "capacity_class") or
+            !@hasField(field.type, "bytes"))
+        {
+            @compileError("every capacity storage field must be a CapacityArena");
         }
+        count += 1;
+    }
+    return count;
+}
+
+pub fn minimumMemoryPagesForStorage(
+    storage: anytype,
+    requirement: CapacityRequirement,
+    live_memory_pages: u64,
+) u64 {
+    const Storage = @typeInfo(@TypeOf(storage)).pointer.child;
+    var growth: u64 = 0;
+    inline for (std.meta.fields(Storage)) |field| {
+        const arena = &@field(storage.*, field.name);
+        const required = switch (field.type.capacity_class) {
+            .input => requirement.minimum_input_bytes,
+            .output => requirement.minimum_output_bytes,
+            .scratch => requirement.minimum_scratch_bytes,
+        };
         growth = saturatingAddU64(
             growth,
-            requirement.minimum_scratch_bytes -|
-                @as(u64, @intCast(self.scratch_bytes)),
+            required -| @as(u64, @intCast(arena.bytes.len)),
         );
-        return bytesToPages(saturatingAddU64(live_memory_bytes, growth));
     }
-};
+    const live_bytes = std.math.mul(
+        u64,
+        live_memory_pages,
+        65536,
+    ) catch std.math.maxInt(u64);
+    return bytesToPages(saturatingAddU64(live_bytes, growth));
+}
+
+pub fn currentCapacityForClass(
+    storage: anytype,
+    class: CapacityClass,
+) u64 {
+    const Storage = @typeInfo(@TypeOf(storage)).pointer.child;
+    var current: u64 = 0;
+    inline for (std.meta.fields(Storage)) |field| {
+        if (field.type.capacity_class == class) {
+            current = @max(
+                current,
+                @as(u64, @intCast(@field(storage.*, field.name).bytes.len)),
+            );
+        }
+    }
+    return current;
+}
 
 pub fn encodeOutcomeForCapacity(
     outcome: Outcome,
     input_length: usize,
-    layout: KernelArenaLayout,
+    storage: anytype,
     minimum_memory_pages_floor: u64,
     output: []u8,
 ) Error![]const u8 {
@@ -376,7 +384,8 @@ pub fn encodeOutcomeForCapacity(
             .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
             .minimum_memory_pages = @max(
                 requirement.minimum_memory_pages,
-                layout.minimumMemoryPages(
+                minimumMemoryPagesForStorage(
+                    storage,
                     requirement,
                     minimum_memory_pages_floor,
                 ),
@@ -390,14 +399,18 @@ pub fn encodeOutcomeForCapacity(
                 const requirement: CapacityRequirement = .{
                     .minimum_input_bytes = @intCast(input_length),
                     .minimum_output_bytes = @intCast(required_output),
-                    .minimum_scratch_bytes = @intCast(layout.scratch_bytes),
+                    .minimum_scratch_bytes = currentCapacityForClass(
+                        storage,
+                        .scratch,
+                    ),
                     .minimum_memory_pages = 0,
                 };
                 break :requirement .{
                     .minimum_input_bytes = requirement.minimum_input_bytes,
                     .minimum_output_bytes = requirement.minimum_output_bytes,
                     .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
-                    .minimum_memory_pages = layout.minimumMemoryPages(
+                    .minimum_memory_pages = minimumMemoryPagesForStorage(
+                        storage,
                         requirement,
                         minimum_memory_pages_floor,
                     ),
@@ -441,6 +454,7 @@ fn writeOutcomeHeader(
 
 const Slot = reducer_clause_v1.Slot;
 const slicesOverlap = process_state_v1.slicesOverlap;
+const CapacityTracker = reducer_clause_v1.CapacityTracker;
 
 const LoadedEnvironment = reducer_clause_v1.LoadedEnvironment;
 
@@ -474,12 +488,14 @@ pub fn advance(
     const prior_invariant_result = workspace.invariant_result;
     workspace.invariant_result = buffers.scratch;
     defer workspace.invariant_result = prior_invariant_result;
+    var capacity: CapacityTracker = .{};
     return advanceFinite(
         image_bytes,
         instance,
         effect_result,
         buffers,
         workspace,
+        &capacity,
     ) catch |err| switch (err) {
         error.OutputCapacity,
         error.ScratchCapacity,
@@ -489,6 +505,7 @@ pub fn advance(
             instance,
             effect_result,
             buffers,
+            capacity,
             err,
         ) },
         else => err,
@@ -641,12 +658,14 @@ pub fn validateInitialArgs(
     workspace.invariant_result = invariant_scratch;
     defer workspace.invariant_result = prior_invariant_result;
     const image = try image_v1.validateImage(image_bytes, workspace);
+    var capacity: CapacityTracker = .{};
     const encoded = try initialState(
         image,
         initial_args,
         output_state,
         invariant_scratch,
         workspace,
+        &capacity,
     );
     const state = try process_state_v1.validate(
         encoded,
@@ -661,6 +680,7 @@ fn advanceFinite(
     effect_result: ?[]const u8,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!Outcome {
     const image = try image_v1.validateImage(image_bytes, workspace);
     return switch (instance) {
@@ -672,6 +692,7 @@ fn advanceFinite(
                 buffers.candidate_state,
                 buffers.environment,
                 workspace,
+                capacity,
             );
             break :blk try advanceState(
                 image,
@@ -679,6 +700,7 @@ fn advanceFinite(
                 null,
                 buffers,
                 workspace,
+                capacity,
             );
         },
         .process_state => |state_bytes| try advanceState(
@@ -687,6 +709,7 @@ fn advanceFinite(
             effect_result,
             buffers,
             workspace,
+            capacity,
         ),
     };
 }
@@ -696,6 +719,7 @@ fn capacityRequirement(
     instance: Instance,
     effect_result: ?[]const u8,
     buffers: Buffers,
+    capacity: CapacityTracker,
     err: anyerror,
 ) CapacityRequirement {
     const instance_length: u64 = switch (instance) {
@@ -714,32 +738,6 @@ fn capacityRequirement(
         ),
     );
     const envelope = image_v1.validateEnvelope(image_bytes) catch null;
-    const maximum_value: u64 = if (envelope) |view|
-        view.header.maximum_single_value_bytes
-    else
-        @as(u64, @intCast(buffers.output_value.len)) +| 1;
-    const maximum_environment = saturatingAddU64(
-        4,
-        std.math.mul(u64, maximum_value, 2048) catch
-            std.math.maxInt(u64),
-    );
-    const maximum_call_environments = std.math.mul(
-        u64,
-        maximum_environment,
-        2,
-    ) catch std.math.maxInt(u64);
-    const maximum_state = saturatingAddU64(
-        saturatingAddU64(instance_length, maximum_call_environments),
-        256,
-    );
-    const maximum_request = saturatingAddU64(
-        saturatingAddU64(image_bytes.len, maximum_value),
-        512,
-    );
-    const required_output = saturatingAddU64(
-        saturatingAddU64(maximum_state, maximum_request),
-        outcome_header_length,
-    );
     const current_output: u64 = @max(
         @as(u64, @intCast(buffers.output_state.len)),
         @max(
@@ -756,12 +754,16 @@ fn capacityRequirement(
             ),
         ),
     );
+    const observed_output = if (capacity.output_bytes == 0)
+        current_output +| 1
+    else
+        capacity.output_bytes;
     const minimum_output = @max(
-        required_output,
         if (err == error.OutputCapacity)
-            current_output +| 1
+            observed_output
         else
             current_output,
+        current_output,
     );
     const current_scratch: u64 = @intCast(buffers.scratch.len);
     const required_scratch: u64 = if (envelope) |view|
@@ -781,17 +783,6 @@ fn capacityRequirement(
         .minimum_scratch_bytes = minimum_scratch,
         .minimum_memory_pages = 0,
     };
-    const layout: KernelArenaLayout = .{
-        .input_bytes = 0,
-        .output_bytes = 0,
-        .state_bytes = 0,
-        .candidate_state_bytes = 0,
-        .value_bytes = 0,
-        .request_bytes = 0,
-        .environment_bytes = 0,
-        .auxiliary_environment_bytes = 0,
-        .scratch_bytes = 0,
-    };
     const fixed_bytes = saturatingAddU64(
         4 << 10,
         @intCast(@sizeOf(image_v1.ValidationWorkspace)),
@@ -800,11 +791,35 @@ fn capacityRequirement(
         .minimum_input_bytes = requirement.minimum_input_bytes,
         .minimum_output_bytes = requirement.minimum_output_bytes,
         .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
-        .minimum_memory_pages = layout.minimumMemoryPagesFromBytes(
+        .minimum_memory_pages = minimumMemoryPagesForBuffers(
+            buffers,
             requirement,
             fixed_bytes,
         ),
     };
+}
+
+fn minimumMemoryPagesForBuffers(
+    buffers: Buffers,
+    requirement: CapacityRequirement,
+    fixed_bytes: u64,
+) u64 {
+    var total = saturatingAddU64(
+        fixed_bytes,
+        requirement.minimum_input_bytes,
+    );
+    inline for (std.meta.fields(Buffers)) |field| {
+        const current = @field(buffers, field.name).len;
+        const required = if (comptime std.mem.eql(u8, field.name, "scratch"))
+            requirement.minimum_scratch_bytes
+        else
+            requirement.minimum_output_bytes;
+        total = saturatingAddU64(
+            total,
+            @max(required, @as(u64, @intCast(current))),
+        );
+    }
+    return bytesToPages(total);
 }
 
 fn validateBufferOwnership(
@@ -856,6 +871,7 @@ fn initialState(
     output: []u8,
     environment_output: []u8,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error![]const u8 {
     const constructor = try image_v1.evaluatorConstructorRecord(
         image,
@@ -874,24 +890,23 @@ fn initialState(
         error.ScratchCapacity => return error.ScratchCapacity,
         else => return error.InvalidInitialArgs,
     };
-    const environment = reducer_clause_v1.encodeEnvironmentSlots(
+    const environment = try encodeEnvironment(
         constructor,
         null,
         &activation_slots,
         &slots,
         environment_output,
-    ) catch |err| switch (err) {
-        error.OutputCapacity => return error.OutputCapacity,
-        else => return error.InvalidInitialArgs,
-    };
+        capacity,
+    );
     const frames = [_]process_state_v1.Frame{.{
         .constructor_id = image.catalogs.initial_constructor_id,
         .environment = environment,
     }};
-    return process_state_v1.encode(
+    return process_state_v1.encodeTracked(
         image.catalogs.envelope.header.program_transition_digest,
         &frames,
         output,
+        &capacity.output_bytes,
     );
 }
 
@@ -901,6 +916,7 @@ fn advanceState(
     effect_result: ?[]const u8,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!Outcome {
     const state = process_state_v1.validate(
         state_bytes,
@@ -915,18 +931,26 @@ fn advanceState(
                 result_bytes,
                 buffers,
                 workspace,
+                capacity,
             );
-            return stepState(image, &successor, buffers, workspace);
+            return stepState(
+                image,
+                &successor,
+                buffers,
+                workspace,
+                capacity,
+            );
         }
         return currentRequest(
             image,
             &admitted,
             buffers,
             workspace,
+            capacity,
         );
     }
     if (effect_result != null) return error.UnexpectedEffectResult;
-    return stepState(image, &admitted, buffers, workspace);
+    return stepState(image, &admitted, buffers, workspace, capacity);
 }
 
 fn stepState(
@@ -934,6 +958,7 @@ fn stepState(
     admitted: *AdmittedState,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!Outcome {
     const state = admitted.state;
     var slots = admitted.slots;
@@ -947,6 +972,7 @@ fn stepState(
         buffers.output_value,
         buffers.scratch,
         workspace,
+        capacity,
     );
     const outcome: Outcome = switch (clause) {
         .progressed => |progressed| .{ .progressed = (try transitionState(
@@ -960,6 +986,7 @@ fn stepState(
             &slots,
             buffers,
             workspace,
+            capacity,
         )).state.bytes },
         .requested => |request| blk: {
             const await_constructor_id = try image_v1.evaluatorSuspensionConstructor(
@@ -977,6 +1004,7 @@ fn stepState(
                 &activation_slots,
                 &slots,
                 buffers.environment,
+                capacity,
             );
             const parked_admitted = try replaceTopAdmitted(
                 image,
@@ -987,6 +1015,7 @@ fn stepState(
                 },
                 buffers.output_state,
                 workspace,
+                capacity,
             );
             break :blk try makeRequest(
                 image,
@@ -995,6 +1024,7 @@ fn stepState(
                 request.payload,
                 buffers.output_request,
                 workspace,
+                capacity,
             );
         },
         .explicit_yield => |continuation| .{
@@ -1009,6 +1039,7 @@ fn stepState(
                 &slots,
                 buffers,
                 workspace,
+                capacity,
             )).state.bytes,
         },
         .completed => |value| .{ .completed = value },
@@ -1023,6 +1054,7 @@ fn stepState(
             &slots,
             buffers,
             workspace,
+            capacity,
         )).state.bytes },
         .return_to_caller => |return_value| .{
             .progressed = (try returnToCaller(
@@ -1031,6 +1063,7 @@ fn stepState(
                 return_value,
                 buffers,
                 workspace,
+                capacity,
             )).state.bytes,
         },
     };
@@ -1047,6 +1080,7 @@ fn callState(
     slots: *[1024]Slot,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!AdmittedState {
     const return_constructor_id = try image_v1.evaluatorSuspensionConstructor(
         image,
@@ -1063,6 +1097,7 @@ fn callState(
         activation_slots,
         slots,
         buffers.environment,
+        capacity,
     );
 
     const target_segment_id = readInt(u16, callee, 0);
@@ -1096,6 +1131,7 @@ fn callState(
         slots,
         slots,
         buffers.auxiliary_environment,
+        capacity,
     );
     return replaceTopAndAppendAdmitted(
         image,
@@ -1107,6 +1143,7 @@ fn callState(
         },
         buffers.output_state,
         workspace,
+        capacity,
     );
 }
 
@@ -1161,6 +1198,7 @@ fn returnToCaller(
     return_value: []const u8,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!AdmittedState {
     const parent = try process_state_v1.parentFrame(state);
     const parent_constructor = try image_v1.evaluatorConstructorRecord(
@@ -1217,6 +1255,7 @@ fn returnToCaller(
         &activation_slots,
         &slots,
         buffers.environment,
+        capacity,
     );
     return replaceParentAndDropTopAdmitted(
         image,
@@ -1227,6 +1266,7 @@ fn returnToCaller(
         },
         buffers.output_state,
         workspace,
+        capacity,
     );
 }
 
@@ -1235,15 +1275,17 @@ fn currentRequest(
     admitted: *const AdmittedState,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!Outcome {
     const parts = try pendingRequestParts(
         image,
         admitted.constructor,
         &admitted.slots,
     );
-    if (buffers.output_state.len < admitted.state.bytes.len) {
-        return error.OutputCapacity;
-    }
+    try capacity.requireOutput(
+        buffers.output_state.len,
+        admitted.state.bytes.len,
+    );
     @memcpy(
         buffers.output_state[0..admitted.state.bytes.len],
         admitted.state.bytes,
@@ -1255,6 +1297,7 @@ fn currentRequest(
         parts.payload,
         buffers.output_request,
         workspace,
+        capacity,
     );
 }
 
@@ -1293,6 +1336,7 @@ fn makeRequest(
     payload: []const u8,
     output: []u8,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!Outcome {
     const request_input = try requestInput(
         image,
@@ -1301,9 +1345,10 @@ fn makeRequest(
         payload,
         workspace,
     );
-    const request = try process_effect_v1.encodeRequest(
+    const request = try process_effect_v1.encodeRequestTracked(
         request_input,
         output,
+        &capacity.output_bytes,
     );
     return .{ .requested = .{ .state = parked_state, .request = request } };
 }
@@ -1350,6 +1395,7 @@ fn resumePending(
     result_bytes: []const u8,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!AdmittedState {
     const state = admitted.state;
     const constructor = admitted.constructor;
@@ -1421,6 +1467,7 @@ fn resumePending(
         &activation_slots,
         &slots,
         buffers.environment,
+        capacity,
     );
     return replaceTopAdmitted(
         image,
@@ -1431,6 +1478,7 @@ fn resumePending(
         },
         buffers.candidate_state,
         workspace,
+        capacity,
     );
 }
 
@@ -1445,6 +1493,7 @@ fn transitionState(
     slots: *[1024]Slot,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!AdmittedState {
     const target_segment_id = readInt(u16, edge, 0);
     const target_segment = try image_v1.evaluatorSegmentRecord(
@@ -1468,6 +1517,7 @@ fn transitionState(
         activation_slots,
         slots,
         buffers.environment,
+        capacity,
     );
     return replaceTopAdmitted(
         image,
@@ -1475,6 +1525,7 @@ fn transitionState(
         .{ .constructor_id = constructor_id, .environment = environment },
         buffers.output_state,
         workspace,
+        capacity,
     );
 }
 
@@ -1484,8 +1535,14 @@ fn replaceTopAdmitted(
     frame: process_state_v1.Frame,
     output: []u8,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!AdmittedState {
-    const successor = try process_state_v1.replaceTop(state, frame, output);
+    const successor = try process_state_v1.replaceTopTracked(
+        state,
+        frame,
+        output,
+        &capacity.output_bytes,
+    );
     return admitProducedSuffix(
         image,
         successor,
@@ -1501,12 +1558,14 @@ fn replaceTopAndAppendAdmitted(
     child: process_state_v1.Frame,
     output: []u8,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!AdmittedState {
-    const successor = try process_state_v1.replaceTopAndAppend(
+    const successor = try process_state_v1.replaceTopAndAppendTracked(
         state,
         parent,
         child,
         output,
+        &capacity.output_bytes,
     );
     return admitProducedSuffix(
         image,
@@ -1522,11 +1581,13 @@ fn replaceParentAndDropTopAdmitted(
     parent: process_state_v1.Frame,
     output: []u8,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
 ) Error!AdmittedState {
-    const successor = try process_state_v1.replaceParentAndDropTop(
+    const successor = try process_state_v1.replaceParentAndDropTopTracked(
         state,
         parent,
         output,
+        &capacity.output_bytes,
     );
     return admitProducedSuffix(
         image,
@@ -1828,7 +1889,18 @@ fn encodeEnvironment(
     activation_slots: *const [1024]Slot,
     slots: *const [1024]Slot,
     output: []u8,
+    capacity: *CapacityTracker,
 ) Error![]const u8 {
+    const required = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        activation_entry,
+        activation_slots,
+        slots,
+    ) catch |err| switch (err) {
+        error.InvalidState => return error.InvalidProcessState,
+        else => return err,
+    };
+    try capacity.requireOutput(output.len, required);
     return reducer_clause_v1.encodeEnvironmentSlots(
         constructor,
         activation_entry,
