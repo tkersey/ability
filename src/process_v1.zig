@@ -3,10 +3,11 @@ pub const effect = @import("process_effect_v1");
 const semantics = @import("process_advance_v1");
 const state_codec = @import("process_state_v1");
 
-pub const advance = semantics.advance;
+pub const advance = semantics.advanceInStorage;
 pub const encodeKernelInput = semantics.encodeKernelInput;
 pub const validateState = semantics.validateState;
-pub const Buffers = semantics.Buffers;
+pub const CapacityStorage = semantics.CapacityStorage;
+pub const StorageCapacities = semantics.StorageCapacities;
 pub const CapacityRequirement = semantics.CapacityRequirement;
 pub const Instance = semantics.Instance;
 pub const Outcome = semantics.Outcome;

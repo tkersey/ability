@@ -3,41 +3,27 @@ const fixture = @import("process_kernel_fixture");
 const process_advance_v1 = @import("process_advance_v1");
 const std = @import("std");
 
-const Arena = process_advance_v1.CapacityArena;
-const Storage = struct {
-    input: Arena(.input, 128 * 1024) = .{},
-    output: Arena(.output, 64) = .{},
-    state: Arena(.output, 64 * 1024) = .{},
-    value: Arena(.output, 64 * 1024) = .{},
-    request: Arena(.output, 64 * 1024) = .{},
-    candidate: Arena(.output, 64 * 1024) = .{},
-    environment: Arena(.output, 64 * 1024) = .{},
-    auxiliary_environment: Arena(.output, 64 * 1024) = .{},
-    scratch: Arena(.scratch, 1024 * 1024) = .{},
-
-    fn buffers(self: *@This()) process_advance_v1.Buffers {
-        return .{
-            .output_state = &self.state.bytes,
-            .output_value = &self.value.bytes,
-            .output_request = &self.request.bytes,
-            .candidate_state = &self.candidate.bytes,
-            .environment = &self.environment.bytes,
-            .auxiliary_environment = &self.auxiliary_environment.bytes,
-            .scratch = &self.scratch.bytes,
-        };
-    }
-};
+const Storage = process_advance_v1.CapacityStorage(.{
+    .input = 128 * 1024,
+    .output = 64,
+    .state = 64 * 1024,
+    .value = 64 * 1024,
+    .request = 64 * 1024,
+    .environment = 64 * 1024,
+    .scratch = 1024 * 1024,
+});
 
 pub fn main(init: std.process.Init) !void {
     var initial: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial, 17, .little);
     var storage: Storage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
-    const attempt = try process_advance_v1.advanceAttempt(
+    const attempt = try process_advance_v1.advanceAttemptInStorage(
         &fixture.CapacityImage.bytes,
         .{ .initial_args = &initial },
         null,
-        storage.buffers(),
+        &storage,
+        64,
         &workspace,
     );
     const outcome = attempt.outcome;

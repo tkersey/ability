@@ -17,24 +17,15 @@ const environment_capacity = process_kernel_options.environment_capacity;
 const scratch_capacity = process_kernel_options.scratch_capacity;
 const error_capacity = process_kernel_options.error_capacity;
 
-const Arena = process_advance_v1.CapacityArena;
-const KernelStorage = struct {
-    input: Arena(.input, input_capacity) = .{},
-    output: Arena(.output, output_capacity) = .{},
-    state: Arena(.output, state_capacity) = .{},
-    value: Arena(.output, value_capacity) = .{},
-    request: Arena(.output, request_capacity) = .{},
-    candidate: Arena(.output, state_capacity) = .{},
-    environment: Arena(.output, environment_capacity) = .{},
-    auxiliary_environment: Arena(.output, environment_capacity) = .{},
-    scratch: Arena(.scratch, scratch_capacity) = .{},
-};
-
-comptime {
-    if (process_advance_v1.capacityArenaCount(KernelStorage) != 9) {
-        @compileError("Process kernel capacity arena topology changed");
-    }
-}
+const KernelStorage = process_advance_v1.CapacityStorage(.{
+    .input = input_capacity,
+    .output = output_capacity,
+    .state = state_capacity,
+    .value = value_capacity,
+    .request = request_capacity,
+    .environment = environment_capacity,
+    .scratch = scratch_capacity,
+});
 
 var storage: KernelStorage = .{};
 var error_storage: [error_capacity]u8 align(16) = undefined;
@@ -133,19 +124,12 @@ fn execute(input: []const u8) !u32 {
         return error.MalformedKernelInput;
 
     validation_workspace = .{};
-    const attempt = try process_advance_v1.advanceAttempt(
+    const attempt = try process_advance_v1.advanceAttemptInStorage(
         decoded.image,
         decoded.instance,
         decoded.effect_result,
-        .{
-            .output_state = &storage.state.bytes,
-            .output_value = &storage.value.bytes,
-            .output_request = &storage.request.bytes,
-            .candidate_state = &storage.candidate.bytes,
-            .environment = &storage.environment.bytes,
-            .auxiliary_environment = &storage.auxiliary_environment.bytes,
-            .scratch = &storage.scratch.bytes,
-        },
+        &storage,
+        @wasmMemorySize(0),
         &validation_workspace,
     );
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(

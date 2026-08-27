@@ -346,7 +346,7 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
     std.mem.writeInt(u32, &initial_args, 41, .little);
     var first_storage: Storage = .{};
     var first_workspace: boundary.image.ValidationWorkspace = .{};
-    const first = try boundary.process_v1.advance(
+    const first = try process_advance_v1.advance(
         &Image.bytes,
         .{ .initial_args = &initial_args },
         null,
@@ -622,7 +622,7 @@ test "Process preserves activation across helper-entry backedges" {
 
     var call_storage: Storage = .{};
     var call_workspace: boundary.image.ValidationWorkspace = .{};
-    const call = try boundary.process_v1.advance(
+    const call = try process_advance_v1.advance(
         &BackedgeImage.bytes,
         .{ .initial_args = &initial_args },
         null,
@@ -632,7 +632,7 @@ test "Process preserves activation across helper-entry backedges" {
 
     var branch_storage: Storage = .{};
     var branch_workspace: boundary.image.ValidationWorkspace = .{};
-    const branch = try boundary.process_v1.advance(
+    const branch = try process_advance_v1.advance(
         &BackedgeImage.bytes,
         .{ .process_state = call.progressed },
         null,
@@ -642,7 +642,7 @@ test "Process preserves activation across helper-entry backedges" {
 
     var yield_storage: Storage = .{};
     var yield_workspace: boundary.image.ValidationWorkspace = .{};
-    const yielded = try boundary.process_v1.advance(
+    const yielded = try process_advance_v1.advance(
         &BackedgeImage.bytes,
         .{ .process_state = branch.progressed },
         null,
@@ -1654,10 +1654,6 @@ test "NeedsCapacity adds every arena growth delta to live pages" {
 test "capacity storage fold cannot omit a newly declared arena" {
     var storage: ExtendedCapacityStorage = .{};
     try std.testing.expectEqual(
-        @as(usize, 10),
-        process_advance_v1.capacityArenaCount(ExtendedCapacityStorage),
-    );
-    try std.testing.expectEqual(
         @as(u64, 11),
         process_advance_v1.minimumMemoryPagesForStorage(
             &storage,
@@ -1669,6 +1665,45 @@ test "capacity storage fold cannot omit a newly declared arena" {
             },
             1,
         ),
+    );
+}
+
+test "public native advance derives pages from its physical storage" {
+    const NativeStorage = boundary.process_v1.CapacityStorage(.{
+        .input = 128 * 1024,
+        .output = 64,
+        .state = 4096,
+        .value = 4096,
+        .request = 0,
+        .environment = 4096,
+        .scratch = 64 * 1024,
+    });
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 17, .little);
+    var storage: NativeStorage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const outcome = try boundary.process_v1.advance(
+        &Image.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        &storage,
+        1,
+        &workspace,
+    );
+    const requirement = outcome.needs_capacity;
+    const native_storage_bytes: u64 = @sizeOf(NativeStorage);
+    const native_storage_pages = native_storage_bytes / 65536 +
+        @intFromBool(native_storage_bytes % 65536 != 0);
+    try std.testing.expect(
+        requirement.minimum_memory_pages >= native_storage_pages,
+    );
+    try std.testing.expectEqual(
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
+            requirement,
+            1,
+        ),
+        requirement.minimum_memory_pages,
     );
 }
 

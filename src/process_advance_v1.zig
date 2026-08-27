@@ -38,6 +38,16 @@ pub const Buffers = struct {
     scratch: []u8,
 };
 
+pub const StorageCapacities = struct {
+    input: usize,
+    output: usize,
+    state: usize,
+    value: usize,
+    request: usize,
+    environment: usize,
+    scratch: usize,
+};
+
 pub const Outcome = union(enum) {
     progressed: []const u8,
     requested: struct {
@@ -320,17 +330,19 @@ pub fn CapacityArena(
     };
 }
 
-pub fn capacityArenaCount(comptime Storage: type) usize {
-    var count: usize = 0;
-    inline for (std.meta.fields(Storage)) |field| {
-        if (!@hasDecl(field.type, "capacity_class") or
-            !@hasField(field.type, "bytes"))
-        {
-            @compileError("every capacity storage field must be a CapacityArena");
-        }
-        count += 1;
-    }
-    return count;
+pub fn CapacityStorage(comptime capacities: StorageCapacities) type {
+    const Arena = CapacityArena;
+    return struct {
+        input: Arena(.input, capacities.input) = .{},
+        output: Arena(.output, capacities.output) = .{},
+        state: Arena(.output, capacities.state) = .{},
+        value: Arena(.output, capacities.value) = .{},
+        request: Arena(.output, capacities.request) = .{},
+        candidate: Arena(.output, capacities.state) = .{},
+        environment: Arena(.output, capacities.environment) = .{},
+        auxiliary_environment: Arena(.output, capacities.environment) = .{},
+        scratch: Arena(.scratch, capacities.scratch) = .{},
+    };
 }
 
 pub fn minimumMemoryPagesForStorage(
@@ -358,9 +370,11 @@ pub fn minimumMemoryPagesForStorage(
             required_physical -| current_physical,
         );
     }
+    const storage_pages = bytesToPages(@sizeOf(Storage));
+    const effective_live_pages = @max(live_memory_pages, storage_pages);
     const live_bytes = std.math.mul(
         u64,
-        live_memory_pages,
+        effective_live_pages,
         65536,
     ) catch std.math.maxInt(u64);
     return bytesToPages(saturatingAddU64(live_bytes, growth));
@@ -492,6 +506,59 @@ pub fn advance(
     )).outcome;
 }
 
+/// Execute through one explicit physical storage carrier. Semantic reduction
+/// records byte demand; this wrapper is the sole native page authority.
+pub fn advanceInStorage(
+    image_bytes: []const u8,
+    instance: Instance,
+    effect_result: ?[]const u8,
+    storage: anytype,
+    minimum_memory_pages_floor: u64,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!Outcome {
+    return (try advanceAttemptInStorage(
+        image_bytes,
+        instance,
+        effect_result,
+        storage,
+        minimum_memory_pages_floor,
+        workspace,
+    )).outcome;
+}
+
+pub fn advanceAttemptInStorage(
+    image_bytes: []const u8,
+    instance: Instance,
+    effect_result: ?[]const u8,
+    storage: anytype,
+    minimum_memory_pages_floor: u64,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!ReductionAttempt {
+    var attempt = try advanceAttempt(
+        image_bytes,
+        instance,
+        effect_result,
+        buffersFromStorage(storage),
+        workspace,
+    );
+    switch (attempt.outcome) {
+        .needs_capacity => |requirement| {
+            attempt.outcome = .{ .needs_capacity = .{
+                .minimum_input_bytes = requirement.minimum_input_bytes,
+                .minimum_output_bytes = requirement.minimum_output_bytes,
+                .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
+                .minimum_memory_pages = minimumMemoryPagesForStorage(
+                    storage,
+                    requirement,
+                    minimum_memory_pages_floor,
+                ),
+            } };
+        },
+        else => {},
+    }
+    return attempt;
+}
+
 pub fn advanceAttempt(
     image_bytes: []const u8,
     instance: Instance,
@@ -525,7 +592,6 @@ pub fn advanceAttempt(
             image_bytes,
             instance,
             effect_result,
-            buffers,
             capacity,
             err,
         ) },
@@ -734,7 +800,6 @@ fn capacityRequirement(
     image_bytes: []const u8,
     instance: Instance,
     effect_result: ?[]const u8,
-    buffers: Buffers,
     capacity: CapacityTracker,
     err: anyerror,
 ) Error!CapacityRequirement {
@@ -761,49 +826,24 @@ fn capacityRequirement(
     {
         return error.InvalidCapacityEvidence;
     }
-    const requirement: CapacityRequirement = .{
+    return .{
         .minimum_input_bytes = input,
         .minimum_output_bytes = capacity.output_bytes,
         .minimum_scratch_bytes = capacity.scratch_bytes,
         .minimum_memory_pages = 0,
     };
-    const fixed_bytes = saturatingAddU64(
-        4 << 10,
-        @intCast(@sizeOf(image_v1.ValidationWorkspace)),
-    );
-    return .{
-        .minimum_input_bytes = requirement.minimum_input_bytes,
-        .minimum_output_bytes = requirement.minimum_output_bytes,
-        .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
-        .minimum_memory_pages = minimumMemoryPagesForBuffers(
-            buffers,
-            requirement,
-            fixed_bytes,
-        ),
-    };
 }
 
-fn minimumMemoryPagesForBuffers(
-    buffers: Buffers,
-    requirement: CapacityRequirement,
-    fixed_bytes: u64,
-) u64 {
-    var total = saturatingAddU64(
-        fixed_bytes,
-        requirement.minimum_input_bytes,
-    );
-    inline for (std.meta.fields(Buffers)) |field| {
-        const current = @field(buffers, field.name).len;
-        const required = if (comptime std.mem.eql(u8, field.name, "scratch"))
-            requirement.minimum_scratch_bytes
-        else
-            requirement.minimum_output_bytes;
-        total = saturatingAddU64(
-            total,
-            @max(required, @as(u64, @intCast(current))),
-        );
-    }
-    return bytesToPages(total);
+fn buffersFromStorage(storage: anytype) Buffers {
+    return .{
+        .output_state = &storage.state.bytes,
+        .output_value = &storage.value.bytes,
+        .output_request = &storage.request.bytes,
+        .candidate_state = &storage.candidate.bytes,
+        .environment = &storage.environment.bytes,
+        .auxiliary_environment = &storage.auxiliary_environment.bytes,
+        .scratch = &storage.scratch.bytes,
+    };
 }
 
 fn validateBufferOwnership(

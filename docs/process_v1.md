@@ -13,21 +13,26 @@ with byte-identical State, site, continuation, and payload intentionally has the
 same identity. Programs requiring occurrence distinction must author a counter
 or nonce in portable State; exactly-once effects are not claimed.
 
-For the native buffer API, allocate at least `minimum_output_bytes` for each
-output/candidate/environment arena and at least `minimum_scratch_bytes` for the
-scratch arena before retrying the same input. Every mutable output, scratch,
-and validation arena must be disjoint from all source bytes and from every
-other mutable arena; readonly source slices may overlap. Invalid mutable
-aliases reject before writing. Every State-bearing outcome is returned from the
-supplied output-State arena, including byte-identical pending-request recovery.
+For the native reference API, instantiate `boundary.process_v1.CapacityStorage`
+with the physical interpreter's arena capacities and pass its current page
+floor to `advance`. The storage product derives all mutable reducer buffers and
+is the sole owner of `minimum_memory_pages`; semantic reduction records only
+byte demand. Allocate at least `minimum_output_bytes` for each output-class
+arena and at least `minimum_scratch_bytes` for the scratch arena before retrying
+the same input. Every mutable output, scratch, and validation arena must be
+disjoint from all source bytes and from every other mutable arena; readonly
+source slices may overlap. Invalid mutable aliases reject before writing. Every
+State-bearing outcome is returned from the supplied storage product, including
+byte-identical pending-request recovery.
 An invocation-local capacity tracker records the exact bytes required at each
 output producer and reducer scratch allocation before a capacity error.
 `NeedsCapacity` therefore preserves the current reduction requirement rather
 than reconstructing a global maximum from BPI1 schema bounds or substituting
 an unrelated arena's existing capacity.
 Internally, one `ReductionAttempt` carries the outcome and that capacity
-evidence together through final PKO1 serialization; the public `advance`
-operation projects only its normative outcome.
+evidence together through final PKO1 serialization. The public `advance`
+operation attaches page evidence from its `CapacityStorage` and projects only
+the normative outcome.
 
 `ABL_PST1` stores the program transition digest and a minimally encoded frame
 sequence. Each frame contains its continuation-constructor identity and exact
@@ -56,7 +61,10 @@ descriptors before reading payload bytes. When preparation admits the input,
 the adapter reads exactly those bytes through the same descriptors, rejects a
 changed length, copies only BPI1 and instance/result bytes, invokes one kernel
 operation, writes the canonical outcome bytes, and exits. The kernel itself is
-also admitted as one bounded regular-file descriptor before materialization.
+also admitted as one nonblocking regular-file descriptor before materialization.
+The reference relay's 64 MiB kernel ceiling is an operational limit of that
+host implementation, not Process semantics; a larger compatible fixed kernel
+can be transferred to another conforming host.
 If the fixed input arena cannot hold those payloads, preparation returns a
 canonical transactional `NeedsCapacity` outcome before any payload copy.
 Kernel-input and kernel-outcome framing uses `u64` component lengths. The

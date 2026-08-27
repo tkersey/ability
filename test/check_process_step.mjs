@@ -109,6 +109,40 @@ try {
       wide.stdout.readBigUInt64LE(32) !== BigInt(wideLength + 40)) {
     throw new Error("relay materialized wide input before NeedsCapacity");
   }
+  const oversizedKernel = path.join(temporary, "oversized-kernel.wasm");
+  const oversizedKernelFile = fs.openSync(oversizedKernel, "w");
+  try {
+    fs.ftruncateSync(oversizedKernelFile, 64 * 1024 * 1024 + 1);
+  } finally {
+    fs.closeSync(oversizedKernelFile);
+  }
+  const boundedKernel = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", oversizedKernel,
+    "--image", emptyImage,
+    "--initial-args", emptyInitial,
+  ]);
+  if (boundedKernel.status === 0 ||
+      !boundedKernel.stderr.toString("utf8").includes(
+        "kernel exceeds this relay's operational byte limit",
+      )) {
+    throw new Error("relay materialized an oversized kernel descriptor");
+  }
+  const fifo = path.join(temporary, "input.fifo");
+  const madeFifo = spawnSync("mkfifo", [fifo]);
+  if (madeFifo.status !== 0) throw new Error("could not create FIFO fixture");
+  const fifoInput = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", kernel,
+    "--image", emptyImage,
+    "--initial-args", fifo,
+  ], { timeout: 2000 });
+  if (fifoInput.status === 0 || fifoInput.error?.code === "ETIMEDOUT" ||
+      !fifoInput.stderr.toString("utf8").includes(
+        "instance must be a regular file",
+      )) {
+    throw new Error("relay blocked on a FIFO before regular-file admission");
+  }
   const nonRegular = spawnSync(process.execPath, [
     adapter,
     "--kernel", kernel,

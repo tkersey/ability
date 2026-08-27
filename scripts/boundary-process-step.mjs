@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 
+const maximumKernelBytes = 64n * 1024n * 1024n;
+
 const options = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
   const name = process.argv[index];
@@ -22,7 +24,7 @@ const instancePath = statePath ?? initialPath;
 const resultPath = options.get("--result");
 const opened = [];
 try {
-  const kernelFile = openPayload(kernelPath, "kernel");
+  const kernelFile = openPayload(kernelPath, "kernel", maximumKernelBytes);
   const imageFile = openPayload(imagePath, "image");
   const instanceFile = openPayload(instancePath, "instance");
   const resultFile = resultPath === undefined
@@ -47,6 +49,7 @@ try {
     resultFile?.size ?? 0n,
   );
   if (inputLength === 0) {
+    verifyLengths([imageFile, instanceFile, resultFile]);
     const capacity = kernelOutput(exports, memory);
     if (capacity.length === 0) {
       throw new Error("kernel cannot prepare the Process input");
@@ -90,14 +93,29 @@ function wasmOffset(value) {
   return value >>> 0;
 }
 
-function openPayload(path, label) {
-  const fd = fs.openSync(path, "r");
+function openPayload(path, label, maximumBytes = null) {
+  const fd = fs.openSync(
+    path,
+    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+  );
   const file = { fd, size: 0n, label };
   opened.push(file);
   const stat = fs.fstatSync(fd, { bigint: true });
   if (!stat.isFile()) throw new Error(label + " must be a regular file");
+  if (maximumBytes !== null && stat.size > maximumBytes) {
+    throw new Error(label + " exceeds this relay's operational byte limit");
+  }
   file.size = stat.size;
   return file;
+}
+
+function verifyLengths(files) {
+  for (const file of files) {
+    if (file !== null &&
+        fs.fstatSync(file.fd, { bigint: true }).size !== file.size) {
+      throw new Error(file.label + " changed after preflight");
+    }
+  }
 }
 
 function readExact(file, label) {
