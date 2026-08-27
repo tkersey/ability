@@ -133,7 +133,7 @@ fn execute(input: []const u8) !u32 {
         return error.MalformedKernelInput;
 
     validation_workspace = .{};
-    const outcome = try process_advance_v1.advance(
+    const attempt = try process_advance_v1.advanceAttempt(
         decoded.image,
         decoded.instance,
         decoded.effect_result,
@@ -149,7 +149,8 @@ fn execute(input: []const u8) !u32 {
         &validation_workspace,
     );
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
-        outcome,
+        attempt.outcome,
+        attempt.capacity,
         input.len,
         &storage,
         @wasmMemorySize(0),

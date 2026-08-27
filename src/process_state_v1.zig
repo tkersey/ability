@@ -45,6 +45,11 @@ pub const StateView = struct {
     }
 };
 
+pub const MutationView = struct {
+    state: StateView,
+    first_changed_frame: u64,
+};
+
 pub const FrameIterator = struct {
     bytes: []const u8,
     cursor: usize,
@@ -196,7 +201,7 @@ pub fn replaceTop(
     replacement: Frame,
     output: []u8,
 ) Error!StateView {
-    return replaceTopTracked(state, replacement, output, null);
+    return (try replaceTopTracked(state, replacement, output, null)).state;
 }
 
 pub fn replaceTopTracked(
@@ -204,7 +209,7 @@ pub fn replaceTopTracked(
     replacement: Frame,
     output: []u8,
     required_output: ?*u64,
-) Error!StateView {
+) Error!MutationView {
     try rejectMutationAliases(output, state.bytes, &.{replacement});
     const top = try topFrame(state);
     var required = fixed_header_length;
@@ -240,7 +245,10 @@ pub fn replaceTopTracked(
     append(output, &cursor, replacement.environment);
     if (cursor != required) return error.InvalidEncoding;
     const encoded = output[0..required];
-    return validate(encoded, state.program_transition_digest);
+    return .{
+        .state = try validate(encoded, state.program_transition_digest),
+        .first_changed_frame = state.frame_count - 1,
+    };
 }
 
 pub fn replaceTopAndAppend(
@@ -249,13 +257,13 @@ pub fn replaceTopAndAppend(
     appended: Frame,
     output: []u8,
 ) Error!StateView {
-    return replaceTopAndAppendTracked(
+    return (try replaceTopAndAppendTracked(
         state,
         replacement,
         appended,
         output,
         null,
-    );
+    )).state;
 }
 
 pub fn replaceTopAndAppendTracked(
@@ -264,7 +272,7 @@ pub fn replaceTopAndAppendTracked(
     appended: Frame,
     output: []u8,
     required_output: ?*u64,
-) Error!StateView {
+) Error!MutationView {
     try rejectMutationAliases(
         output,
         state.bytes,
@@ -292,7 +300,10 @@ pub fn replaceTopAndAppendTracked(
     try appendFrame(output, &cursor, appended);
     if (cursor != required) return error.InvalidEncoding;
     const encoded = output[0..required];
-    return validate(encoded, state.program_transition_digest);
+    return .{
+        .state = try validate(encoded, state.program_transition_digest),
+        .first_changed_frame = state.frame_count - 1,
+    };
 }
 
 pub fn replaceParentAndDropTop(
@@ -300,7 +311,12 @@ pub fn replaceParentAndDropTop(
     replacement: Frame,
     output: []u8,
 ) Error!StateView {
-    return replaceParentAndDropTopTracked(state, replacement, output, null);
+    return (try replaceParentAndDropTopTracked(
+        state,
+        replacement,
+        output,
+        null,
+    )).state;
 }
 
 pub fn replaceParentAndDropTopTracked(
@@ -308,7 +324,7 @@ pub fn replaceParentAndDropTopTracked(
     replacement: Frame,
     output: []u8,
     required_output: ?*u64,
-) Error!StateView {
+) Error!MutationView {
     try rejectMutationAliases(output, state.bytes, &.{replacement});
     if (state.frame_count < 2) return error.InvalidState;
     var iterator = state.iterator();
@@ -344,7 +360,10 @@ pub fn replaceParentAndDropTopTracked(
     try appendFrame(output, &cursor, replacement);
     if (cursor != required) return error.InvalidEncoding;
     const encoded = output[0..required];
-    return validate(encoded, state.program_transition_digest);
+    return .{
+        .state = try validate(encoded, state.program_transition_digest),
+        .first_changed_frame = frame_count - 1,
+    };
 }
 
 pub fn parentFrame(state: StateView) Error!FrameSpan {

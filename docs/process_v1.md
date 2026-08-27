@@ -25,6 +25,9 @@ output producer and reducer scratch allocation before a capacity error.
 `NeedsCapacity` therefore preserves the current reduction requirement rather
 than reconstructing a global maximum from BPI1 schema bounds or substituting
 an unrelated arena's existing capacity.
+Internally, one `ReductionAttempt` carries the outcome and that capacity
+evidence together through final PKO1 serialization; the public `advance`
+operation projects only its normative outcome.
 
 `ABL_PST1` stores the program transition digest and a minimally encoded frame
 sequence. Each frame contains its continuation-constructor identity and exact
@@ -38,10 +41,12 @@ One `advance` invocation performs that full admission once and carries an
 internal, non-serializable admitted top-frame projection through the reduction.
 State encoders return the canonical `StateView` they already validate. Every
 internal State producer must return that refinement and declare the exact
-changed frame suffix through the same mutation helper that serializes it; one
-checked constructor admits every frame in that suffix and their internal stack
+changed frame suffix through the same mutation carrier that serializes it; the
+codec-owned `MutationView` carries the first changed frame into one admission
+constructor, which admits every frame in that suffix and their internal stack
 pairs, plus the pair crossing from the preserved prefix, before publishing
-canonical bytes.
+canonical bytes. Initial construction returns bound `AdmittedState` directly
+to the first reduction instead of decoding and admitting its environment again.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic

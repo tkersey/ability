@@ -922,9 +922,8 @@ test "Process NeedsCapacity is transactional and retryable" {
         },
         &hidden_workspace,
     );
-    const image_envelope = try boundary.image.validateEnvelope(&Image.bytes);
     try std.testing.expectEqual(
-        image_envelope.header.maximum_kernel_scratch_bytes,
+        @as(u64, 0),
         hidden.needs_capacity.minimum_scratch_bytes,
     );
 }
@@ -1411,7 +1410,7 @@ test "Process call production admits every changed frame" {
         child = frame;
     }
     const changed_parent = parent orelse return error.TestUnexpectedResult;
-    const changed_child = child orelse return error.TestUnexpectedResult;
+    _ = child orelse return error.TestUnexpectedResult;
     try std.testing.expect(changed_parent.frame.environment.len >= 4);
     var forged: [128 * 1024]u8 = undefined;
     var found_omission_witness = false;
@@ -1437,10 +1436,7 @@ test "Process call production admits every changed frame" {
         process_advance_v1.testing.validateProducedSuffix(
             &RecursiveImage.bytes,
             forged[0..authentic.len],
-            &.{
-                changed_parent.frame.constructor_id,
-                changed_child.frame.constructor_id,
-            },
+            state.frame_count - 2,
             &complete_scratch,
             &complete_workspace,
         ) catch |err| {
@@ -1533,7 +1529,7 @@ test "Process changed suffix admits its preserved-prefix boundary" {
             process_advance_v1.testing.validateProducedSuffix(
                 &RecursiveImage.bytes,
                 forged[0..authentic.len],
-                &.{changed_child.frame.constructor_id},
+                state.frame_count - 1,
                 &suffix_scratch,
                 &suffix_workspace,
             ),
@@ -1626,6 +1622,7 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
             .minimum_scratch_bytes = std.math.maxInt(u64),
             .minimum_memory_pages = 0,
         } },
+        .{},
         1,
         &storage,
         0,

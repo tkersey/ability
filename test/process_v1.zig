@@ -166,6 +166,41 @@ test "Process State mutation codecs reject every source alias before writing" {
     );
 }
 
+test "Process State mutation carrier owns its changed suffix cut" {
+    const digest = [_]u8{0x72} ** 32;
+    const frames = [_]process_state_v1.Frame{
+        .{ .constructor_id = 1, .environment = &.{1} },
+        .{ .constructor_id = 2, .environment = &.{2} },
+    };
+    var state_storage: [192]u8 = undefined;
+    const state = try process_state_v1.encode(
+        digest,
+        &frames,
+        &state_storage,
+    );
+    var successor_storage: [192]u8 = undefined;
+    var required: u64 = 0;
+    const mutation = try process_state_v1.replaceTopAndAppendTracked(
+        state,
+        .{ .constructor_id = 3, .environment = &.{3} },
+        .{ .constructor_id = 4, .environment = &.{4} },
+        &successor_storage,
+        &required,
+    );
+    try std.testing.expectEqual(
+        state.frame_count - 1,
+        mutation.first_changed_frame,
+    );
+    try std.testing.expectEqual(
+        state.frame_count + 1,
+        mutation.state.frame_count,
+    );
+    try std.testing.expectEqual(
+        @as(u64, mutation.state.bytes.len),
+        required,
+    );
+}
+
 test "ABL_ERQ1 and ABL_ERS1 bind the current request and resume schema" {
     const payload_schema = [_]u8{4} ** 32;
     const resume_schema = [_]u8{5} ** 32;

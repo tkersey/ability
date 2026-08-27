@@ -519,6 +519,26 @@ pub fn loadEnvironmentSlots(
     activation_slots: ?*[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
+    return loadEnvironmentSlotsTracked(
+        image,
+        constructor,
+        environment,
+        slots,
+        activation_slots,
+        workspace,
+        null,
+    );
+}
+
+pub fn loadEnvironmentSlotsTracked(
+    image: anytype,
+    constructor: []const u8,
+    environment: []const u8,
+    slots: *[1024]Slot,
+    activation_slots: ?*[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+    capacity: ?*CapacityTracker,
+) Error!LoadedEnvironment {
     const loaded = try decodeEnvironmentSlots(
         image,
         constructor,
@@ -527,7 +547,13 @@ pub fn loadEnvironmentSlots(
         activation_slots,
         workspace,
     );
-    try validatePathInvariants(image, constructor, slots, workspace);
+    try validatePathInvariantsTracked(
+        image,
+        constructor,
+        slots,
+        workspace,
+        capacity,
+    );
     return loaded;
 }
 
@@ -1680,6 +1706,22 @@ pub fn validatePathInvariants(
     slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
+    return validatePathInvariantsTracked(
+        image,
+        constructor,
+        slots,
+        workspace,
+        null,
+    );
+}
+
+pub fn validatePathInvariantsTracked(
+    image: anytype,
+    constructor: []const u8,
+    slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+    capacity: ?*CapacityTracker,
+) Error!void {
     const activation_count = readInt(u16, constructor, 16);
     const environment_count = readInt(u16, constructor, 18);
     const invariant_count = readInt(u16, constructor, 20);
@@ -1705,6 +1747,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             2 => try validateComputedResult(
                 image,
@@ -1714,6 +1757,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             3 => try validateComputedResult(
                 image,
@@ -1726,6 +1770,7 @@ pub fn validatePathInvariants(
                 },
                 slots,
                 workspace,
+                capacity,
             ),
             4, 7 => try validateComputedResult(
                 image,
@@ -1739,6 +1784,7 @@ pub fn validatePathInvariants(
                 },
                 slots,
                 workspace,
+                capacity,
             ),
             6 => try validateInvariantConstant(
                 image,
@@ -1762,6 +1808,7 @@ pub fn validatePathInvariants(
                     operand_count,
                     slots,
                     workspace,
+                    capacity,
                 );
             },
             9 => try validateComputedResult(
@@ -1772,6 +1819,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             10 => try validateComputedResult(
                 image,
@@ -1781,6 +1829,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             11 => blk: {
                 const bounded = readInt(u16, constructor, payload + 2);
@@ -1798,6 +1847,7 @@ pub fn validatePathInvariants(
                     &.{bounded},
                     slots,
                     workspace,
+                    capacity,
                 );
             },
             12 => try validateComputedResult(
@@ -1808,6 +1858,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             13 => blk: {
                 const operations = [_]u16{ 3, 4, 5, 6, 7, 16, 17, 18 };
@@ -1824,6 +1875,7 @@ pub fn validatePathInvariants(
                     },
                     slots,
                     workspace,
+                    capacity,
                 );
             },
             14 => try validateComputedResult(
@@ -1834,6 +1886,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             15 => blk: {
                 const value = readInt(u16, constructor, payload);
@@ -1850,6 +1903,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             17 => blk: {
                 const left_id = readInt(u16, constructor, payload);
@@ -1880,6 +1934,7 @@ pub fn validatePathInvariants(
                 },
                 slots,
                 workspace,
+                capacity,
             ),
             19 => blk: {
                 const value = readInt(u16, constructor, payload);
@@ -1900,6 +1955,7 @@ pub fn validatePathInvariants(
                 &.{readInt(u16, constructor, payload + 2)},
                 slots,
                 workspace,
+                capacity,
             ),
             else => return error.InvalidState,
         };
@@ -1934,6 +1990,7 @@ fn validateComputedResult(
     operands: []const u16,
     slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: ?*CapacityTracker,
 ) Error!bool {
     var operand_bytes: [6]u8 = undefined;
     if (operands.len > operand_bytes.len / 2) return false;
@@ -1954,6 +2011,7 @@ fn validateComputedResult(
         @intCast(operands.len),
         slots,
         workspace,
+        capacity,
     );
 }
 
@@ -1966,6 +2024,7 @@ fn validateComputedResultEncoded(
     operand_count: u16,
     slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: ?*CapacityTracker,
 ) Error!bool {
     if (!slots[result].initialized or
         operand_bytes.len != @as(usize, operand_count) * 2)
@@ -2015,7 +2074,7 @@ fn validateComputedResultEncoded(
             slots,
             workspace.invariant_result,
             &scratch_cursor,
-            null,
+            capacity,
         )
     else if (operation <= 56)
         try executeCompositeOperation(
@@ -2026,7 +2085,7 @@ fn validateComputedResultEncoded(
             workspace.invariant_result,
             &scratch_cursor,
             workspace,
-            null,
+            capacity,
         )
     else
         return error.InvalidState;

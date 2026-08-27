@@ -33,13 +33,14 @@ pub fn main(init: std.process.Init) !void {
     std.mem.writeInt(u32, &initial, 17, .little);
     var storage: Storage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
-    const outcome = try process_advance_v1.advance(
+    const attempt = try process_advance_v1.advanceAttempt(
         &fixture.CapacityImage.bytes,
         .{ .initial_args = &initial },
         null,
         storage.buffers(),
         &workspace,
     );
+    const outcome = attempt.outcome;
     _ = outcome.requested;
 
     const input = try process_advance_v1.encodeKernelInput(
@@ -50,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
     );
     const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
+        attempt.capacity,
         input.len,
         &storage,
         64,
@@ -59,6 +61,11 @@ pub fn main(init: std.process.Init) !void {
         storage.output.bytes.len or output[10] != 5)
     {
         return error.ExpectedSerializationCapacity;
+    }
+    if (std.mem.readInt(u64, output[48..56], .little) !=
+        attempt.capacity.scratch_bytes)
+    {
+        return error.SerializationLostScratchEvidence;
     }
 
     var stdout_buffer: [4096]u8 = undefined;
