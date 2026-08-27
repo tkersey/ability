@@ -1174,6 +1174,10 @@ pub fn build(b: *std.Build) void {
     );
     constructor_invariants.addImport("image_v1", host_core.image_v1);
     constructor_invariants.addImport("kernel_v1", host_core.kernel_v1);
+    constructor_invariants.addImport(
+        "reducer_clause_v1",
+        host_core.reducer_clause_v1,
+    );
     const recursion = programTestModule(
         b,
         host_core,
@@ -1463,7 +1467,7 @@ pub fn build(b: *std.Build) void {
     constrained_process_kernel_options.addOption(
         usize,
         "output_capacity",
-        56,
+        64,
     );
     constrained_process_kernel_options.addOption(
         usize,

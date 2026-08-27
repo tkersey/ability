@@ -26,15 +26,15 @@ try {
     cursor += inputLength;
     const expected = vector.subarray(cursor, cursor + outputLength);
     cursor += outputLength;
-    const imageLength = input.readUInt32LE(12);
-    const instanceLength = input.readUInt32LE(16);
-    const resultLength = input.readUInt32LE(20);
+    const imageLength = Number(input.readBigUInt64LE(12));
+    const instanceLength = Number(input.readBigUInt64LE(20));
+    const resultLength = Number(input.readBigUInt64LE(28));
     const imagePath = path.join(temporary, "system-" + index + ".bpi1");
     const instancePath = path.join(temporary, "instance-" + index + ".bin");
     const resultPath = path.join(temporary, "result-" + index + ".ers1");
-    const imageEnd = 28 + imageLength;
+    const imageEnd = 40 + imageLength;
     const instanceEnd = imageEnd + instanceLength;
-    fs.writeFileSync(imagePath, input.subarray(28, imageEnd));
+    fs.writeFileSync(imagePath, input.subarray(40, imageEnd));
     fs.writeFileSync(instancePath, input.subarray(imageEnd, instanceEnd));
     const argumentsList = [
       adapter,
@@ -85,8 +85,8 @@ try {
   if (oversized.status !== 0 ||
       oversized.stdout.subarray(0, 8).toString("ascii") !== "ABL_PKO1" ||
       oversized.stdout[10] !== 5 ||
-      oversized.stdout.readBigUInt64LE(24) !==
-        BigInt(kernelInputCapacity + 28)) {
+      oversized.stdout.readBigUInt64LE(32) !==
+        BigInt(kernelInputCapacity + 40)) {
     throw new Error("relay did not return NeedsCapacity for oversized input");
   }
   const wrongAbi = spawnSync(process.execPath, [

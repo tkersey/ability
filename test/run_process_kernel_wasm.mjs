@@ -53,7 +53,7 @@ for (let index = 0; index < count; index += 1) {
   if (instance.exports.boundary_process_kernel_abi_version() !== 1) {
     throw new Error("unexpected Process kernel ABI");
   }
-  if (instance.exports.boundary_process_kernel_reserve(input.length) !== 1) {
+  if (instance.exports.boundary_process_kernel_reserve(BigInt(input.length)) !== 1) {
     throw new Error("conformance input was not admitted");
   }
   const memory = new Uint8Array(instance.exports.memory.buffer);
@@ -69,17 +69,17 @@ for (let index = 0; index < count; index += 1) {
     throw new Error("Process kernel rejected vector " + index + ": " + message);
   }
   const outputPtr = instance.exports.boundary_process_kernel_output_ptr();
-  const outputLength = instance.exports.boundary_process_kernel_output_len();
+  const outputLength = Number(instance.exports.boundary_process_kernel_output_len());
   const actual = Buffer.from(memory.subarray(outputPtr, outputPtr + outputLength));
   if (!actual.equals(expected)) {
     throw new Error("native/WASM Process mismatch at vector " + index);
   }
   if (actual[10] === 5) {
     const actualMemoryPages = memory.buffer.byteLength / 65536;
-    const minimumOutputBytes = Number(actual.readBigUInt64LE(32));
-    const reportedMinimumPages = Number(actual.readBigUInt64LE(48));
+    const minimumOutputBytes = Number(actual.readBigUInt64LE(40));
+    const reportedMinimumPages = Number(actual.readBigUInt64LE(56));
     const outputGrowthPages = Math.ceil(
-      Math.max(0, minimumOutputBytes - 56) / 65536,
+      Math.max(0, minimumOutputBytes - 64) / 65536,
     );
     if (reportedMinimumPages < actualMemoryPages + outputGrowthPages) {
       throw new Error("NeedsCapacity under-reported live WASM growth pages");
@@ -114,32 +114,58 @@ const oversizedCapacity =
   oversizedInstance.exports.boundary_process_kernel_input_capacity();
 if (oversizedInstance.exports.boundary_process_kernel_prepare_input(
   0,
-  oversizedCapacity,
-  1,
+  BigInt(oversizedCapacity),
+  1n,
   0,
-  0,
+  0n,
 ) !== 0) {
   throw new Error("oversized Process input was admitted");
 }
 const oversizedMemory = new Uint8Array(oversizedInstance.exports.memory.buffer);
 const oversizedOutputPtr =
   oversizedInstance.exports.boundary_process_kernel_output_ptr();
-const oversizedOutputLength =
-  oversizedInstance.exports.boundary_process_kernel_output_len();
+const oversizedOutputLength = Number(
+  oversizedInstance.exports.boundary_process_kernel_output_len(),
+);
 const oversizedOutput = Buffer.from(oversizedMemory.subarray(
   oversizedOutputPtr,
   oversizedOutputPtr + oversizedOutputLength,
 ));
 if (oversizedOutput[10] !== 5 ||
-    oversizedOutput.readBigUInt64LE(24) !== BigInt(oversizedCapacity + 29)) {
+    oversizedOutput.readBigUInt64LE(32) !== BigInt(oversizedCapacity + 41)) {
   throw new Error("oversized Process input did not return typed NeedsCapacity");
 }
 
+const wideInstance = await WebAssembly.instantiate(module, {});
+const wideLength = 0x1_0000_0000n;
+if (wideInstance.exports.boundary_process_kernel_prepare_input(
+  0,
+  0n,
+  wideLength,
+  0,
+  0n,
+) !== 0) {
+  throw new Error("physically unaddressable Process input was admitted");
+}
+const wideMemory = new Uint8Array(wideInstance.exports.memory.buffer);
+const wideOutputPtr = wideInstance.exports.boundary_process_kernel_output_ptr();
+const wideOutputLength = Number(
+  wideInstance.exports.boundary_process_kernel_output_len(),
+);
+const wideOutput = Buffer.from(wideMemory.subarray(
+  wideOutputPtr,
+  wideOutputPtr + wideOutputLength,
+));
+if (wideOutput[10] !== 5 ||
+    wideOutput.readBigUInt64LE(32) !== wideLength + 40n) {
+  throw new Error("wide Process length was truncated before NeedsCapacity");
+}
+
 const malformedInstance = await WebAssembly.instantiate(module, {});
-const malformed = Buffer.alloc(28);
+const malformed = Buffer.alloc(40);
 malformed.write("ABL_PKI1", 0, "ascii");
 malformed.writeUInt16LE(1, 8);
-malformed.writeUInt32LE(1, 24);
+malformed.writeUInt32LE(1, 36);
 const malformedMemory = new Uint8Array(malformedInstance.exports.memory.buffer);
 malformedMemory.set(
   malformed,

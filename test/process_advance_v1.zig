@@ -998,10 +998,23 @@ test "Process kernel-input codec has one canonical round trip" {
         decoded.instance.initial_args,
     );
     try std.testing.expect(decoded.effect_result == null);
-    storage[24] = 1;
+    storage[36] = 1;
     try std.testing.expectError(
         error.InvalidKernelInput,
         process_advance_v1.validateKernelInput(storage[0..encoded.len]),
+    );
+    var wide_header: [process_advance_v1.kernel_input_header_length]u8 = undefined;
+    _ = try process_advance_v1.encodeKernelInputHeader(
+        1,
+        false,
+        0,
+        @as(u64, std.math.maxInt(u32)) + 1,
+        0,
+        &wide_header,
+    );
+    try std.testing.expectEqual(
+        @as(u64, std.math.maxInt(u32)) + 1,
+        std.mem.readInt(u64, wide_header[20..28], .little),
     );
 }
 
@@ -1284,7 +1297,7 @@ test "Process rejects schema-valid forged constructor invariants" {
 }
 
 test "NeedsCapacity page ceiling preserves saturated u64 totals" {
-    var output: [56]u8 = undefined;
+    var output: [64]u8 = undefined;
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         .{ .needs_capacity = .{
             .minimum_input_bytes = 1,
@@ -1300,6 +1313,6 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
     );
     try std.testing.expectEqual(
         @as(u64, 281474976710656),
-        std.mem.readInt(u64, encoded[48..56], .little),
+        std.mem.readInt(u64, encoded[56..64], .little),
     );
 }

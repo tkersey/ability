@@ -36,10 +36,10 @@ if (typeof exports.boundary_process_kernel_abi_version !== "function" ||
 const memory = new Uint8Array(exports.memory.buffer);
 const inputLength = exports.boundary_process_kernel_prepare_input(
   statePath === undefined ? 0 : 1,
-  image.length,
-  instance.length,
+  BigInt(image.length),
+  BigInt(instance.length),
   options.has("--result") ? 1 : 0,
-  result.length,
+  BigInt(result.length),
 );
 if (inputLength === 0) {
   const capacity = kernelOutput();
@@ -67,7 +67,7 @@ if (inputLength === 0) {
 
 function kernelOutput() {
   const start = exports.boundary_process_kernel_output_ptr();
-  const length = exports.boundary_process_kernel_output_len();
+  const length = Number(exports.boundary_process_kernel_output_len());
   return Buffer.from(memory.subarray(start, start + length));
 }
 

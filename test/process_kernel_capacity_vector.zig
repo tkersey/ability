@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         .error_bytes = 4 * 1024,
         .validation_workspace_bytes = @sizeOf(@TypeOf(workspace)),
     }).baseMemoryWithoutOutput(input.len);
-    var output_storage: [56]u8 = undefined;
+    var output_storage: [64]u8 = undefined;
     const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,

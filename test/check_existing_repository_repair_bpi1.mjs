@@ -26,22 +26,31 @@ let currentIsState = false;
 let reductions = 0;
 let request = null;
 for (; reductions < 128; reductions += 1) {
-  const input = kernelInput(image, current, currentIsState);
   const instance = await WebAssembly.instantiate(module, {});
   const exports = instance.exports;
+  const inputLength = exports.boundary_process_kernel_prepare_input(
+    currentIsState ? 1 : 0,
+    BigInt(image.length),
+    BigInt(current.length),
+    0,
+    0n,
+  );
   if (exports.boundary_process_kernel_abi_version() !== 1 ||
-      exports.boundary_process_kernel_reserve(input.length) !== 1) {
+      inputLength === 0) {
     throw new Error("fixed Process kernel rejected landed BPI1 input");
   }
   const memory = new Uint8Array(exports.memory.buffer);
-  memory.set(input, exports.boundary_process_kernel_input_ptr());
-  if (exports.boundary_process_kernel_execute(input.length) !== 0) {
+  let payload = exports.boundary_process_kernel_input_payload_ptr();
+  memory.set(image, payload);
+  payload += image.length;
+  memory.set(current, payload);
+  if (exports.boundary_process_kernel_execute(inputLength) !== 0) {
     const start = exports.boundary_process_kernel_error_ptr();
     const length = exports.boundary_process_kernel_error_len();
     throw new Error(Buffer.from(memory.subarray(start, start + length)).toString("utf8"));
   }
   const outputStart = exports.boundary_process_kernel_output_ptr();
-  const outputLength = exports.boundary_process_kernel_output_len();
+  const outputLength = Number(exports.boundary_process_kernel_output_len());
   const output = Buffer.from(
     memory.subarray(outputStart, outputStart + outputLength),
   );
@@ -50,14 +59,14 @@ for (; reductions < 128; reductions += 1) {
     throw new Error("malformed Process outcome");
   }
   const kind = output[10];
-  const primaryLength = output.readUInt32LE(12);
-  const secondaryLength = output.readUInt32LE(16);
-  const primary = output.subarray(24, 24 + primaryLength);
+  const primaryLength = Number(output.readBigUInt64LE(12));
+  const secondaryLength = Number(output.readBigUInt64LE(20));
+  const primary = output.subarray(32, 32 + primaryLength);
   const secondary = output.subarray(
-    24 + primaryLength,
-    24 + primaryLength + secondaryLength,
+    32 + primaryLength,
+    32 + primaryLength + secondaryLength,
   );
-  if (24 + primaryLength + secondaryLength !== output.length) {
+  if (32 + primaryLength + secondaryLength !== output.length) {
     throw new Error("trailing Process outcome bytes");
   }
   if (kind === 0) {
@@ -98,18 +107,4 @@ function decodeFrozen(path) {
 
 function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
-}
-
-function kernelInput(program, instance, isState) {
-  const input = Buffer.alloc(28 + program.length + instance.length);
-  input.write("ABL_PKI1", 0, "ascii");
-  input.writeUInt16LE(1, 8);
-  input.writeUInt8(isState ? 1 : 0, 10);
-  input.writeUInt8(0, 11);
-  input.writeUInt32LE(program.length, 12);
-  input.writeUInt32LE(instance.length, 16);
-  input.writeUInt32LE(0, 20);
-  program.copy(input, 28);
-  instance.copy(input, 28 + program.length);
-  return input;
 }

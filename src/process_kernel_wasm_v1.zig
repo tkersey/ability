@@ -38,7 +38,7 @@ pub export fn boundary_process_kernel_abi_version() u32 {
 /// This fixed implementation has a statically addressed input arena. Returning
 /// zero tells the embedding environment to transfer to a larger conforming
 /// kernel when the requested input does not fit.
-pub export fn boundary_process_kernel_reserve(required_input_bytes: u32) u32 {
+pub export fn boundary_process_kernel_reserve(required_input_bytes: u64) u32 {
     return @intFromBool(required_input_bytes <= input_capacity);
 }
 
@@ -56,10 +56,10 @@ pub export fn boundary_process_kernel_input_payload_ptr() u32 {
 
 pub export fn boundary_process_kernel_prepare_input(
     instance_kind: u32,
-    image_length: u32,
-    instance_length: u32,
+    image_length: u64,
+    instance_length: u64,
     result_present: u32,
-    result_length: u32,
+    result_length: u64,
 ) u32 {
     output_length = 0;
     error_length = 0;
@@ -68,10 +68,10 @@ pub export fn boundary_process_kernel_prepare_input(
     {
         return 0;
     }
-    const required_input = @as(u64, input_header_length) +
-        @as(u64, image_length) +
-        @as(u64, instance_length) +
-        @as(u64, result_length);
+    const required_input = @as(u64, input_header_length) +|
+        image_length +|
+        instance_length +|
+        result_length;
     if (required_input > input_storage.len) {
         reportInputCapacity(required_input);
         return 0;
@@ -92,7 +92,7 @@ pub export fn boundary_process_kernel_output_ptr() u32 {
     return @intCast(@intFromPtr(&output_storage));
 }
 
-pub export fn boundary_process_kernel_output_len() u32 {
+pub export fn boundary_process_kernel_output_len() u64 {
     return output_length;
 }
 

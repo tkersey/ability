@@ -58,10 +58,10 @@ pub const CapacityRequirement = struct {
 
 pub const outcome_magic = "ABL_PKO1".*;
 pub const outcome_format_version: u16 = 1;
-pub const outcome_header_length: usize = 24;
+pub const outcome_header_length: usize = 32;
 pub const kernel_input_magic = "ABL_PKI1".*;
 pub const kernel_input_format_version: u16 = 1;
-pub const kernel_input_header_length: usize = 28;
+pub const kernel_input_header_length: usize = 40;
 
 pub const KernelInputView = struct {
     image: []const u8,
@@ -72,9 +72,9 @@ pub const KernelInputView = struct {
 pub fn encodeKernelInputHeader(
     instance_kind: u8,
     result_present: bool,
-    image_length: u32,
-    instance_length: u32,
-    result_length: u32,
+    image_length: u64,
+    instance_length: u64,
+    result_length: u64,
     output: []u8,
 ) Error![]const u8 {
     if (instance_kind > 1 or (!result_present and result_length != 0)) {
@@ -85,10 +85,10 @@ pub fn encodeKernelInputHeader(
     std.mem.writeInt(u16, output[8..10], kernel_input_format_version, .little);
     output[10] = instance_kind;
     output[11] = @intFromBool(result_present);
-    std.mem.writeInt(u32, output[12..16], image_length, .little);
-    std.mem.writeInt(u32, output[16..20], instance_length, .little);
-    std.mem.writeInt(u32, output[20..24], result_length, .little);
-    @memset(output[24..28], 0);
+    std.mem.writeInt(u64, output[12..20], image_length, .little);
+    std.mem.writeInt(u64, output[20..28], instance_length, .little);
+    std.mem.writeInt(u64, output[28..36], result_length, .little);
+    @memset(output[36..40], 0);
     return output[0..kernel_input_header_length];
 }
 
@@ -97,27 +97,33 @@ pub fn validateKernelInput(input: []const u8) Error!KernelInputView {
         !std.mem.eql(u8, input[0..8], &kernel_input_magic) or
         readInt(u16, input, 8) != kernel_input_format_version or
         input[10] > 1 or input[11] & ~@as(u8, 1) != 0 or
-        !allZero(input[24..28]))
+        !allZero(input[36..40]))
     {
         return error.InvalidKernelInput;
     }
-    const image_length = readInt(u32, input, 12);
-    const instance_length = readInt(u32, input, 16);
-    const result_length = readInt(u32, input, 20);
+    const image_length = readInt(u64, input, 12);
+    const instance_length = readInt(u64, input, 20);
+    const result_length = readInt(u64, input, 28);
     const result_present = input[11] & 1 != 0;
     if (!result_present and result_length != 0) return error.InvalidKernelInput;
-    var expected = std.math.add(usize, kernel_input_header_length, image_length) catch
+    const image_length_usize = std.math.cast(usize, image_length) orelse
         return error.InvalidKernelInput;
-    expected = std.math.add(usize, expected, instance_length) catch
+    const instance_length_usize = std.math.cast(usize, instance_length) orelse
         return error.InvalidKernelInput;
-    expected = std.math.add(usize, expected, result_length) catch
+    const result_length_usize = std.math.cast(usize, result_length) orelse
+        return error.InvalidKernelInput;
+    var expected = std.math.add(usize, kernel_input_header_length, image_length_usize) catch
+        return error.InvalidKernelInput;
+    expected = std.math.add(usize, expected, instance_length_usize) catch
+        return error.InvalidKernelInput;
+    expected = std.math.add(usize, expected, result_length_usize) catch
         return error.InvalidKernelInput;
     if (expected != input.len) return error.InvalidKernelInput;
     var cursor: usize = kernel_input_header_length;
-    const image = input[cursor..][0..image_length];
-    cursor += image_length;
-    const instance_bytes = input[cursor..][0..instance_length];
-    cursor += instance_length;
+    const image = input[cursor..][0..image_length_usize];
+    cursor += image_length_usize;
+    const instance_bytes = input[cursor..][0..instance_length_usize];
+    cursor += instance_length_usize;
     return .{
         .image = image,
         .instance = if (input[10] == 0)
@@ -125,7 +131,7 @@ pub fn validateKernelInput(input: []const u8) Error!KernelInputView {
         else
             .{ .process_state = instance_bytes },
         .effect_result = if (result_present)
-            input[cursor..][0..result_length]
+            input[cursor..][0..result_length_usize]
         else
             null,
     };
@@ -152,11 +158,11 @@ pub fn encodeKernelInput(
     {
         return error.InvalidBuffers;
     }
-    const image_length = std.math.cast(u32, image.len) orelse
+    const image_length = std.math.cast(u64, image.len) orelse
         return error.OutputCapacity;
-    const instance_length = std.math.cast(u32, instance_bytes.len) orelse
+    const instance_length = std.math.cast(u64, instance_bytes.len) orelse
         return error.OutputCapacity;
-    const result_length = std.math.cast(u32, result.len) orelse
+    const result_length = std.math.cast(u64, result.len) orelse
         return error.OutputCapacity;
     var required = std.math.add(
         usize,
@@ -246,9 +252,9 @@ pub fn encodeOutcome(outcome: Outcome, output: []u8) Error![]const u8 {
     {
         return error.InvalidBuffers;
     }
-    const primary_length = std.math.cast(u32, fields.primary.len) orelse
+    const primary_length = std.math.cast(u64, fields.primary.len) orelse
         return error.OutputCapacity;
-    const secondary_length = std.math.cast(u32, fields.secondary.len) orelse
+    const secondary_length = std.math.cast(u64, fields.secondary.len) orelse
         return error.OutputCapacity;
     const payload_length = std.math.add(
         usize,
@@ -412,22 +418,30 @@ fn addOutcomeLength(primary: usize, secondary: usize) Error!usize {
 fn writeOutcomeHeader(
     output: []u8,
     kind: u8,
-    primary_length: u32,
-    secondary_length: u32,
+    primary_length: u64,
+    secondary_length: u64,
 ) void {
     @memcpy(output[0..outcome_magic.len], &outcome_magic);
     std.mem.writeInt(u16, output[8..10], outcome_format_version, .little);
     output[10] = kind;
     output[11] = 0;
-    std.mem.writeInt(u32, output[12..16], primary_length, .little);
-    std.mem.writeInt(u32, output[16..20], secondary_length, .little);
-    @memset(output[20..24], 0);
+    std.mem.writeInt(u64, output[12..20], primary_length, .little);
+    std.mem.writeInt(u64, output[20..28], secondary_length, .little);
+    @memset(output[28..32], 0);
 }
 
 const Slot = reducer_clause_v1.Slot;
 const slicesOverlap = process_state_v1.slicesOverlap;
 
 const LoadedEnvironment = reducer_clause_v1.LoadedEnvironment;
+
+const AdmittedState = struct {
+    state: process_state_v1.StateView,
+    constructor: []const u8,
+    slots: [1024]Slot,
+    activation_slots: [1024]Slot,
+    loaded: LoadedEnvironment,
+};
 
 pub fn advance(
     image_bytes: []const u8,
@@ -490,7 +504,7 @@ pub fn validateState(
         state_bytes,
         image.catalogs.envelope.header.program_transition_digest,
     ) catch return error.InvalidProcessState;
-    try validateFrames(image, state, workspace);
+    _ = try admitFrames(image, state, workspace);
     return state;
 }
 
@@ -539,7 +553,7 @@ pub fn encodeState(
         encoded,
         image.catalogs.envelope.header.program_transition_digest,
     ) catch return error.InvalidProcessState;
-    try validateFrames(image, state, workspace);
+    _ = try admitFrames(image, state, workspace);
     return state;
 }
 
@@ -578,7 +592,7 @@ pub fn validateInitialArgs(
         encoded,
         image.catalogs.envelope.header.program_transition_digest,
     );
-    try validateFrames(image, state, workspace);
+    _ = try admitFrames(image, state, workspace);
 }
 
 fn advanceFinite(
@@ -820,61 +834,40 @@ fn advanceState(
         state_bytes,
         image.catalogs.envelope.header.program_transition_digest,
     ) catch return error.InvalidProcessState;
-    try validateFrames(image, state, workspace);
-    const top = try process_state_v1.topFrame(state);
-    const constructor = try image_v1.evaluatorConstructorRecord(
-        image,
-        top.frame.constructor_id,
-    );
-    if (constructor[8] == 3) {
+    var admitted = try admitFrames(image, state, workspace);
+    if (admitted.constructor[8] == 3) {
         if (effect_result) |result_bytes| {
-            const successor = try resumePending(
+            var successor = try resumePending(
                 image,
-                state,
-                top,
-                constructor,
+                &admitted,
                 result_bytes,
                 buffers,
                 workspace,
             );
-            return stepState(image, successor, buffers, workspace);
+            return stepState(image, &successor, buffers, workspace);
         }
         return currentRequest(
             image,
-            state,
-            top,
-            constructor,
+            &admitted,
             buffers,
             workspace,
         );
     }
     if (effect_result != null) return error.UnexpectedEffectResult;
-    return stepState(image, state, buffers, workspace);
+    return stepState(image, &admitted, buffers, workspace);
 }
 
 fn stepState(
     image: image_v1.ValidatedImage,
-    state: process_state_v1.StateView,
+    admitted: *AdmittedState,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
-    const top = try process_state_v1.topFrame(state);
-    const constructor = try image_v1.evaluatorConstructorRecord(
-        image,
-        top.frame.constructor_id,
-    );
-    var slots = [_]Slot{.{}} ** 1024;
-    var activation_slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-    const loaded = try loadEnvironment(
-        image,
-        constructor,
-        top.frame.environment,
-        &slots,
-        &activation_slots,
-        workspace,
-    );
-    const segment_id = readInt(u16, constructor, 12);
+    const state = admitted.state;
+    var slots = admitted.slots;
+    var activation_slots = admitted.activation_slots;
+    const loaded = admitted.loaded;
+    const segment_id = readInt(u16, admitted.constructor, 12);
     const clause = try reducer_clause_v1.evaluateClause(
         image,
         segment_id,
@@ -884,7 +877,7 @@ fn stepState(
         workspace,
     );
     const outcome: Outcome = switch (clause) {
-        .progressed => |progressed| .{ .progressed = try transitionState(
+        .progressed => |progressed| .{ .progressed = (try transitionState(
             image,
             state,
             segment_id,
@@ -894,7 +887,8 @@ fn stepState(
             &activation_slots,
             &slots,
             buffers,
-        ) },
+            workspace,
+        )).state.bytes },
         .requested => |request| blk: {
             const await_constructor_id = try image_v1.evaluatorSuspensionConstructor(
                 image,
@@ -920,9 +914,15 @@ fn stepState(
                 },
                 buffers.output_state,
             );
-            break :blk try makeRequest(
+            const parked_admitted = try admitProducedTop(
                 image,
                 parked,
+                await_constructor_id,
+                workspace,
+            );
+            break :blk try makeRequest(
+                image,
+                parked_admitted.state.bytes,
                 request.site_ordinal,
                 request.payload,
                 buffers.output_request,
@@ -930,7 +930,7 @@ fn stepState(
             );
         },
         .explicit_yield => |continuation| .{
-            .explicitly_yielded = try transitionState(
+            .explicitly_yielded = (try transitionState(
                 image,
                 state,
                 segment_id,
@@ -940,11 +940,12 @@ fn stepState(
                 &activation_slots,
                 &slots,
                 buffers,
-            ),
+                workspace,
+            )).state.bytes,
         },
         .completed => |value| .{ .completed = value },
         .authored_failure => |failure| .{ .authored_failure = failure },
-        .call => |callee| .{ .progressed = try callState(
+        .call => |callee| .{ .progressed = (try callState(
             image,
             state,
             segment_id,
@@ -953,22 +954,22 @@ fn stepState(
             &activation_slots,
             &slots,
             buffers,
-        ) },
+            workspace,
+        )).state.bytes },
         .return_to_caller => |return_value| blk: {
             const stable_return = try stabilizeValue(
                 return_value,
                 buffers.output_value,
             );
-            break :blk .{ .progressed = try returnToCaller(
+            break :blk .{ .progressed = (try returnToCaller(
                 image,
                 state,
                 stable_return,
                 buffers,
                 workspace,
-            ) };
+            )).state.bytes };
         },
     };
-    try validateOutcomeStates(image, outcome, workspace);
     return outcome;
 }
 
@@ -977,26 +978,6 @@ fn stabilizeValue(value: []const u8, output: []u8) Error![]const u8 {
     if (output.len < value.len) return error.OutputCapacity;
     @memcpy(output[0..value.len], value);
     return output[0..value.len];
-}
-
-fn validateOutcomeStates(
-    image: image_v1.ValidatedImage,
-    outcome: Outcome,
-    workspace: *image_v1.ValidationWorkspace,
-) Error!void {
-    const state_bytes: ?[]const u8 = switch (outcome) {
-        .progressed => |state| state,
-        .requested => |requested| requested.state,
-        .explicitly_yielded => |state| state,
-        .completed, .authored_failure, .needs_capacity => null,
-    };
-    if (state_bytes) |bytes| {
-        const state = process_state_v1.validate(
-            bytes,
-            image.catalogs.envelope.header.program_transition_digest,
-        ) catch return error.InvalidProcessState;
-        try validateFrames(image, state, workspace);
-    }
 }
 
 fn callState(
@@ -1008,7 +989,8 @@ fn callState(
     activation_slots: *const [1024]Slot,
     slots: *[1024]Slot,
     buffers: Buffers,
-) Error![]const u8 {
+    workspace: *image_v1.ValidationWorkspace,
+) Error!AdmittedState {
     const return_constructor_id = try image_v1.evaluatorSuspensionConstructor(
         image,
         source_segment_id,
@@ -1041,12 +1023,22 @@ fn callState(
         image,
         child_constructor_id,
     );
+    const parent_slots = slots.*;
     try applyValueEdge(
         child_constructor,
         target_segment,
         callee,
         slots,
     );
+    reducer_clause_v1.validateStackPair(
+        image,
+        return_constructor,
+        &parent_slots,
+        child_constructor,
+        child_constructor_id,
+        slots,
+        child_constructor_id,
+    ) catch return error.InvalidProcessState;
     const parent_frame = process_state_v1.Frame{
         .constructor_id = return_constructor_id,
         .environment = parent_environment,
@@ -1058,7 +1050,7 @@ fn callState(
         slots,
         buffers.auxiliary_environment,
     );
-    return process_state_v1.replaceTopAndAppend(
+    const successor = try process_state_v1.replaceTopAndAppend(
         state,
         parent_frame,
         .{
@@ -1066,6 +1058,12 @@ fn callState(
             .environment = child_environment,
         },
         buffers.output_state,
+    );
+    return admitProducedTop(
+        image,
+        successor,
+        child_constructor_id,
+        workspace,
     );
 }
 
@@ -1120,7 +1118,7 @@ fn returnToCaller(
     return_value: []const u8,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
-) Error![]const u8 {
+) Error!AdmittedState {
     const parent = try process_state_v1.parentFrame(state);
     const parent_constructor = try image_v1.evaluatorConstructorRecord(
         image,
@@ -1178,7 +1176,7 @@ fn returnToCaller(
         &slots,
         buffers.environment,
     );
-    return process_state_v1.replaceParentAndDropTop(
+    const successor = try process_state_v1.replaceParentAndDropTop(
         state,
         .{
             .constructor_id = next_constructor_id,
@@ -1186,37 +1184,35 @@ fn returnToCaller(
         },
         buffers.output_state,
     );
+    return admitProducedTop(
+        image,
+        successor,
+        next_constructor_id,
+        workspace,
+    );
 }
 
 fn currentRequest(
     image: image_v1.ValidatedImage,
-    state: process_state_v1.StateView,
-    top: process_state_v1.FrameSpan,
-    constructor: []const u8,
+    admitted: *const AdmittedState,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!Outcome {
-    var slots = [_]Slot{.{}} ** 1024;
-    var activation_slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-    _ = try loadEnvironment(
-        image,
-        constructor,
-        top.frame.environment,
-        &slots,
-        &activation_slots,
-        workspace,
-    );
     const parts = try pendingRequestParts(
         image,
-        constructor,
-        &slots,
+        admitted.constructor,
+        &admitted.slots,
     );
-    if (buffers.output_state.len < state.bytes.len) return error.OutputCapacity;
-    @memcpy(buffers.output_state[0..state.bytes.len], state.bytes);
+    if (buffers.output_state.len < admitted.state.bytes.len) {
+        return error.OutputCapacity;
+    }
+    @memcpy(
+        buffers.output_state[0..admitted.state.bytes.len],
+        admitted.state.bytes,
+    );
     return makeRequest(
         image,
-        buffers.output_state[0..state.bytes.len],
+        buffers.output_state[0..admitted.state.bytes.len],
         parts.site_ordinal,
         parts.payload,
         buffers.output_request,
@@ -1312,24 +1308,15 @@ fn requestInput(
 
 fn resumePending(
     image: image_v1.ValidatedImage,
-    state: process_state_v1.StateView,
-    top: process_state_v1.FrameSpan,
-    constructor: []const u8,
+    admitted: *const AdmittedState,
     result_bytes: []const u8,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
-) Error!process_state_v1.StateView {
-    var slots = [_]Slot{.{}} ** 1024;
-    var activation_slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-    const loaded = try loadEnvironment(
-        image,
-        constructor,
-        top.frame.environment,
-        &slots,
-        &activation_slots,
-        workspace,
-    );
+) Error!AdmittedState {
+    const state = admitted.state;
+    const constructor = admitted.constructor;
+    var slots = admitted.slots;
+    const activation_slots = admitted.activation_slots;
     const parts = try pendingRequestParts(
         image,
         constructor,
@@ -1392,7 +1379,7 @@ fn resumePending(
     );
     const environment = try encodeEnvironment(
         target_constructor,
-        loaded.activation_entry,
+        admitted.loaded.activation_entry,
         &activation_slots,
         &slots,
         buffers.environment,
@@ -1405,12 +1392,12 @@ fn resumePending(
         },
         buffers.candidate_state,
     );
-    const successor_state = try process_state_v1.validate(
+    return admitProducedTop(
+        image,
         successor,
-        image.catalogs.envelope.header.program_transition_digest,
+        target_constructor_id,
+        workspace,
     );
-    try validateFrames(image, successor_state, workspace);
-    return successor_state;
 }
 
 fn transitionState(
@@ -1423,7 +1410,8 @@ fn transitionState(
     activation_slots: *const [1024]Slot,
     slots: *[1024]Slot,
     buffers: Buffers,
-) Error![]const u8 {
+    workspace: *image_v1.ValidationWorkspace,
+) Error!AdmittedState {
     const target_segment_id = readInt(u16, edge, 0);
     const target_segment = try image_v1.evaluatorSegmentRecord(
         image,
@@ -1447,23 +1435,71 @@ fn transitionState(
         slots,
         buffers.environment,
     );
-    return process_state_v1.replaceTop(
+    const successor = try process_state_v1.replaceTop(
         state,
         .{ .constructor_id = constructor_id, .environment = environment },
         buffers.output_state,
     );
+    return admitProducedTop(
+        image,
+        successor,
+        constructor_id,
+        workspace,
+    );
 }
 
-fn validateFrames(
+fn admitProducedTop(
+    image: image_v1.ValidatedImage,
+    state_bytes: []const u8,
+    expected_constructor_id: u32,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!AdmittedState {
+    const state = process_state_v1.validate(
+        state_bytes,
+        image.catalogs.envelope.header.program_transition_digest,
+    ) catch return error.InvalidProcessState;
+    const top = try process_state_v1.topFrame(state);
+    if (top.frame.constructor_id != expected_constructor_id) {
+        return error.InvalidProcessState;
+    }
+    const constructor = try image_v1.evaluatorConstructorRecord(
+        image,
+        expected_constructor_id,
+    );
+    var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
+    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
+    const loaded = try loadEnvironment(
+        image,
+        constructor,
+        top.frame.environment,
+        &slots,
+        &activation_slots,
+        workspace,
+    );
+    return .{
+        .state = state,
+        .constructor = constructor,
+        .slots = slots,
+        .activation_slots = activation_slots,
+        .loaded = loaded,
+    };
+}
+
+fn admitFrames(
     image: image_v1.ValidatedImage,
     state: process_state_v1.StateView,
     workspace: *image_v1.ValidationWorkspace,
-) Error!void {
+) Error!AdmittedState {
     var iterator = state.iterator();
     var index: u64 = 0;
+    var saw_frame = false;
     var previous_constructor: []const u8 = &.{};
     var previous_slots = [_]Slot{.{}} ** 1024;
-    while (try iterator.next()) |frame| : (index += 1) {
+    var previous_activation_slots = [_]Slot{.{}} ** 1024;
+    var previous_loaded: LoadedEnvironment = .{ .activation_entry = null };
+    while (try iterator.nextSpan()) |frame_span| : (index += 1) {
+        const frame = frame_span.frame;
         if (frame.constructor_id >= image.constructor_count) {
             return error.InvalidProcessState;
         }
@@ -1500,12 +1536,23 @@ fn validateFrames(
                 &activation_slots,
             );
         }
+        saw_frame = true;
         previous_constructor = constructor;
         previous_slots = slots;
+        previous_activation_slots = activation_slots;
+        previous_loaded = loaded;
     }
     if (reducer_clause_v1.isAwaitCallConstructor(image, previous_constructor)) {
         return error.InvalidProcessState;
     }
+    if (!saw_frame) return error.InvalidProcessState;
+    return .{
+        .state = state,
+        .constructor = previous_constructor,
+        .slots = previous_slots,
+        .activation_slots = previous_activation_slots,
+        .loaded = previous_loaded,
+    };
 }
 
 fn validateStackPair(

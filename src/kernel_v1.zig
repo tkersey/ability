@@ -1773,7 +1773,7 @@ fn loadFrameEnvironment(
 ) Error!void {
     const environment_length = readInt(u32, state, frame_offset + 4);
     const environment = state[frame_offset + 8 ..][0..environment_length];
-    _ = reducer_clause_v1.loadEnvironmentSlots(
+    _ = reducer_clause_v1.decodeEnvironmentSlots(
         image,
         constructor,
         environment,
@@ -1798,7 +1798,7 @@ fn loadActivationSlots(
     const environment = state[frame_offset + 8 ..][0..environment_length];
     var current_slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &current_slots);
-    _ = reducer_clause_v1.loadEnvironmentSlots(
+    _ = reducer_clause_v1.decodeEnvironmentSlots(
         image,
         constructor,
         environment,

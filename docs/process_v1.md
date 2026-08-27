@@ -29,6 +29,10 @@ profile, scheduler state, pointer, or instance identity.
 `boundary.process_v1.state.validateEncoding` checks canonical framing;
 `boundary.process_v1.validateState` additionally admits every constructor
 environment and path invariant against the supplied BPI1 before execution.
+One `advance` invocation performs that full admission once and carries an
+internal, non-serializable admitted top-frame projection through the reduction.
+Every internal State producer must return that refinement and semantically
+admits only its newly produced top before publishing canonical bytes.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic
@@ -37,6 +41,10 @@ canonical input header, copies only the BPI1 and instance/result payload bytes,
 invokes one kernel operation, writes the canonical outcome bytes, and exits.
 If the fixed input arena cannot hold those payloads, preparation returns a
 canonical transactional `NeedsCapacity` outcome before any payload copy.
+Kernel-input and kernel-outcome framing uses `u64` component lengths. The
+wasm32 kernel accepts those lengths as scalar preflight data, so a larger finite
+State reports capacity without truncation even though that instance cannot
+address the State itself.
 
 Run:
 

@@ -473,6 +473,29 @@ pub fn loadEnvironmentSlots(
     activation_slots: ?*[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
+    const loaded = try decodeEnvironmentSlots(
+        image,
+        constructor,
+        environment,
+        slots,
+        activation_slots,
+        workspace,
+    );
+    try validatePathInvariants(image, constructor, slots, workspace);
+    return loaded;
+}
+
+/// Decode an environment that has already crossed semantic State admission.
+/// This projection validates canonical value encodings but does not replay path
+/// invariants or write invariant-result scratch.
+pub fn decodeEnvironmentSlots(
+    image: anytype,
+    constructor: []const u8,
+    environment: []const u8,
+    slots: *[1024]Slot,
+    activation_slots: ?*[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!LoadedEnvironment {
     if (activation_slots) |activation| {
         try initializeZeroWidthSlots(image, activation);
     }
@@ -509,7 +532,6 @@ pub fn loadEnvironmentSlots(
         field_cursor += 8;
     }
     if (cursor != environment.len) return error.InvalidState;
-    try validatePathInvariants(image, constructor, slots, workspace);
     return .{ .activation_entry = activation_entry };
 }
 
