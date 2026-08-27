@@ -859,7 +859,7 @@ test "Process NeedsCapacity is transactional and retryable" {
         requirement.minimum_output_bytes >= pending.request.len,
     );
     try std.testing.expectEqual(
-        @as(u64, constrained_storage.state.len),
+        @as(u64, pending.request.len),
         requirement.minimum_output_bytes,
     );
     const output_capacity: usize = @intCast(requirement.minimum_output_bytes);
@@ -985,6 +985,61 @@ test "NeedsCapacity preserves the reducer output requirement" {
     try std.testing.expectEqual(
         @as(u64, @sizeOf(u32)),
         final.needs_capacity.minimum_output_bytes,
+    );
+}
+
+test "NeedsCapacity preserves the reducer scratch requirement" {
+    var initial: [8]u8 = undefined;
+    std.mem.writeInt(u32, initial[0..4], 7, .little);
+    std.mem.writeInt(u32, initial[4..8], 11, .little);
+    var first_storage: Storage = .{};
+    var first_workspace: boundary.image.ValidationWorkspace = .{};
+    const first = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        first_storage.buffers(),
+        &first_workspace,
+    );
+    var second_storage: Storage = .{};
+    var second_workspace: boundary.image.ValidationWorkspace = .{};
+    const second = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .process_state = first.progressed },
+        null,
+        second_storage.buffers(),
+        &second_workspace,
+    );
+    var third_storage: Storage = .{};
+    var third_workspace: boundary.image.ValidationWorkspace = .{};
+    const third = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .process_state = second.progressed },
+        null,
+        third_storage.buffers(),
+        &third_workspace,
+    );
+    var final_storage: Storage = .{};
+    var no_scratch: [0]u8 = .{};
+    var final_workspace: boundary.image.ValidationWorkspace = .{};
+    const outcome = try process_advance_v1.advance(
+        &SwapImage.bytes,
+        .{ .process_state = third.progressed },
+        null,
+        .{
+            .output_state = &final_storage.state,
+            .output_value = &final_storage.value,
+            .output_request = &final_storage.request,
+            .candidate_state = &final_storage.candidate,
+            .environment = &final_storage.environment,
+            .auxiliary_environment = &final_storage.auxiliary_environment,
+            .scratch = &no_scratch,
+        },
+        &final_workspace,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        outcome.needs_capacity.minimum_scratch_bytes,
     );
 }
 
@@ -1620,6 +1675,23 @@ test "capacity storage fold cannot omit a newly declared arena" {
     );
 }
 
+test "capacity storage fold includes per-arena alignment" {
+    var storage: AlignmentCapacityStorage = .{};
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
+            .{
+                .minimum_input_bytes = 0,
+                .minimum_output_bytes = 9361,
+                .minimum_scratch_bytes = 0,
+                .minimum_memory_pages = 0,
+            },
+            0,
+        ),
+    );
+}
+
 const ZeroArena = process_advance_v1.CapacityArena;
 const ZeroCapacityStorage = struct {
     input: ZeroArena(.input, 0) = .{},
@@ -1644,4 +1716,14 @@ const ExtendedCapacityStorage = struct {
     auxiliary_environment: ZeroArena(.output, 0) = .{},
     future_arena: ZeroArena(.output, 0) = .{},
     scratch: ZeroArena(.scratch, 0) = .{},
+};
+
+const AlignmentCapacityStorage = struct {
+    first: ZeroArena(.output, 0) = .{},
+    second: ZeroArena(.output, 0) = .{},
+    third: ZeroArena(.output, 0) = .{},
+    fourth: ZeroArena(.output, 0) = .{},
+    fifth: ZeroArena(.output, 0) = .{},
+    sixth: ZeroArena(.output, 0) = .{},
+    seventh: ZeroArena(.output, 0) = .{},
 };

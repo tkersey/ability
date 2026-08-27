@@ -142,7 +142,7 @@ pub fn encode(
     program_transition_digest: [32]u8,
     frames: []const Frame,
     output: []u8,
-) Error![]const u8 {
+) Error!StateView {
     return encodeTracked(
         program_transition_digest,
         frames,
@@ -156,7 +156,7 @@ pub fn encodeTracked(
     frames: []const Frame,
     output: []u8,
     required_output: ?*u64,
-) Error![]const u8 {
+) Error!StateView {
     if (slicesOverlap(output, std.mem.sliceAsBytes(frames))) {
         return error.InvalidEncoding;
     }
@@ -181,8 +181,7 @@ pub fn encodeTracked(
     }
     if (cursor != required) return error.InvalidEncoding;
     const encoded = output[0..required];
-    _ = try validate(encoded, program_transition_digest);
-    return encoded;
+    return validate(encoded, program_transition_digest);
 }
 
 pub fn topFrame(state: StateView) Error!FrameSpan {

@@ -53,6 +53,7 @@ test "product construction streams more operands than the value catalog" {
             &scratch,
             &scratch_cursor,
             &workspace,
+            null,
         ),
     );
     try std.testing.expectEqual(@as(usize, operand_count), slots[1].bytes.len);

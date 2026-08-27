@@ -1239,17 +1239,6 @@ fn transitionState(
     );
 }
 
-fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        if (readInt(u16, constructor, cursor) == value) return true;
-        cursor += 8;
-    }
-    return false;
-}
-
 fn encodeTopFrame(
     image: ValidatedProgram,
     state: []const u8,

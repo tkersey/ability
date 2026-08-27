@@ -121,6 +121,18 @@ try {
       )) {
     throw new Error("relay accepted a non-regular payload source");
   }
+  const nonRegularKernel = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", temporary,
+    "--image", emptyImage,
+    "--initial-args", emptyInitial,
+  ]);
+  if (nonRegularKernel.status === 0 ||
+      !nonRegularKernel.stderr.toString("utf8").includes(
+        "kernel must be a regular file",
+      )) {
+    throw new Error("relay accepted a non-regular kernel source");
+  }
   const wrongAbi = spawnSync(process.execPath, [
     adapter,
     "--kernel", wrongKernel,

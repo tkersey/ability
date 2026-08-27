@@ -22,12 +22,13 @@ const instancePath = statePath ?? initialPath;
 const resultPath = options.get("--result");
 const opened = [];
 try {
+  const kernelFile = openPayload(kernelPath, "kernel");
   const imageFile = openPayload(imagePath, "image");
   const instanceFile = openPayload(instancePath, "instance");
   const resultFile = resultPath === undefined
     ? null
     : openPayload(resultPath, "result");
-  const module = await WebAssembly.compile(fs.readFileSync(kernelPath));
+  const module = await WebAssembly.compile(readExact(kernelFile, "kernel"));
   if (WebAssembly.Module.imports(module).length !== 0) {
     throw new Error("Boundary Process kernel must be import-free");
   }

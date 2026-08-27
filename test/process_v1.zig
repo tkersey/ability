@@ -10,13 +10,12 @@ test "ABL_PST1 round trips an unbounded-count frame sequence canonically" {
         .{ .constructor_id = 128, .environment = &.{ 4, 5 } },
     };
     var storage: [256]u8 = undefined;
-    const encoded = try process_state_v1.encode(digest, &frames, &storage);
-    const state = try process_state_v1.validate(encoded, digest);
+    const state = try process_state_v1.encode(digest, &frames, &storage);
     try std.testing.expectEqual(@as(u64, 3), state.frame_count);
     try std.testing.expectEqualSlices(
         u8,
         &process_state_v1.magic,
-        encoded[0..process_state_v1.magic.len],
+        state.bytes[0..process_state_v1.magic.len],
     );
     var iterator = state.iterator();
     for (frames) |expected| {
@@ -26,7 +25,7 @@ test "ABL_PST1 round trips an unbounded-count frame sequence canonically" {
     }
     try std.testing.expect((try iterator.next()) == null);
     try std.testing.expectEqual(
-        process_state_v1.artifactDigest(encoded),
+        process_state_v1.artifactDigest(state.bytes),
         process_state_v1.artifactDigest(state.bytes),
     );
 }
@@ -38,7 +37,7 @@ test "ABL_PST1 rejects non-minimal naturals and wrong program binding" {
         .environment = &.{},
     }};
     var storage: [96]u8 = undefined;
-    const encoded = try process_state_v1.encode(digest, &frame, &storage);
+    const encoded = (try process_state_v1.encode(digest, &frame, &storage)).bytes;
     var overlong: [96]u8 = undefined;
     @memcpy(overlong[0..process_state_v1.fixed_header_length], encoded[0..process_state_v1.fixed_header_length]);
     overlong[process_state_v1.fixed_header_length] = 0x81;
@@ -113,14 +112,13 @@ test "Process State mutation codecs reject every source alias before writing" {
         .{ .constructor_id = 2, .environment = &.{ 2, 3 } },
     };
     var state_storage: [192]u8 = undefined;
-    const encoded = try process_state_v1.encode(
+    const state = try process_state_v1.encode(
         digest,
         &frames,
         &state_storage,
     );
-    const state = try process_state_v1.validate(encoded, digest);
     var before: [192]u8 = undefined;
-    @memcpy(before[0..encoded.len], encoded);
+    @memcpy(before[0..state.bytes.len], state.bytes);
     const replacement: process_state_v1.Frame = .{
         .constructor_id = 3,
         .environment = &.{ 4, 5, 6 },
@@ -150,7 +148,11 @@ test "Process State mutation codecs reject every source alias before writing" {
             state_storage[1..],
         ),
     );
-    try std.testing.expectEqualSlices(u8, before[0..encoded.len], encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        before[0..state.bytes.len],
+        state.bytes,
+    );
 
     var output: [192]u8 = undefined;
     @memset(output[160..164], 0x99);

@@ -21,9 +21,10 @@ other mutable arena; readonly source slices may overlap. Invalid mutable
 aliases reject before writing. Every State-bearing outcome is returned from the
 supplied output-State arena, including byte-identical pending-request recovery.
 An invocation-local capacity tracker records the exact bytes required at each
-output producer before a capacity error. `NeedsCapacity` therefore preserves
-the current reduction requirement rather than reconstructing a global maximum
-from BPI1 schema bounds.
+output producer and reducer scratch allocation before a capacity error.
+`NeedsCapacity` therefore preserves the current reduction requirement rather
+than reconstructing a global maximum from BPI1 schema bounds or substituting
+an unrelated arena's existing capacity.
 
 `ABL_PST1` stores the program transition digest and a minimally encoded frame
 sequence. Each frame contains its continuation-constructor identity and exact
@@ -35,7 +36,8 @@ profile, scheduler state, pointer, or instance identity.
 environment and path invariant against the supplied BPI1 before execution.
 One `advance` invocation performs that full admission once and carries an
 internal, non-serializable admitted top-frame projection through the reduction.
-Every internal State producer must return that refinement and declare the exact
+State encoders return the canonical `StateView` they already validate. Every
+internal State producer must return that refinement and declare the exact
 changed frame suffix through the same mutation helper that serializes it; one
 checked constructor admits every frame in that suffix and their internal stack
 pairs, plus the pair crossing from the preserved prefix, before publishing
@@ -48,7 +50,8 @@ canonical input header from `u64` sizes obtained from open regular-file
 descriptors before reading payload bytes. When preparation admits the input,
 the adapter reads exactly those bytes through the same descriptors, rejects a
 changed length, copies only BPI1 and instance/result bytes, invokes one kernel
-operation, writes the canonical outcome bytes, and exits.
+operation, writes the canonical outcome bytes, and exits. The kernel itself is
+also admitted as one bounded regular-file descriptor before materialization.
 If the fixed input arena cannot hold those payloads, preparation returns a
 canonical transactional `NeedsCapacity` outcome before any payload copy.
 Kernel-input and kernel-outcome framing uses `u64` component lengths. The
@@ -59,7 +62,9 @@ The relay normalizes exported wasm32 pointers to unsigned offsets before
 indexing linear memory. Fixed-kernel storage declares input, serialized output,
 State, candidate State, value, request, both environments, and scratch as typed
 capacity arenas. Page accounting folds over that actual storage product, so a
-new arena cannot be omitted from the calculation or its omission witness.
+new arena cannot be omitted from the calculation or its omission witness. Each
+growth delta uses the arena's aligned physical size rather than only its logical
+payload length.
 
 Run:
 

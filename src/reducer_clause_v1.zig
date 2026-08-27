@@ -27,6 +27,7 @@ pub const Slot = struct {
 /// the exact bytes required at the producer before returning a capacity error.
 pub const CapacityTracker = struct {
     output_bytes: u64 = 0,
+    scratch_bytes: u64 = 0,
 
     pub fn requireOutput(
         self: *@This(),
@@ -35,6 +36,15 @@ pub const CapacityTracker = struct {
     ) Error!void {
         self.output_bytes = @max(self.output_bytes, required);
         if (available < required) return error.OutputCapacity;
+    }
+
+    pub fn requireScratch(
+        self: *@This(),
+        available: usize,
+        required: usize,
+    ) Error!void {
+        self.scratch_bytes = @max(self.scratch_bytes, required);
+        if (available < required) return error.ScratchCapacity;
     }
 };
 
@@ -262,6 +272,7 @@ pub fn evaluateClause(
                 slots,
                 scratch,
                 &scratch_cursor,
+                capacity,
             ),
             24...56 => try executeCompositeOperation(
                 image,
@@ -271,6 +282,7 @@ pub fn evaluateClause(
                 scratch,
                 &scratch_cursor,
                 workspace,
+                capacity,
             ),
             else => return error.UnsupportedOperation,
         };
@@ -364,6 +376,15 @@ fn requireOutput(
 ) Error!void {
     if (capacity) |tracker| return tracker.requireOutput(available, required);
     if (available < required) return error.OutputCapacity;
+}
+
+fn requireScratch(
+    capacity: ?*CapacityTracker,
+    available: usize,
+    required: usize,
+) Error!void {
+    if (capacity) |tracker| return tracker.requireScratch(available, required);
+    if (available < required) return error.ScratchCapacity;
 }
 
 pub fn initializeZeroWidthSlots(
@@ -711,6 +732,7 @@ pub fn executeScalarOperation(
     slots: *[1024]Slot,
     scratch: []u8,
     scratch_cursor: *usize,
+    capacity: ?*CapacityTracker,
 ) Error!?u32 {
     const operation = readInt(u16, instruction, 6);
     const operand_count = readInt(u16, instruction, 10);
@@ -750,7 +772,7 @@ pub fn executeScalarOperation(
             else => unreachable,
         };
         slots[result] = .{
-            .bytes = try writeRaw(scratch, scratch_cursor, .bool, @intFromBool(value)),
+            .bytes = try writeRaw(scratch, scratch_cursor, capacity, .bool, @intFromBool(value)),
             .initialized = true,
         };
         return null;
@@ -764,6 +786,7 @@ pub fn executeScalarOperation(
             .bytes = try writeRaw(
                 scratch,
                 scratch_cursor,
+                capacity,
                 .bool,
                 @intFromBool(left.raw == 0),
             ),
@@ -775,7 +798,7 @@ pub fn executeScalarOperation(
         const converted = convertInteger(left, result_kind) orelse
             return try failureTag(image, "arithmetic_overflow");
         slots[result] = .{
-            .bytes = try writeRaw(scratch, scratch_cursor, result_kind, converted),
+            .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, converted),
             .initialized = true,
         };
         return null;
@@ -787,7 +810,7 @@ pub fn executeScalarOperation(
         const raw = encodeSigned(negated, result_kind) orelse
             return try failureTag(image, "arithmetic_overflow");
         slots[result] = .{
-            .bytes = try writeRaw(scratch, scratch_cursor, result_kind, raw),
+            .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
             .initialized = true,
         };
         return null;
@@ -795,7 +818,7 @@ pub fn executeScalarOperation(
     if (operation == 15) {
         const raw = (~left.raw) & integerMask(left.bits);
         slots[result] = .{
-            .bytes = try writeRaw(scratch, scratch_cursor, result_kind, raw),
+            .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
             .initialized = true,
         };
         return null;
@@ -810,6 +833,7 @@ pub fn executeScalarOperation(
             .bytes = try writeRaw(
                 scratch,
                 scratch_cursor,
+                capacity,
                 .bool,
                 @intFromBool(relation),
             ),
@@ -825,7 +849,7 @@ pub fn executeScalarOperation(
             else => unreachable,
         } & integerMask(left.bits);
         slots[result] = .{
-            .bytes = try writeRaw(scratch, scratch_cursor, result_kind, raw),
+            .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
             .initialized = true,
         };
         return null;
@@ -835,7 +859,7 @@ pub fn executeScalarOperation(
         error.Overflow => return try failureTag(image, "arithmetic_overflow"),
     };
     slots[result] = .{
-        .bytes = try writeRaw(scratch, scratch_cursor, result_kind, raw),
+        .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
         .initialized = true,
     };
     return null;
@@ -849,6 +873,7 @@ pub fn executeCompositeOperation(
     scratch: []u8,
     scratch_cursor: *usize,
     workspace: *image_v1.ValidationWorkspace,
+    capacity: ?*CapacityTracker,
 ) Error!?u32 {
     const operation = readInt(u16, instruction, 6);
     const operand_count = readInt(u16, instruction, 10);
@@ -864,7 +889,7 @@ pub fn executeCompositeOperation(
                 slots[operand].bytes.len,
             ) catch return error.ScratchCapacity;
         }
-        const output = try allocateScratch(scratch, scratch_cursor, length);
+        const output = try allocateScratch(scratch, scratch_cursor, capacity, length);
         var cursor: usize = 0;
         for (0..operand_count) |index| {
             const operand = readInt(u16, instruction, 16 + index * 2);
@@ -909,6 +934,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 product.len - field.len + replacement.len,
             );
             @memcpy(output[0..prefix_length], product[0..prefix_length]);
@@ -930,6 +956,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 4 + payload.len,
             );
             std.mem.writeInt(u32, output[0..4], tag, .little);
@@ -952,6 +979,7 @@ pub fn executeCompositeOperation(
                     .bytes = try writeRaw(
                         scratch,
                         scratch_cursor,
+                        capacity,
                         .bool,
                         @intFromBool(matches),
                     ),
@@ -966,7 +994,7 @@ pub fn executeCompositeOperation(
             }
         },
         30 => {
-            const output = try allocateScratch(scratch, scratch_cursor, 1);
+            const output = try allocateScratch(scratch, scratch_cursor, capacity, 1);
             output[0] = 0;
             slots[result] = .{ .bytes = output, .initialized = true };
         },
@@ -975,6 +1003,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 1 + payload.len,
             );
             output[0] = 1;
@@ -986,6 +1015,7 @@ pub fn executeCompositeOperation(
                 .bytes = try writeRaw(
                     scratch,
                     scratch_cursor,
+                    capacity,
                     .bool,
                     @intFromBool(slots[operands[0]].bytes[0] == 1),
                 ),
@@ -993,7 +1023,7 @@ pub fn executeCompositeOperation(
             };
         },
         33, 41, 49 => {
-            const output = try allocateScratch(scratch, scratch_cursor, 4);
+            const output = try allocateScratch(scratch, scratch_cursor, capacity, 4);
             @memset(output, 0);
             slots[result] = .{ .bytes = output, .initialized = true };
         },
@@ -1008,6 +1038,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 vector.len + element.len,
             );
             std.mem.writeInt(u32, output[0..4], length + 1, .little);
@@ -1021,6 +1052,7 @@ pub fn executeCompositeOperation(
                 .bytes = try writeRaw(
                     scratch,
                     scratch_cursor,
+                    capacity,
                     .u32,
                     length,
                 ),
@@ -1053,6 +1085,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 vector.len - element.len + replacement.len,
             );
             @memcpy(output[0..prefix_length], vector[0..prefix_length]);
@@ -1083,6 +1116,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 prefix_length + 1 + if (popped) |element| element.len else 0,
             );
             std.mem.writeInt(
@@ -1115,6 +1149,7 @@ pub fn executeCompositeOperation(
                 const output = try allocateScratch(
                     scratch,
                     scratch_cursor,
+                    capacity,
                     prefix_length,
                 );
                 @memcpy(output, vector[0..prefix_length]);
@@ -1123,7 +1158,7 @@ pub fn executeCompositeOperation(
             }
         },
         40 => {
-            const output = try allocateScratch(scratch, scratch_cursor, 4);
+            const output = try allocateScratch(scratch, scratch_cursor, capacity, 4);
             @memset(output, 0);
             slots[result] = .{ .bytes = output, .initialized = true };
         },
@@ -1144,6 +1179,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 4 + @as(usize, combined),
             );
             std.mem.writeInt(u32, output[0..4], combined, .little);
@@ -1175,6 +1211,7 @@ pub fn executeCompositeOperation(
                     &.{encoded[0..encoded_length]},
                     scratch,
                     scratch_cursor,
+                    capacity,
                 ) catch |err| switch (err) {
                     error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
                     else => return err,
@@ -1208,6 +1245,7 @@ pub fn executeCompositeOperation(
                     &.{formatted},
                     scratch,
                     scratch_cursor,
+                    capacity,
                 ) catch |err| switch (err) {
                     error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
                     else => return err,
@@ -1234,6 +1272,7 @@ pub fn executeCompositeOperation(
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,
+                capacity,
                 4 + copied.len,
             );
             std.mem.writeInt(u32, output[0..4], @intCast(copied.len), .little);
@@ -1252,6 +1291,7 @@ pub fn executeCompositeOperation(
                 .bytes = try writeRaw(
                     scratch,
                     scratch_cursor,
+                    capacity,
                     .i8,
                     @as(u8, @bitCast(ordered)),
                 ),
@@ -1270,6 +1310,7 @@ pub fn executeCompositeOperation(
                     },
                     scratch,
                     scratch_cursor,
+                    capacity,
                 ) catch |err| switch (err) {
                     error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
                     else => return err,
@@ -1286,6 +1327,7 @@ pub fn executeCompositeOperation(
                     &.{slots[operands[1]].bytes[0..1]},
                     scratch,
                     scratch_cursor,
+                    capacity,
                 ) catch |err| switch (err) {
                     error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
                     else => return err,
@@ -1305,6 +1347,7 @@ fn appendSequence(
     suffixes: []const []const u8,
     scratch: []u8,
     scratch_cursor: *usize,
+    capacity: ?*CapacityTracker,
 ) Error![]const u8 {
     var logical_length: usize = readInt(u32, prefix, 0);
     for (suffixes) |suffix| {
@@ -1318,6 +1361,7 @@ fn appendSequence(
     const output = try allocateScratch(
         scratch,
         scratch_cursor,
+        capacity,
         4 + logical_length,
     );
     std.mem.writeInt(u32, output[0..4], @intCast(logical_length), .little);
@@ -1411,11 +1455,12 @@ pub fn valueNode(
 fn allocateScratch(
     scratch: []u8,
     cursor: *usize,
+    capacity: ?*CapacityTracker,
     length: usize,
 ) Error![]u8 {
-    if (cursor.* > scratch.len or length > scratch.len - cursor.*) {
+    const required = std.math.add(usize, cursor.*, length) catch
         return error.ScratchCapacity;
-    }
+    try requireScratch(capacity, scratch.len, required);
     const result = scratch[cursor.*..][0..length];
     cursor.* += length;
     return result;
@@ -1603,16 +1648,13 @@ pub fn integerMask(bits: u8) u64 {
 fn writeRaw(
     scratch: []u8,
     cursor: *usize,
+    capacity: ?*CapacityTracker,
     kind: dynamic_value_v1.Kind,
     raw: u64,
 ) Error![]const u8 {
     const length: usize = if (kind == .bool) 1 else (integerShape(kind) orelse return error.InvalidImage).bits / 8;
-    if (cursor.* > scratch.len or length > scratch.len - cursor.*) {
-        return error.ScratchCapacity;
-    }
-    const result = scratch[cursor.*..][0..length];
+    const result = try allocateScratch(scratch, cursor, capacity, length);
     for (result, 0..) |*byte, index| byte.* = @truncate(raw >> @intCast(index * 8));
-    cursor.* += length;
     return result;
 }
 
@@ -1973,6 +2015,7 @@ fn validateComputedResultEncoded(
             slots,
             workspace.invariant_result,
             &scratch_cursor,
+            null,
         )
     else if (operation <= 56)
         try executeCompositeOperation(
@@ -1983,6 +2026,7 @@ fn validateComputedResultEncoded(
             workspace.invariant_result,
             &scratch_cursor,
             workspace,
+            null,
         )
     else
         return error.InvalidState;

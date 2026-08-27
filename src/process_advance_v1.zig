@@ -339,9 +339,15 @@ pub fn minimumMemoryPagesForStorage(
             .output => requirement.minimum_output_bytes,
             .scratch => requirement.minimum_scratch_bytes,
         };
+        const current_logical: u64 = @intCast(arena.bytes.len);
+        const current_physical: u64 = @sizeOf(field.type);
+        const required_physical = if (required <= current_logical)
+            current_physical
+        else
+            alignedArenaBytes(required, @alignOf(field.type));
         growth = saturatingAddU64(
             growth,
-            required -| @as(u64, @intCast(arena.bytes.len)),
+            required_physical -| current_physical,
         );
     }
     const live_bytes = std.math.mul(
@@ -350,6 +356,13 @@ pub fn minimumMemoryPagesForStorage(
         65536,
     ) catch std.math.maxInt(u64);
     return bytesToPages(saturatingAddU64(live_bytes, growth));
+}
+
+fn alignedArenaBytes(bytes: u64, alignment: comptime_int) u64 {
+    const mask: u64 = alignment - 1;
+    const added = std.math.add(u64, bytes, mask) catch
+        return std.math.maxInt(u64);
+    return added & ~mask;
 }
 
 pub fn currentCapacityForClass(
@@ -621,15 +634,11 @@ pub fn encodeState(
     workspace.invariant_result = invariant_scratch;
     defer workspace.invariant_result = prior_invariant_result;
     const image = try image_v1.validateImage(image_bytes, workspace);
-    const encoded = try process_state_v1.encode(
+    const state = try process_state_v1.encode(
         image.catalogs.envelope.header.program_transition_digest,
         frames,
         output_state,
     );
-    const state = process_state_v1.validate(
-        encoded,
-        image.catalogs.envelope.header.program_transition_digest,
-    ) catch return error.InvalidProcessState;
     _ = try admitFrames(image, state, workspace);
     return state;
 }
@@ -659,17 +668,13 @@ pub fn validateInitialArgs(
     defer workspace.invariant_result = prior_invariant_result;
     const image = try image_v1.validateImage(image_bytes, workspace);
     var capacity: CapacityTracker = .{};
-    const encoded = try initialState(
+    const state = try initialState(
         image,
         initial_args,
         output_state,
         invariant_scratch,
         workspace,
         &capacity,
-    );
-    const state = try process_state_v1.validate(
-        encoded,
-        image.catalogs.envelope.header.program_transition_digest,
     );
     _ = try admitFrames(image, state, workspace);
 }
@@ -694,7 +699,7 @@ fn advanceFinite(
                 workspace,
                 capacity,
             );
-            break :blk try advanceState(
+            break :blk try advanceStateView(
                 image,
                 initial,
                 null,
@@ -758,24 +763,27 @@ fn capacityRequirement(
         current_output +| 1
     else
         capacity.output_bytes;
-    const minimum_output = @max(
-        if (err == error.OutputCapacity)
-            observed_output
-        else
-            current_output,
-        current_output,
-    );
+    const minimum_output = if (err == error.OutputCapacity)
+        observed_output
+    else
+        current_output;
     const current_scratch: u64 = @intCast(buffers.scratch.len);
     const required_scratch: u64 = if (envelope) |view|
         view.header.maximum_kernel_scratch_bytes
     else
         current_scratch +| 1;
     const minimum_scratch = @max(
-        required_scratch,
         if (err == error.ScratchCapacity or err == error.CapacityExceeded)
-            current_scratch +| 1
+            if (capacity.scratch_bytes == 0)
+                @max(required_scratch, current_scratch +| 1)
+            else
+                capacity.scratch_bytes
         else
             current_scratch,
+        if (err == error.ScratchCapacity or err == error.CapacityExceeded)
+            0
+        else
+            required_scratch,
     );
     const requirement: CapacityRequirement = .{
         .minimum_input_bytes = input,
@@ -872,7 +880,7 @@ fn initialState(
     environment_output: []u8,
     workspace: *image_v1.ValidationWorkspace,
     capacity: *CapacityTracker,
-) Error![]const u8 {
+) Error!process_state_v1.StateView {
     const constructor = try image_v1.evaluatorConstructorRecord(
         image,
         image.catalogs.initial_constructor_id,
@@ -922,6 +930,24 @@ fn advanceState(
         state_bytes,
         image.catalogs.envelope.header.program_transition_digest,
     ) catch return error.InvalidProcessState;
+    return advanceStateView(
+        image,
+        state,
+        effect_result,
+        buffers,
+        workspace,
+        capacity,
+    );
+}
+
+fn advanceStateView(
+    image: image_v1.ValidatedImage,
+    state: process_state_v1.StateView,
+    effect_result: ?[]const u8,
+    buffers: Buffers,
+    workspace: *image_v1.ValidationWorkspace,
+    capacity: *CapacityTracker,
+) Error!Outcome {
     var admitted = try admitFrames(image, state, workspace);
     if (admitted.constructor[8] == 3) {
         if (effect_result) |result_bytes| {
@@ -1911,17 +1937,6 @@ fn encodeEnvironment(
         error.InvalidState => return error.InvalidProcessState,
         else => return err,
     };
-}
-
-fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
-    const field_count = @as(u32, readInt(u16, constructor, 16)) +
-        readInt(u16, constructor, 18);
-    var cursor: usize = 24;
-    for (0..field_count) |_| {
-        if (readInt(u16, constructor, cursor) == value) return true;
-        cursor += 8;
-    }
-    return false;
 }
 
 const suspensionContinuation = reducer_clause_v1.suspensionContinuation;
