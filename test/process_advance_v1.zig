@@ -1865,10 +1865,79 @@ test "generated storage exclusively owns page-bearing advance" {
         try std.testing.expect(@hasField(Generated, field.name));
         const arena = @field(process_advance_v1.CapacityArenaId, field.name);
         try std.testing.expectEqual(
+            arena,
+            @FieldType(Generated, field.name).capacity_arena,
+        );
+        try std.testing.expectEqual(
             arena.capacityClass(),
             @FieldType(Generated, field.name).capacity_class,
         );
+        try std.testing.expectEqual(
+            arena.sizingOwner(),
+            @FieldType(Generated, field.name).sizing_owner,
+        );
     }
+}
+
+test "capacity pages apply shared sizing demand to every physical arena" {
+    const Generated = boundary.process_v1.CapacityStorage(.{
+        .input = 0,
+        .output = 0,
+        .state = 0,
+        .value = 0,
+        .request = 0,
+        .environment = 0,
+        .scratch = 0,
+    });
+    var storage: Generated = .{};
+    inline for (.{
+        .{ process_advance_v1.CapacityArenaId.input, @as(u64, 1) },
+        .{ process_advance_v1.CapacityArenaId.output, @as(u64, 1) },
+        .{ process_advance_v1.CapacityArenaId.state, @as(u64, 2) },
+        .{ process_advance_v1.CapacityArenaId.value, @as(u64, 1) },
+        .{ process_advance_v1.CapacityArenaId.request, @as(u64, 1) },
+        .{ process_advance_v1.CapacityArenaId.candidate, @as(u64, 2) },
+        .{ process_advance_v1.CapacityArenaId.environment, @as(u64, 2) },
+        .{ process_advance_v1.CapacityArenaId.auxiliary_environment, @as(u64, 2) },
+        .{ process_advance_v1.CapacityArenaId.scratch, @as(u64, 1) },
+    }) |case| {
+        var evidence: process_advance_v1.CapacityEvidence = .{};
+        evidence.noteU64(case[0], 65536);
+        try std.testing.expectEqual(
+            case[1],
+            process_advance_v1.minimumMemoryPagesForStorage(
+                &storage,
+                evidence,
+                0,
+                0,
+            ),
+        );
+    }
+
+    var joint: process_advance_v1.CapacityEvidence = .{};
+    joint.noteU64(.state, 65536);
+    joint.noteU64(.candidate, 131072);
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
+            joint,
+            0,
+            0,
+        ),
+    );
+
+    var maximum: process_advance_v1.CapacityEvidence = .{};
+    maximum.noteU64(.auxiliary_environment, std.math.maxInt(u64));
+    try std.testing.expectEqual(
+        @as(u64, 562949953421312),
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
+            maximum,
+            0,
+            0,
+        ),
+    );
 }
 
 test "public native advance derives pages from its physical storage" {
@@ -2022,12 +2091,12 @@ const ZeroArena = process_advance_v1.CapacityArena;
 const ZeroCapacityStorage = struct {
     input: ZeroArena(.input, 0) = .{},
     output: ZeroArena(.output, 0) = .{},
-    state: ZeroArena(.output, 0) = .{},
-    candidate: ZeroArena(.output, 0) = .{},
-    value: ZeroArena(.output, 0) = .{},
-    request: ZeroArena(.output, 0) = .{},
-    environment: ZeroArena(.output, 0) = .{},
-    auxiliary_environment: ZeroArena(.output, 0) = .{},
+    state: ZeroArena(.state, 0) = .{},
+    candidate: ZeroArena(.candidate, 0) = .{},
+    value: ZeroArena(.value, 0) = .{},
+    request: ZeroArena(.request, 0) = .{},
+    environment: ZeroArena(.environment, 0) = .{},
+    auxiliary_environment: ZeroArena(.auxiliary_environment, 0) = .{},
     scratch: ZeroArena(.scratch, 0) = .{},
 };
 

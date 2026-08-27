@@ -48,6 +48,8 @@ pub const StorageCapacities = struct {
     scratch: usize,
 };
 
+pub const StorageCapacityId = std.meta.FieldEnum(StorageCapacities);
+
 pub const Outcome = union(enum) {
     progressed: []const u8,
     requested: struct {
@@ -92,6 +94,25 @@ pub const CapacityArenaId = enum {
             .scratch => .scratch,
         };
     }
+
+    pub fn sizingOwner(self: @This()) StorageCapacityId {
+        return switch (self) {
+            .input => .input,
+            .output => .output,
+            .state, .candidate => .state,
+            .value => .value,
+            .request => .request,
+            .environment, .auxiliary_environment => .environment,
+            .scratch => .scratch,
+        };
+    }
+
+    pub fn storageCapacity(
+        comptime self: @This(),
+        comptime capacities: StorageCapacities,
+    ) usize {
+        return @field(capacities, @tagName(self.sizingOwner()));
+    }
 };
 
 pub const CapacityEvidence = struct {
@@ -132,6 +153,20 @@ pub const CapacityEvidence = struct {
 
     pub fn requiredFor(self: @This(), arena: CapacityArenaId) u64 {
         return self.required_bytes[@intFromEnum(arena)];
+    }
+
+    pub fn requiredForSizingOwner(
+        self: @This(),
+        owner: StorageCapacityId,
+    ) u64 {
+        var required: u64 = 0;
+        inline for (@typeInfo(CapacityArenaId).@"enum".fields) |field| {
+            const arena = @field(CapacityArenaId, field.name);
+            if (arena.sizingOwner() == owner) {
+                required = @max(required, self.requiredFor(arena));
+            }
+        }
+        return required;
     }
 
     pub fn maximumOutput(self: @This()) u64 {
@@ -410,14 +445,17 @@ pub fn outcomeEncodedLength(outcome: Outcome) Error!usize {
 
 pub const CapacityClass = enum { input, output, scratch };
 
-/// A physical interpreter arena that carries its accounting class in its type.
-/// Generic storage folds therefore include every declared arena automatically.
+/// A physical interpreter arena carries its logical identity, sizing owner,
+/// and accounting class in its type. Generic storage folds therefore include
+/// every declared arena automatically.
 pub fn CapacityArena(
-    comptime class: CapacityClass,
+    comptime arena: CapacityArenaId,
     comptime capacity: usize,
 ) type {
     return struct {
-        pub const capacity_class = class;
+        pub const capacity_arena = arena;
+        pub const capacity_class = arena.capacityClass();
+        pub const sizing_owner = arena.sizingOwner();
         bytes: [capacity]u8 align(16) = undefined,
     };
 }
@@ -425,18 +463,18 @@ pub fn CapacityArena(
 pub fn CapacityStorage(comptime capacities: StorageCapacities) type {
     const Arena = CapacityArena;
     return struct {
-        input: Arena(CapacityArenaId.input.capacityClass(), capacities.input) = .{},
-        output: Arena(CapacityArenaId.output.capacityClass(), capacities.output) = .{},
-        state: Arena(CapacityArenaId.state.capacityClass(), capacities.state) = .{},
-        value: Arena(CapacityArenaId.value.capacityClass(), capacities.value) = .{},
-        request: Arena(CapacityArenaId.request.capacityClass(), capacities.request) = .{},
-        candidate: Arena(CapacityArenaId.candidate.capacityClass(), capacities.state) = .{},
-        environment: Arena(CapacityArenaId.environment.capacityClass(), capacities.environment) = .{},
+        input: Arena(.input, CapacityArenaId.input.storageCapacity(capacities)) = .{},
+        output: Arena(.output, CapacityArenaId.output.storageCapacity(capacities)) = .{},
+        state: Arena(.state, CapacityArenaId.state.storageCapacity(capacities)) = .{},
+        value: Arena(.value, CapacityArenaId.value.storageCapacity(capacities)) = .{},
+        request: Arena(.request, CapacityArenaId.request.storageCapacity(capacities)) = .{},
+        candidate: Arena(.candidate, CapacityArenaId.candidate.storageCapacity(capacities)) = .{},
+        environment: Arena(.environment, CapacityArenaId.environment.storageCapacity(capacities)) = .{},
         auxiliary_environment: Arena(
-            CapacityArenaId.auxiliary_environment.capacityClass(),
-            capacities.environment,
+            .auxiliary_environment,
+            CapacityArenaId.auxiliary_environment.storageCapacity(capacities),
         ) = .{},
-        scratch: Arena(CapacityArenaId.scratch.capacityClass(), capacities.scratch) = .{},
+        scratch: Arena(.scratch, CapacityArenaId.scratch.storageCapacity(capacities)) = .{},
 
         pub fn advance(
             self: *@This(),
@@ -480,7 +518,9 @@ pub fn minimumMemoryPagesForStorage(
     var growth: u128 = 0;
     inline for (std.meta.fields(Storage)) |field| {
         const arena = &@field(storage.*, field.name);
-        const required = capacity.requiredFor(@field(CapacityArenaId, field.name));
+        const required = capacity.requiredForSizingOwner(
+            @FieldType(Storage, field.name).sizing_owner,
+        );
         const current_logical: u64 = @intCast(arena.bytes.len);
         const current_physical: u128 = @sizeOf(field.type);
         const required_physical = if (required <= current_logical)
