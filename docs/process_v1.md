@@ -32,8 +32,9 @@ environment and path invariant against the supplied BPI1 before execution.
 One `advance` invocation performs that full admission once and carries an
 internal, non-serializable admitted top-frame projection through the reduction.
 Every internal State producer must return that refinement and declare the exact
-changed frame suffix; one checked constructor admits every frame in that suffix
-and their internal stack pairs before publishing canonical bytes.
+changed frame suffix through the same mutation helper that serializes it; one
+checked constructor admits every frame in that suffix and their internal stack
+pairs before publishing canonical bytes.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic
@@ -46,6 +47,9 @@ Kernel-input and kernel-outcome framing uses `u64` component lengths. The
 wasm32 kernel accepts those lengths as scalar preflight data, so a larger finite
 State reports capacity without truncation even though that instance cannot
 address the State itself.
+The fixed-kernel page requirement starts from live WebAssembly pages and adds
+the growth delta for input, serialized output, State, candidate State, value,
+request, both environment arenas, and scratch.
 
 Run:
 

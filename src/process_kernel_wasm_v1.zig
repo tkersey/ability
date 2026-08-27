@@ -137,7 +137,9 @@ fn execute(input: []const u8) !u32 {
         },
         &validation_workspace,
     );
-    const declared_base_memory = (process_advance_v1.KernelArenaLayout{
+    const layout: process_advance_v1.KernelArenaLayout = .{
+        .input_bytes = @sizeOf(@TypeOf(input_storage)),
+        .output_bytes = @sizeOf(@TypeOf(output_storage)),
         .state_bytes = @sizeOf(@TypeOf(state_storage)),
         .candidate_state_bytes = @sizeOf(@TypeOf(candidate_storage)),
         .value_bytes = @sizeOf(@TypeOf(value_storage)),
@@ -145,14 +147,11 @@ fn execute(input: []const u8) !u32 {
         .environment_bytes = @sizeOf(@TypeOf(environment_storage)),
         .auxiliary_environment_bytes = @sizeOf(@TypeOf(auxiliary_environment_storage)),
         .scratch_bytes = @sizeOf(@TypeOf(scratch_storage)),
-        .error_bytes = @sizeOf(@TypeOf(error_storage)),
-        .validation_workspace_bytes = @sizeOf(@TypeOf(validation_workspace)),
-    }).baseMemoryWithoutOutput(input.len);
+    };
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,
-        scratch_capacity,
-        declared_base_memory,
+        layout,
         @wasmMemorySize(0),
         &output_storage,
     );

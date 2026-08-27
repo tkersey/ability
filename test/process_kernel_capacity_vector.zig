@@ -46,7 +46,9 @@ pub fn main(init: std.process.Init) !void {
         null,
         &input_storage,
     );
-    const declared_base_memory = (process_advance_v1.KernelArenaLayout{
+    const layout: process_advance_v1.KernelArenaLayout = .{
+        .input_bytes = @sizeOf(@TypeOf(input_storage)),
+        .output_bytes = 64,
         .state_bytes = @sizeOf(@TypeOf(storage.state)),
         .candidate_state_bytes = @sizeOf(@TypeOf(storage.candidate)),
         .value_bytes = @sizeOf(@TypeOf(storage.value)),
@@ -54,15 +56,12 @@ pub fn main(init: std.process.Init) !void {
         .environment_bytes = @sizeOf(@TypeOf(storage.environment)),
         .auxiliary_environment_bytes = @sizeOf(@TypeOf(storage.auxiliary_environment)),
         .scratch_bytes = @sizeOf(@TypeOf(storage.scratch)),
-        .error_bytes = 4 * 1024,
-        .validation_workspace_bytes = @sizeOf(@TypeOf(workspace)),
-    }).baseMemoryWithoutOutput(input.len);
+    };
     var output_storage: [64]u8 = undefined;
     const output = try process_advance_v1.encodeOutcomeForCapacity(
         outcome,
         input.len,
-        1024 * 1024,
-        declared_base_memory,
+        layout,
         64,
         &output_storage,
     );

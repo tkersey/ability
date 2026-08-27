@@ -1386,6 +1386,17 @@ test "Process rejects schema-valid forged constructor invariants" {
 
 test "NeedsCapacity page ceiling preserves saturated u64 totals" {
     var output: [64]u8 = undefined;
+    const layout: process_advance_v1.KernelArenaLayout = .{
+        .input_bytes = 0,
+        .output_bytes = 0,
+        .state_bytes = 0,
+        .candidate_state_bytes = 0,
+        .value_bytes = 0,
+        .request_bytes = 0,
+        .environment_bytes = 0,
+        .auxiliary_environment_bytes = 0,
+        .scratch_bytes = 0,
+    };
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
         .{ .needs_capacity = .{
             .minimum_input_bytes = 1,
@@ -1394,13 +1405,38 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
             .minimum_memory_pages = 0,
         } },
         1,
-        1,
-        1,
+        layout,
         0,
         &output,
     );
     try std.testing.expectEqual(
         @as(u64, 281474976710656),
         std.mem.readInt(u64, encoded[56..64], .little),
+    );
+}
+
+test "NeedsCapacity adds every arena growth delta to live pages" {
+    const layout: process_advance_v1.KernelArenaLayout = .{
+        .input_bytes = 0,
+        .output_bytes = 0,
+        .state_bytes = 0,
+        .candidate_state_bytes = 0,
+        .value_bytes = 0,
+        .request_bytes = 0,
+        .environment_bytes = 0,
+        .auxiliary_environment_bytes = 0,
+        .scratch_bytes = 0,
+    };
+    try std.testing.expectEqual(
+        @as(u64, 10),
+        layout.minimumMemoryPages(
+            .{
+                .minimum_input_bytes = 65536,
+                .minimum_output_bytes = 65536,
+                .minimum_scratch_bytes = 65536,
+                .minimum_memory_pages = 0,
+            },
+            1,
+        ),
     );
 }

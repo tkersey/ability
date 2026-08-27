@@ -301,9 +301,12 @@ pub fn outcomeEncodedLength(outcome: Outcome) Error!usize {
 /// Physical arenas retained by one fixed Process-kernel invocation.
 ///
 /// The kernel and native capacity witness both derive accounting from their
-/// actual storage objects through this one formula. Output is excluded because
-/// `encodeOutcomeForCapacity` substitutes the minimum required output size.
+/// actual storage objects through this one formula. The public output minimum
+/// applies to every output/candidate/environment arena, including serialized
+/// kernel output.
 pub const KernelArenaLayout = struct {
+    input_bytes: usize,
+    output_bytes: usize,
     state_bytes: usize,
     candidate_state_bytes: usize,
     value_bytes: usize,
@@ -311,34 +314,49 @@ pub const KernelArenaLayout = struct {
     environment_bytes: usize,
     auxiliary_environment_bytes: usize,
     scratch_bytes: usize,
-    error_bytes: usize,
-    validation_workspace_bytes: usize,
-
-    pub fn baseMemoryWithoutOutput(
+    pub fn minimumMemoryPages(
         self: @This(),
-        input_bytes: usize,
-    ) usize {
-        var total = input_bytes;
+        requirement: CapacityRequirement,
+        live_memory_pages: u64,
+    ) u64 {
+        var growth: u64 = 0;
         inline for (.{
+            self.input_bytes,
+            self.output_bytes,
             self.state_bytes,
             self.candidate_state_bytes,
             self.value_bytes,
             self.request_bytes,
             self.environment_bytes,
             self.auxiliary_environment_bytes,
-            self.scratch_bytes,
-            self.error_bytes,
-            self.validation_workspace_bytes,
-        }) |bytes| total = saturatingAdd(total, bytes);
-        return total;
+        }, 0..) |current, index| {
+            const required = if (index == 0)
+                requirement.minimum_input_bytes
+            else
+                requirement.minimum_output_bytes;
+            growth = saturatingAddU64(
+                growth,
+                required -| @as(u64, @intCast(current)),
+            );
+        }
+        growth = saturatingAddU64(
+            growth,
+            requirement.minimum_scratch_bytes -|
+                @as(u64, @intCast(self.scratch_bytes)),
+        );
+        const live_bytes = std.math.mul(
+            u64,
+            live_memory_pages,
+            65536,
+        ) catch std.math.maxInt(u64);
+        return bytesToPages(saturatingAddU64(live_bytes, growth));
     }
 };
 
 pub fn encodeOutcomeForCapacity(
     outcome: Outcome,
     input_length: usize,
-    minimum_scratch_bytes: usize,
-    base_memory_without_output: usize,
+    layout: KernelArenaLayout,
     minimum_memory_pages_floor: u64,
     output: []u8,
 ) Error![]const u8 {
@@ -350,10 +368,8 @@ pub fn encodeOutcomeForCapacity(
             .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
             .minimum_memory_pages = @max(
                 requirement.minimum_memory_pages,
-                capacityPages(
-                    base_memory_without_output,
-                    output.len,
-                    requirement.minimum_output_bytes,
+                layout.minimumMemoryPages(
+                    requirement,
                     minimum_memory_pages_floor,
                 ),
             ),
@@ -362,42 +378,27 @@ pub fn encodeOutcomeForCapacity(
     };
     return encodeOutcome(admitted_outcome, output) catch |err| switch (err) {
         error.OutputCapacity => encodeOutcome(
-            .{ .needs_capacity = .{
-                .minimum_input_bytes = @intCast(input_length),
-                .minimum_output_bytes = @intCast(required_output),
-                .minimum_scratch_bytes = @intCast(minimum_scratch_bytes),
-                .minimum_memory_pages = capacityPages(
-                    base_memory_without_output,
-                    output.len,
-                    @intCast(required_output),
-                    minimum_memory_pages_floor,
-                ),
+            .{ .needs_capacity = requirement: {
+                const requirement: CapacityRequirement = .{
+                    .minimum_input_bytes = @intCast(input_length),
+                    .minimum_output_bytes = @intCast(required_output),
+                    .minimum_scratch_bytes = @intCast(layout.scratch_bytes),
+                    .minimum_memory_pages = 0,
+                };
+                break :requirement .{
+                    .minimum_input_bytes = requirement.minimum_input_bytes,
+                    .minimum_output_bytes = requirement.minimum_output_bytes,
+                    .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
+                    .minimum_memory_pages = layout.minimumMemoryPages(
+                        requirement,
+                        minimum_memory_pages_floor,
+                    ),
+                };
             } },
             output,
         ),
         else => err,
     };
-}
-
-fn capacityPages(
-    base_memory_without_output: usize,
-    current_output_bytes: usize,
-    required_output_bytes: u64,
-    live_memory_pages: u64,
-) u64 {
-    const declared_total = saturatingAddU64(
-        @intCast(base_memory_without_output),
-        required_output_bytes,
-    );
-    const live_bytes = std.math.mul(
-        u64,
-        live_memory_pages,
-        65536,
-    ) catch std.math.maxInt(u64);
-    const growth = required_output_bytes -|
-        @as(u64, @intCast(current_output_bytes));
-    const live_grown = saturatingAddU64(live_bytes, growth);
-    return @max(bytesToPages(declared_total), bytesToPages(live_grown));
 }
 
 fn bytesToPages(bytes: u64) u64 {
@@ -932,18 +933,14 @@ fn stepState(
                 &slots,
                 buffers.environment,
             );
-            const parked = try process_state_v1.replaceTop(
+            const parked_admitted = try replaceTopAdmitted(
+                image,
                 state,
                 .{
                     .constructor_id = await_constructor_id,
                     .environment = environment,
                 },
                 buffers.output_state,
-            );
-            const parked_admitted = try admitProducedSuffix(
-                image,
-                parked,
-                &.{await_constructor_id},
                 workspace,
             );
             break :blk try makeRequest(
@@ -982,28 +979,17 @@ fn stepState(
             buffers,
             workspace,
         )).state.bytes },
-        .return_to_caller => |return_value| blk: {
-            const stable_return = try stabilizeValue(
-                return_value,
-                buffers.output_value,
-            );
-            break :blk .{ .progressed = (try returnToCaller(
+        .return_to_caller => |return_value| .{
+            .progressed = (try returnToCaller(
                 image,
                 state,
-                stable_return,
+                return_value,
                 buffers,
                 workspace,
-            )).state.bytes };
+            )).state.bytes,
         },
     };
     return outcome;
-}
-
-fn stabilizeValue(value: []const u8, output: []u8) Error![]const u8 {
-    if (slicesOverlap(value, output)) return value;
-    if (output.len < value.len) return error.OutputCapacity;
-    @memcpy(output[0..value.len], value);
-    return output[0..value.len];
 }
 
 fn callState(
@@ -1076,7 +1062,8 @@ fn callState(
         slots,
         buffers.auxiliary_environment,
     );
-    const successor = try process_state_v1.replaceTopAndAppend(
+    return replaceTopAndAppendAdmitted(
+        image,
         state,
         parent_frame,
         .{
@@ -1084,11 +1071,6 @@ fn callState(
             .environment = child_environment,
         },
         buffers.output_state,
-    );
-    return admitProducedSuffix(
-        image,
-        successor,
-        &.{ return_constructor_id, child_constructor_id },
         workspace,
     );
 }
@@ -1155,7 +1137,7 @@ fn returnToCaller(
     }
     var slots = [_]Slot{.{}} ** 1024;
     var activation_slots = [_]Slot{.{}} ** 1024;
-    const loaded = try loadEnvironment(
+    const loaded = try decodeEnvironment(
         image,
         parent_constructor,
         parent.frame.environment,
@@ -1201,18 +1183,14 @@ fn returnToCaller(
         &slots,
         buffers.environment,
     );
-    const successor = try process_state_v1.replaceParentAndDropTop(
+    return replaceParentAndDropTopAdmitted(
+        image,
         state,
         .{
             .constructor_id = next_constructor_id,
             .environment = environment,
         },
         buffers.output_state,
-    );
-    return admitProducedSuffix(
-        image,
-        successor,
-        &.{next_constructor_id},
         workspace,
     );
 }
@@ -1409,18 +1387,14 @@ fn resumePending(
         &slots,
         buffers.environment,
     );
-    const successor = try process_state_v1.replaceTop(
+    return replaceTopAdmitted(
+        image,
         state,
         .{
             .constructor_id = target_constructor_id,
             .environment = environment,
         },
         buffers.candidate_state,
-    );
-    return admitProducedSuffix(
-        image,
-        successor,
-        &.{target_constructor_id},
         workspace,
     );
 }
@@ -1460,15 +1434,69 @@ fn transitionState(
         slots,
         buffers.environment,
     );
-    const successor = try process_state_v1.replaceTop(
+    return replaceTopAdmitted(
+        image,
         state,
         .{ .constructor_id = constructor_id, .environment = environment },
         buffers.output_state,
+        workspace,
+    );
+}
+
+fn replaceTopAdmitted(
+    image: image_v1.ValidatedImage,
+    state: process_state_v1.StateView,
+    frame: process_state_v1.Frame,
+    output: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!AdmittedState {
+    const successor = try process_state_v1.replaceTop(state, frame, output);
+    return admitProducedSuffix(
+        image,
+        successor,
+        &.{frame.constructor_id},
+        workspace,
+    );
+}
+
+fn replaceTopAndAppendAdmitted(
+    image: image_v1.ValidatedImage,
+    state: process_state_v1.StateView,
+    parent: process_state_v1.Frame,
+    child: process_state_v1.Frame,
+    output: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!AdmittedState {
+    const successor = try process_state_v1.replaceTopAndAppend(
+        state,
+        parent,
+        child,
+        output,
     );
     return admitProducedSuffix(
         image,
         successor,
-        &.{constructor_id},
+        &.{ parent.constructor_id, child.constructor_id },
+        workspace,
+    );
+}
+
+fn replaceParentAndDropTopAdmitted(
+    image: image_v1.ValidatedImage,
+    state: process_state_v1.StateView,
+    parent: process_state_v1.Frame,
+    output: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!AdmittedState {
+    const successor = try process_state_v1.replaceParentAndDropTop(
+        state,
+        parent,
+        output,
+    );
+    return admitProducedSuffix(
+        image,
+        successor,
+        &.{parent.constructor_id},
         workspace,
     );
 }
@@ -1688,6 +1716,29 @@ fn loadEnvironment(
         error.ScratchCapacity => return error.ScratchCapacity,
         else => return error.InvalidProcessState,
     };
+    if (loaded.activation_entry) |entry| {
+        _ = image_v1.evaluatorConstructorRecord(image, entry) catch
+            return error.InvalidProcessState;
+    }
+    return loaded;
+}
+
+fn decodeEnvironment(
+    image: image_v1.ValidatedImage,
+    constructor: []const u8,
+    environment: []const u8,
+    slots: *[1024]Slot,
+    activation_slots: ?*[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!LoadedEnvironment {
+    const loaded = reducer_clause_v1.decodeEnvironmentSlots(
+        image,
+        constructor,
+        environment,
+        slots,
+        activation_slots,
+        workspace,
+    ) catch return error.InvalidProcessState;
     if (loaded.activation_entry) |entry| {
         _ = image_v1.evaluatorConstructorRecord(image, entry) catch
             return error.InvalidProcessState;
