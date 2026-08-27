@@ -102,10 +102,10 @@ function openPayload(path, label, maximumBytes = null) {
   opened.push(file);
   const stat = fs.fstatSync(fd, { bigint: true });
   if (!stat.isFile()) throw new Error(label + " must be a regular file");
-  if (maximumBytes !== null && stat.size > maximumBytes) {
+  file.generation = generation(stat);
+  if (maximumBytes !== null && file.generation.size > maximumBytes) {
     throw new Error(label + " exceeds this relay's operational byte limit");
   }
-  file.generation = generation(stat);
   return file;
 }
 
