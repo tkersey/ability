@@ -41,10 +41,10 @@ pub const CapacityTracker = struct {
     pub fn requireScratch(
         self: *@This(),
         available: usize,
-        required: usize,
+        required: u64,
     ) Error!void {
         self.scratch_bytes.* = @max(self.scratch_bytes.*, required);
-        if (available < required) return error.ScratchCapacity;
+        if (@as(u64, available) < required) return error.ScratchCapacity;
     }
 };
 
@@ -381,10 +381,10 @@ fn requireOutput(
 fn requireScratch(
     capacity: ?*CapacityTracker,
     available: usize,
-    required: usize,
+    required: u64,
 ) Error!void {
     if (capacity) |tracker| return tracker.requireScratch(available, required);
-    if (available < required) return error.ScratchCapacity;
+    if (@as(u64, available) < required) return error.ScratchCapacity;
 }
 
 pub fn initializeZeroWidthSlots(
@@ -447,8 +447,25 @@ pub fn environmentEncodedLength(
     activation_slots: *const [1024]Slot,
     slots: *const [1024]Slot,
 ) Error!usize {
+    return std.math.cast(
+        usize,
+        try environmentEncodedLengthU64(
+            constructor,
+            activation_entry,
+            activation_slots,
+            slots,
+        ),
+    ) orelse error.OutputCapacity;
+}
+
+pub fn environmentEncodedLengthU64(
+    constructor: []const u8,
+    activation_entry: ?u32,
+    activation_slots: *const [1024]Slot,
+    slots: *const [1024]Slot,
+) Error!u64 {
     const flags = readInt(u16, constructor, 10);
-    var length: usize = if (flags & 1 != 0) blk: {
+    var length: u64 = if (flags & 1 != 0) blk: {
         _ = activation_entry orelse return error.InvalidState;
         break :blk 4;
     } else 0;
@@ -463,7 +480,7 @@ pub fn environmentEncodedLength(
         else
             slots[value];
         if (!slot.initialized) return error.InvalidState;
-        length = std.math.add(usize, length, slot.bytes.len) catch
+        length = std.math.add(u64, length, slot.bytes.len) catch
             return error.OutputCapacity;
         field_cursor += 8;
     }
@@ -1484,11 +1501,17 @@ fn allocateScratch(
     capacity: ?*CapacityTracker,
     length: usize,
 ) Error![]u8 {
-    const required = std.math.add(usize, cursor.*, length) catch
+    const required_u64 = std.math.add(
+        u64,
+        cursor.*,
+        length,
+    ) catch
         return error.ScratchCapacity;
-    try requireScratch(capacity, scratch.len, required);
+    try requireScratch(capacity, scratch.len, required_u64);
+    const required = std.math.cast(usize, required_u64) orelse
+        return error.ScratchCapacity;
     const result = scratch[cursor.*..][0..length];
-    cursor.* += length;
+    cursor.* = required;
     return result;
 }
 

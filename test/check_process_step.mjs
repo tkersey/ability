@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const kernel = process.argv[2];
 const vectorSource = process.argv[3];
@@ -146,6 +146,22 @@ try {
       )) {
     throw new Error("relay blocked on a FIFO before regular-file admission");
   }
+  const changingInitial = path.join(temporary, "changing.initial");
+  fs.writeFileSync(changingInitial, Buffer.alloc(512 * 1024));
+  const writer = await startSameLengthWriter(changingInitial);
+  const changedGeneration = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", kernel,
+    "--image", emptyImage,
+    "--initial-args", changingInitial,
+  ], { timeout: 3000 });
+  await stopWriter(writer);
+  if (changedGeneration.status === 0 ||
+      !changedGeneration.stderr.toString("utf8").includes(
+        "instance changed after preflight",
+      )) {
+    throw new Error("relay admitted a changing file generation");
+  }
   const nonRegular = spawnSync(process.execPath, [
     adapter,
     "--kernel", kernel,
@@ -197,4 +213,30 @@ function nativeVector(instance, executable) {
     throw new Error(result.stderr.toString("utf8"));
   }
   return result.stdout;
+}
+
+function startSameLengthWriter(file) {
+  const source = `
+    const fs = require("node:fs");
+    const descriptor = fs.openSync(process.argv[1], "r+");
+    let byte = 0;
+    fs.writeSync(1, "ready\\n");
+    while (true) {
+      fs.writeSync(descriptor, Buffer.from([byte++ & 1]), 0, 1, 0);
+    }
+  `;
+  const child = spawn(process.execPath, ["-e", source, file], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.stdout.once("data", () => resolve(child));
+  });
+}
+
+function stopWriter(child) {
+  return new Promise((resolve) => {
+    child.once("close", resolve);
+    child.kill();
+  });
 }

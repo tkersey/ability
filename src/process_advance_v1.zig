@@ -77,6 +77,21 @@ pub const CapacityArenaId = enum {
     environment,
     auxiliary_environment,
     scratch,
+
+    pub fn capacityClass(self: @This()) CapacityClass {
+        return switch (self) {
+            .input => .input,
+            .output,
+            .state,
+            .value,
+            .request,
+            .candidate,
+            .environment,
+            .auxiliary_environment,
+            => .output,
+            .scratch => .scratch,
+        };
+    }
 };
 
 pub const CapacityEvidence = struct {
@@ -121,15 +136,12 @@ pub const CapacityEvidence = struct {
 
     pub fn maximumOutput(self: @This()) u64 {
         var maximum: u64 = 0;
-        inline for (.{
-            CapacityArenaId.output,
-            .state,
-            .value,
-            .request,
-            .candidate,
-            .environment,
-            .auxiliary_environment,
-        }) |arena| maximum = @max(maximum, self.requiredFor(arena));
+        inline for (@typeInfo(CapacityArenaId).@"enum".fields) |field| {
+            const arena = @field(CapacityArenaId, field.name);
+            if (arena.capacityClass() == .output) {
+                maximum = @max(maximum, self.requiredFor(arena));
+            }
+        }
         return maximum;
     }
 };
@@ -398,15 +410,18 @@ pub fn CapacityArena(
 pub fn CapacityStorage(comptime capacities: StorageCapacities) type {
     const Arena = CapacityArena;
     return struct {
-        input: Arena(.input, capacities.input) = .{},
-        output: Arena(.output, capacities.output) = .{},
-        state: Arena(.output, capacities.state) = .{},
-        value: Arena(.output, capacities.value) = .{},
-        request: Arena(.output, capacities.request) = .{},
-        candidate: Arena(.output, capacities.state) = .{},
-        environment: Arena(.output, capacities.environment) = .{},
-        auxiliary_environment: Arena(.output, capacities.environment) = .{},
-        scratch: Arena(.scratch, capacities.scratch) = .{},
+        input: Arena(CapacityArenaId.input.capacityClass(), capacities.input) = .{},
+        output: Arena(CapacityArenaId.output.capacityClass(), capacities.output) = .{},
+        state: Arena(CapacityArenaId.state.capacityClass(), capacities.state) = .{},
+        value: Arena(CapacityArenaId.value.capacityClass(), capacities.value) = .{},
+        request: Arena(CapacityArenaId.request.capacityClass(), capacities.request) = .{},
+        candidate: Arena(CapacityArenaId.candidate.capacityClass(), capacities.state) = .{},
+        environment: Arena(CapacityArenaId.environment.capacityClass(), capacities.environment) = .{},
+        auxiliary_environment: Arena(
+            CapacityArenaId.auxiliary_environment.capacityClass(),
+            capacities.environment,
+        ) = .{},
+        scratch: Arena(CapacityArenaId.scratch.capacityClass(), capacities.scratch) = .{},
 
         pub fn advance(
             self: *@This(),
@@ -2037,7 +2052,7 @@ fn encodeEnvironment(
     arena: CapacityArenaId,
     capacity: *CapacityTracker,
 ) Error![]const u8 {
-    const required = reducer_clause_v1.environmentEncodedLength(
+    const required_u64 = reducer_clause_v1.environmentEncodedLengthU64(
         constructor,
         activation_entry,
         activation_slots,
@@ -2046,7 +2061,10 @@ fn encodeEnvironment(
         error.InvalidState => return error.InvalidProcessState,
         else => return err,
     };
-    try capacity.require(arena, output.len, required);
+    capacity.noteU64(arena, required_u64);
+    const required = std.math.cast(usize, required_u64) orelse
+        return error.OutputCapacity;
+    if (output.len < required) return error.OutputCapacity;
     return reducer_clause_v1.encodeEnvironmentSlots(
         constructor,
         activation_entry,

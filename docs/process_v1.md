@@ -61,8 +61,9 @@ no authoritative Process State between calls. The generic
 canonical input header from `u64` sizes obtained from open regular-file
 descriptors before reading payload bytes. When preparation admits the input,
 the adapter reads exactly those bytes through the same descriptors, rejects a
-changed length, copies only BPI1 and instance/result bytes, invokes one kernel
-operation, writes the canonical outcome bytes, and exits. The kernel itself is
+changed device, inode, length, modification time, or change time, copies only
+BPI1 and instance/result bytes, invokes one kernel operation, writes the
+canonical outcome bytes, and exits. The kernel itself is
 also admitted as one nonblocking regular-file descriptor before materialization.
 The reference relay's 64 MiB kernel ceiling is an operational limit of that
 host implementation, not Process semantics; a larger compatible fixed kernel

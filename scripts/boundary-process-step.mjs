@@ -49,7 +49,7 @@ try {
     resultFile?.size ?? 0n,
   );
   if (inputLength === 0) {
-    verifyLengths([imageFile, instanceFile, resultFile]);
+    verifyGenerations([imageFile, instanceFile, resultFile]);
     const capacity = kernelOutput(exports, memory);
     if (capacity.length === 0) {
       throw new Error("kernel cannot prepare the Process input");
@@ -98,7 +98,7 @@ function openPayload(path, label, maximumBytes = null) {
     path,
     fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
   );
-  const file = { fd, size: 0n, label };
+  const file = { fd, generation: null, label, size: 0n };
   opened.push(file);
   const stat = fs.fstatSync(fd, { bigint: true });
   if (!stat.isFile()) throw new Error(label + " must be a regular file");
@@ -106,19 +106,18 @@ function openPayload(path, label, maximumBytes = null) {
     throw new Error(label + " exceeds this relay's operational byte limit");
   }
   file.size = stat.size;
+  file.generation = generation(stat);
   return file;
 }
 
-function verifyLengths(files) {
+function verifyGenerations(files) {
   for (const file of files) {
-    if (file !== null &&
-        fs.fstatSync(file.fd, { bigint: true }).size !== file.size) {
-      throw new Error(file.label + " changed after preflight");
-    }
+    if (file !== null) verifyGeneration(file);
   }
 }
 
 function readExact(file, label) {
+  verifyGeneration(file);
   const length = Number(file.size);
   if (!Number.isSafeInteger(length)) {
     throw new Error(label + " is too large to materialize after preflight");
@@ -137,11 +136,30 @@ function readExact(file, label) {
     offset += consumed;
   }
   const probe = Buffer.alloc(1);
-  if (fs.readSync(file.fd, probe, 0, 1, length) !== 0 ||
-      fs.fstatSync(file.fd, { bigint: true }).size !== file.size) {
+  if (fs.readSync(file.fd, probe, 0, 1, length) !== 0) {
     throw new Error(label + " changed after preflight");
   }
+  verifyGeneration(file);
   return bytes;
+}
+
+function verifyGeneration(file) {
+  const current = generation(fs.fstatSync(file.fd, { bigint: true }));
+  if (Object.keys(current).some(
+    (key) => current[key] !== file.generation[key],
+  )) {
+    throw new Error(file.label + " changed after preflight");
+  }
+}
+
+function generation(stat) {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+  };
 }
 
 function required(name) {

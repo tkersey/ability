@@ -1705,15 +1705,9 @@ test "generated storage exclusively owns page-bearing advance" {
     try std.testing.expectEqual(arena_fields.len, std.meta.fields(Generated).len);
     inline for (arena_fields) |field| {
         try std.testing.expect(@hasField(Generated, field.name));
-        const expected: process_advance_v1.CapacityClass =
-            if (std.mem.eql(u8, field.name, "input"))
-                .input
-            else if (std.mem.eql(u8, field.name, "scratch"))
-                .scratch
-            else
-                .output;
+        const arena = @field(process_advance_v1.CapacityArenaId, field.name);
         try std.testing.expectEqual(
-            expected,
+            arena.capacityClass(),
             @FieldType(Generated, field.name).capacity_class,
         );
     }
