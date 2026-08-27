@@ -533,6 +533,27 @@ pub const testing = if (@import("builtin").is_test) struct {
             workspace,
         );
     }
+
+    pub fn validateFrame(
+        image_bytes: []const u8,
+        frame: process_state_v1.Frame,
+        invariant_scratch: []u8,
+        workspace: *image_v1.ValidationWorkspace,
+    ) Error!void {
+        const prior_invariant_result = workspace.invariant_result;
+        workspace.invariant_result = invariant_scratch;
+        defer workspace.invariant_result = prior_invariant_result;
+        const image = try image_v1.validateImage(image_bytes, workspace);
+        var slots = [_]Slot{.{}} ** 1024;
+        var activation_slots = [_]Slot{.{}} ** 1024;
+        _ = try admitFrame(
+            image,
+            frame,
+            &slots,
+            &activation_slots,
+            workspace,
+        );
+    }
 } else struct {};
 
 /// Encode and semantically admit canonical Process State for one exact BPI1.
@@ -1526,6 +1547,23 @@ fn admitProducedSuffix(
     var previous_activation_slots = [_]Slot{.{}} ** 1024;
     var previous_loaded: LoadedEnvironment = .{ .activation_entry = null };
     while (try iterator.next()) |frame| : (frame_index += 1) {
+        if (first_changed != 0 and frame_index + 1 == first_changed) {
+            var slots = [_]Slot{.{}} ** 1024;
+            var activation_slots = [_]Slot{.{}} ** 1024;
+            const projected = try projectFrame(
+                image,
+                frame,
+                &slots,
+                &activation_slots,
+                workspace,
+            );
+            saw_frame = true;
+            previous_constructor = projected.constructor;
+            previous_slots = slots;
+            previous_activation_slots = activation_slots;
+            previous_loaded = projected.loaded;
+            continue;
+        }
         if (frame_index < first_changed) continue;
         if (suffix_index >= expected_constructor_ids.len or
             frame.constructor_id != expected_constructor_ids[suffix_index])
@@ -1649,6 +1687,34 @@ fn admitFrame(
         frame.constructor_id,
     );
     const loaded = try loadEnvironment(
+        image,
+        constructor,
+        frame.environment,
+        slots,
+        activation_slots,
+        workspace,
+    );
+    return .{
+        .constructor = constructor,
+        .loaded = loaded,
+    };
+}
+
+fn projectFrame(
+    image: image_v1.ValidatedImage,
+    frame: process_state_v1.Frame,
+    slots: *[1024]Slot,
+    activation_slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!FrameAdmission {
+    if (frame.constructor_id >= image.constructor_count) {
+        return error.InvalidProcessState;
+    }
+    const constructor = try image_v1.evaluatorConstructorRecord(
+        image,
+        frame.constructor_id,
+    );
+    const loaded = try decodeEnvironment(
         image,
         constructor,
         frame.environment,

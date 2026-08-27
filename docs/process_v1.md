@@ -34,13 +34,15 @@ internal, non-serializable admitted top-frame projection through the reduction.
 Every internal State producer must return that refinement and declare the exact
 changed frame suffix through the same mutation helper that serializes it; one
 checked constructor admits every frame in that suffix and their internal stack
-pairs before publishing canonical bytes.
+pairs, plus the pair crossing from the preserved prefix, before publishing
+canonical bytes.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic
 `scripts/boundary-process-step.mjs` adapter asks the kernel to prepare its
-canonical input header, copies only the BPI1 and instance/result payload bytes,
-invokes one kernel operation, writes the canonical outcome bytes, and exits.
+canonical input header from `u64` file sizes before reading payload files,
+copies only admitted BPI1 and instance/result bytes, invokes one kernel
+operation, writes the canonical outcome bytes, and exits.
 If the fixed input arena cannot hold those payloads, preparation returns a
 canonical transactional `NeedsCapacity` outcome before any payload copy.
 Kernel-input and kernel-outcome framing uses `u64` component lengths. The

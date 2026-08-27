@@ -89,6 +89,26 @@ try {
         BigInt(kernelInputCapacity + 40)) {
     throw new Error("relay did not return NeedsCapacity for oversized input");
   }
+  const wideInitial = path.join(temporary, "wide.initial");
+  const wideLength = 0x1_0000_0000;
+  const wideFile = fs.openSync(wideInitial, "w");
+  try {
+    fs.ftruncateSync(wideFile, wideLength);
+  } finally {
+    fs.closeSync(wideFile);
+  }
+  const wide = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", kernel,
+    "--image", emptyImage,
+    "--initial-args", wideInitial,
+  ]);
+  if (wide.status !== 0 ||
+      wide.stdout.subarray(0, 8).toString("ascii") !== "ABL_PKO1" ||
+      wide.stdout[10] !== 5 ||
+      wide.stdout.readBigUInt64LE(32) !== BigInt(wideLength + 40)) {
+    throw new Error("relay materialized wide input before NeedsCapacity");
+  }
   const wrongAbi = spawnSync(process.execPath, [
     adapter,
     "--kernel", wrongKernel,

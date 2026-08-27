@@ -12,16 +12,19 @@ for (let index = 2; index < process.argv.length; index += 2) {
 }
 
 const kernelPath = required("--kernel");
-const image = fs.readFileSync(required("--image"));
+const imagePath = required("--image");
 const statePath = options.get("--state");
 const initialPath = options.get("--initial-args");
 if ((statePath === undefined) === (initialPath === undefined)) {
   throw new Error("provide exactly one of --state or --initial-args");
 }
-const instance = fs.readFileSync(statePath ?? initialPath);
-const result = options.has("--result")
-  ? fs.readFileSync(options.get("--result"))
-  : Buffer.alloc(0);
+const instancePath = statePath ?? initialPath;
+const resultPath = options.get("--result");
+const imageLength = fs.statSync(imagePath, { bigint: true }).size;
+const instanceLength = fs.statSync(instancePath, { bigint: true }).size;
+const resultLength = resultPath === undefined
+  ? 0n
+  : fs.statSync(resultPath, { bigint: true }).size;
 
 const module = await WebAssembly.compile(fs.readFileSync(kernelPath));
 if (WebAssembly.Module.imports(module).length !== 0) {
@@ -36,10 +39,10 @@ if (typeof exports.boundary_process_kernel_abi_version !== "function" ||
 const memory = new Uint8Array(exports.memory.buffer);
 const inputLength = exports.boundary_process_kernel_prepare_input(
   statePath === undefined ? 0 : 1,
-  BigInt(image.length),
-  BigInt(instance.length),
-  options.has("--result") ? 1 : 0,
-  BigInt(result.length),
+  imageLength,
+  instanceLength,
+  resultPath === undefined ? 0 : 1,
+  resultLength,
 );
 if (inputLength === 0) {
   const capacity = kernelOutput();
@@ -48,6 +51,11 @@ if (inputLength === 0) {
   }
   process.stdout.write(capacity);
 } else {
+  const image = fs.readFileSync(imagePath);
+  const instance = fs.readFileSync(instancePath);
+  const result = resultPath === undefined
+    ? Buffer.alloc(0)
+    : fs.readFileSync(resultPath);
   let payload = exports.boundary_process_kernel_input_payload_ptr();
   memory.set(image, payload);
   payload += image.length;
