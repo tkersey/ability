@@ -18,7 +18,8 @@ output/candidate/environment arena and at least `minimum_scratch_bytes` for the
 scratch arena before retrying the same input. Every mutable output, scratch,
 and validation arena must be disjoint from all source bytes and from every
 other mutable arena; readonly source slices may overlap. Invalid mutable
-aliases reject before writing.
+aliases reject before writing. Every State-bearing outcome is returned from the
+supplied output-State arena, including byte-identical pending-request recovery.
 
 `ABL_PST1` stores the program transition digest and a minimally encoded frame
 sequence. Each frame contains its continuation-constructor identity and exact
@@ -34,6 +35,8 @@ no authoritative Process State between calls. The generic
 `scripts/boundary-process-step.mjs` adapter asks the kernel to prepare its
 canonical input header, copies only the BPI1 and instance/result payload bytes,
 invokes one kernel operation, writes the canonical outcome bytes, and exits.
+If the fixed input arena cannot hold those payloads, preparation returns a
+canonical transactional `NeedsCapacity` outcome before any payload copy.
 
 Run:
 

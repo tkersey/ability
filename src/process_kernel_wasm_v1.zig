@@ -61,15 +61,22 @@ pub export fn boundary_process_kernel_prepare_input(
     result_present: u32,
     result_length: u32,
 ) u32 {
-    if (instance_kind > 1 or result_present > 1) return 0;
-    var total = std.math.add(
-        usize,
-        input_header_length,
-        image_length,
-    ) catch return 0;
-    total = std.math.add(usize, total, instance_length) catch return 0;
-    total = std.math.add(usize, total, result_length) catch return 0;
-    if (total > input_storage.len) return 0;
+    output_length = 0;
+    error_length = 0;
+    if (instance_kind > 1 or result_present > 1 or
+        (result_present == 0 and result_length != 0))
+    {
+        return 0;
+    }
+    const required_input = @as(u64, input_header_length) +
+        @as(u64, image_length) +
+        @as(u64, instance_length) +
+        @as(u64, result_length);
+    if (required_input > input_storage.len) {
+        reportInputCapacity(required_input);
+        return 0;
+    }
+    const total: usize = @intCast(required_input);
     _ = process_advance_v1.encodeKernelInputHeader(
         @intCast(instance_kind),
         result_present == 1,
@@ -157,4 +164,21 @@ fn setError(message: []const u8) void {
     const length = @min(message.len, error_storage.len);
     @memcpy(error_storage[0..length], message[0..length]);
     error_length = @intCast(length);
+}
+
+fn reportInputCapacity(required_input: u64) void {
+    const growth = required_input - input_storage.len;
+    const page_bytes: u64 = 64 * 1024;
+    const growth_pages = growth / page_bytes + @intFromBool(growth % page_bytes != 0);
+    const minimum_pages = @as(u64, @wasmMemorySize(0)) +| growth_pages;
+    const encoded = process_advance_v1.encodeOutcome(
+        .{ .needs_capacity = .{
+            .minimum_input_bytes = required_input,
+            .minimum_output_bytes = process_advance_v1.outcome_header_length + 32,
+            .minimum_scratch_bytes = 0,
+            .minimum_memory_pages = minimum_pages,
+        } },
+        &output_storage,
+    ) catch return;
+    output_length = @intCast(encoded.len);
 }

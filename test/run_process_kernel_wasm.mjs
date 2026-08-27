@@ -109,6 +109,32 @@ if (emptyResultInput !== null) {
   }
 }
 
+const oversizedInstance = await WebAssembly.instantiate(module, {});
+const oversizedCapacity =
+  oversizedInstance.exports.boundary_process_kernel_input_capacity();
+if (oversizedInstance.exports.boundary_process_kernel_prepare_input(
+  0,
+  oversizedCapacity,
+  1,
+  0,
+  0,
+) !== 0) {
+  throw new Error("oversized Process input was admitted");
+}
+const oversizedMemory = new Uint8Array(oversizedInstance.exports.memory.buffer);
+const oversizedOutputPtr =
+  oversizedInstance.exports.boundary_process_kernel_output_ptr();
+const oversizedOutputLength =
+  oversizedInstance.exports.boundary_process_kernel_output_len();
+const oversizedOutput = Buffer.from(oversizedMemory.subarray(
+  oversizedOutputPtr,
+  oversizedOutputPtr + oversizedOutputLength,
+));
+if (oversizedOutput[10] !== 5 ||
+    oversizedOutput.readBigUInt64LE(24) !== BigInt(oversizedCapacity + 29)) {
+  throw new Error("oversized Process input did not return typed NeedsCapacity");
+}
+
 const malformedInstance = await WebAssembly.instantiate(module, {});
 const malformed = Buffer.alloc(28);
 malformed.write("ABL_PKI1", 0, "ascii");

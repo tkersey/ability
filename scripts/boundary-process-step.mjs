@@ -33,6 +33,7 @@ if (typeof exports.boundary_process_kernel_abi_version !== "function" ||
     exports.boundary_process_kernel_abi_version() !== 1) {
   throw new Error("unsupported Boundary Process kernel ABI");
 }
+const memory = new Uint8Array(exports.memory.buffer);
 const inputLength = exports.boundary_process_kernel_prepare_input(
   statePath === undefined ? 0 : 1,
   image.length,
@@ -40,27 +41,35 @@ const inputLength = exports.boundary_process_kernel_prepare_input(
   options.has("--result") ? 1 : 0,
   result.length,
 );
-if (inputLength === 0) throw new Error("kernel cannot prepare the Process input");
-const memory = new Uint8Array(exports.memory.buffer);
-let payload = exports.boundary_process_kernel_input_payload_ptr();
-memory.set(image, payload);
-payload += image.length;
-memory.set(instance, payload);
-payload += instance.length;
-memory.set(result, payload);
-const status = exports.boundary_process_kernel_execute(inputLength);
-if (status !== 0) {
-  const start = exports.boundary_process_kernel_error_ptr();
-  const length = exports.boundary_process_kernel_error_len();
-  throw new Error(
-    Buffer.from(memory.subarray(start, start + length)).toString("utf8"),
-  );
+if (inputLength === 0) {
+  const capacity = kernelOutput();
+  if (capacity.length === 0) {
+    throw new Error("kernel cannot prepare the Process input");
+  }
+  process.stdout.write(capacity);
+} else {
+  let payload = exports.boundary_process_kernel_input_payload_ptr();
+  memory.set(image, payload);
+  payload += image.length;
+  memory.set(instance, payload);
+  payload += instance.length;
+  memory.set(result, payload);
+  const status = exports.boundary_process_kernel_execute(inputLength);
+  if (status !== 0) {
+    const start = exports.boundary_process_kernel_error_ptr();
+    const length = exports.boundary_process_kernel_error_len();
+    throw new Error(
+      Buffer.from(memory.subarray(start, start + length)).toString("utf8"),
+    );
+  }
+  process.stdout.write(kernelOutput());
 }
-const outputStart = exports.boundary_process_kernel_output_ptr();
-const outputLength = exports.boundary_process_kernel_output_len();
-process.stdout.write(
-  Buffer.from(memory.subarray(outputStart, outputStart + outputLength)),
-);
+
+function kernelOutput() {
+  const start = exports.boundary_process_kernel_output_ptr();
+  const length = exports.boundary_process_kernel_output_len();
+  return Buffer.from(memory.subarray(start, start + length));
+}
 
 function required(name) {
   const value = options.get(name);

@@ -549,7 +549,7 @@ fn validateStateValidated(
         cursor = environment_end;
     }
     if ((top_kind == 3 and sequence == 0) or
-        isAwaitCallConstructor(image, previous_constructor))
+        reducer_clause_v1.isAwaitCallConstructor(image, previous_constructor))
     {
         return error.InvalidState;
     }
@@ -605,25 +605,6 @@ fn validateStateEnvelope(
     }
 }
 
-fn isAwaitCallConstructor(
-    image: ValidatedProgram,
-    constructor: []const u8,
-) bool {
-    if (constructor.len < 24 or constructor[8] != 4 or constructor[9] != 2) {
-        return false;
-    }
-    const segment = segmentRecord(
-        image,
-        readInt(u16, constructor, 12),
-    ) catch return false;
-    const terminator = segmentTerminatorOffset(segment);
-    const suspension = reducer_clause_v1.suspensionView(
-        segment,
-        terminator,
-    ) catch return false;
-    return suspension.kind == 1;
-}
-
 fn validateStackPair(
     image: ValidatedProgram,
     parent_constructor: []const u8,
@@ -673,22 +654,22 @@ fn currentValidated(
         segment,
         terminator,
     ) catch return error.InvalidState;
-    if (suspension.kind != 0 or suspension.request_values.len != 2) {
-        return error.InvalidState;
-    }
-    const request_value = readInt(u16, suspension.request_values, 0);
+    const effect = switch (suspension) {
+        .effect => |effect| effect,
+        else => return error.InvalidState,
+    };
     var slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
-    if (!slots[request_value].initialized) return error.InvalidState;
-    if (output_payload.len < slots[request_value].bytes.len) {
+    if (!slots[effect.request_value].initialized) return error.InvalidState;
+    if (output_payload.len < slots[effect.request_value].bytes.len) {
         return error.OutputCapacity;
     }
     @memcpy(
-        output_payload[0..slots[request_value].bytes.len],
-        slots[request_value].bytes,
+        output_payload[0..slots[effect.request_value].bytes.len],
+        slots[effect.request_value].bytes,
     );
-    const canonical_payload = output_payload[0..slots[request_value].bytes.len];
+    const canonical_payload = output_payload[0..slots[effect.request_value].bytes.len];
     const sequence = readInt(u64, state, 44);
     return .{
         .state = state,
@@ -697,7 +678,7 @@ fn currentValidated(
             image,
             state,
             constructor_id,
-            suspension.site_ordinal,
+            effect.site_ordinal,
             canonical_payload,
             sequence,
         ),
@@ -723,31 +704,31 @@ fn resumeValidated(
         segment,
         terminator,
     ) catch return error.InvalidState;
-    if (suspension.kind != 0 or suspension.request_values.len != 2) {
-        return error.InvalidState;
-    }
-    const request_value = readInt(u16, suspension.request_values, 0);
+    const effect = switch (suspension) {
+        .effect => |effect| effect,
+        else => return error.InvalidState,
+    };
     var slots = [_]Slot{.{}} ** 1024;
     try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
-    if (!slots[request_value].initialized) return error.InvalidState;
+    if (!slots[effect.request_value].initialized) return error.InvalidState;
     const expected = try requestIdentity(
         image,
         state,
         constructor_id,
-        suspension.site_ordinal,
-        slots[request_value].bytes,
+        effect.site_ordinal,
+        slots[effect.request_value].bytes,
         readInt(u64, state, 44),
     );
     if (!requestIdentityEqual(expected, identity)) return error.InvalidState;
-    const resume_schema = try effectResumeSchema(image, suspension.site_ordinal);
+    const resume_schema = try effectResumeSchema(image, effect.site_ordinal);
     dynamic_value_v1.validateValue(
         image.catalogs.schemas,
         resume_schema,
         response,
         &workspace.value_tasks,
     ) catch return error.InvalidState;
-    const continuation = suspension.continuation;
+    const continuation = effect.continuation;
     const target_segment = readInt(u16, continuation, 0);
     const target = try segmentRecord(image, target_segment);
     const next_constructor = try transitionConstructor(

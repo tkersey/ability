@@ -1212,9 +1212,11 @@ fn currentRequest(
         constructor,
         &slots,
     );
+    if (buffers.output_state.len < state.bytes.len) return error.OutputCapacity;
+    @memcpy(buffers.output_state[0..state.bytes.len], state.bytes);
     return makeRequest(
         image,
-        state.bytes,
+        buffers.output_state[0..state.bytes.len],
         parts.site_ordinal,
         parts.payload,
         buffers.output_request,
@@ -1239,14 +1241,14 @@ fn pendingRequestParts(
         segment,
         terminator,
     ) catch return error.InvalidProcessState;
-    if (suspension.kind != 0 or suspension.request_values.len != 2) {
-        return error.InvalidProcessState;
-    }
-    const request_value = readInt(u16, suspension.request_values, 0);
-    if (!slots[request_value].initialized) return error.InvalidProcessState;
+    const effect = switch (suspension) {
+        .effect => |effect| effect,
+        else => return error.InvalidProcessState,
+    };
+    if (!slots[effect.request_value].initialized) return error.InvalidProcessState;
     return .{
-        .site_ordinal = suspension.site_ordinal,
-        .payload = slots[request_value].bytes,
+        .site_ordinal = effect.site_ordinal,
+        .payload = slots[effect.request_value].bytes,
     };
 }
 
@@ -1501,7 +1503,7 @@ fn validateFrames(
         previous_constructor = constructor;
         previous_slots = slots;
     }
-    if (isAwaitCallConstructor(image, previous_constructor)) {
+    if (reducer_clause_v1.isAwaitCallConstructor(image, previous_constructor)) {
         return error.InvalidProcessState;
     }
 }
@@ -1539,25 +1541,6 @@ fn validateStackPair(
         child_slots,
         expected_call_entry,
     ) catch return error.InvalidProcessState;
-}
-
-fn isAwaitCallConstructor(
-    image: image_v1.ValidatedImage,
-    constructor: []const u8,
-) bool {
-    if (constructor.len < 24 or constructor[8] != 4 or constructor[9] != 2) {
-        return false;
-    }
-    const segment = image_v1.evaluatorSegmentRecord(
-        image,
-        readInt(u16, constructor, 12),
-    ) catch return false;
-    const terminator = image_v1.evaluatorSegmentTerminator(segment);
-    const suspension = reducer_clause_v1.suspensionView(
-        segment,
-        terminator,
-    ) catch return false;
-    return suspension.kind == 1;
 }
 
 fn loadEnvironment(

@@ -285,29 +285,25 @@ pub fn evaluateClause(
                 .{ .edge_kind = 2, .edge = segment[else_edge..] } };
         },
         2 => blk: {
-            const suspension_kind = segment[payload];
-            if (suspension_kind == 0) {
-                const request_count = readInt(u16, segment, payload + 10);
-                if (request_count != 1) return error.InvalidImage;
-                const request_value = readInt(u16, segment, payload + 12);
-                if (!slots[request_value].initialized) return error.InvalidBindings;
-                const bytes = slots[request_value].bytes;
-                if (output_value.len < bytes.len) return error.OutputCapacity;
-                @memcpy(output_value[0..bytes.len], bytes);
-                break :blk .{ .requested = .{
-                    .site_ordinal = readInt(u32, segment, payload + 4),
-                    .payload = output_value[0..bytes.len],
-                } };
-            }
-            if (suspension_kind == 1) {
-                break :blk .{ .call = suspensionCallee(segment, cursor) };
-            }
-            if (suspension_kind != 2) return error.InvalidImage;
-            const request_count = readInt(u16, segment, payload + 10);
-            var continuation = payload + 12 + @as(usize, request_count) * 2;
-            if (segment[continuation] != 0) return error.InvalidImage;
-            continuation += 4;
-            break :blk .{ .explicit_yield = segment[continuation..] };
+            const suspension = try suspensionView(segment, cursor);
+            break :blk switch (suspension) {
+                .effect => |effect| request: {
+                    if (!slots[effect.request_value].initialized) {
+                        return error.InvalidBindings;
+                    }
+                    const bytes = slots[effect.request_value].bytes;
+                    if (output_value.len < bytes.len) return error.OutputCapacity;
+                    @memcpy(output_value[0..bytes.len], bytes);
+                    break :request .{ .requested = .{
+                        .site_ordinal = effect.site_ordinal,
+                        .payload = output_value[0..bytes.len],
+                    } };
+                },
+                .call => |call| .{ .call = call.callee },
+                .explicit_yield => |yielded| .{
+                    .explicit_yield = yielded.continuation,
+                },
+            };
         },
         3 => blk: {
             if (segment[payload] == 0) break :blk .{ .completed = &.{} };
@@ -517,18 +513,25 @@ pub fn loadEnvironmentSlots(
     return .{ .activation_entry = activation_entry };
 }
 
-pub const SuspensionView = struct {
-    kind: u8,
-    site_ordinal: u32,
-    request_values: []const u8,
-    callee: []const u8,
-    continuation: []const u8,
+pub const Suspension = union(enum) {
+    effect: struct {
+        site_ordinal: u32,
+        request_value: u16,
+        continuation: []const u8,
+    },
+    call: struct {
+        callee: []const u8,
+        continuation: []const u8,
+    },
+    explicit_yield: struct {
+        continuation: []const u8,
+    },
 };
 
 pub fn suspensionView(
     segment: []const u8,
     terminator: usize,
-) Error!SuspensionView {
+) Error!Suspension {
     if (terminator > segment.len or segment.len - terminator < 20 or
         segment[terminator + 4] != 2)
     {
@@ -544,6 +547,7 @@ pub fn suspensionView(
     if (request_end > segment.len or segment.len - request_end < 4) {
         return error.InvalidImage;
     }
+    if (segment[request_end] > 1) return error.InvalidImage;
     const callee_present = segment[request_end] == 1;
     var continuation_start = request_end + 4;
     const callee = if (callee_present) blk: {
@@ -556,17 +560,33 @@ pub fn suspensionView(
         break :blk edge;
     } else &.{};
     if (continuation_start > segment.len) return error.InvalidImage;
-    return .{
-        .kind = segment[payload],
-        .site_ordinal = readInt(u32, segment, payload + 4),
-        .request_values = segment[payload + 12 .. request_end],
-        .callee = callee,
-        .continuation = segment[continuation_start..],
+    const continuation = segment[continuation_start..];
+    return switch (segment[payload]) {
+        0 => if (request_count == 1 and !callee_present)
+            .{ .effect = .{
+                .site_ordinal = readInt(u32, segment, payload + 4),
+                .request_value = readInt(u16, segment, payload + 12),
+                .continuation = continuation,
+            } }
+        else
+            error.InvalidImage,
+        1 => if (request_count == 0 and callee_present)
+            .{ .call = .{ .callee = callee, .continuation = continuation } }
+        else
+            error.InvalidImage,
+        2 => if (request_count == 0 and !callee_present)
+            .{ .explicit_yield = .{ .continuation = continuation } }
+        else
+            error.InvalidImage,
+        else => error.InvalidImage,
     };
 }
 
 pub fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
-    return (suspensionView(segment, terminator) catch return &.{}).callee;
+    return switch (suspensionView(segment, terminator) catch return &.{}) {
+        .call => |call| call.callee,
+        else => &.{},
+    };
 }
 
 pub fn edgeLength(edge: []const u8) usize {
@@ -598,7 +618,26 @@ fn segmentTerminatorOffset(segment: []const u8) usize {
 }
 
 pub fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
-    return (suspensionView(segment, terminator) catch return &.{}).continuation;
+    return switch (suspensionView(segment, terminator) catch return &.{}) {
+        .effect => |effect| effect.continuation,
+        .call => |call| call.continuation,
+        .explicit_yield => |yielded| yielded.continuation,
+    };
+}
+
+pub fn isAwaitCallConstructor(image: anytype, constructor: []const u8) bool {
+    if (constructor.len < 24 or constructor[8] != 4 or constructor[9] != 2) {
+        return false;
+    }
+    const segment = segmentRecord(
+        image,
+        readInt(u16, constructor, 12),
+    ) catch return false;
+    const suspension = suspensionView(
+        segment,
+        segmentTerminatorOffset(segment),
+    ) catch return false;
+    return suspension == .call;
 }
 
 pub fn constantBytes(

@@ -445,6 +445,10 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
         requested.state,
         second.requested.state,
     );
+    try std.testing.expectEqual(
+        @intFromPtr(&second_storage.state),
+        @intFromPtr(second.requested.state.ptr),
+    );
     try std.testing.expectEqualSlices(
         u8,
         requested.request,

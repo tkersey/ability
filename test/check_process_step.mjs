@@ -7,6 +7,12 @@ const kernel = process.argv[2];
 const vector = fs.readFileSync(process.argv[3]);
 const adapter = process.argv[4];
 const wrongKernel = process.argv[5];
+const kernelInstance = new WebAssembly.Instance(
+  new WebAssembly.Module(fs.readFileSync(kernel)),
+  {},
+);
+const kernelInputCapacity =
+  kernelInstance.exports.boundary_process_kernel_input_capacity();
 let cursor = 0;
 const vectorCount = vector.readUInt32LE(cursor);
 cursor += 4;
@@ -68,6 +74,21 @@ try {
   const emptyInitial = path.join(temporary, "empty.initial");
   fs.writeFileSync(emptyImage, Buffer.alloc(0));
   fs.writeFileSync(emptyInitial, Buffer.alloc(0));
+  const oversizedInitial = path.join(temporary, "oversized.initial");
+  fs.writeFileSync(oversizedInitial, Buffer.alloc(kernelInputCapacity));
+  const oversized = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", kernel,
+    "--image", emptyImage,
+    "--initial-args", oversizedInitial,
+  ]);
+  if (oversized.status !== 0 ||
+      oversized.stdout.subarray(0, 8).toString("ascii") !== "ABL_PKO1" ||
+      oversized.stdout[10] !== 5 ||
+      oversized.stdout.readBigUInt64LE(24) !==
+        BigInt(kernelInputCapacity + 28)) {
+    throw new Error("relay did not return NeedsCapacity for oversized input");
+  }
   const wrongAbi = spawnSync(process.execPath, [
     adapter,
     "--kernel", wrongKernel,
