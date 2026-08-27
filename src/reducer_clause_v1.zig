@@ -496,6 +496,7 @@ pub fn decodeEnvironmentSlots(
     activation_slots: ?*[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
+    try initializeZeroWidthSlots(image, slots);
     if (activation_slots) |activation| {
         try initializeZeroWidthSlots(image, activation);
     }

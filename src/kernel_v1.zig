@@ -659,7 +659,6 @@ fn currentValidated(
         else => return error.InvalidState,
     };
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     if (!slots[effect.request_value].initialized) return error.InvalidState;
     if (output_payload.len < slots[effect.request_value].bytes.len) {
@@ -709,7 +708,6 @@ fn resumeValidated(
         else => return error.InvalidState,
     };
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     if (!slots[effect.request_value].initialized) return error.InvalidState;
     const expected = try requestIdentity(
@@ -906,7 +904,6 @@ fn preflightCurrentSegment(
     const minimum_cost = image.profile.segmentCost(segment_id) catch
         return error.InvalidImage;
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     const top_offset = try topFrameOffset(state);
     const environment_length = readInt(u32, state, top_offset + 4);
@@ -1282,7 +1279,6 @@ fn encodeTopFrame(
     }
     const activation_count = readInt(u16, constructor, 16);
     var activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &activation_slots);
     if (activation_count != 0) {
         try loadActivationSlots(
             image,
@@ -1476,7 +1472,6 @@ fn returnToCaller(
         return error.InvalidState;
     }
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadFrameEnvironment(
         image,
         state,
@@ -1683,7 +1678,6 @@ fn replaceFrameAndTruncate(
     }
     const activation_count = readInt(u16, constructor, 16);
     var activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &activation_slots);
     if (activation_count != 0) {
         try loadActivationSlots(
             image,
@@ -1797,7 +1791,6 @@ fn loadActivationSlots(
     const environment_length = readInt(u32, state, frame_offset + 4);
     const environment = state[frame_offset + 8 ..][0..environment_length];
     var current_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &current_slots);
     _ = reducer_clause_v1.decodeEnvironmentSlots(
         image,
         constructor,
@@ -1859,7 +1852,6 @@ fn validateEnvironment(
     activation_slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!reducer_clause_v1.LoadedEnvironment {
-    try initializeZeroWidthSlots(image, slots);
     const loaded = try reducer_clause_v1.loadEnvironmentSlots(
         image,
         constructor,

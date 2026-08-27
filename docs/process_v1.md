@@ -31,8 +31,9 @@ profile, scheduler state, pointer, or instance identity.
 environment and path invariant against the supplied BPI1 before execution.
 One `advance` invocation performs that full admission once and carries an
 internal, non-serializable admitted top-frame projection through the reduction.
-Every internal State producer must return that refinement and semantically
-admits only its newly produced top before publishing canonical bytes.
+Every internal State producer must return that refinement and declare the exact
+changed frame suffix; one checked constructor admits every frame in that suffix
+and their internal stack pairs before publishing canonical bytes.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic

@@ -435,6 +435,11 @@ const slicesOverlap = process_state_v1.slicesOverlap;
 
 const LoadedEnvironment = reducer_clause_v1.LoadedEnvironment;
 
+const FrameAdmission = struct {
+    constructor: []const u8,
+    loaded: LoadedEnvironment,
+};
+
 const AdmittedState = struct {
     state: process_state_v1.StateView,
     constructor: []const u8,
@@ -507,6 +512,27 @@ pub fn validateState(
     _ = try admitFrames(image, state, workspace);
     return state;
 }
+
+pub const testing = if (@import("builtin").is_test) struct {
+    pub fn validateProducedSuffix(
+        image_bytes: []const u8,
+        state_bytes: []const u8,
+        expected_constructor_ids: []const u32,
+        invariant_scratch: []u8,
+        workspace: *image_v1.ValidationWorkspace,
+    ) Error!void {
+        const prior_invariant_result = workspace.invariant_result;
+        workspace.invariant_result = invariant_scratch;
+        defer workspace.invariant_result = prior_invariant_result;
+        const image = try image_v1.validateImage(image_bytes, workspace);
+        _ = try admitProducedSuffix(
+            image,
+            state_bytes,
+            expected_constructor_ids,
+            workspace,
+        );
+    }
+} else struct {};
 
 /// Encode and semantically admit canonical Process State for one exact BPI1.
 pub fn encodeState(
@@ -914,10 +940,10 @@ fn stepState(
                 },
                 buffers.output_state,
             );
-            const parked_admitted = try admitProducedTop(
+            const parked_admitted = try admitProducedSuffix(
                 image,
                 parked,
-                await_constructor_id,
+                &.{await_constructor_id},
                 workspace,
             );
             break :blk try makeRequest(
@@ -1059,10 +1085,10 @@ fn callState(
         },
         buffers.output_state,
     );
-    return admitProducedTop(
+    return admitProducedSuffix(
         image,
         successor,
-        child_constructor_id,
+        &.{ return_constructor_id, child_constructor_id },
         workspace,
     );
 }
@@ -1129,7 +1155,6 @@ fn returnToCaller(
     }
     var slots = [_]Slot{.{}} ** 1024;
     var activation_slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
     const loaded = try loadEnvironment(
         image,
         parent_constructor,
@@ -1184,10 +1209,10 @@ fn returnToCaller(
         },
         buffers.output_state,
     );
-    return admitProducedTop(
+    return admitProducedSuffix(
         image,
         successor,
-        next_constructor_id,
+        &.{next_constructor_id},
         workspace,
     );
 }
@@ -1392,10 +1417,10 @@ fn resumePending(
         },
         buffers.candidate_state,
     );
-    return admitProducedTop(
+    return admitProducedSuffix(
         image,
         successor,
-        target_constructor_id,
+        &.{target_constructor_id},
         workspace,
     );
 }
@@ -1440,49 +1465,85 @@ fn transitionState(
         .{ .constructor_id = constructor_id, .environment = environment },
         buffers.output_state,
     );
-    return admitProducedTop(
+    return admitProducedSuffix(
         image,
         successor,
-        constructor_id,
+        &.{constructor_id},
         workspace,
     );
 }
 
-fn admitProducedTop(
+fn admitProducedSuffix(
     image: image_v1.ValidatedImage,
     state_bytes: []const u8,
-    expected_constructor_id: u32,
+    expected_constructor_ids: []const u32,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!AdmittedState {
     const state = process_state_v1.validate(
         state_bytes,
         image.catalogs.envelope.header.program_transition_digest,
     ) catch return error.InvalidProcessState;
-    const top = try process_state_v1.topFrame(state);
-    if (top.frame.constructor_id != expected_constructor_id) {
+    if (expected_constructor_ids.len == 0 or
+        expected_constructor_ids.len > state.frame_count)
+    {
         return error.InvalidProcessState;
     }
-    const constructor = try image_v1.evaluatorConstructorRecord(
-        image,
-        expected_constructor_id,
-    );
-    var slots = [_]Slot{.{}} ** 1024;
-    var activation_slots = [_]Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-    const loaded = try loadEnvironment(
-        image,
-        constructor,
-        top.frame.environment,
-        &slots,
-        &activation_slots,
-        workspace,
-    );
+    const first_changed = state.frame_count - expected_constructor_ids.len;
+    var iterator = state.iterator();
+    var frame_index: u64 = 0;
+    var suffix_index: usize = 0;
+    var saw_frame = false;
+    var previous_constructor: []const u8 = &.{};
+    var previous_slots = [_]Slot{.{}} ** 1024;
+    var previous_activation_slots = [_]Slot{.{}} ** 1024;
+    var previous_loaded: LoadedEnvironment = .{ .activation_entry = null };
+    while (try iterator.next()) |frame| : (frame_index += 1) {
+        if (frame_index < first_changed) continue;
+        if (suffix_index >= expected_constructor_ids.len or
+            frame.constructor_id != expected_constructor_ids[suffix_index])
+        {
+            return error.InvalidProcessState;
+        }
+        var slots = [_]Slot{.{}} ** 1024;
+        var activation_slots = [_]Slot{.{}} ** 1024;
+        const admitted = try admitFrame(
+            image,
+            frame,
+            &slots,
+            &activation_slots,
+            workspace,
+        );
+        if (saw_frame) {
+            try validateStackPair(
+                image,
+                previous_constructor,
+                &previous_slots,
+                admitted.constructor,
+                admitted.loaded.activation_entry,
+                &activation_slots,
+            );
+        }
+        saw_frame = true;
+        previous_constructor = admitted.constructor;
+        previous_slots = slots;
+        previous_activation_slots = activation_slots;
+        previous_loaded = admitted.loaded;
+        suffix_index += 1;
+    }
+    if (suffix_index != expected_constructor_ids.len) {
+        return error.InvalidProcessState;
+    }
+    if (!saw_frame or
+        reducer_clause_v1.isAwaitCallConstructor(image, previous_constructor))
+    {
+        return error.InvalidProcessState;
+    }
     return .{
         .state = state,
-        .constructor = constructor,
-        .slots = slots,
-        .activation_slots = activation_slots,
-        .loaded = loaded,
+        .constructor = previous_constructor,
+        .slots = previous_slots,
+        .activation_slots = previous_activation_slots,
+        .loaded = previous_loaded,
     };
 }
 
@@ -1499,21 +1560,11 @@ fn admitFrames(
     var previous_activation_slots = [_]Slot{.{}} ** 1024;
     var previous_loaded: LoadedEnvironment = .{ .activation_entry = null };
     while (try iterator.nextSpan()) |frame_span| : (index += 1) {
-        const frame = frame_span.frame;
-        if (frame.constructor_id >= image.constructor_count) {
-            return error.InvalidProcessState;
-        }
-        const constructor = try image_v1.evaluatorConstructorRecord(
-            image,
-            frame.constructor_id,
-        );
         var slots = [_]Slot{.{}} ** 1024;
         var activation_slots = [_]Slot{.{}} ** 1024;
-        try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
-        const loaded = try loadEnvironment(
+        const admitted = try admitFrame(
             image,
-            constructor,
-            frame.environment,
+            frame_span.frame,
             &slots,
             &activation_slots,
             workspace,
@@ -1521,7 +1572,7 @@ fn admitFrames(
         if (index == 0) {
             const segment = try image_v1.evaluatorSegmentRecord(
                 image,
-                readInt(u16, constructor, 12),
+                readInt(u16, admitted.constructor, 12),
             );
             if (readInt(u16, segment, 6) != 0) {
                 return error.InvalidProcessState;
@@ -1531,16 +1582,16 @@ fn admitFrames(
                 image,
                 previous_constructor,
                 &previous_slots,
-                constructor,
-                loaded.activation_entry,
+                admitted.constructor,
+                admitted.loaded.activation_entry,
                 &activation_slots,
             );
         }
         saw_frame = true;
-        previous_constructor = constructor;
+        previous_constructor = admitted.constructor;
         previous_slots = slots;
         previous_activation_slots = activation_slots;
-        previous_loaded = loaded;
+        previous_loaded = admitted.loaded;
     }
     if (reducer_clause_v1.isAwaitCallConstructor(image, previous_constructor)) {
         return error.InvalidProcessState;
@@ -1552,6 +1603,34 @@ fn admitFrames(
         .slots = previous_slots,
         .activation_slots = previous_activation_slots,
         .loaded = previous_loaded,
+    };
+}
+
+fn admitFrame(
+    image: image_v1.ValidatedImage,
+    frame: process_state_v1.Frame,
+    slots: *[1024]Slot,
+    activation_slots: *[1024]Slot,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!FrameAdmission {
+    if (frame.constructor_id >= image.constructor_count) {
+        return error.InvalidProcessState;
+    }
+    const constructor = try image_v1.evaluatorConstructorRecord(
+        image,
+        frame.constructor_id,
+    );
+    const loaded = try loadEnvironment(
+        image,
+        constructor,
+        frame.environment,
+        slots,
+        activation_slots,
+        workspace,
+    );
+    return .{
+        .constructor = constructor,
+        .loaded = loaded,
     };
 }
 

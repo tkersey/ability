@@ -2395,7 +2395,6 @@ test "predecessor-defined live-through values retain local definitions" {
     const environment = encoded[first_environment_offset..][0..environment_length];
     var slots = [_]reducer_clause_v1.Slot{.{}} ** 1024;
     var activation_slots = [_]reducer_clause_v1.Slot{.{}} ** 1024;
-    try reducer_clause_v1.initializeZeroWidthSlots(image, &slots);
     var projection_workspace: image_v1.ValidationWorkspace = .{};
     var invariant_sentinel = [_]u8{0xa5} ** 64;
     projection_workspace.invariant_result = &invariant_sentinel;

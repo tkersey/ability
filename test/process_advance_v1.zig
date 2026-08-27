@@ -1235,6 +1235,94 @@ test "Process recursive state exceeds the former frame ceiling and resumes" {
     return error.RecursiveProcessDidNotComplete;
 }
 
+test "Process call production admits every changed frame" {
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 3, .little);
+    var initial_storage: DeepStorage = .{};
+    var initial_workspace: boundary.image.ValidationWorkspace = .{};
+    const first = try process_advance_v1.advance(
+        &RecursiveImage.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        initial_storage.buffers(),
+        &initial_workspace,
+    );
+    const authentic = first.progressed;
+    const state = try process_state_v1.validate(
+        authentic,
+        RecursiveImage.program_transition_digest,
+    );
+    try std.testing.expect(state.frame_count >= 2);
+    var iterator = state.iterator();
+    var parent: ?process_state_v1.FrameSpan = null;
+    var child: ?process_state_v1.FrameSpan = null;
+    while (try iterator.nextSpan()) |frame| {
+        parent = child;
+        child = frame;
+    }
+    const changed_parent = parent orelse return error.TestUnexpectedResult;
+    const changed_child = child orelse return error.TestUnexpectedResult;
+    try std.testing.expect(changed_parent.frame.environment.len >= 4);
+    var forged: [128 * 1024]u8 = undefined;
+    var found_omission_witness = false;
+    var field_offset: usize = 0;
+    while (field_offset + 4 <= changed_parent.frame.environment.len) : (field_offset += 4) {
+        @memcpy(forged[0..authentic.len], authentic);
+        const environment_offset = @intFromPtr(changed_parent.frame.environment.ptr) -
+            @intFromPtr(authentic.ptr);
+        const value_offset = environment_offset + field_offset;
+        const original = std.mem.readInt(
+            u32,
+            forged[value_offset..][0..4],
+            .little,
+        );
+        std.mem.writeInt(
+            u32,
+            forged[value_offset..][0..4],
+            original +% 1,
+            .little,
+        );
+        var child_only_scratch: [1024 * 1024]u8 = undefined;
+        var child_only_workspace: boundary.image.ValidationWorkspace = .{};
+        process_advance_v1.testing.validateProducedSuffix(
+            &RecursiveImage.bytes,
+            forged[0..authentic.len],
+            &.{changed_child.frame.constructor_id},
+            &child_only_scratch,
+            &child_only_workspace,
+        ) catch continue;
+        var complete_scratch: [1024 * 1024]u8 = undefined;
+        var complete_workspace: boundary.image.ValidationWorkspace = .{};
+        try std.testing.expectError(
+            error.InvalidProcessState,
+            process_advance_v1.testing.validateProducedSuffix(
+                &RecursiveImage.bytes,
+                forged[0..authentic.len],
+                &.{
+                    changed_parent.frame.constructor_id,
+                    changed_child.frame.constructor_id,
+                },
+                &complete_scratch,
+                &complete_workspace,
+            ),
+        );
+        var public_scratch: [1024 * 1024]u8 = undefined;
+        var public_workspace: boundary.image.ValidationWorkspace = .{};
+        try std.testing.expectError(
+            error.InvalidProcessState,
+            boundary.process_v1.validateState(
+                &RecursiveImage.bytes,
+                forged[0..authentic.len],
+                &public_scratch,
+                &public_workspace,
+            ),
+        );
+        found_omission_witness = true;
+        break;
+    }
+    try std.testing.expect(found_omission_witness);
+}
+
 test "Process rejects schema-valid forged constructor invariants" {
     var initial_args: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial_args, 3, .little);
