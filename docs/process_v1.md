@@ -77,7 +77,9 @@ canonical transactional `NeedsCapacity` outcome before any payload copy.
 Kernel-input and kernel-outcome framing uses `u64` component lengths. The
 wasm32 kernel accepts those lengths as scalar preflight data, so a larger finite
 State reports capacity without truncation even though that instance cannot
-address the State itself.
+address the State itself. A component tuple whose aggregate plus framing exceeds
+`u64` is unrepresentable and rejects instead of publishing a saturated retry
+requirement.
 The relay normalizes exported wasm32 pointers to unsigned offsets before
 indexing linear memory. Fixed-kernel storage declares input, serialized output,
 State, candidate State, value, request, both environments, and scratch as typed

@@ -162,6 +162,59 @@ if (wideOutput[10] !== 5 ||
   throw new Error("wide Process length was truncated before NeedsCapacity");
 }
 
+const maximumI64 = 0x7fff_ffff_ffff_ffffn;
+const maximumU64 = 0xffff_ffff_ffff_ffffn;
+const maximumInstance = await WebAssembly.instantiate(module, {});
+if (maximumInstance.exports.boundary_process_kernel_prepare_input(
+  0,
+  maximumI64,
+  maximumI64 - 39n,
+  0,
+  0n,
+) !== 0) {
+  throw new Error("maximum representable Process input total was admitted");
+}
+const maximumMemory = new Uint8Array(maximumInstance.exports.memory.buffer);
+const maximumOutputPtr =
+  maximumInstance.exports.boundary_process_kernel_output_ptr() >>> 0;
+const maximumOutputLength = Number(
+  maximumInstance.exports.boundary_process_kernel_output_len(),
+);
+const maximumOutput = Buffer.from(maximumMemory.subarray(
+  maximumOutputPtr,
+  maximumOutputPtr + maximumOutputLength,
+));
+if (maximumOutput[10] !== 5 ||
+    maximumOutput.readBigUInt64LE(32) !== maximumU64) {
+  throw new Error("maximum Process input total lost exact capacity");
+}
+
+const overflowInstance = await WebAssembly.instantiate(module, {});
+if (overflowInstance.exports.boundary_process_kernel_prepare_input(
+  0,
+  maximumI64,
+  maximumI64 - 38n,
+  0,
+  0n,
+) !== 0) {
+  throw new Error("unrepresentable Process input total was admitted");
+}
+if (overflowInstance.exports.boundary_process_kernel_output_len() !== 0n) {
+  throw new Error("unrepresentable Process input total was made retryable");
+}
+const overflowMemory = new Uint8Array(overflowInstance.exports.memory.buffer);
+const overflowErrorPtr =
+  overflowInstance.exports.boundary_process_kernel_error_ptr() >>> 0;
+const overflowErrorLength =
+  overflowInstance.exports.boundary_process_kernel_error_len();
+const overflowError = Buffer.from(overflowMemory.subarray(
+  overflowErrorPtr,
+  overflowErrorPtr + overflowErrorLength,
+)).toString("utf8");
+if (overflowError !== "KernelInputLengthOverflow") {
+  throw new Error("unrepresentable Process input total was not rejected");
+}
+
 const malformedInstance = await WebAssembly.instantiate(module, {});
 const malformed = Buffer.alloc(40);
 malformed.write("ABL_PKI1", 0, "ascii");

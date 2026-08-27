@@ -81,7 +81,10 @@ pub export fn boundary_process_kernel_prepare_input(
         image_length,
         instance_length,
         result_length,
-    );
+    ) catch {
+        setError("KernelInputLengthOverflow");
+        return 0;
+    };
     if (required_input > storage.input.bytes.len) {
         reportInputCapacity(required_input);
         return 0;

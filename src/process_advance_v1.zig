@@ -163,14 +163,14 @@ pub fn kernelInputEncodedLength(
     image_length: u64,
     instance_length: u64,
     result_length: u64,
-) u64 {
-    return saturatingAddU64(
-        kernel_input_header_length,
-        saturatingAddU64(
-            saturatingAddU64(image_length, instance_length),
-            result_length,
-        ),
-    );
+) Error!u64 {
+    var required: u64 = kernel_input_header_length;
+    required = std.math.add(u64, required, image_length) catch
+        return error.InvalidKernelInput;
+    required = std.math.add(u64, required, instance_length) catch
+        return error.InvalidKernelInput;
+    return std.math.add(u64, required, result_length) catch
+        error.InvalidKernelInput;
 }
 
 pub const KernelInputView = struct {
@@ -641,7 +641,7 @@ pub fn advanceAttemptForPhysicalStorage(
         buffersFromStorage(storage),
         std.mem.asBytes(workspace),
     );
-    const input_length = kernelInputLength(
+    const input_length = try kernelInputLength(
         image_bytes,
         instance,
         effect_result,
@@ -946,7 +946,7 @@ fn capacityRequirement(
     capacity: *CapacityTracker,
     err: anyerror,
 ) Error!CapacityRequirement {
-    const input = kernelInputLength(image_bytes, instance, effect_result);
+    const input = try kernelInputLength(image_bytes, instance, effect_result);
     capacity.required_bytes[@intFromEnum(CapacityArenaId.input)] = input;
     if (err == error.OutputCapacity and capacity.maximumOutput() == 0) {
         return error.InvalidCapacityEvidence;
@@ -969,7 +969,7 @@ fn kernelInputLength(
     image_bytes: []const u8,
     instance: Instance,
     effect_result: ?[]const u8,
-) u64 {
+) Error!u64 {
     const instance_length: u64 = switch (instance) {
         .initial_args => |bytes| @intCast(bytes.len),
         .process_state => |bytes| @intCast(bytes.len),
@@ -978,7 +978,7 @@ fn kernelInputLength(
         @intCast(bytes.len)
     else
         0;
-    return kernelInputEncodedLength(
+    return try kernelInputEncodedLength(
         @intCast(image_bytes.len),
         instance_length,
         result_length,

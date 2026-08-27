@@ -1185,6 +1185,22 @@ test "Process kernel-input codec has one canonical round trip" {
         @as(u64, std.math.maxInt(u32)) + 1,
         std.mem.readInt(u64, wide_header[20..28], .little),
     );
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        try process_advance_v1.kernelInputEncodedLength(
+            std.math.maxInt(u64) - process_advance_v1.kernel_input_header_length,
+            0,
+            0,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidKernelInput,
+        process_advance_v1.kernelInputEncodedLength(
+            std.math.maxInt(u64),
+            1,
+            0,
+        ),
+    );
 }
 
 test "Process rejects aliased kernel-outcome encoding" {
