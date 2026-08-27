@@ -3,7 +3,6 @@ pub const effect = @import("process_effect_v1");
 const semantics = @import("process_advance_v1");
 const state_codec = @import("process_state_v1");
 
-pub const advance = semantics.advanceInStorage;
 pub const encodeKernelInput = semantics.encodeKernelInput;
 pub const validateState = semantics.validateState;
 pub const CapacityStorage = semantics.CapacityStorage;
@@ -37,6 +36,7 @@ pub const fixed_kernel_abi = struct {
         pub const input_ptr = "boundary_process_kernel_input_ptr";
         pub const input_capacity = "boundary_process_kernel_input_capacity";
         pub const input_payload_ptr = "boundary_process_kernel_input_payload_ptr";
+        pub const occupied_memory_bytes = "boundary_process_kernel_occupied_memory_bytes";
         pub const prepare_input = "boundary_process_kernel_prepare_input";
         pub const execute = "boundary_process_kernel_execute";
         pub const output_ptr = "boundary_process_kernel_output_ptr";

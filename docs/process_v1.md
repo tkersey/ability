@@ -1,8 +1,9 @@
 # Boundary Process ABI v1
 
 The portable running system is canonical BPI1 bytes plus either initial
-arguments or canonical `ABL_PST1` Process State. `boundary.process_v1.advance`
-validates those bytes and evaluates exactly one finite BPI1 reducer segment.
+arguments or canonical `ABL_PST1` Process State. The `advance` method on a
+`boundary.process_v1.CapacityStorage(...)` validates those bytes and evaluates
+exactly one finite BPI1 reducer segment.
 
 Outcomes are progressed State, a self-contained `ABL_ERQ1` Effect Request,
 explicitly yielded State, completed Result, authored Failure, or transactional
@@ -14,12 +15,14 @@ same identity. Programs requiring occurrence distinction must author a counter
 or nonce in portable State; exactly-once effects are not claimed.
 
 For the native reference API, instantiate `boundary.process_v1.CapacityStorage`
-with the physical interpreter's arena capacities and pass its current page
-floor to `advance`. The storage product derives all mutable reducer buffers and
-is the sole owner of `minimum_memory_pages`; semantic reduction records only
-byte demand. Allocate at least `minimum_output_bytes` for each output-class
-arena and at least `minimum_scratch_bytes` for the scratch arena before retrying
-the same input. Every mutable output, scratch, and validation arena must be
+with the physical interpreter's arena capacities and call the storage's
+`advance` method. The generated storage derives its own page floor and
+occupied-byte watermark, supplies all mutable reducer buffers, and is the sole
+owner of `minimum_memory_pages`; semantic reduction records each arena's byte
+demand.
+Allocate at least `minimum_output_bytes` for any generic output arena and at
+least `minimum_scratch_bytes` for the scratch arena before retrying the same
+input. Every mutable output, scratch, and validation arena must be
 disjoint from all source bytes and from every other mutable arena; readonly
 source slices may overlap. Invalid mutable aliases reject before writing. Every
 State-bearing outcome is returned from the supplied storage product, including
@@ -30,9 +33,8 @@ output producer and reducer scratch allocation before a capacity error.
 than reconstructing a global maximum from BPI1 schema bounds or substituting
 an unrelated arena's existing capacity.
 Internally, one `ReductionAttempt` carries the outcome and that capacity
-evidence together through final PKO1 serialization. The public `advance`
-operation attaches page evidence from its `CapacityStorage` and projects only
-the normative outcome.
+evidence together through final PKO1 serialization. The generated storage's
+`advance` method attaches page evidence and projects only the normative outcome.
 
 `ABL_PST1` stores the program transition digest and a minimally encoded frame
 sequence. Each frame contains its continuation-constructor identity and exact

@@ -24,9 +24,10 @@ Valid images describe effects but grant no authority; the kernel returns a
 typed request and stops.
 
 The byte-level BPI1 clause evaluator remains internal. The public Process ABI
-admits canonical bytes and exposes one finite reduction through
-`boundary.process_v1.advance` and the fixed import-free Process kernel. The
-bounded Machine ABI v2 path remains compatibility and specialization.
+admits canonical bytes and exposes one finite reduction through a generated
+`boundary.process_v1.CapacityStorage(...).advance` method and the fixed
+import-free Process kernel. The bounded Machine ABI v2 path remains
+compatibility and specialization.
 
 The v2 compatibility claim is transition equivalence: outcome tag, caller fuel, State,
 request identity and payload, result, failure, and operational rejection must

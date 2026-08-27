@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const wasmBytes = fs.readFileSync(process.argv[2]);
-const vectorBytes = fs.readFileSync(process.argv[3]);
 const expectedKinds = new Set(
   (process.argv[4] ?? "").split(",").filter(Boolean).map(Number),
 );
@@ -10,6 +10,9 @@ const module = await WebAssembly.compile(wasmBytes);
 if (WebAssembly.Module.imports(module).length !== 0) {
   throw new Error("Boundary Process kernel must be import-free");
 }
+const vectorBytes = process.argv[5] === "native"
+  ? nativeVector(module, process.argv[3])
+  : fs.readFileSync(process.argv[3]);
 
 const requiredExports = [
   "memory",
@@ -18,6 +21,7 @@ const requiredExports = [
   "boundary_process_kernel_input_ptr",
   "boundary_process_kernel_input_capacity",
   "boundary_process_kernel_input_payload_ptr",
+  "boundary_process_kernel_occupied_memory_bytes",
   "boundary_process_kernel_prepare_input",
   "boundary_process_kernel_execute",
   "boundary_process_kernel_output_ptr",
@@ -76,13 +80,9 @@ for (let index = 0; index < count; index += 1) {
   }
   if (actual[10] === 5) {
     const actualMemoryPages = memory.buffer.byteLength / 65536;
-    const minimumOutputBytes = Number(actual.readBigUInt64LE(40));
     const reportedMinimumPages = Number(actual.readBigUInt64LE(56));
-    const outputGrowthPages = Math.ceil(
-      Math.max(0, minimumOutputBytes - 64) / 65536,
-    );
-    if (reportedMinimumPages < actualMemoryPages + outputGrowthPages) {
-      throw new Error("NeedsCapacity under-reported live WASM growth pages");
+    if (reportedMinimumPages < actualMemoryPages) {
+      throw new Error("NeedsCapacity under-reported live WASM pages");
     }
   }
   comparisons += 1;
@@ -185,3 +185,17 @@ process.stdout.write(JSON.stringify({
   byte_identical_native_wasm_outcomes: comparisons,
   outcome_kinds: [...observedKinds].sort(),
 }) + "\n");
+
+function nativeVector(module, executable) {
+  const probe = new WebAssembly.Instance(module, {});
+  const livePages = probe.exports.memory.buffer.byteLength / 65536;
+  const occupiedBytes = probe.exports.boundary_process_kernel_occupied_memory_bytes();
+  const result = spawnSync(executable, [
+    String(livePages),
+    String(occupiedBytes),
+  ], { maxBuffer: 16 * 1024 * 1024 });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.toString("utf8"));
+  }
+  return result.stdout;
+}

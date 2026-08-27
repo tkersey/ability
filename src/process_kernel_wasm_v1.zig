@@ -17,7 +17,7 @@ const environment_capacity = process_kernel_options.environment_capacity;
 const scratch_capacity = process_kernel_options.scratch_capacity;
 const error_capacity = process_kernel_options.error_capacity;
 
-const KernelStorage = process_advance_v1.CapacityStorage(.{
+const kernel_storage_capacities: process_advance_v1.StorageCapacities = .{
     .input = input_capacity,
     .output = output_capacity,
     .state = state_capacity,
@@ -25,7 +25,10 @@ const KernelStorage = process_advance_v1.CapacityStorage(.{
     .request = request_capacity,
     .environment = environment_capacity,
     .scratch = scratch_capacity,
-});
+};
+const KernelStorage = process_advance_v1.CapacityStorage(
+    kernel_storage_capacities,
+);
 
 var storage: KernelStorage = .{};
 var error_storage: [error_capacity]u8 align(16) = undefined;
@@ -54,6 +57,10 @@ pub export fn boundary_process_kernel_input_capacity() u32 {
 
 pub export fn boundary_process_kernel_input_payload_ptr() u32 {
     return @intCast(@intFromPtr(&storage.input.bytes) + input_header_length);
+}
+
+pub export fn boundary_process_kernel_occupied_memory_bytes() u64 {
+    return occupiedMemoryBytes();
 }
 
 pub export fn boundary_process_kernel_prepare_input(
@@ -124,12 +131,16 @@ fn execute(input: []const u8) !u32 {
         return error.MalformedKernelInput;
 
     validation_workspace = .{};
-    const attempt = try process_advance_v1.advanceAttemptInStorage(
+    const live_pages = @wasmMemorySize(0);
+    const occupied_bytes = occupiedMemoryBytes();
+    const attempt = try process_advance_v1.advanceAttemptForPhysicalStorage(
+        kernel_storage_capacities,
         decoded.image,
         decoded.instance,
         decoded.effect_result,
         &storage,
-        @wasmMemorySize(0),
+        live_pages,
+        occupied_bytes,
         &validation_workspace,
     );
     const encoded = try process_advance_v1.encodeOutcomeForCapacity(
@@ -137,7 +148,8 @@ fn execute(input: []const u8) !u32 {
         attempt.capacity,
         input.len,
         &storage,
-        @wasmMemorySize(0),
+        live_pages,
+        occupied_bytes,
         &storage.output.bytes,
     );
     output_length = @intCast(encoded.len);
@@ -151,6 +163,9 @@ fn setError(message: []const u8) void {
 }
 
 fn reportInputCapacity(required_input: u64) void {
+    var capacity: process_advance_v1.CapacityEvidence = .{};
+    capacity.noteU64(.input, required_input);
+    capacity.note(.output, process_advance_v1.outcome_header_length + 32);
     const requirement: process_advance_v1.CapacityRequirement = .{
         .minimum_input_bytes = required_input,
         .minimum_output_bytes = process_advance_v1.outcome_header_length + 32,
@@ -159,8 +174,9 @@ fn reportInputCapacity(required_input: u64) void {
     };
     const minimum_pages = process_advance_v1.minimumMemoryPagesForStorage(
         &storage,
-        requirement,
+        capacity,
         @wasmMemorySize(0),
+        occupiedMemoryBytes(),
     );
     const encoded = process_advance_v1.encodeOutcome(
         .{ .needs_capacity = .{
@@ -172,4 +188,8 @@ fn reportInputCapacity(required_input: u64) void {
         &storage.output.bytes,
     ) catch return;
     output_length = @intCast(encoded.len);
+}
+
+fn occupiedMemoryBytes() u64 {
+    return @intFromPtr(@extern(*u8, .{ .name = "__heap_base" }));
 }

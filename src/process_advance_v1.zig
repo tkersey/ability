@@ -67,7 +67,72 @@ pub const CapacityRequirement = struct {
     minimum_memory_pages: u64,
 };
 
-pub const CapacityEvidence = reducer_clause_v1.CapacityTracker;
+pub const CapacityArenaId = enum {
+    input,
+    output,
+    state,
+    value,
+    request,
+    candidate,
+    environment,
+    auxiliary_environment,
+    scratch,
+};
+
+pub const CapacityEvidence = struct {
+    required_bytes: [@typeInfo(CapacityArenaId).@"enum".fields.len]u64 =
+        .{0} ** @typeInfo(CapacityArenaId).@"enum".fields.len,
+
+    pub fn note(self: *@This(), arena: CapacityArenaId, demand: usize) void {
+        self.noteU64(arena, demand);
+    }
+
+    pub fn noteU64(self: *@This(), arena: CapacityArenaId, demand: u64) void {
+        const slot = &self.required_bytes[@intFromEnum(arena)];
+        slot.* = @max(slot.*, demand);
+    }
+
+    pub fn require(
+        self: *@This(),
+        arena: CapacityArenaId,
+        available: usize,
+        demand: usize,
+    ) Error!void {
+        self.note(arena, demand);
+        if (available < demand) return if (arena == .scratch)
+            error.ScratchCapacity
+        else
+            error.OutputCapacity;
+    }
+
+    pub fn tracker(
+        self: *@This(),
+        output_arena: CapacityArenaId,
+    ) reducer_clause_v1.CapacityTracker {
+        return .{
+            .output_bytes = &self.required_bytes[@intFromEnum(output_arena)],
+            .scratch_bytes = &self.required_bytes[@intFromEnum(CapacityArenaId.scratch)],
+        };
+    }
+
+    pub fn requiredFor(self: @This(), arena: CapacityArenaId) u64 {
+        return self.required_bytes[@intFromEnum(arena)];
+    }
+
+    pub fn maximumOutput(self: @This()) u64 {
+        var maximum: u64 = 0;
+        inline for (.{
+            CapacityArenaId.output,
+            .state,
+            .value,
+            .request,
+            .candidate,
+            .environment,
+            .auxiliary_environment,
+        }) |arena| maximum = @max(maximum, self.requiredFor(arena));
+        return maximum;
+    }
+};
 
 pub const ReductionAttempt = struct {
     outcome: Outcome,
@@ -342,23 +407,43 @@ pub fn CapacityStorage(comptime capacities: StorageCapacities) type {
         environment: Arena(.output, capacities.environment) = .{},
         auxiliary_environment: Arena(.output, capacities.environment) = .{},
         scratch: Arena(.scratch, capacities.scratch) = .{},
+
+        pub fn advance(
+            self: *@This(),
+            image_bytes: []const u8,
+            instance: Instance,
+            effect_result: ?[]const u8,
+            workspace: *image_v1.ValidationWorkspace,
+        ) Error!Outcome {
+            const occupied_memory_bytes = saturatingAddU64(
+                @sizeOf(@This()),
+                @sizeOf(image_v1.ValidationWorkspace),
+            );
+            return (try advanceAttemptForPhysicalStorage(
+                capacities,
+                image_bytes,
+                instance,
+                effect_result,
+                self,
+                bytesToPages(occupied_memory_bytes),
+                occupied_memory_bytes,
+                workspace,
+            )).outcome;
+        }
     };
 }
 
 pub fn minimumMemoryPagesForStorage(
     storage: anytype,
-    requirement: CapacityRequirement,
+    capacity: CapacityEvidence,
     live_memory_pages: u64,
+    occupied_memory_bytes: u64,
 ) u64 {
     const Storage = @typeInfo(@TypeOf(storage)).pointer.child;
     var growth: u64 = 0;
     inline for (std.meta.fields(Storage)) |field| {
         const arena = &@field(storage.*, field.name);
-        const required = switch (field.type.capacity_class) {
-            .input => requirement.minimum_input_bytes,
-            .output => requirement.minimum_output_bytes,
-            .scratch => requirement.minimum_scratch_bytes,
-        };
+        const required = capacity.requiredFor(@field(CapacityArenaId, field.name));
         const current_logical: u64 = @intCast(arena.bytes.len);
         const current_physical: u64 = @sizeOf(field.type);
         const required_physical = if (required <= current_logical)
@@ -372,12 +457,11 @@ pub fn minimumMemoryPagesForStorage(
     }
     const storage_pages = bytesToPages(@sizeOf(Storage));
     const effective_live_pages = @max(live_memory_pages, storage_pages);
-    const live_bytes = std.math.mul(
-        u64,
+    const occupied = @max(occupied_memory_bytes, @as(u64, @sizeOf(Storage)));
+    return @max(
         effective_live_pages,
-        65536,
-    ) catch std.math.maxInt(u64);
-    return bytesToPages(saturatingAddU64(live_bytes, growth));
+        bytesToPages(saturatingAddU64(occupied, growth)),
+    );
 }
 
 fn alignedArenaBytes(bytes: u64, alignment: comptime_int) u64 {
@@ -393,8 +477,11 @@ pub fn encodeOutcomeForCapacity(
     input_length: usize,
     storage: anytype,
     minimum_memory_pages_floor: u64,
+    occupied_memory_bytes: u64,
     output: []u8,
 ) Error![]const u8 {
+    var evidence = capacity;
+    evidence.note(.input, input_length);
     const required_output = try outcomeEncodedLength(outcome);
     const admitted_outcome: Outcome = switch (outcome) {
         .needs_capacity => |requirement| .{ .needs_capacity = .{
@@ -405,38 +492,29 @@ pub fn encodeOutcomeForCapacity(
                 requirement.minimum_memory_pages,
                 minimumMemoryPagesForStorage(
                     storage,
-                    requirement,
+                    evidence,
                     minimum_memory_pages_floor,
+                    occupied_memory_bytes,
                 ),
             ),
         } },
         else => outcome,
     };
     return encodeOutcome(admitted_outcome, output) catch |err| switch (err) {
-        error.OutputCapacity => encodeOutcome(
-            .{ .needs_capacity = requirement: {
-                const requirement: CapacityRequirement = .{
-                    .minimum_input_bytes = @intCast(input_length),
-                    .minimum_output_bytes = @max(
-                        capacity.output_bytes,
-                        @as(u64, @intCast(required_output)),
-                    ),
-                    .minimum_scratch_bytes = capacity.scratch_bytes,
-                    .minimum_memory_pages = 0,
-                };
-                break :requirement .{
-                    .minimum_input_bytes = requirement.minimum_input_bytes,
-                    .minimum_output_bytes = requirement.minimum_output_bytes,
-                    .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
-                    .minimum_memory_pages = minimumMemoryPagesForStorage(
-                        storage,
-                        requirement,
-                        minimum_memory_pages_floor,
-                    ),
-                };
-            } },
-            output,
-        ),
+        error.OutputCapacity => blk: {
+            evidence.note(.output, required_output);
+            break :blk encodeOutcome(.{ .needs_capacity = .{
+                .minimum_input_bytes = evidence.requiredFor(.input),
+                .minimum_output_bytes = evidence.maximumOutput(),
+                .minimum_scratch_bytes = evidence.requiredFor(.scratch),
+                .minimum_memory_pages = minimumMemoryPagesForStorage(
+                    storage,
+                    evidence,
+                    minimum_memory_pages_floor,
+                    occupied_memory_bytes,
+                ),
+            } }, output);
+        },
         else => return err,
     };
 }
@@ -506,32 +584,14 @@ pub fn advance(
     )).outcome;
 }
 
-/// Execute through one explicit physical storage carrier. Semantic reduction
-/// records byte demand; this wrapper is the sole native page authority.
-pub fn advanceInStorage(
+pub fn advanceAttemptForPhysicalStorage(
+    comptime capacities: StorageCapacities,
     image_bytes: []const u8,
     instance: Instance,
     effect_result: ?[]const u8,
-    storage: anytype,
+    storage: *CapacityStorage(capacities),
     minimum_memory_pages_floor: u64,
-    workspace: *image_v1.ValidationWorkspace,
-) Error!Outcome {
-    return (try advanceAttemptInStorage(
-        image_bytes,
-        instance,
-        effect_result,
-        storage,
-        minimum_memory_pages_floor,
-        workspace,
-    )).outcome;
-}
-
-pub fn advanceAttemptInStorage(
-    image_bytes: []const u8,
-    instance: Instance,
-    effect_result: ?[]const u8,
-    storage: anytype,
-    minimum_memory_pages_floor: u64,
+    occupied_memory_bytes: u64,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!ReductionAttempt {
     var attempt = try advanceAttempt(
@@ -549,8 +609,9 @@ pub fn advanceAttemptInStorage(
                 .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
                 .minimum_memory_pages = minimumMemoryPagesForStorage(
                     storage,
-                    requirement,
+                    attempt.capacity,
                     minimum_memory_pages_floor,
+                    occupied_memory_bytes,
                 ),
             } };
         },
@@ -592,7 +653,7 @@ pub fn advanceAttempt(
             image_bytes,
             instance,
             effect_result,
-            capacity,
+            &capacity,
             err,
         ) },
         else => return err,
@@ -800,7 +861,7 @@ fn capacityRequirement(
     image_bytes: []const u8,
     instance: Instance,
     effect_result: ?[]const u8,
-    capacity: CapacityTracker,
+    capacity: *CapacityTracker,
     err: anyerror,
 ) Error!CapacityRequirement {
     const instance_length: u64 = switch (instance) {
@@ -818,18 +879,19 @@ fn capacityRequirement(
             result_length,
         ),
     );
-    if (err == error.OutputCapacity and capacity.output_bytes == 0) {
+    capacity.required_bytes[@intFromEnum(CapacityArenaId.input)] = input;
+    if (err == error.OutputCapacity and capacity.maximumOutput() == 0) {
         return error.InvalidCapacityEvidence;
     }
     if ((err == error.ScratchCapacity or err == error.CapacityExceeded) and
-        capacity.scratch_bytes == 0)
+        capacity.requiredFor(.scratch) == 0)
     {
         return error.InvalidCapacityEvidence;
     }
     return .{
         .minimum_input_bytes = input,
-        .minimum_output_bytes = capacity.output_bytes,
-        .minimum_scratch_bytes = capacity.scratch_bytes,
+        .minimum_output_bytes = capacity.maximumOutput(),
+        .minimum_scratch_bytes = capacity.requiredFor(.scratch),
         .minimum_memory_pages = 0,
     };
 }
@@ -914,12 +976,13 @@ fn initialState(
         error.ScratchCapacity => return error.ScratchCapacity,
         else => return error.InvalidInitialArgs,
     };
+    var invariant_capacity = capacity.tracker(.scratch);
     reducer_clause_v1.validatePathInvariantsTracked(
         image,
         constructor,
         &slots,
         workspace,
-        capacity,
+        &invariant_capacity,
     ) catch |err| switch (err) {
         error.ScratchCapacity => return error.ScratchCapacity,
         else => return error.InvalidInitialArgs,
@@ -930,6 +993,7 @@ fn initialState(
         &activation_slots,
         &slots,
         environment_output,
+        .environment,
         capacity,
     );
     const frames = [_]process_state_v1.Frame{.{
@@ -940,7 +1004,7 @@ fn initialState(
         image.catalogs.envelope.header.program_transition_digest,
         &frames,
         output,
-        &capacity.output_bytes,
+        &capacity.required_bytes[@intFromEnum(CapacityArenaId.candidate)],
     );
     return .{
         .state = state,
@@ -1024,6 +1088,7 @@ fn stepState(
     var activation_slots = admitted.activation_slots;
     const loaded = admitted.loaded;
     const segment_id = readInt(u16, admitted.constructor, 12);
+    var clause_capacity = capacity.tracker(.value);
     const clause = try reducer_clause_v1.evaluateClause(
         image,
         segment_id,
@@ -1031,7 +1096,7 @@ fn stepState(
         buffers.output_value,
         buffers.scratch,
         workspace,
-        capacity,
+        &clause_capacity,
     );
     const outcome: Outcome = switch (clause) {
         .progressed => |progressed| .{ .progressed = (try transitionState(
@@ -1063,6 +1128,7 @@ fn stepState(
                 &activation_slots,
                 &slots,
                 buffers.environment,
+                .environment,
                 capacity,
             );
             const parked_admitted = try replaceTopAdmitted(
@@ -1073,6 +1139,7 @@ fn stepState(
                     .environment = environment,
                 },
                 buffers.output_state,
+                .state,
                 workspace,
                 capacity,
             );
@@ -1156,6 +1223,7 @@ fn callState(
         activation_slots,
         slots,
         buffers.environment,
+        .environment,
         capacity,
     );
 
@@ -1190,6 +1258,7 @@ fn callState(
         slots,
         slots,
         buffers.auxiliary_environment,
+        .auxiliary_environment,
         capacity,
     );
     return replaceTopAndAppendAdmitted(
@@ -1201,6 +1270,7 @@ fn callState(
             .environment = child_environment,
         },
         buffers.output_state,
+        .state,
         workspace,
         capacity,
     );
@@ -1314,6 +1384,7 @@ fn returnToCaller(
         &activation_slots,
         &slots,
         buffers.environment,
+        .environment,
         capacity,
     );
     return replaceParentAndDropTopAdmitted(
@@ -1324,6 +1395,7 @@ fn returnToCaller(
             .environment = environment,
         },
         buffers.output_state,
+        .state,
         workspace,
         capacity,
     );
@@ -1341,7 +1413,8 @@ fn currentRequest(
         admitted.constructor,
         &admitted.slots,
     );
-    try capacity.requireOutput(
+    try capacity.require(
+        .state,
         buffers.output_state.len,
         admitted.state.bytes.len,
     );
@@ -1407,7 +1480,7 @@ fn makeRequest(
     const request = try process_effect_v1.encodeRequestTracked(
         request_input,
         output,
-        &capacity.output_bytes,
+        &capacity.required_bytes[@intFromEnum(CapacityArenaId.request)],
     );
     return .{ .requested = .{ .state = parked_state, .request = request } };
 }
@@ -1526,6 +1599,7 @@ fn resumePending(
         &activation_slots,
         &slots,
         buffers.environment,
+        .environment,
         capacity,
     );
     return replaceTopAdmitted(
@@ -1536,6 +1610,7 @@ fn resumePending(
             .environment = environment,
         },
         buffers.candidate_state,
+        .candidate,
         workspace,
         capacity,
     );
@@ -1576,6 +1651,7 @@ fn transitionState(
         activation_slots,
         slots,
         buffers.environment,
+        .environment,
         capacity,
     );
     return replaceTopAdmitted(
@@ -1583,6 +1659,7 @@ fn transitionState(
         state,
         .{ .constructor_id = constructor_id, .environment = environment },
         buffers.output_state,
+        .state,
         workspace,
         capacity,
     );
@@ -1593,6 +1670,7 @@ fn replaceTopAdmitted(
     state: process_state_v1.StateView,
     frame: process_state_v1.Frame,
     output: []u8,
+    arena: CapacityArenaId,
     workspace: *image_v1.ValidationWorkspace,
     capacity: *CapacityTracker,
 ) Error!AdmittedState {
@@ -1600,7 +1678,7 @@ fn replaceTopAdmitted(
         state,
         frame,
         output,
-        &capacity.output_bytes,
+        &capacity.required_bytes[@intFromEnum(arena)],
     );
     return admitProducedSuffix(
         image,
@@ -1616,6 +1694,7 @@ fn replaceTopAndAppendAdmitted(
     parent: process_state_v1.Frame,
     child: process_state_v1.Frame,
     output: []u8,
+    arena: CapacityArenaId,
     workspace: *image_v1.ValidationWorkspace,
     capacity: *CapacityTracker,
 ) Error!AdmittedState {
@@ -1624,7 +1703,7 @@ fn replaceTopAndAppendAdmitted(
         parent,
         child,
         output,
-        &capacity.output_bytes,
+        &capacity.required_bytes[@intFromEnum(arena)],
     );
     return admitProducedSuffix(
         image,
@@ -1639,6 +1718,7 @@ fn replaceParentAndDropTopAdmitted(
     state: process_state_v1.StateView,
     parent: process_state_v1.Frame,
     output: []u8,
+    arena: CapacityArenaId,
     workspace: *image_v1.ValidationWorkspace,
     capacity: *CapacityTracker,
 ) Error!AdmittedState {
@@ -1646,7 +1726,7 @@ fn replaceParentAndDropTopAdmitted(
         state,
         parent,
         output,
-        &capacity.output_bytes,
+        &capacity.required_bytes[@intFromEnum(arena)],
     );
     return admitProducedSuffix(
         image,
@@ -1901,6 +1981,11 @@ fn loadEnvironment(
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!LoadedEnvironment {
+    var tracker: reducer_clause_v1.CapacityTracker = undefined;
+    const tracker_ptr: ?*reducer_clause_v1.CapacityTracker = if (capacity) |evidence| blk: {
+        tracker = evidence.tracker(.scratch);
+        break :blk &tracker;
+    } else null;
     const loaded = reducer_clause_v1.loadEnvironmentSlotsTracked(
         image,
         constructor,
@@ -1908,7 +1993,7 @@ fn loadEnvironment(
         slots,
         activation_slots,
         workspace,
-        capacity,
+        tracker_ptr,
     ) catch |err| switch (err) {
         error.ScratchCapacity => return error.ScratchCapacity,
         else => return error.InvalidProcessState,
@@ -1949,6 +2034,7 @@ fn encodeEnvironment(
     activation_slots: *const [1024]Slot,
     slots: *const [1024]Slot,
     output: []u8,
+    arena: CapacityArenaId,
     capacity: *CapacityTracker,
 ) Error![]const u8 {
     const required = reducer_clause_v1.environmentEncodedLength(
@@ -1960,7 +2046,7 @@ fn encodeEnvironment(
         error.InvalidState => return error.InvalidProcessState,
         else => return err,
     };
-    try capacity.requireOutput(output.len, required);
+    try capacity.require(arena, output.len, required);
     return reducer_clause_v1.encodeEnvironmentSlots(
         constructor,
         activation_entry,

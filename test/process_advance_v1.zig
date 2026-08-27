@@ -1622,9 +1622,10 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
             .minimum_scratch_bytes = std.math.maxInt(u64),
             .minimum_memory_pages = 0,
         } },
-        .{},
+        capacityEvidence(1, std.math.maxInt(u64), std.math.maxInt(u64)),
         1,
         &storage,
+        0,
         0,
         &output,
     );
@@ -1640,32 +1641,82 @@ test "NeedsCapacity adds every arena growth delta to live pages" {
         @as(u64, 10),
         process_advance_v1.minimumMemoryPagesForStorage(
             &storage,
-            .{
-                .minimum_input_bytes = 65536,
-                .minimum_output_bytes = 65536,
-                .minimum_scratch_bytes = 65536,
-                .minimum_memory_pages = 0,
-            },
+            capacityEvidence(65536, 65536, 65536),
+            1,
+            65536,
+        ),
+    );
+}
+
+test "capacity pages preserve per-arena demand identity" {
+    var storage: ZeroCapacityStorage = .{};
+    var evidence: process_advance_v1.CapacityEvidence = .{};
+    evidence.noteU64(.value, 65536);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
+            evidence,
+            0,
+            0,
+        ),
+    );
+}
+
+test "capacity pages preserve occupied-byte slack" {
+    var storage: ZeroCapacityStorage = .{};
+    var evidence: process_advance_v1.CapacityEvidence = .{};
+    evidence.noteU64(.value, 1);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        process_advance_v1.minimumMemoryPagesForStorage(
+            &storage,
+            evidence,
+            1,
             1,
         ),
     );
 }
 
-test "capacity storage fold cannot omit a newly declared arena" {
-    var storage: ExtendedCapacityStorage = .{};
-    try std.testing.expectEqual(
-        @as(u64, 11),
-        process_advance_v1.minimumMemoryPagesForStorage(
-            &storage,
-            .{
-                .minimum_input_bytes = 65536,
-                .minimum_output_bytes = 65536,
-                .minimum_scratch_bytes = 65536,
-                .minimum_memory_pages = 0,
-            },
-            1,
-        ),
-    );
+test "generated storage exclusively owns page-bearing advance" {
+    const Generated = boundary.process_v1.CapacityStorage(.{
+        .input = 0,
+        .output = 0,
+        .state = 0,
+        .value = 0,
+        .request = 0,
+        .environment = 0,
+        .scratch = 0,
+    });
+    const StructuralAlias = struct {
+        input: ZeroArena(.input, 0) = .{},
+        output: ZeroArena(.output, 0) = .{},
+        state: ZeroArena(.output, 0) = .{},
+        value: ZeroArena(.output, 0) = .{},
+        request: ZeroArena(.output, 0) = .{},
+        candidate: ZeroArena(.output, 0) = .{},
+        environment: ZeroArena(.output, 0) = .{},
+        auxiliary_environment: ZeroArena(.output, 0) = .{},
+        scratch: ZeroArena(.scratch, 0) = .{},
+    };
+    try std.testing.expect(@hasDecl(Generated, "advance"));
+    try std.testing.expect(!@hasDecl(StructuralAlias, "advance"));
+    const arena_fields = @typeInfo(process_advance_v1.CapacityArenaId).@"enum".fields;
+    try std.testing.expectEqual(arena_fields.len, std.meta.fields(Generated).len);
+    inline for (arena_fields) |field| {
+        try std.testing.expect(@hasField(Generated, field.name));
+        const expected: process_advance_v1.CapacityClass =
+            if (std.mem.eql(u8, field.name, "input"))
+                .input
+            else if (std.mem.eql(u8, field.name, "scratch"))
+                .scratch
+            else
+                .output;
+        try std.testing.expectEqual(
+            expected,
+            @FieldType(Generated, field.name).capacity_class,
+        );
+    }
 }
 
 test "public native advance derives pages from its physical storage" {
@@ -1682,28 +1733,19 @@ test "public native advance derives pages from its physical storage" {
     std.mem.writeInt(u32, &initial_args, 17, .little);
     var storage: NativeStorage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
-    const outcome = try boundary.process_v1.advance(
+    const outcome = try storage.advance(
         &Image.bytes,
         .{ .initial_args = &initial_args },
         null,
-        &storage,
-        1,
         &workspace,
     );
     const requirement = outcome.needs_capacity;
-    const native_storage_bytes: u64 = @sizeOf(NativeStorage);
+    const native_storage_bytes: u64 = @sizeOf(NativeStorage) +
+        @sizeOf(boundary.image.ValidationWorkspace);
     const native_storage_pages = native_storage_bytes / 65536 +
         @intFromBool(native_storage_bytes % 65536 != 0);
     try std.testing.expect(
         requirement.minimum_memory_pages >= native_storage_pages,
-    );
-    try std.testing.expectEqual(
-        process_advance_v1.minimumMemoryPagesForStorage(
-            &storage,
-            requirement,
-            1,
-        ),
-        requirement.minimum_memory_pages,
     );
 }
 
@@ -1713,12 +1755,8 @@ test "capacity storage fold includes per-arena alignment" {
         @as(u64, 2),
         process_advance_v1.minimumMemoryPagesForStorage(
             &storage,
-            .{
-                .minimum_input_bytes = 0,
-                .minimum_output_bytes = 9361,
-                .minimum_scratch_bytes = 0,
-                .minimum_memory_pages = 0,
-            },
+            capacityEvidence(0, 9361, 0),
+            0,
             0,
         ),
     );
@@ -1737,25 +1775,20 @@ const ZeroCapacityStorage = struct {
     scratch: ZeroArena(.scratch, 0) = .{},
 };
 
-const ExtendedCapacityStorage = struct {
-    input: ZeroArena(.input, 0) = .{},
-    output: ZeroArena(.output, 0) = .{},
-    state: ZeroArena(.output, 0) = .{},
-    candidate: ZeroArena(.output, 0) = .{},
-    value: ZeroArena(.output, 0) = .{},
-    request: ZeroArena(.output, 0) = .{},
-    environment: ZeroArena(.output, 0) = .{},
-    auxiliary_environment: ZeroArena(.output, 0) = .{},
-    future_arena: ZeroArena(.output, 0) = .{},
-    scratch: ZeroArena(.scratch, 0) = .{},
-};
+const AlignmentCapacityStorage = ZeroCapacityStorage;
 
-const AlignmentCapacityStorage = struct {
-    first: ZeroArena(.output, 0) = .{},
-    second: ZeroArena(.output, 0) = .{},
-    third: ZeroArena(.output, 0) = .{},
-    fourth: ZeroArena(.output, 0) = .{},
-    fifth: ZeroArena(.output, 0) = .{},
-    sixth: ZeroArena(.output, 0) = .{},
-    seventh: ZeroArena(.output, 0) = .{},
-};
+fn capacityEvidence(input: u64, output: u64, scratch: u64) process_advance_v1.CapacityEvidence {
+    var evidence: process_advance_v1.CapacityEvidence = .{};
+    evidence.noteU64(.input, input);
+    inline for (.{
+        process_advance_v1.CapacityArenaId.output,
+        .state,
+        .value,
+        .request,
+        .candidate,
+        .environment,
+        .auxiliary_environment,
+    }) |arena| evidence.noteU64(arena, output);
+    evidence.noteU64(.scratch, scratch);
+    return evidence;
+}

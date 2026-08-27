@@ -62,7 +62,8 @@ no runtime dispatch surface.
 Boundary has no source-language interpreter, runtime Zig-definition loader,
 callback registry, or host-owned continuation. `Program.compile` remains the
 direct specialization route; canonical BPI1 may also be evaluated one finite
-reducer segment at a time by `boundary.process_v1.advance` or the fixed
+reducer segment at a time by a
+`boundary.process_v1.CapacityStorage(...).advance` method or the fixed
 import-free Process kernel.
 
 For local use, instantiate `boundary.Driver(Machine)`. The Driver owns only

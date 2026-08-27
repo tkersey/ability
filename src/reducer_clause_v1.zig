@@ -26,15 +26,15 @@ pub const Slot = struct {
 /// Invocation-local operational capacity evidence. Semantic evaluation records
 /// the exact bytes required at the producer before returning a capacity error.
 pub const CapacityTracker = struct {
-    output_bytes: u64 = 0,
-    scratch_bytes: u64 = 0,
+    output_bytes: *u64,
+    scratch_bytes: *u64,
 
     pub fn requireOutput(
         self: *@This(),
         available: usize,
         required: usize,
     ) Error!void {
-        self.output_bytes = @max(self.output_bytes, required);
+        self.output_bytes.* = @max(self.output_bytes.*, required);
         if (available < required) return error.OutputCapacity;
     }
 
@@ -43,7 +43,7 @@ pub const CapacityTracker = struct {
         available: usize,
         required: usize,
     ) Error!void {
-        self.scratch_bytes = @max(self.scratch_bytes, required);
+        self.scratch_bytes.* = @max(self.scratch_bytes.*, required);
         if (available < required) return error.ScratchCapacity;
     }
 };

@@ -1543,10 +1543,6 @@ pub fn build(b: *std.Build) void {
         .name = "boundary-process-kernel-capacity-vector",
         .root_module = capacity_vector_module,
     });
-    const run_capacity_vector = b.addRunArtifact(capacity_vector_executable);
-    const capacity_vector = run_capacity_vector.captureStdOut(.{
-        .basename = "boundary-process-kernel-capacity-vector.bin",
-    });
     const run_process_kernel_wasm = b.addSystemCommand(&.{"node"});
     run_process_kernel_wasm.addFileArg(
         b.path("test/run_process_kernel_wasm.mjs"),
@@ -1578,8 +1574,11 @@ pub fn build(b: *std.Build) void {
     run_constrained_process_kernel_wasm.addFileArg(
         constrained_process_kernel.getEmittedBin(),
     );
-    run_constrained_process_kernel_wasm.addFileArg(capacity_vector);
+    run_constrained_process_kernel_wasm.addArtifactArg(
+        capacity_vector_executable,
+    );
     run_constrained_process_kernel_wasm.addArg("5");
+    run_constrained_process_kernel_wasm.addArg("native");
     process_step.dependOn(&run_constrained_process_kernel_wasm.step);
     const check_process_step = b.addSystemCommand(&.{"node"});
     check_process_step.addFileArg(b.path("test/check_process_step.mjs"));
@@ -1598,7 +1597,7 @@ pub fn build(b: *std.Build) void {
     check_constrained_process_step.addFileArg(
         constrained_process_kernel.getEmittedBin(),
     );
-    check_constrained_process_step.addFileArg(capacity_vector);
+    check_constrained_process_step.addArtifactArg(capacity_vector_executable);
     check_constrained_process_step.addFileArg(
         b.path("scripts/boundary-process-step.mjs"),
     );
@@ -1616,6 +1615,7 @@ pub fn build(b: *std.Build) void {
     check_constrained_process_step.addFileArg(
         kernel_wasm_executable.getEmittedBin(),
     );
+    check_constrained_process_step.addArg("native");
     const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
     const kernel_wasm_reproducible = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1-reproducible",

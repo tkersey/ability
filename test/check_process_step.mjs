@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const kernel = process.argv[2];
-const vector = fs.readFileSync(process.argv[3]);
+const vectorSource = process.argv[3];
 const adapter = process.argv[4];
 const wrongKernel = process.argv[5];
 const kernelInstance = new WebAssembly.Instance(
@@ -13,6 +13,9 @@ const kernelInstance = new WebAssembly.Instance(
 );
 const kernelInputCapacity =
   kernelInstance.exports.boundary_process_kernel_input_capacity();
+const vector = process.argv[6] === "native"
+  ? nativeVector(kernelInstance, vectorSource)
+  : fs.readFileSync(vectorSource);
 let cursor = 0;
 const vectorCount = vector.readUInt32LE(cursor);
 cursor += 4;
@@ -181,4 +184,17 @@ try {
   }
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
+}
+
+function nativeVector(instance, executable) {
+  const livePages = instance.exports.memory.buffer.byteLength / 65536;
+  const occupiedBytes = instance.exports.boundary_process_kernel_occupied_memory_bytes();
+  const result = spawnSync(executable, [
+    String(livePages),
+    String(occupiedBytes),
+  ], { maxBuffer: 16 * 1024 * 1024 });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.toString("utf8"));
+  }
+  return result.stdout;
 }

@@ -24,5 +24,5 @@ insufficient.
 Separately, the direct unmetered reducer clause and the internal BPI1 clause
 evaluator must agree before Machine v2 policy is applied. The clause evaluator
 is a repository-internal seam, not a package-root API. Process ABI v1 evaluates
-the same clauses through `boundary.process_v1.advance`; its native/WASM parity
-is proved separately by `check-boundary-process-v1`.
+the same clauses through `boundary.process_v1.CapacityStorage(...).advance`;
+its native/WASM parity is proved separately by `check-boundary-process-v1`.
