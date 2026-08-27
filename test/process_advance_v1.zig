@@ -418,6 +418,7 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
     );
     frames[frame_count - 1].constructor_id = std.math.maxInt(u32);
     var forged_state: [4096]u8 = undefined;
+    @memset(&forged_state, 0xa5);
     var forged_scratch: [4096]u8 = undefined;
     var forged_workspace: boundary.image.ValidationWorkspace = .{};
     try std.testing.expectError(
@@ -430,6 +431,21 @@ test "Process advance requests, recovers, resumes, and completes one segment at 
             &forged_workspace,
         ),
     );
+    try std.testing.expect(std.mem.allEqual(u8, &forged_state, 0xa5));
+    var short_state = [_]u8{0x5a};
+    var short_scratch: [4096]u8 = undefined;
+    var short_workspace: boundary.image.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.OutputCapacity,
+        boundary.process_v1.state.encode(
+            &Image.bytes,
+            frames[0..frame_count],
+            &short_state,
+            &short_scratch,
+            &short_workspace,
+        ),
+    );
+    try std.testing.expectEqual(@as(u8, 0x5a), short_state[0]);
 
     var second_storage: Storage = .{};
     var second_workspace: boundary.image.ValidationWorkspace = .{};
@@ -982,7 +998,7 @@ test "NeedsCapacity preserves the reducer output requirement" {
         &final_workspace,
     );
     try std.testing.expectEqual(
-        @as(u64, @sizeOf(u32)),
+        @as(u64, process_advance_v1.needs_capacity_encoded_length),
         final.needs_capacity.minimum_output_bytes,
     );
 }
@@ -1039,6 +1055,10 @@ test "NeedsCapacity preserves the reducer scratch requirement" {
     try std.testing.expectEqual(
         @as(u64, 8),
         outcome.needs_capacity.minimum_scratch_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(u64, process_advance_v1.needs_capacity_encoded_length),
+        outcome.needs_capacity.minimum_output_bytes,
     );
 }
 
@@ -1207,7 +1227,24 @@ test "Process Capsule admits only a compatible image and bound instance" {
     try std.testing.expectEqualSlices(u8, &initial_args, capsule.instance);
     try std.testing.expect(std.mem.find(u8, encoded, "profile") == null);
 
+    var overlapping_image = Image.bytes;
+    var overlap_storage: [128 * 1024]u8 = undefined;
+    var overlap_scratch: [1024 * 1024]u8 = undefined;
+    var overlap_workspace: boundary.image.ValidationWorkspace = .{};
+    _ = try boundary.process_v1.capsule.encode(
+        .{
+            .required_kernel_semantic_version = 1,
+            .image = &overlapping_image,
+            .instance_kind = .initial_args,
+            .instance = overlapping_image[0..4],
+        },
+        &overlap_storage,
+        &overlap_scratch,
+        &overlap_workspace,
+    );
+
     var wrong_version_storage: [128 * 1024]u8 = undefined;
+    @memset(&wrong_version_storage, 0xa5);
     var wrong_version_workspace: boundary.image.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.UnsupportedKernelSemanticVersion,
@@ -1223,8 +1260,14 @@ test "Process Capsule admits only a compatible image and bound instance" {
             &wrong_version_workspace,
         ),
     );
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        &wrong_version_storage,
+        0xa5,
+    ));
 
     var wrong_state_storage: [128 * 1024]u8 = undefined;
+    @memset(&wrong_state_storage, 0xa5);
     var wrong_state_workspace: boundary.image.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.InvalidProcessState,
@@ -1240,10 +1283,16 @@ test "Process Capsule admits only a compatible image and bound instance" {
             &wrong_state_workspace,
         ),
     );
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        &wrong_state_storage,
+        0xa5,
+    ));
 
     var corrupted_image = Image.bytes;
     corrupted_image[0] ^= 1;
     var corrupted_storage: [128 * 1024]u8 = undefined;
+    @memset(&corrupted_storage, 0xa5);
     var corrupted_workspace: boundary.image.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.InvalidMagic,
@@ -1259,6 +1308,7 @@ test "Process Capsule admits only a compatible image and bound instance" {
             &corrupted_workspace,
         ),
     );
+    try std.testing.expect(std.mem.allEqual(u8, &corrupted_storage, 0xa5));
 
     var alias_workspace: boundary.image.ValidationWorkspace = .{};
     const alias_bytes = std.mem.asBytes(&alias_workspace);
@@ -1534,6 +1584,49 @@ test "Process changed suffix admits its preserved-prefix boundary" {
                 &suffix_workspace,
             ),
         );
+        const forged_view = try process_state_v1.validate(
+            forged[0..authentic.len],
+            RecursiveImage.program_transition_digest,
+        );
+        const forged_frame_count = std.math.cast(
+            usize,
+            forged_view.frame_count,
+        ) orelse return error.TestUnexpectedResult;
+        const forged_frames = try std.testing.allocator.alloc(
+            process_state_v1.Frame,
+            forged_frame_count,
+        );
+        defer std.testing.allocator.free(forged_frames);
+        var forged_iterator = forged_view.iterator();
+        var forged_frame_index: usize = 0;
+        while (try forged_iterator.next()) |frame| {
+            forged_frames[forged_frame_index] = frame;
+            forged_frame_index += 1;
+        }
+        try std.testing.expectEqual(forged_frame_count, forged_frame_index);
+        const encode_output = try std.testing.allocator.alloc(
+            u8,
+            authentic.len + 128,
+        );
+        defer std.testing.allocator.free(encode_output);
+        @memset(encode_output, 0xa5);
+        const encode_scratch = try std.testing.allocator.alloc(
+            u8,
+            1024 * 1024,
+        );
+        defer std.testing.allocator.free(encode_scratch);
+        var encode_workspace: boundary.image.ValidationWorkspace = .{};
+        try std.testing.expectError(
+            error.InvalidProcessState,
+            boundary.process_v1.state.encode(
+                &RecursiveImage.bytes,
+                forged_frames,
+                encode_output,
+                encode_scratch,
+                &encode_workspace,
+            ),
+        );
+        try std.testing.expect(std.mem.allEqual(u8, encode_output, 0xa5));
         var public_scratch: [1024 * 1024]u8 = undefined;
         var public_workspace: boundary.image.ValidationWorkspace = .{};
         try std.testing.expectError(
@@ -1594,6 +1687,7 @@ test "Process rejects schema-valid forged constructor invariants" {
     );
 
     var capsule_storage: [256 * 1024]u8 = undefined;
+    @memset(&capsule_storage, 0xa5);
     var capsule_scratch: [1024 * 1024]u8 = undefined;
     var capsule_workspace: boundary.image.ValidationWorkspace = .{};
     try std.testing.expectError(
@@ -1610,6 +1704,7 @@ test "Process rejects schema-valid forged constructor invariants" {
             &capsule_workspace,
         ),
     );
+    try std.testing.expect(std.mem.allEqual(u8, &capsule_storage, 0xa5));
 }
 
 test "NeedsCapacity page ceiling preserves saturated u64 totals" {
@@ -1632,6 +1727,29 @@ test "NeedsCapacity page ceiling preserves saturated u64 totals" {
     try std.testing.expectEqual(
         @as(u64, 281474976710656),
         std.mem.readInt(u64, encoded[56..64], .little),
+    );
+}
+
+test "NeedsCapacity serialization demand is present before encoding fails" {
+    var output: [process_advance_v1.needs_capacity_encoded_length]u8 = undefined;
+    var storage: ZeroCapacityStorage = .{};
+    const encoded = try process_advance_v1.encodeOutcomeForCapacity(
+        .{ .needs_capacity = .{
+            .minimum_input_bytes = 0,
+            .minimum_output_bytes = 0,
+            .minimum_scratch_bytes = 0,
+            .minimum_memory_pages = 0,
+        } },
+        .{},
+        0,
+        &storage,
+        0,
+        0,
+        &output,
+    );
+    try std.testing.expectEqual(
+        @as(u64, process_advance_v1.needs_capacity_encoded_length),
+        std.mem.readInt(u64, encoded[40..48], .little),
     );
 }
 
@@ -1741,6 +1859,62 @@ test "public native advance derives pages from its physical storage" {
     try std.testing.expect(
         requirement.minimum_memory_pages >= native_storage_pages,
     );
+}
+
+test "public native advance enforces its physical input arena" {
+    const input_capacity = process_advance_v1.kernel_input_header_length +
+        Image.bytes.len + @sizeOf(u32);
+    const ConstrainedInputStorage = boundary.process_v1.CapacityStorage(.{
+        .input = 0,
+        .output = process_advance_v1.needs_capacity_encoded_length,
+        .state = 4096,
+        .value = 4096,
+        .request = 4096,
+        .environment = 4096,
+        .scratch = 64 * 1024,
+    });
+    const ExactInputStorage = boundary.process_v1.CapacityStorage(.{
+        .input = input_capacity,
+        .output = process_advance_v1.needs_capacity_encoded_length,
+        .state = 4096,
+        .value = 4096,
+        .request = 4096,
+        .environment = 4096,
+        .scratch = 64 * 1024,
+    });
+    var initial_args: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial_args, 17, .little);
+
+    var constrained_storage: ConstrainedInputStorage = .{};
+    var constrained_workspace: boundary.image.ValidationWorkspace = .{};
+    const constrained = try constrained_storage.advance(
+        &Image.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        &constrained_workspace,
+    );
+    try std.testing.expectEqual(
+        @as(u64, input_capacity),
+        constrained.needs_capacity.minimum_input_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(u64, process_advance_v1.needs_capacity_encoded_length),
+        constrained.needs_capacity.minimum_output_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        constrained.needs_capacity.minimum_scratch_bytes,
+    );
+
+    var exact_storage: ExactInputStorage = .{};
+    var exact_workspace: boundary.image.ValidationWorkspace = .{};
+    const exact = try exact_storage.advance(
+        &Image.bytes,
+        .{ .initial_args = &initial_args },
+        null,
+        &exact_workspace,
+    );
+    try std.testing.expect(exact == .requested);
 }
 
 test "capacity storage fold includes per-arena alignment" {

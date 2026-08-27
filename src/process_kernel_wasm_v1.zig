@@ -77,10 +77,11 @@ pub export fn boundary_process_kernel_prepare_input(
     {
         return 0;
     }
-    const required_input = @as(u64, input_header_length) +|
-        image_length +|
-        instance_length +|
-        result_length;
+    const required_input = process_advance_v1.kernelInputEncodedLength(
+        image_length,
+        instance_length,
+        result_length,
+    );
     if (required_input > storage.input.bytes.len) {
         reportInputCapacity(required_input);
         return 0;
@@ -165,10 +166,10 @@ fn setError(message: []const u8) void {
 fn reportInputCapacity(required_input: u64) void {
     var capacity: process_advance_v1.CapacityEvidence = .{};
     capacity.noteU64(.input, required_input);
-    capacity.note(.output, process_advance_v1.outcome_header_length + 32);
+    capacity.note(.output, process_advance_v1.needs_capacity_encoded_length);
     const requirement: process_advance_v1.CapacityRequirement = .{
         .minimum_input_bytes = required_input,
-        .minimum_output_bytes = process_advance_v1.outcome_header_length + 32,
+        .minimum_output_bytes = process_advance_v1.needs_capacity_encoded_length,
         .minimum_scratch_bytes = 0,
         .minimum_memory_pages = 0,
     };

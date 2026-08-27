@@ -154,9 +154,24 @@ pub const ReductionAttempt = struct {
 pub const outcome_magic = "ABL_PKO1".*;
 pub const outcome_format_version: u16 = 1;
 pub const outcome_header_length: usize = 32;
+pub const needs_capacity_encoded_length: usize = outcome_header_length + 32;
 pub const kernel_input_magic = "ABL_PKI1".*;
 pub const kernel_input_format_version: u16 = 1;
 pub const kernel_input_header_length: usize = 40;
+
+pub fn kernelInputEncodedLength(
+    image_length: u64,
+    instance_length: u64,
+    result_length: u64,
+) u64 {
+    return saturatingAddU64(
+        kernel_input_header_length,
+        saturatingAddU64(
+            saturatingAddU64(image_length, instance_length),
+            result_length,
+        ),
+    );
+}
 
 pub const KernelInputView = struct {
     image: []const u8,
@@ -311,7 +326,7 @@ pub fn encodeOutcome(outcome: Outcome, output: []u8) Error![]const u8 {
                 .secondary = &.{},
             },
             .needs_capacity => |requirement| {
-                if (output.len < outcome_header_length + 32) {
+                if (output.len < needs_capacity_encoded_length) {
                     return error.OutputCapacity;
                 }
                 writeOutcomeHeader(output, 5, 32, 0);
@@ -339,7 +354,7 @@ pub fn encodeOutcome(outcome: Outcome, output: []u8) Error![]const u8 {
                     requirement.minimum_memory_pages,
                     .little,
                 );
-                return output[0 .. outcome_header_length + 32];
+                return output[0..needs_capacity_encoded_length];
             },
         };
     if (slicesOverlap(output, fields.primary) or
@@ -389,7 +404,7 @@ pub fn outcomeEncodedLength(outcome: Outcome) Error!usize {
         .explicitly_yielded => |state| addOutcomeLength(state.len, 0),
         .completed => |result| addOutcomeLength(result.len, 0),
         .authored_failure => |failure| addOutcomeLength(failure.len, 0),
-        .needs_capacity => outcome_header_length + 32,
+        .needs_capacity => needs_capacity_encoded_length,
     };
 }
 
@@ -498,10 +513,14 @@ pub fn encodeOutcomeForCapacity(
     var evidence = capacity;
     evidence.note(.input, input_length);
     const required_output = try outcomeEncodedLength(outcome);
+    evidence.note(.output, required_output);
     const admitted_outcome: Outcome = switch (outcome) {
         .needs_capacity => |requirement| .{ .needs_capacity = .{
             .minimum_input_bytes = requirement.minimum_input_bytes,
-            .minimum_output_bytes = requirement.minimum_output_bytes,
+            .minimum_output_bytes = @max(
+                requirement.minimum_output_bytes,
+                evidence.maximumOutput(),
+            ),
             .minimum_scratch_bytes = requirement.minimum_scratch_bytes,
             .minimum_memory_pages = @max(
                 requirement.minimum_memory_pages,
@@ -517,7 +536,6 @@ pub fn encodeOutcomeForCapacity(
     };
     return encodeOutcome(admitted_outcome, output) catch |err| switch (err) {
         error.OutputCapacity => blk: {
-            evidence.note(.output, required_output);
             break :blk encodeOutcome(.{ .needs_capacity = .{
                 .minimum_input_bytes = evidence.requiredFor(.input),
                 .minimum_output_bytes = evidence.maximumOutput(),
@@ -575,6 +593,13 @@ const FrameAdmission = struct {
     loaded: LoadedEnvironment,
 };
 
+const FrameSequenceAdmission = struct {
+    constructor: []const u8,
+    slots: [1024]Slot,
+    activation_slots: [1024]Slot,
+    loaded: LoadedEnvironment,
+};
+
 const AdmittedState = struct {
     state: process_state_v1.StateView,
     constructor: []const u8,
@@ -609,6 +634,37 @@ pub fn advanceAttemptForPhysicalStorage(
     occupied_memory_bytes: u64,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!ReductionAttempt {
+    try validateBufferOwnership(
+        image_bytes,
+        instance,
+        effect_result,
+        buffersFromStorage(storage),
+        std.mem.asBytes(workspace),
+    );
+    const input_length = kernelInputLength(
+        image_bytes,
+        instance,
+        effect_result,
+    );
+    if (input_length > capacities.input) {
+        var capacity: CapacityEvidence = .{};
+        capacity.noteU64(.input, input_length);
+        capacity.note(.output, needs_capacity_encoded_length);
+        return .{
+            .outcome = .{ .needs_capacity = .{
+                .minimum_input_bytes = input_length,
+                .minimum_output_bytes = needs_capacity_encoded_length,
+                .minimum_scratch_bytes = 0,
+                .minimum_memory_pages = minimumMemoryPagesForStorage(
+                    storage,
+                    capacity,
+                    minimum_memory_pages_floor,
+                    occupied_memory_bytes,
+                ),
+            } },
+            .capacity = capacity,
+        };
+    }
     var attempt = try advanceAttempt(
         image_bytes,
         instance,
@@ -789,12 +845,19 @@ pub fn encodeState(
     workspace.invariant_result = invariant_scratch;
     defer workspace.invariant_result = prior_invariant_result;
     const image = try image_v1.validateImage(image_bytes, workspace);
+    const required = try process_state_v1.encodedLength(frames);
+    if (output_state.len < required) return error.OutputCapacity;
+    _ = try admitFrameSequence(
+        image,
+        FrameSliceIterator{ .frames = frames },
+        workspace,
+        null,
+    );
     const state = try process_state_v1.encode(
         image.catalogs.envelope.header.program_transition_digest,
         frames,
         output_state,
     );
-    _ = try admitFrames(image, state, workspace, null);
     return state;
 }
 
@@ -806,15 +869,19 @@ pub fn validateInitialArgs(
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     const workspace_bytes = std.mem.asBytes(workspace);
-    const arenas = [_][]const u8{
-        image_bytes,
-        initial_args,
+    const sources = [_][]const u8{ image_bytes, initial_args };
+    const mutable_arenas = [_][]const u8{
         output_state,
         invariant_scratch,
         workspace_bytes,
     };
-    for (arenas, 0..) |arena, index| {
-        for (arenas[index + 1 ..]) |other| {
+    for (sources) |source| {
+        for (mutable_arenas) |arena| {
+            if (slicesOverlap(source, arena)) return error.InvalidBuffers;
+        }
+    }
+    for (mutable_arenas, 0..) |arena, index| {
+        for (mutable_arenas[index + 1 ..]) |other| {
             if (slicesOverlap(arena, other)) return error.InvalidBuffers;
         }
     }
@@ -879,21 +946,7 @@ fn capacityRequirement(
     capacity: *CapacityTracker,
     err: anyerror,
 ) Error!CapacityRequirement {
-    const instance_length: u64 = switch (instance) {
-        .initial_args => |bytes| @intCast(bytes.len),
-        .process_state => |bytes| @intCast(bytes.len),
-    };
-    const result_length: u64 = if (effect_result) |bytes|
-        @intCast(bytes.len)
-    else
-        0;
-    const input = saturatingAddU64(
-        kernel_input_header_length,
-        saturatingAddU64(
-            saturatingAddU64(image_bytes.len, instance_length),
-            result_length,
-        ),
-    );
+    const input = kernelInputLength(image_bytes, instance, effect_result);
     capacity.required_bytes[@intFromEnum(CapacityArenaId.input)] = input;
     if (err == error.OutputCapacity and capacity.maximumOutput() == 0) {
         return error.InvalidCapacityEvidence;
@@ -903,12 +956,33 @@ fn capacityRequirement(
     {
         return error.InvalidCapacityEvidence;
     }
+    capacity.note(.output, needs_capacity_encoded_length);
     return .{
         .minimum_input_bytes = input,
         .minimum_output_bytes = capacity.maximumOutput(),
         .minimum_scratch_bytes = capacity.requiredFor(.scratch),
         .minimum_memory_pages = 0,
     };
+}
+
+fn kernelInputLength(
+    image_bytes: []const u8,
+    instance: Instance,
+    effect_result: ?[]const u8,
+) u64 {
+    const instance_length: u64 = switch (instance) {
+        .initial_args => |bytes| @intCast(bytes.len),
+        .process_state => |bytes| @intCast(bytes.len),
+    };
+    const result_length: u64 = if (effect_result) |bytes|
+        @intCast(bytes.len)
+    else
+        0;
+    return kernelInputEncodedLength(
+        @intCast(image_bytes.len),
+        instance_length,
+        result_length,
+    );
 }
 
 fn buffersFromStorage(storage: anytype) Buffers {
@@ -1839,19 +1913,52 @@ fn admitFrames(
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!AdmittedState {
-    var iterator = state.iterator();
+    const admitted = try admitFrameSequence(
+        image,
+        state.iterator(),
+        workspace,
+        capacity,
+    );
+    return .{
+        .state = state,
+        .constructor = admitted.constructor,
+        .slots = admitted.slots,
+        .activation_slots = admitted.activation_slots,
+        .loaded = admitted.loaded,
+    };
+}
+
+const FrameSliceIterator = struct {
+    frames: []const process_state_v1.Frame,
+    index: usize = 0,
+
+    fn next(self: *@This()) Error!?process_state_v1.Frame {
+        if (self.index == self.frames.len) return null;
+        const frame = self.frames[self.index];
+        self.index += 1;
+        return frame;
+    }
+};
+
+fn admitFrameSequence(
+    image: image_v1.ValidatedImage,
+    frame_iterator: anytype,
+    workspace: *image_v1.ValidationWorkspace,
+    capacity: ?*CapacityTracker,
+) Error!FrameSequenceAdmission {
+    var iterator = frame_iterator;
     var index: u64 = 0;
     var saw_frame = false;
     var previous_constructor: []const u8 = &.{};
     var previous_slots = [_]Slot{.{}} ** 1024;
     var previous_activation_slots = [_]Slot{.{}} ** 1024;
     var previous_loaded: LoadedEnvironment = .{ .activation_entry = null };
-    while (try iterator.nextSpan()) |frame_span| : (index += 1) {
+    while (try iterator.next()) |frame| : (index += 1) {
         var slots = [_]Slot{.{}} ** 1024;
         var activation_slots = [_]Slot{.{}} ** 1024;
         const admitted = try admitFrame(
             image,
-            frame_span.frame,
+            frame,
             &slots,
             &activation_slots,
             workspace,
@@ -1886,7 +1993,6 @@ fn admitFrames(
     }
     if (!saw_frame) return error.InvalidProcessState;
     return .{
-        .state = state,
         .constructor = previous_constructor,
         .slots = previous_slots,
         .activation_slots = previous_activation_slots,

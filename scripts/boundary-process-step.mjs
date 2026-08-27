@@ -43,10 +43,10 @@ try {
   const memory = new Uint8Array(exports.memory.buffer);
   const inputLength = exports.boundary_process_kernel_prepare_input(
     statePath === undefined ? 0 : 1,
-    imageFile.size,
-    instanceFile.size,
+    imageFile.generation.size,
+    instanceFile.generation.size,
     resultFile === null ? 0 : 1,
-    resultFile?.size ?? 0n,
+    resultFile?.generation.size ?? 0n,
   );
   if (inputLength === 0) {
     verifyGenerations([imageFile, instanceFile, resultFile]);
@@ -98,14 +98,13 @@ function openPayload(path, label, maximumBytes = null) {
     path,
     fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
   );
-  const file = { fd, generation: null, label, size: 0n };
+  const file = { fd, generation: null, label };
   opened.push(file);
   const stat = fs.fstatSync(fd, { bigint: true });
   if (!stat.isFile()) throw new Error(label + " must be a regular file");
   if (maximumBytes !== null && stat.size > maximumBytes) {
     throw new Error(label + " exceeds this relay's operational byte limit");
   }
-  file.size = stat.size;
   file.generation = generation(stat);
   return file;
 }
@@ -118,7 +117,7 @@ function verifyGenerations(files) {
 
 function readExact(file, label) {
   verifyGeneration(file);
-  const length = Number(file.size);
+  const length = Number(file.generation.size);
   if (!Number.isSafeInteger(length)) {
     throw new Error(label + " is too large to materialize after preflight");
   }

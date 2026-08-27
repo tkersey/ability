@@ -71,6 +71,17 @@ pub fn encode(
     }
     const required = try encodedLength(input);
     if (output.len < required) return error.OutputCapacity;
+    var image_length_bytes: [10]u8 = undefined;
+    const image_length = try process_state_v1.writeNatural(
+        input.image.len,
+        &image_length_bytes,
+    );
+    var instance_length_bytes: [10]u8 = undefined;
+    const instance_length = try process_state_v1.writeNatural(
+        input.instance.len,
+        &instance_length_bytes,
+    );
+    try validateInput(input, invariant_scratch, workspace);
     var cursor: usize = 0;
     append(output, &cursor, &magic);
     appendInt(u16, output, &cursor, format_version);
@@ -85,14 +96,12 @@ pub fn encode(
     cursor += 1;
     output[cursor] = 0;
     cursor += 1;
-    cursor += try process_state_v1.writeNatural(input.image.len, output[cursor..]);
+    append(output, &cursor, image_length_bytes[0..image_length]);
     append(output, &cursor, input.image);
-    cursor += try process_state_v1.writeNatural(input.instance.len, output[cursor..]);
+    append(output, &cursor, instance_length_bytes[0..instance_length]);
     append(output, &cursor, input.instance);
-    if (cursor != required) return error.InvalidCapsule;
-    const encoded = output[0..required];
-    _ = try validate(encoded, invariant_scratch, workspace);
-    return encoded;
+    std.debug.assert(cursor == required);
+    return output[0..required];
 }
 
 pub fn validate(
@@ -107,30 +116,44 @@ pub fn validate(
         return error.InvalidCapsule;
     }
     const view = try decode(bytes);
-    if (view.required_kernel_semantic_version !=
+    try validateInput(.{
+        .required_kernel_semantic_version = view.required_kernel_semantic_version,
+        .image = view.image,
+        .instance_kind = view.instance_kind,
+        .instance = view.instance,
+    }, invariant_scratch, workspace);
+    return view;
+}
+
+fn validateInput(
+    input: Input,
+    invariant_scratch: []u8,
+    workspace: *image_v1.ValidationWorkspace,
+) Error!void {
+    if (input.required_kernel_semantic_version !=
         process_advance_v1.kernel_semantic_version)
     {
         return error.UnsupportedKernelSemanticVersion;
     }
-    switch (view.instance_kind) {
+    switch (input.instance_kind) {
         .process_state => _ = try process_advance_v1.validateState(
-            view.image,
-            view.instance,
+            input.image,
+            input.instance,
             invariant_scratch,
             workspace,
         ),
         .initial_args => {
             const state_capacity = std.math.add(
                 usize,
-                view.instance.len,
+                input.instance.len,
                 128,
             ) catch return error.ScratchCapacity;
             if (invariant_scratch.len < state_capacity) {
                 return error.ScratchCapacity;
             }
             process_advance_v1.validateInitialArgs(
-                view.image,
-                view.instance,
+                input.image,
+                input.instance,
                 invariant_scratch[0..state_capacity],
                 invariant_scratch[state_capacity..],
                 workspace,
@@ -140,7 +163,6 @@ pub fn validate(
             };
         },
     }
-    return view;
 }
 
 fn decode(bytes: []const u8) Error!View {

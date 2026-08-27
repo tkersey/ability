@@ -19,7 +19,9 @@ with the physical interpreter's arena capacities and call the storage's
 `advance` method. The generated storage derives its own page floor and
 occupied-byte watermark, supplies all mutable reducer buffers, and is the sole
 owner of `minimum_memory_pages`; semantic reduction records each arena's byte
-demand.
+demand. It rejects a canonical kernel input larger than its declared input
+arena before reduction, and every `NeedsCapacity` reserves the 64-byte PKO1
+record required to report that outcome.
 Allocate at least `minimum_output_bytes` for any generic output arena and at
 least `minimum_scratch_bytes` for the scratch arena before retrying the same
 input. Every mutable output, scratch, and validation arena must be
@@ -54,6 +56,8 @@ constructor, which admits every frame in that suffix and their internal stack
 pairs, plus the pair crossing from the preserved prefix, before publishing
 canonical bytes. Initial construction returns bound `AdmittedState` directly
 to the first reduction instead of decoding and admitting its environment again.
+Public State and Capsule encoders complete semantic admission before their
+first caller-output write, so semantic rejection leaves output byte-identical.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
 no authoritative Process State between calls. The generic
