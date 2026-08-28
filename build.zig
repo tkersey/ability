@@ -2205,6 +2205,10 @@ pub fn build(b: *std.Build) void {
             "Body.Failure must declare arithmetic_overflow",
         },
         .{
+            "test/compile_fail/dynamic_instruction_failure_operand.zig",
+            "mapped instruction failure operands must be canonical Body.Failure constants",
+        },
+        .{
             "test/compile_fail/non_enum_failure_tagged_union.zig",
             "Body.Failure must be an exhaustive enum",
         },

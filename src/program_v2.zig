@@ -126,6 +126,20 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 ) @TypeOf(compiler.instructionFailureTags(Body, instruction)) {
                     return compiler.instructionFailureTags(Body, instruction);
                 }
+
+                /// Normalize evaluator-v1 role defaults and evaluator-v2
+                /// authored constants into one linker-owned source view.
+                pub fn instructionFailureProjection(
+                    comptime instruction: anytype,
+                ) @TypeOf(compiler.instructionFailureProjection(
+                    Body,
+                    instruction,
+                )) {
+                    return compiler.instructionFailureProjection(
+                        Body,
+                        instruction,
+                    );
+                }
             };
         }
 

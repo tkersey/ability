@@ -306,6 +306,13 @@ test "compiled pure operations construct products vectors and text" {
 }
 
 test "evaluator semantics v2 maps an instruction failure through explicit operands" {
+    const projection = MappedFailureProgram.componentAdmission()
+        .instructionFailureProjection(mapped_failure_instructions[3]);
+    try std.testing.expectEqual(@as(usize, 2), projection.ordinary_operand_count);
+    try std.testing.expectEqual(
+        @as(u32, @intFromEnum(MappedFailure.mapped)),
+        projection.failure_tags[0],
+    );
     try std.testing.expectEqual(
         image_v1.evaluator_semantics_v2,
         MappedFailureImage.evaluator_semantics_version,
