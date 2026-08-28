@@ -121,7 +121,7 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 /// that a linker must map when it embeds this instruction in
                 /// a Program with a different Failure type.
                 pub fn instructionFailureTags(
-                    comptime instruction: @import("control_ir").Instruction,
+                    comptime instruction: anytype,
                 ) [
                     program_semantics_v1.failureRoles(
                         instruction.operation,
