@@ -30,6 +30,30 @@ fn constructorFieldsEqual(
     return true;
 }
 
+/// Return the authenticated build-time component projection for one canonical
+/// Boundary Program.
+///
+/// Consumers must use this owner function instead of trusting a structurally
+/// compatible `componentAdmission` declaration supplied by an arbitrary type.
+pub fn componentAdmission(comptime Program: type) type {
+    if (!@hasDecl(Program, "program_label") or
+        !@hasDecl(Program, "component"))
+    {
+        @compileError(
+            "Boundary component admission requires a canonical Boundary Program",
+        );
+    }
+    const label: []const u8 = Program.program_label;
+    const Body = Program.component();
+    const Canonical = program(label, Body);
+    if (Canonical != Program) {
+        @compileError(
+            "Boundary component admission requires a canonical Boundary Program",
+        );
+    }
+    return Canonical.componentAdmission();
+}
+
 /// Declare one typed Boundary source program with one Machine meaning.
 pub fn program(comptime label: []const u8, comptime Body: type) type {
     const Reified = compiler.ReifiedFor(label, Body);

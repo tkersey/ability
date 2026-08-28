@@ -64,6 +64,9 @@ pub const schema = portable_value;
 pub const ir = control_ir;
 /// Declare one typed Boundary source program with one Machine meaning.
 pub const program = program_v2.program;
+/// Authenticate one canonical Boundary Program and expose its build-time
+/// component projection.
+pub const componentAdmission = program_v2.componentAdmission;
 /// Local driver over the same compiled Machine used by World.
 pub const Driver = driver.Driver;
 /// Deprecated compatibility profile. Agent-specific authoring belongs in the

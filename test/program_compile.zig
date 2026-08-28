@@ -77,7 +77,8 @@ test "Program exposes one generic pre-RNF component projection" {
 }
 
 test "Program exposes admitted component compiler facts" {
-    const Admission = Program.componentAdmission();
+    const Admission = program_v2.componentAdmission(Program);
+    try std.testing.expect(Admission == Program.componentAdmission());
     try std.testing.expect(Admission.SourceBody == Body);
     try std.testing.expectEqualSlices(
         u8,
