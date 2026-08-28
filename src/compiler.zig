@@ -775,7 +775,9 @@ pub fn instructionFailureTags(
     comptime Body: type,
     comptime instruction: anytype,
 ) [program_semantics_v1.failureRoles(instruction.operation).len]u32 {
-    const roles = program_semantics_v1.failureRoles(instruction.operation);
+    const roles = comptime program_semantics_v1.failureRoles(
+        instruction.operation,
+    );
     var tags: [roles.len]u32 = undefined;
     inline for (roles, 0..) |role, index| {
         tags[index] = @intCast(@intFromEnum(failureNamed(
