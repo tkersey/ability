@@ -771,6 +771,21 @@ fn failureNamed(comptime Body: type, comptime name: []const u8) Body.Failure {
     @compileError("Body.Failure must declare " ++ name);
 }
 
+pub fn instructionFailureTags(
+    comptime Body: type,
+    comptime instruction: anytype,
+) [program_semantics_v1.failureRoles(instruction.operation).len]u32 {
+    const roles = program_semantics_v1.failureRoles(instruction.operation);
+    var tags: [roles.len]u32 = undefined;
+    inline for (roles, 0..) |role, index| {
+        tags[index] = @intCast(@intFromEnum(failureNamed(
+            Body,
+            program_semantics_v1.failureName(role),
+        )));
+    }
+    return tags;
+}
+
 fn failureFromTag(comptime Body: type, comptime tag: u16) Body.Failure {
     inline for (std.meta.fields(Body.Failure)) |field| {
         if (field.value == tag) {

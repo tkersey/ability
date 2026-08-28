@@ -3,7 +3,6 @@ const image_emit_v1 = @import("image_emit_v1");
 const kernel_machine_v1 = @import("kernel_machine_v1");
 const machine = @import("machine");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
-const program_semantics_v1 = @import("program_semantics_v1");
 const std = @import("std");
 
 fn constructorFieldsEqual(
@@ -122,28 +121,8 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 /// a Program with a different Failure type.
                 pub fn instructionFailureTags(
                     comptime instruction: anytype,
-                ) [
-                    program_semantics_v1.failureRoles(
-                        instruction.operation,
-                    ).len
-                ]u32 {
-                    const roles = program_semantics_v1.failureRoles(
-                        instruction.operation,
-                    );
-                    var tags: [roles.len]u32 = undefined;
-                    inline for (roles, 0..) |role, index| {
-                        inline for (std.meta.fields(Body.Failure)) |field| {
-                            if (comptime std.mem.eql(
-                                u8,
-                                field.name,
-                                program_semantics_v1.failureName(role),
-                            )) {
-                                tags[index] = @intCast(field.value);
-                                break;
-                            }
-                        }
-                    }
-                    return tags;
+                ) @TypeOf(compiler.instructionFailureTags(Body, instruction)) {
+                    return compiler.instructionFailureTags(Body, instruction);
                 }
             };
         }
