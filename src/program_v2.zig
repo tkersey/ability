@@ -71,6 +71,29 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
             return Body;
         }
 
+        /// Return the admitted compiler facts needed by build-time linkers.
+        ///
+        /// This projection carries Boundary-owned validation, reachability,
+        /// canonical source mappings, residual analysis, and compatibility
+        /// metering without transferring graph-composition authority.
+        pub fn componentAdmission() type {
+            return struct {
+                pub const SourceBody = Body;
+                pub const source_control_ir = Body.control_ir;
+                pub const semantic_control_ir = Reified.control;
+                pub const reachability = Reified.reachability;
+                pub const semantic_canonicalization =
+                    Reified.semantic_canonicalization;
+                pub const residual_effects = Reified.residual_effects;
+                pub const effective_block_costs =
+                    MachineV2Lowering.effective_block_costs;
+                pub const program_transition_digest =
+                    Reified.program_transition_digest;
+                pub const machine_v2_semantic_digest =
+                    MachineV2Lowering.machine_v2_semantic_digest;
+            };
+        }
+
         /// Compile this program to its sole direct Boundary Machine.
         pub fn compileV2(comptime options: machine.Options) type {
             return machine.Machine(Definition, options);

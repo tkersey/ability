@@ -76,6 +76,41 @@ test "Program exposes one generic pre-RNF component projection" {
     try std.testing.expect(!@hasDecl(Component, "effect_morphisms"));
 }
 
+test "Program exposes admitted component compiler facts" {
+    const Admission = Program.componentAdmission();
+    try std.testing.expect(Admission.SourceBody == Body);
+    try std.testing.expectEqualSlices(
+        u8,
+        &Program.program_transition_digest,
+        &Admission.program_transition_digest,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &Program.machine_v2_semantic_digest,
+        &Admission.machine_v2_semantic_digest,
+    );
+    try std.testing.expectEqual(
+        Body.control_ir.blocks.len,
+        Admission.source_control_ir.blocks.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        Admission.reachability.count,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        Admission.semantic_canonicalization.block_count,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        Admission.residual_effects.residual_count,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        Admission.effective_block_costs[0],
+    );
+}
+
 const CanonicalTextLookup = struct {
     pub const id: u32 = 0;
     pub const semantic_identity = "test.canonical-text.v1";
