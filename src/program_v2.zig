@@ -115,6 +115,8 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                     Reified.program_transition_digest;
                 pub const machine_v2_semantic_digest =
                     MachineV2Lowering.machine_v2_semantic_digest;
+                pub const evaluator_semantics_version =
+                    Reified.evaluator_semantics_version;
 
                 /// Return the source Failure tags, in evaluator role order,
                 /// that a linker must map when it embeds this instruction in
