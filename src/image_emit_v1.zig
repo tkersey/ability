@@ -66,6 +66,7 @@ fn effectDigest(
 }
 
 pub const EnvelopeOptions = struct {
+    evaluator_semantics_version: u16 = image_v1.evaluator_semantics_v1,
     program_transition_digest: [32]u8,
     maximum_kernel_scratch_bytes: u64,
     maximum_single_value_bytes: u32,
@@ -89,7 +90,7 @@ pub fn Envelope(
         @memset(bytes[0..image_v1.header_length], 0);
         @memcpy(bytes[0..image_v1.magic.len], &image_v1.magic);
         writeAt(u16, &bytes, 8, image_v1.image_format_version);
-        writeAt(u16, &bytes, 10, image_v1.evaluator_semantics_version);
+        writeAt(u16, &bytes, 10, options.evaluator_semantics_version);
         writeAt(u32, &bytes, 16, image_v1.header_length);
         writeAt(u64, &bytes, 24, total_length);
         writeAt(u32, &bytes, 20, image_v1.section_count);
@@ -378,6 +379,8 @@ pub fn ProgramImage(
     };
     return struct {
         pub const format_version = image_v1.image_format_version;
+        pub const evaluator_semantics_version =
+            Reified.evaluator_semantics_version;
         pub const bytes = encoded;
         pub const byte_length: u64 = encoded.len;
         pub const program_transition_digest = Reified.program_transition_digest;
@@ -813,7 +816,7 @@ pub fn encodeProgramImage(
     @memset(output[0..image_v1.header_length], 0);
     @memcpy(output[0..image_v1.magic.len], &image_v1.magic);
     writeAt(u16, output, 8, image_v1.image_format_version);
-    writeAt(u16, output, 10, image_v1.evaluator_semantics_version);
+    writeAt(u16, output, 10, Reified.evaluator_semantics_version);
     writeAt(u32, output, 16, image_v1.header_length);
     writeAt(u32, output, 20, image_v1.section_count);
     writeAt(u64, output, 24, writer.cursor);

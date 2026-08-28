@@ -5,6 +5,10 @@ arguments or canonical `ABL_PST1` Process State. The `advance` method on a
 `boundary.process_v1.CapacityStorage(...)` validates those bytes and evaluates
 exactly one finite BPI1 reducer segment.
 
+The Process kernel accepts BPI1 evaluator semantics versions 1 and 2. Version
+2 adds instruction-local authored-failure operands without changing the BPI1
+container, State format, Process ABI, or any version-1 image bytes.
+
 Outcomes are progressed State, a self-contained `ABL_ERQ1` Effect Request,
 explicitly yielded State, completed Result, authored Failure, or transactional
 operational `NeedsCapacity`. Matching resumes use `ABL_ERS1`; wrong-request,

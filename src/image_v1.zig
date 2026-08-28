@@ -4,7 +4,9 @@ const std = @import("std");
 
 pub const magic = "ABL_BPI1".*;
 pub const image_format_version: u16 = 1;
-pub const evaluator_semantics_version: u16 = 1;
+pub const evaluator_semantics_v1: u16 = 1;
+pub const evaluator_semantics_v2: u16 = 2;
+pub const evaluator_semantics_version: u16 = evaluator_semantics_v1;
 pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
@@ -78,6 +80,7 @@ pub const Section = struct {
 };
 
 pub const Header = struct {
+    evaluator_semantics_version: u16,
     total_length: u64,
     program_transition_digest: [32]u8,
     maximum_kernel_scratch_bytes: u64,
@@ -250,7 +253,10 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (readInt(u16, image, 8) != image_format_version) {
         return error.UnsupportedImageVersion;
     }
-    if (readInt(u16, image, 10) != evaluator_semantics_version) {
+    const evaluator_version = readInt(u16, image, 10);
+    if (evaluator_version != evaluator_semantics_v1 and
+        evaluator_version != evaluator_semantics_v2)
+    {
         return error.UnsupportedEvaluatorSemantics;
     }
     if (readInt(u32, image, 12) != 0) return error.UnknownFlags;
@@ -299,6 +305,7 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     return .{
         .image = image,
         .header = .{
+            .evaluator_semantics_version = evaluator_version,
             .total_length = declared_total,
             .program_transition_digest = image[32..64].*,
             .maximum_kernel_scratch_bytes = readInt(u64, image, 64),
@@ -1252,7 +1259,31 @@ fn validateInstruction(
         operand_count,
         immediate,
     );
-    for (program_semantics_v1.failureRolesForWire(wire_operation)) |role| {
+    const failure_roles = program_semantics_v1.failureRolesForWire(
+        wire_operation,
+    );
+    const base_operand_count = program_semantics_v1.fixedOperandCount(
+        wire_operation,
+    );
+    const mapped_failures = base_operand_count != null and
+        catalogs.envelope.header.evaluator_semantics_version ==
+            evaluator_semantics_v2 and
+        failure_roles.len != 0 and
+        operand_count == base_operand_count.? + failure_roles.len;
+    if (mapped_failures) {
+        for (0..failure_roles.len) |index| {
+            const failure_value = readInt(
+                u16,
+                bytes,
+                start + 16 + (base_operand_count.? + index) * 2,
+            );
+            if (try catalogs.valueSchemaId(failure_value) !=
+                catalogs.failure_schema_id)
+            {
+                return error.InvalidFailureMap;
+            }
+        }
+    } else for (failure_roles) |role| {
         if (!failureNameExists(
             catalogs,
             program_semantics_v1.failureRoleName(role),
@@ -1273,7 +1304,15 @@ fn validateInstructionSchemas(
     immediate: u32,
 ) Error!void {
     if (program_semantics_v1.fixedOperandCount(operation)) |expected| {
-        if (operand_count != expected) return error.InvalidInstruction;
+        const failure_count = program_semantics_v1.failureRolesForWire(
+            operation,
+        ).len;
+        const mapped = catalogs.envelope.header.evaluator_semantics_version ==
+            evaluator_semantics_v2 and failure_count != 0 and
+            operand_count == expected + failure_count;
+        if (operand_count != expected and !mapped) {
+            return error.InvalidInstruction;
+        }
     }
     const result_schema = valueSchema(catalogs, result);
     const result_node = catalogs.schemas.node(result_schema) catch

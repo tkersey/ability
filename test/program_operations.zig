@@ -132,6 +132,76 @@ const PureMachine = Program.compile(pure_options);
 const PureImage = Program.image();
 const PureProfile = Program.machineV2Profile(pure_options);
 
+const MappedFailure = enum { mapped };
+const mapped_failure_value_types = [_]cir.ValueType{
+    .{ .scalar = .u8 },
+    .{ .scalar = .u8 },
+    .{ .schema = 0 },
+    .{ .scalar = .u8 },
+};
+const mapped_failure_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 0,
+        .operation = .{ .constant = 0 },
+    },
+    .{
+        .kind = .constant,
+        .result = 1,
+        .operation = .{ .constant = 1 },
+    },
+    .{
+        .kind = .constant,
+        .result = 2,
+        .operation = .{ .constant = 2 },
+    },
+    .{
+        .kind = .pure,
+        .result = 3,
+        .operands = &.{ 0, 1, 2 },
+        .operation = .integer_add,
+    },
+};
+const mapped_failure_blocks = [_]cir.Block{.{
+    .id = 0,
+    .instructions = &mapped_failure_instructions,
+    .terminator = .{ .return_value = 3 },
+}};
+const MappedFailureBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u8;
+    pub const Failure = MappedFailure;
+    pub const constants = .{
+        @as(u8, std.math.maxInt(u8)),
+        @as(u8, 1),
+        MappedFailure.mapped,
+    };
+    pub const effect_sites = .{};
+    pub const schema_types = .{MappedFailure};
+    pub const control_ir: cir.Program = .{
+        .label = "mapped-instruction-failure",
+        .value_types = &mapped_failure_value_types,
+        .blocks = &mapped_failure_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u8 },
+    };
+};
+const MappedFailureProgram = program_v2.program(
+    "mapped-instruction-failure",
+    MappedFailureBody,
+);
+const MappedFailureImage = MappedFailureProgram.image();
+const MappedFailureMachine = MappedFailureProgram.compile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 32,
+});
+const MappedFailureProfile = MappedFailureProgram.machineV2Profile(.{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 32,
+});
+
 pub const ReificationBaselineBody = Body;
 pub const ReificationBaselineProgram = Program;
 pub const ReificationBaselineMachine = PureMachine;
@@ -232,6 +302,87 @@ test "compiled pure operations construct products vectors and text" {
         u8,
         direct_bytes[0..direct_length],
         kernel_done,
+    );
+}
+
+test "evaluator semantics v2 maps an instruction failure through explicit operands" {
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v2,
+        MappedFailureImage.evaluator_semantics_version,
+    );
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v2,
+        std.mem.readInt(u16, MappedFailureImage.bytes[10..12], .little),
+    );
+
+    const state = try MappedFailureMachine.initialState(std.testing.allocator, {});
+    defer MappedFailureMachine.deinitState(state);
+    var fuel: u64 = 32;
+    switch (try MappedFailureMachine.step(state, &fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |authored| try std.testing.expectEqual(
+                MappedFailure.mapped,
+                authored,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(
+        &MappedFailureImage.bytes,
+        &workspace,
+    );
+    const bound = try kernel_v1.bindMachineV2(
+        image,
+        &MappedFailureProfile.bytes,
+        &workspace,
+    );
+    var kernel_state: [1024]u8 = undefined;
+    var invariant_scratch: [1024]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        bound,
+        &.{},
+        &kernel_state,
+        &invariant_scratch,
+        &workspace,
+    );
+    var next_state: [1024]u8 = undefined;
+    var output: [4]u8 = undefined;
+    var scratch: [4096]u8 = undefined;
+    var kernel_fuel: u64 = 32;
+    const outcome = try kernel_v1.step(
+        bound,
+        kernel_state[0..state_length],
+        &kernel_fuel,
+        &next_state,
+        &output,
+        &scratch,
+        &workspace,
+    );
+    const failure_bytes = switch (outcome) {
+        .failed => |bytes| bytes,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        @as(u32, @intFromEnum(MappedFailure.mapped)),
+        std.mem.readInt(u32, failure_bytes[0..4], .little),
+    );
+}
+
+test "evaluator semantics v1 rejects explicit instruction failure operands" {
+    var downgraded = MappedFailureImage.bytes;
+    std.mem.writeInt(
+        u16,
+        downgraded[10..12],
+        image_v1.evaluator_semantics_v1,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidInstruction,
+        image_v1.validateImage(&downgraded, &workspace),
     );
 }
 

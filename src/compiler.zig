@@ -799,7 +799,11 @@ fn requireOperandCount(
     comptime instruction: control_ir.Instruction,
     comptime expected: usize,
 ) void {
-    if (instruction.operands.len != expected) {
+    if (!program_semantics_v1.validOperandCount(
+        instruction.operation,
+        instruction.operands.len,
+        expected,
+    )) {
         @compileError(
             "Control IR operation has the wrong operand count",
         );
@@ -864,9 +868,26 @@ fn validateInstruction(
     )) {
         @compileError("Control IR operation has a noncanonical instruction kind");
     }
-    inline for (program_semantics_v1.failureRoles(
+    const failure_roles = program_semantics_v1.failureRoles(
         instruction.operation,
-    )) |role| {
+    );
+    if (program_semantics_v1.usesMappedFailures(
+        instruction.operation,
+        instruction.operands.len,
+    )) {
+        const base = program_semantics_v1.fixedOperandCount(
+            program_semantics_v1.wireOperation(instruction.operation),
+        ).?;
+        inline for (failure_roles, 0..) |_, index| {
+            if (operandType(Body, program, instruction, base + index) !=
+                Body.Failure)
+            {
+                @compileError(
+                    "mapped instruction failure operands must use Body.Failure",
+                );
+            }
+        }
+    } else inline for (failure_roles) |role| {
         _ = failureNamed(Body, program_semantics_v1.failureName(role));
     }
     switch (instruction.operation) {
@@ -2231,6 +2252,22 @@ fn generatedReducerOperationCount(
     return total;
 }
 
+fn evaluatorSemanticsVersion(
+    comptime program: control_ir.Program,
+    comptime reachability: anytype,
+) u16 {
+    for (program.blocks) |block| {
+        if (!reachability.contains(block.id)) continue;
+        for (block.instructions) |instruction| {
+            if (program_semantics_v1.usesMappedFailures(
+                instruction.operation,
+                instruction.operands.len,
+            )) return 2;
+        }
+    }
+    return 1;
+}
+
 fn initialConstructorId(
     comptime program: control_ir.Program,
     comptime normal_form: anytype,
@@ -2320,6 +2357,10 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         semantic_canonicalization,
         false,
     );
+    const evaluator_semantics_version = comptime evaluatorSemanticsVersion(
+        program,
+        reachability,
+    );
     return reified_program_v1.Program(
         label,
         Body,
@@ -2333,6 +2374,7 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         initial_constructor_id,
         generated_operation_count,
         program_transition_digest,
+        evaluator_semantics_version,
     );
 }
 

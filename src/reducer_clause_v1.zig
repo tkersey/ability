@@ -839,7 +839,7 @@ pub fn executeScalarOperation(
     }
     if (operation == 19) {
         const converted = convertInteger(left, result_kind) orelse
-            return try failureTag(image, "arithmetic_overflow");
+            return try instructionFailureTag(image, instruction, slots, "arithmetic_overflow");
         slots[result] = .{
             .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, converted),
             .initialized = true,
@@ -849,9 +849,9 @@ pub fn executeScalarOperation(
     if (operation == 8) {
         const value = signedValue(left);
         const negated = std.math.sub(i128, 0, value) catch
-            return try failureTag(image, "arithmetic_overflow");
+            return try instructionFailureTag(image, instruction, slots, "arithmetic_overflow");
         const raw = encodeSigned(negated, result_kind) orelse
-            return try failureTag(image, "arithmetic_overflow");
+            return try instructionFailureTag(image, instruction, slots, "arithmetic_overflow");
         slots[result] = .{
             .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
             .initialized = true,
@@ -898,8 +898,8 @@ pub fn executeScalarOperation(
         return null;
     }
     const raw = integerArithmetic(left, right, operation) catch |err| switch (err) {
-        error.DivisionByZero => return try failureTag(image, "division_by_zero"),
-        error.Overflow => return try failureTag(image, "arithmetic_overflow"),
+        error.DivisionByZero => return try instructionFailureTag(image, instruction, slots, "division_by_zero"),
+        error.Overflow => return try instructionFailureTag(image, instruction, slots, "arithmetic_overflow"),
     };
     slots[result] = .{
         .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
@@ -1029,7 +1029,7 @@ pub fn executeCompositeOperation(
                     .initialized = true,
                 };
             } else {
-                if (!matches) return try failureTag(image, "invalid_variant");
+                if (!matches) return try instructionFailureTag(image, instruction, slots, "invalid_variant");
                 slots[result] = .{
                     .bytes = slots[operands[0]].bytes[4..],
                     .initialized = true,
@@ -1076,7 +1076,7 @@ pub fn executeCompositeOperation(
             const schema = try valueNode(image, operands[0]);
             const length = readInt(u32, vector, 0);
             if (length >= readInt(u32, schema.payload, 0)) {
-                return try failureTag(image, "capacity_exceeded");
+                return try instructionFailureTag(image, instruction, slots, "capacity_exceeded");
             }
             const output = try allocateScratch(
                 scratch,
@@ -1110,7 +1110,7 @@ pub fn executeCompositeOperation(
                 slots[operands[0]].bytes,
                 index,
                 workspace,
-            ) catch return try failureTag(image, "invalid_index");
+            ) catch return try instructionFailureTag(image, instruction, slots, "invalid_index");
             slots[result] = .{ .bytes = element, .initialized = true };
         },
         36 => {
@@ -1122,7 +1122,7 @@ pub fn executeCompositeOperation(
                 vector,
                 index,
                 workspace,
-            ) catch return try failureTag(image, "invalid_index");
+            ) catch return try instructionFailureTag(image, instruction, slots, "invalid_index");
             const prefix_length = @intFromPtr(element.ptr) - @intFromPtr(vector.ptr);
             const replacement = slots[operands[2]].bytes;
             const output = try allocateScratch(
@@ -1214,10 +1214,10 @@ pub fn executeCompositeOperation(
                 u32,
                 destination_length,
                 suffix_length,
-            ) catch return try failureTag(image, "capacity_exceeded");
+            ) catch return try instructionFailureTag(image, instruction, slots, "capacity_exceeded");
             const schema = try valueNode(image, result);
             if (combined > readInt(u32, schema.payload, 0)) {
-                return try failureTag(image, "capacity_exceeded");
+                return try instructionFailureTag(image, instruction, slots, "capacity_exceeded");
             }
             const output = try allocateScratch(
                 scratch,
@@ -1239,13 +1239,13 @@ pub fn executeCompositeOperation(
         43 => {
             const raw = readInt(u32, slots[operands[1]].bytes, 0);
             if (raw > std.math.maxInt(u21)) {
-                return try failureTag(image, "invalid_utf8");
+                return try instructionFailureTag(image, instruction, slots, "invalid_utf8");
             }
             var encoded: [4]u8 = undefined;
             const encoded_length = std.unicode.utf8Encode(
                 @intCast(raw),
                 &encoded,
-            ) catch return try failureTag(image, "invalid_utf8");
+            ) catch return try instructionFailureTag(image, instruction, slots, "invalid_utf8");
             slots[result] = .{
                 .bytes = appendSequence(
                     image,
@@ -1256,7 +1256,7 @@ pub fn executeCompositeOperation(
                     scratch_cursor,
                     capacity,
                 ) catch |err| switch (err) {
-                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
                 .initialized = true,
@@ -1273,13 +1273,13 @@ pub fn executeCompositeOperation(
                     &formatted_storage,
                     "{d}",
                     .{integer.raw},
-                ) catch return try failureTag(image, "capacity_exceeded")
+                ) catch return try instructionFailureTag(image, instruction, slots, "capacity_exceeded")
             else
                 std.fmt.bufPrint(
                     &formatted_storage,
                     "{d}",
                     .{signedValue(integer)},
-                ) catch return try failureTag(image, "capacity_exceeded");
+                ) catch return try instructionFailureTag(image, instruction, slots, "capacity_exceeded");
             slots[result] = .{
                 .bytes = appendSequence(
                     image,
@@ -1290,7 +1290,7 @@ pub fn executeCompositeOperation(
                     scratch_cursor,
                     capacity,
                 ) catch |err| switch (err) {
-                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
                 .initialized = true,
@@ -1302,15 +1302,15 @@ pub fn executeCompositeOperation(
             const end = readInt(u32, slots[operands[2]].bytes, 0);
             const source_length = readInt(u32, source, 0);
             if (start > end or end > source_length) {
-                return try failureTag(image, "capacity_exceeded");
+                return try instructionFailureTag(image, instruction, slots, "capacity_exceeded");
             }
             const copied = source[4 + start .. 4 + end];
             const node = try valueNode(image, result);
             if (copied.len > readInt(u32, node.payload, 0)) {
-                return try failureTag(image, "capacity_exceeded");
+                return try instructionFailureTag(image, instruction, slots, "capacity_exceeded");
             }
             if (operation == 46 and !std.unicode.utf8ValidateSlice(copied)) {
-                return try failureTag(image, "invalid_utf8");
+                return try instructionFailureTag(image, instruction, slots, "invalid_utf8");
             }
             const output = try allocateScratch(
                 scratch,
@@ -1355,7 +1355,7 @@ pub fn executeCompositeOperation(
                     scratch_cursor,
                     capacity,
                 ) catch |err| switch (err) {
-                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
                 .initialized = true,
@@ -1372,7 +1372,7 @@ pub fn executeCompositeOperation(
                     scratch_cursor,
                     capacity,
                 ) catch |err| switch (err) {
-                    error.CapacityExceeded => return try failureTag(image, "capacity_exceeded"),
+                    error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
                 .initialized = true,
@@ -1692,6 +1692,45 @@ pub fn integerKind(value: Integer) dynamic_value_v1.Kind {
 
 pub fn integerMask(bits: u8) u64 {
     return if (bits == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(bits)) - 1;
+}
+
+fn instructionFailureTag(
+    image: anytype,
+    instruction: []const u8,
+    slots: *[1024]Slot,
+    name: []const u8,
+) Error!u32 {
+    const operation = std.enums.fromInt(
+        program_semantics_v1.WireOperation,
+        readInt(u16, instruction, 6),
+    ) orelse return error.InvalidImage;
+    const base = program_semantics_v1.fixedOperandCount(operation) orelse
+        return error.InvalidImage;
+    const roles = program_semantics_v1.failureRolesForWire(operation);
+    const operand_count = readInt(u16, instruction, 10);
+    if (image.catalogs.envelope.header.evaluator_semantics_version ==
+        image_v1.evaluator_semantics_v2 and roles.len != 0 and
+        operand_count == base + roles.len)
+    {
+        for (roles, 0..) |role, index| {
+            if (!std.mem.eql(
+                u8,
+                program_semantics_v1.failureRoleName(role),
+                name,
+            )) continue;
+            const value = readInt(
+                u16,
+                instruction,
+                16 + (@as(usize, base) + index) * 2,
+            );
+            if (!slots[value].initialized or slots[value].bytes.len != 4) {
+                return error.InvalidBindings;
+            }
+            return readInt(u32, slots[value].bytes, 0);
+        }
+        return error.InvalidImage;
+    }
+    return failureTag(image, name);
 }
 
 fn writeRaw(

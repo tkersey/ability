@@ -153,6 +153,46 @@ pub const Instruction = struct {
     operation: InstructionOperation = .metadata,
 };
 
+/// Number of explicit Body.Failure operands appended after an operation's
+/// ordinary operands when the instruction uses evaluator semantics v2.
+pub fn mappedFailureOperandCount(operation: InstructionOperation) usize {
+    return switch (operation) {
+        .integer_divide,
+        .integer_remainder,
+        .text_append_scalar,
+        .text_copy,
+        => 2,
+        .integer_add,
+        .integer_subtract,
+        .integer_multiply,
+        .integer_negate,
+        .integer_convert,
+        .sum_extract,
+        .vector_get,
+        .vector_set,
+        .vector_push,
+        .text_append,
+        .text_append_unsigned,
+        .text_append_signed,
+        .text_join,
+        .bytes_append,
+        .bytes_append_scalar,
+        .bytes_copy,
+        .bytes_join,
+        => 1,
+        else => 0,
+    };
+}
+
+pub fn validInstructionOperandCount(
+    operation: InstructionOperation,
+    actual: usize,
+    base: usize,
+) bool {
+    const mapped = mappedFailureOperandCount(operation);
+    return actual == base or (mapped != 0 and actual == base + mapped);
+}
+
 /// One value supplied to a successor block parameter.
 pub const EdgeArgument = union(enum) {
     value: ValueId,
@@ -708,7 +748,11 @@ pub fn validate(
                 .bytes_append,
                 .bytes_append_scalar,
                 .bytes_compare,
-                => if (instruction.kind != .pure or instruction.operands.len != 2) {
+                => if (instruction.kind != .pure or !validInstructionOperandCount(
+                    instruction.operation,
+                    instruction.operands.len,
+                    2,
+                )) {
                     return error.InvalidInstruction;
                 },
                 .product_construct, .sum_construct => if (instruction.kind != .pure) {
@@ -730,7 +774,11 @@ pub fn validate(
                 .vector_pop,
                 .vector_clear,
                 => if (instruction.kind != .pure or
-                    instruction.operands.len != 1)
+                    !validInstructionOperandCount(
+                        instruction.operation,
+                        instruction.operands.len,
+                        1,
+                    ))
                 {
                     return error.InvalidInstruction;
                 },
@@ -741,7 +789,11 @@ pub fn validate(
                 .bytes_copy,
                 .bytes_join,
                 => if (instruction.kind != .pure or
-                    instruction.operands.len != 3)
+                    !validInstructionOperandCount(
+                        instruction.operation,
+                        instruction.operands.len,
+                        3,
+                    ))
                 {
                     return error.InvalidInstruction;
                 },

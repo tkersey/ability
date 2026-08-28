@@ -13,6 +13,7 @@ pub fn Program(
     comptime initial_constructor_id_value: u32,
     comptime generated_operation_count_value: usize,
     comptime program_transition_digest_value: [32]u8,
+    comptime evaluator_semantics_version_value: u16,
 ) type {
     return struct {
         pub const program_label = label;
@@ -29,6 +30,8 @@ pub fn Program(
         pub const generated_reducer_operation_count =
             generated_operation_count_value;
         pub const program_transition_digest = program_transition_digest_value;
+        pub const evaluator_semantics_version =
+            evaluator_semantics_version_value;
 
         pub fn portableType(comptime value_type: anytype) type {
             return switch (value_type) {
@@ -66,6 +69,7 @@ pub fn require(comptime Reified: type) void {
         "initial_constructor_id",
         "generated_reducer_operation_count",
         "program_transition_digest",
+        "evaluator_semantics_version",
         "portableType",
     }) |name| {
         if (!@hasDecl(Reified, name)) {

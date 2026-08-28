@@ -373,6 +373,49 @@ pub fn failureRoles(
     return failureRolesForWire(wireOperation(operation));
 }
 
+pub fn validOperandCount(
+    comptime operation: control_ir.InstructionOperation,
+    actual: usize,
+    base: usize,
+) bool {
+    return control_ir.validInstructionOperandCount(operation, actual, base);
+}
+
+pub fn usesMappedFailures(
+    comptime operation: control_ir.InstructionOperation,
+    operand_count: usize,
+) bool {
+    const base = fixedOperandCount(wireOperation(operation)) orelse return false;
+    const failure_count = failureRoles(operation).len;
+    return failure_count != 0 and operand_count == base + failure_count;
+}
+
+fn failureForInstruction(
+    comptime Body: type,
+    comptime Backend: type,
+    comptime instruction: control_ir.Instruction,
+    store: anytype,
+    comptime role: FailureRole,
+) Body.Failure {
+    if (comptime !usesMappedFailures(
+        instruction.operation,
+        instruction.operands.len,
+    )) {
+        return Backend.failure(role);
+    }
+    const base = comptime fixedOperandCount(wireOperation(instruction.operation)).?;
+    const roles = comptime failureRoles(instruction.operation);
+    inline for (roles, 0..) |candidate, index| {
+        if (candidate == role) {
+            return @field(
+                store,
+                Backend.valueName(instruction.operands[base + index]),
+            );
+        }
+    }
+    unreachable;
+}
+
 pub fn failureRolesForWire(operation: WireOperation) []const FailureRole {
     return switch (operation) {
         .integer_add,
@@ -479,7 +522,13 @@ pub noinline fn executeTypedInstructions(
                     ResultType,
                     @field(store, Backend.valueName(instruction.operands[0])),
                     @field(store, Backend.valueName(instruction.operands[1])),
-                ) catch return Backend.failure(.arithmetic_overflow);
+                ) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .arithmetic_overflow,
+                );
             },
             .integer_subtract => {
                 const ResultType = @FieldType(ValueCatalog, result_name);
@@ -487,7 +536,13 @@ pub noinline fn executeTypedInstructions(
                     ResultType,
                     @field(store, Backend.valueName(instruction.operands[0])),
                     @field(store, Backend.valueName(instruction.operands[1])),
-                ) catch return Backend.failure(.arithmetic_overflow);
+                ) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .arithmetic_overflow,
+                );
             },
             .integer_multiply => {
                 const ResultType = @FieldType(ValueCatalog, result_name);
@@ -495,7 +550,13 @@ pub noinline fn executeTypedInstructions(
                     ResultType,
                     @field(store, Backend.valueName(instruction.operands[0])),
                     @field(store, Backend.valueName(instruction.operands[1])),
-                ) catch return Backend.failure(.arithmetic_overflow);
+                ) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .arithmetic_overflow,
+                );
             },
             .integer_divide => {
                 const ResultType = @FieldType(ValueCatalog, result_name);
@@ -504,8 +565,20 @@ pub noinline fn executeTypedInstructions(
                     @field(store, Backend.valueName(instruction.operands[0])),
                     @field(store, Backend.valueName(instruction.operands[1])),
                 ) catch |err| return switch (err) {
-                    error.DivisionByZero => Backend.failure(.division_by_zero),
-                    error.Overflow => Backend.failure(.arithmetic_overflow),
+                    error.DivisionByZero => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .division_by_zero,
+                    ),
+                    error.Overflow => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .arithmetic_overflow,
+                    ),
                 };
             },
             .integer_remainder => {
@@ -523,8 +596,20 @@ pub noinline fn executeTypedInstructions(
                     left,
                     right,
                 ) catch |err| return switch (err) {
-                    error.DivisionByZero => Backend.failure(.division_by_zero),
-                    error.Overflow => Backend.failure(.arithmetic_overflow),
+                    error.DivisionByZero => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .division_by_zero,
+                    ),
+                    error.Overflow => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .arithmetic_overflow,
+                    ),
                 };
                 @field(store, result_name) = @rem(left, right);
             },
@@ -532,7 +617,13 @@ pub noinline fn executeTypedInstructions(
                 @field(store, result_name) = std.math.negate(@field(
                     store,
                     Backend.valueName(instruction.operands[0]),
-                )) catch return Backend.failure(.arithmetic_overflow);
+                )) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .arithmetic_overflow,
+                );
             },
             .integer_equal => {
                 @field(store, result_name) = @field(
@@ -626,7 +717,13 @@ pub noinline fn executeTypedInstructions(
                 @field(store, result_name) = std.math.cast(
                     ResultType,
                     @field(store, Backend.valueName(instruction.operands[0])),
-                ) orelse return Backend.failure(.arithmetic_overflow);
+                ) orelse return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .arithmetic_overflow,
+                );
             },
             .enum_to_u32 => {
                 @field(store, result_name) = @intCast(@intFromEnum(@field(
@@ -747,7 +844,13 @@ pub noinline fn executeTypedInstructions(
                 const Tag = @typeInfo(Sum).@"union".tag_type.?;
                 const field = std.meta.fields(Sum)[variant_index];
                 if (std.meta.activeTag(sum) != @field(Tag, field.name)) {
-                    return Backend.failure(.invalid_variant);
+                    return failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .invalid_variant,
+                    );
                 }
                 @field(store, result_name) = @field(sum, field.name);
             },
@@ -785,7 +888,13 @@ pub noinline fn executeTypedInstructions(
                     Backend.valueName(instruction.operands[1]),
                 )) catch unreachable;
                 @field(store, result_name) = observed orelse
-                    return Backend.failure(.invalid_index);
+                    return failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .invalid_index,
+                    );
             },
             .vector_set => {
                 var vector = @field(
@@ -801,7 +910,13 @@ pub noinline fn executeTypedInstructions(
                         store,
                         Backend.valueName(instruction.operands[2]),
                     ),
-                ) catch return Backend.failure(.invalid_index);
+                ) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .invalid_index,
+                );
                 @field(store, result_name) = vector;
             },
             .vector_push => {
@@ -812,7 +927,13 @@ pub noinline fn executeTypedInstructions(
                 vector.push(@field(
                     store,
                     Backend.valueName(instruction.operands[1]),
-                )) catch return Backend.failure(.capacity_exceeded);
+                )) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .capacity_exceeded,
+                );
                 @field(store, result_name) = vector;
             },
             .vector_pop => {
@@ -867,7 +988,13 @@ pub noinline fn executeTypedInstructions(
                     Backend.valueName(instruction.operands[1]),
                 );
                 text.append(suffix.slice() catch unreachable) catch
-                    return Backend.failure(.capacity_exceeded);
+                    return failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .capacity_exceeded,
+                    );
                 @field(store, result_name) = text;
             },
             .text_append_scalar => {
@@ -881,11 +1008,35 @@ pub noinline fn executeTypedInstructions(
                         store,
                         Backend.valueName(instruction.operands[1]),
                     ),
-                ) orelse return Backend.failure(.invalid_utf8);
+                ) orelse return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .invalid_utf8,
+                );
                 text.appendScalar(scalar) catch |err| return switch (err) {
-                    error.InvalidUtf8 => Backend.failure(.invalid_utf8),
-                    error.CapacityExceeded => Backend.failure(.capacity_exceeded),
-                    else => Backend.failure(.capacity_exceeded),
+                    error.InvalidUtf8 => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .invalid_utf8,
+                    ),
+                    error.CapacityExceeded => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .capacity_exceeded,
+                    ),
+                    else => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .capacity_exceeded,
+                    ),
                 };
                 @field(store, result_name) = text;
             },
@@ -897,7 +1048,13 @@ pub noinline fn executeTypedInstructions(
                 text.appendUnsigned(@intCast(@field(
                     store,
                     Backend.valueName(instruction.operands[1]),
-                ))) catch return Backend.failure(.capacity_exceeded);
+                ))) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .capacity_exceeded,
+                );
                 @field(store, result_name) = text;
             },
             .text_append_signed => {
@@ -908,7 +1065,13 @@ pub noinline fn executeTypedInstructions(
                 text.appendSigned(@intCast(@field(
                     store,
                     Backend.valueName(instruction.operands[1]),
-                ))) catch return Backend.failure(.capacity_exceeded);
+                ))) catch return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .capacity_exceeded,
+                );
                 @field(store, result_name) = text;
             },
             .text_copy => {
@@ -936,9 +1099,27 @@ pub noinline fn executeTypedInstructions(
                         Backend.valueName(instruction.operands[2]),
                     ),
                 ) catch |err| return switch (err) {
-                    error.InvalidUtf8 => Backend.failure(.invalid_utf8),
-                    error.CapacityExceeded => Backend.failure(.capacity_exceeded),
-                    else => Backend.failure(.capacity_exceeded),
+                    error.InvalidUtf8 => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .invalid_utf8,
+                    ),
+                    error.CapacityExceeded => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .capacity_exceeded,
+                    ),
+                    else => failureForInstruction(
+                        Body,
+                        Backend,
+                        instruction,
+                        store,
+                        .capacity_exceeded,
+                    ),
                 };
             },
             .text_compare => {
@@ -974,9 +1155,9 @@ pub noinline fn executeTypedInstructions(
                     Backend.valueName(instruction.operands[2]),
                 );
                 text.append(separator.slice() catch unreachable) catch
-                    return Backend.failure(.capacity_exceeded);
+                    return failureForInstruction(Body, Backend, instruction, store, .capacity_exceeded);
                 text.append(right.slice() catch unreachable) catch
-                    return Backend.failure(.capacity_exceeded);
+                    return failureForInstruction(Body, Backend, instruction, store, .capacity_exceeded);
                 @field(store, result_name) = text;
             },
             .bytes_empty => {
@@ -999,7 +1180,7 @@ pub noinline fn executeTypedInstructions(
                     Backend.valueName(instruction.operands[1]),
                 );
                 bytes.append(suffix.slice() catch unreachable) catch
-                    return Backend.failure(.capacity_exceeded);
+                    return failureForInstruction(Body, Backend, instruction, store, .capacity_exceeded);
                 @field(store, result_name) = bytes;
             },
             .bytes_append_scalar => {
@@ -1012,7 +1193,7 @@ pub noinline fn executeTypedInstructions(
                     Backend.valueName(instruction.operands[1]),
                 );
                 bytes.append(&.{scalar}) catch
-                    return Backend.failure(.capacity_exceeded);
+                    return failureForInstruction(Body, Backend, instruction, store, .capacity_exceeded);
                 @field(store, result_name) = bytes;
             },
             .bytes_copy => {
@@ -1034,7 +1215,7 @@ pub noinline fn executeTypedInstructions(
                         store,
                         Backend.valueName(instruction.operands[2]),
                     ),
-                ) catch return Backend.failure(.capacity_exceeded);
+                ) catch return failureForInstruction(Body, Backend, instruction, store, .capacity_exceeded);
             },
             .bytes_compare => {
                 const left = @field(
@@ -1069,9 +1250,9 @@ pub noinline fn executeTypedInstructions(
                     Backend.valueName(instruction.operands[2]),
                 );
                 bytes.append(separator.slice() catch unreachable) catch
-                    return Backend.failure(.capacity_exceeded);
+                    return failureForInstruction(Body, Backend, instruction, store, .capacity_exceeded);
                 bytes.append(right.slice() catch unreachable) catch
-                    return Backend.failure(.capacity_exceeded);
+                    return failureForInstruction(Body, Backend, instruction, store, .capacity_exceeded);
                 @field(store, result_name) = bytes;
             },
         }

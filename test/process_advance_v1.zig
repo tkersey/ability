@@ -86,6 +86,63 @@ const CompletedImage = boundary.program(
     CompletedBody,
 ).image();
 
+const MappedFailure = enum { mapped };
+const mapped_failure_blocks = [_]boundary.ir.Block{.{
+    .id = 0,
+    .instructions = &.{
+        .{
+            .kind = .constant,
+            .result = 0,
+            .operation = .{ .constant = 0 },
+        },
+        .{
+            .kind = .constant,
+            .result = 1,
+            .operation = .{ .constant = 1 },
+        },
+        .{
+            .kind = .constant,
+            .result = 2,
+            .operation = .{ .constant = 2 },
+        },
+        .{
+            .kind = .pure,
+            .result = 3,
+            .operands = &.{ 0, 1, 2 },
+            .operation = .integer_add,
+        },
+    },
+    .terminator = .{ .return_value = 3 },
+}};
+const MappedFailureBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u8;
+    pub const Failure = MappedFailure;
+    pub const constants = .{
+        @as(u8, std.math.maxInt(u8)),
+        @as(u8, 1),
+        MappedFailure.mapped,
+    };
+    pub const effect_sites = .{};
+    pub const schema_types = .{MappedFailure};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-mapped-instruction-failure",
+        .value_types = &.{
+            .{ .scalar = .u8 },
+            .{ .scalar = .u8 },
+            .{ .schema = 0 },
+            .{ .scalar = .u8 },
+        },
+        .blocks = &mapped_failure_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u8 },
+    };
+};
+const MappedFailureImage = boundary.program(
+    "process-mapped-instruction-failure",
+    MappedFailureBody,
+).image();
+
 const call_arguments = [_]boundary.ir.EdgeArgument{.{ .value = 0 }};
 const return_arguments = [_]boundary.ir.EdgeArgument{.@"resume"};
 const call_blocks = [_]boundary.ir.Block{
@@ -364,6 +421,27 @@ const DeepStorage = struct {
         };
     }
 };
+
+test "Process advance executes evaluator semantics v2 mapped failures" {
+    try std.testing.expectEqual(
+        boundary.image.evaluator_semantics_v2,
+        MappedFailureImage.evaluator_semantics_version,
+    );
+    var storage: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const outcome = try process_advance_v1.advance(
+        &MappedFailureImage.bytes,
+        .{ .initial_args = &.{} },
+        null,
+        storage.buffers(),
+        &workspace,
+    );
+    const failure = outcome.authored_failure;
+    try std.testing.expectEqual(
+        @as(u32, @intFromEnum(MappedFailure.mapped)),
+        std.mem.readInt(u32, failure[0..4], .little),
+    );
+}
 
 test "Process advance requests, recovers, resumes, and completes one segment at a time" {
     var initial_args: [4]u8 = undefined;

@@ -43,6 +43,14 @@ runtime value at that id and is admitted only when its type is exactly
 `Body.Failure`. Both lower through the same Machine ABI v2 `Outcome.failed`
 transition.
 
+A fallible instruction may append one `Body.Failure` value operand per
+Boundary-defined failure role after its ordinary operands. This selects the
+exact authored Failure returned by that instruction and emits evaluator
+semantics version 2. Ordinary instructions retain the version-1 role-name
+behavior. `Program.componentAdmission().instructionFailureTags(instruction)`
+exposes the admitted source tags in role order for generic build-time linkers;
+it does not expose the raw clause evaluator.
+
 `compiler_limits` has type `boundary.ir.CompilerLimits`. It can lower the
 implementation ceilings for values, blocks, constructors, constructor
 environments, invariants, and generated reducer work. These admission ceilings

@@ -3,6 +3,7 @@ const image_emit_v1 = @import("image_emit_v1");
 const kernel_machine_v1 = @import("kernel_machine_v1");
 const machine = @import("machine");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
+const program_semantics_v1 = @import("program_semantics_v1");
 const std = @import("std");
 
 fn constructorFieldsEqual(
@@ -115,6 +116,35 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                     Reified.program_transition_digest;
                 pub const machine_v2_semantic_digest =
                     MachineV2Lowering.machine_v2_semantic_digest;
+
+                /// Return the source Failure tags, in evaluator role order,
+                /// that a linker must map when it embeds this instruction in
+                /// a Program with a different Failure type.
+                pub fn instructionFailureTags(
+                    comptime instruction: @import("control_ir").Instruction,
+                ) [
+                    program_semantics_v1.failureRoles(
+                        instruction.operation,
+                    ).len
+                ]u32 {
+                    const roles = program_semantics_v1.failureRoles(
+                        instruction.operation,
+                    );
+                    var tags: [roles.len]u32 = undefined;
+                    inline for (roles, 0..) |role, index| {
+                        inline for (std.meta.fields(Body.Failure)) |field| {
+                            if (comptime std.mem.eql(
+                                u8,
+                                field.name,
+                                program_semantics_v1.failureName(role),
+                            )) {
+                                tags[index] = @intCast(field.value);
+                                break;
+                            }
+                        }
+                    }
+                    return tags;
+                }
             };
         }
 
@@ -133,6 +163,8 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
             const Emitted = image_emit_v1.ProgramImage(Reified);
             return struct {
                 pub const format_version = Emitted.format_version;
+                pub const evaluator_semantics_version =
+                    Emitted.evaluator_semantics_version;
                 pub const bytes = Emitted.bytes;
                 pub const byte_length = Emitted.byte_length;
                 pub const program_transition_digest =

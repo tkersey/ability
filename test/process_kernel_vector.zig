@@ -140,6 +140,63 @@ const FailedImage = boundary.program(
     FailedBody,
 ).image();
 
+const MappedFailure = enum { mapped };
+const mapped_failure_blocks = [_]boundary.ir.Block{.{
+    .id = 0,
+    .instructions = &.{
+        .{
+            .kind = .constant,
+            .result = 0,
+            .operation = .{ .constant = 0 },
+        },
+        .{
+            .kind = .constant,
+            .result = 1,
+            .operation = .{ .constant = 1 },
+        },
+        .{
+            .kind = .constant,
+            .result = 2,
+            .operation = .{ .constant = 2 },
+        },
+        .{
+            .kind = .pure,
+            .result = 3,
+            .operands = &.{ 0, 1, 2 },
+            .operation = .integer_add,
+        },
+    },
+    .terminator = .{ .return_value = 3 },
+}};
+const MappedFailureBody = struct {
+    pub const InitialArgs = void;
+    pub const Result = u8;
+    pub const Failure = MappedFailure;
+    pub const constants = .{
+        @as(u8, std.math.maxInt(u8)),
+        @as(u8, 1),
+        MappedFailure.mapped,
+    };
+    pub const effect_sites = .{};
+    pub const schema_types = .{MappedFailure};
+    pub const control_ir: boundary.ir.Program = .{
+        .label = "process-kernel-mapped-failure",
+        .value_types = &.{
+            .{ .scalar = .u8 },
+            .{ .scalar = .u8 },
+            .{ .schema = 0 },
+            .{ .scalar = .u8 },
+        },
+        .blocks = &mapped_failure_blocks,
+        .entry = 0,
+        .result_type = .{ .scalar = .u8 },
+    };
+};
+const MappedFailureImage = boundary.program(
+    "process-kernel-mapped-failure",
+    MappedFailureBody,
+).image();
+
 const Storage = struct {
     state: [64 * 1024]u8 = undefined,
     value: [64 * 1024]u8 = undefined,
@@ -235,6 +292,15 @@ pub fn main(init: std.process.Init) !void {
         sixth_storage.buffers(),
         &sixth_workspace,
     );
+    var seventh_storage: Storage = .{};
+    var seventh_workspace: boundary.image.ValidationWorkspace = .{};
+    const seventh = try process_advance_v1.advance(
+        &MappedFailureImage.bytes,
+        .{ .initial_args = &.{} },
+        null,
+        seventh_storage.buffers(),
+        &seventh_workspace,
+    );
 
     var input_one_storage: [128 * 1024]u8 = undefined;
     var input_two_storage: [128 * 1024]u8 = undefined;
@@ -242,6 +308,7 @@ pub fn main(init: std.process.Init) !void {
     var input_four_storage: [128 * 1024]u8 = undefined;
     var input_five_storage: [128 * 1024]u8 = undefined;
     var input_six_storage: [128 * 1024]u8 = undefined;
+    var input_seven_storage: [128 * 1024]u8 = undefined;
     const inputs = [_][]const u8{
         try process_advance_v1.encodeKernelInput(
             &Image.bytes,
@@ -279,6 +346,12 @@ pub fn main(init: std.process.Init) !void {
             null,
             &input_six_storage,
         ),
+        try process_advance_v1.encodeKernelInput(
+            &MappedFailureImage.bytes,
+            .{ .initial_args = &.{} },
+            null,
+            &input_seven_storage,
+        ),
     };
     var output_one_storage: [128 * 1024]u8 = undefined;
     var output_two_storage: [128 * 1024]u8 = undefined;
@@ -286,6 +359,7 @@ pub fn main(init: std.process.Init) !void {
     var output_four_storage: [128 * 1024]u8 = undefined;
     var output_five_storage: [128 * 1024]u8 = undefined;
     var output_six_storage: [128 * 1024]u8 = undefined;
+    var output_seven_storage: [128 * 1024]u8 = undefined;
     const outputs = [_][]const u8{
         try process_advance_v1.encodeOutcome(first, &output_one_storage),
         try process_advance_v1.encodeOutcome(second, &output_two_storage),
@@ -293,6 +367,7 @@ pub fn main(init: std.process.Init) !void {
         try process_advance_v1.encodeOutcome(fourth, &output_four_storage),
         try process_advance_v1.encodeOutcome(fifth, &output_five_storage),
         try process_advance_v1.encodeOutcome(sixth, &output_six_storage),
+        try process_advance_v1.encodeOutcome(seventh, &output_seven_storage),
     };
 
     var stdout_buffer: [4096]u8 = undefined;
