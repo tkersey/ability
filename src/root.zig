@@ -6,10 +6,11 @@ const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
 const portable_value = @import("portable_value");
+const process_v1_module = @import("process_v1");
 const program_v2 = @import("program_v2");
 
 /// Published Boundary package identity.
-pub const package_version = "1.6.1";
+pub const package_version = "1.7.0";
 
 /// Public typed residual-effect authoring namespace.
 pub const effect = effect_v2;
@@ -18,6 +19,8 @@ pub const image = struct {
     pub const magic = image_v1.magic;
     pub const image_format_version = image_v1.image_format_version;
     pub const evaluator_semantics_version = image_v1.evaluator_semantics_version;
+    pub const evaluator_semantics_v1 = image_v1.evaluator_semantics_v1;
+    pub const evaluator_semantics_v2 = image_v1.evaluator_semantics_v2;
     pub const header_length = image_v1.header_length;
     pub const section_count = image_v1.section_count;
     pub const Error = image_v1.Error;
@@ -55,15 +58,18 @@ pub const machine_v2 = struct {
         pub const step = kernel_v1.step;
     };
 };
+/// Portable Boundary Process ABI v1 records and semantic operations.
+pub const process_v1 = process_v1_module;
 /// Public canonical portable-value and codec namespace.
 pub const schema = portable_value;
 /// Advanced typed source/control authoring namespace.
 pub const ir = control_ir;
 /// Declare one typed Boundary source program with one Machine meaning.
 pub const program = program_v2.program;
-/// Local driver over the same compiled Machine used by World.
+/// Local driver over the same compiled Machine used by embeddings.
 pub const Driver = driver.Driver;
-/// Optional agent profile over the sole Program compiler.
+/// Deprecated compatibility profile. Agent-specific authoring belongs in the
+/// separate Agent package and will be removed in the next major release.
 pub const Agent = agent_profile;
 /// Canonical bounded byte sequence.
 pub const Bytes = portable_value.Bytes;
@@ -74,9 +80,10 @@ pub const Vector = portable_value.Vector;
 /// Identity-bearing Machine compiler options.
 pub const MachineOptions = machine.Options;
 
-test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
+test "Boundary root exposes one compiler and no legacy runtime" {
     const std = @import("std");
 
+    try std.testing.expectEqualStrings("1.7.0", package_version);
     try std.testing.expect(@hasDecl(@This(), "program"));
     try std.testing.expect(@hasDecl(@This(), "Driver"));
     try std.testing.expect(@hasDecl(@This(), "Agent"));
@@ -105,7 +112,33 @@ test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
     try std.testing.expect(!@hasDecl(@This(), "clause"));
     try std.testing.expect(!@hasDecl(@This(), "program_evaluator"));
     try std.testing.expect(!@hasDecl(@This(), "internal_evaluator"));
+    inline for (.{
+        "componentAdmission",
+        "componentProjection",
+        "linkerAdmission",
+        "programComponent",
+        "sourceProjection",
+        "linkFacts",
+        "worldComponent",
+        "linker",
+        "system",
+        "world",
+        "host",
+        "capabilities",
+    }) |linker_decl| {
+        try std.testing.expect(!@hasDecl(@This(), linker_decl));
+    }
     try std.testing.expect(@hasDecl(@This(), "machine_v2"));
+    try std.testing.expect(@hasDecl(@This(), "process_v1"));
+    try std.testing.expect(!@hasDecl(process_v1, "encodeOutcome"));
+    try std.testing.expectEqualStrings(
+        "boundary_process_kernel_input_capacity",
+        process_v1.fixed_kernel_abi.exports.input_capacity,
+    );
+    try std.testing.expectEqualStrings(
+        "boundary_process_kernel_prepare_input",
+        process_v1.fixed_kernel_abi.exports.prepare_input,
+    );
     try std.testing.expect(!@hasDecl(machine_v2, "profile"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "preflightStep"));
     try std.testing.expect(!@hasDecl(machine_v2.kernel, "StepAdmission"));

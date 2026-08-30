@@ -197,6 +197,7 @@ const Body = struct {
 };
 
 const Program = program_v2.program("bounded-recursive-helper", Body);
+pub const ProcessRecursionProgram = Program;
 
 pub const ReificationBaselineBody = Body;
 pub const ReificationBaselineProgram = Program;
@@ -832,7 +833,7 @@ const HelperBackedgeBody = struct {
     };
 };
 
-const HelperBackedgeProgram = program_v2.program(
+pub const HelperBackedgeProgram = program_v2.program(
     "helper-entry-backedge",
     HelperBackedgeBody,
 );

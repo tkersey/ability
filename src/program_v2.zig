@@ -78,6 +78,8 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
             const Emitted = image_emit_v1.ProgramImage(Reified);
             return struct {
                 pub const format_version = Emitted.format_version;
+                pub const evaluator_semantics_version =
+                    Emitted.evaluator_semantics_version;
                 pub const bytes = Emitted.bytes;
                 pub const byte_length = Emitted.byte_length;
                 pub const program_transition_digest =

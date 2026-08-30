@@ -18,6 +18,12 @@ const CoreModules = struct {
     machine_v2_metering_v1: *std.Build.Module,
     machine_v2_profile_v1: *std.Build.Module,
     portable_value: *std.Build.Module,
+    process_advance_v1: *std.Build.Module,
+    process_capsule_v1: *std.Build.Module,
+    process_effect_v1: *std.Build.Module,
+    process_kernel_wasm_v1: *std.Build.Module,
+    process_state_v1: *std.Build.Module,
+    process_v1: *std.Build.Module,
     program_semantics_v1: *std.Build.Module,
     program_v2: *std.Build.Module,
     reducer_clause_v1: *std.Build.Module,
@@ -41,6 +47,12 @@ const CoreModuleId = enum {
     machine_v2_metering_v1,
     machine_v2_profile_v1,
     portable_value,
+    process_advance_v1,
+    process_capsule_v1,
+    process_effect_v1,
+    process_kernel_wasm_v1,
+    process_state_v1,
+    process_v1,
     program_semantics_v1,
     program_v2,
     reducer_clause_v1,
@@ -72,6 +84,12 @@ fn coreModulePath(module: CoreModuleId) []const u8 {
         .machine_v2_metering_v1 => "src/machine_v2_metering_v1.zig",
         .machine_v2_profile_v1 => "src/machine_v2_profile_v1.zig",
         .portable_value => "src/portable_value.zig",
+        .process_advance_v1 => "src/process_advance_v1.zig",
+        .process_capsule_v1 => "src/process_capsule_v1.zig",
+        .process_effect_v1 => "src/process_effect_v1.zig",
+        .process_kernel_wasm_v1 => "src/process_kernel_wasm_v1.zig",
+        .process_state_v1 => "src/process_state_v1.zig",
+        .process_v1 => "src/process_v1.zig",
         .program_semantics_v1 => "src/program_semantics_v1.zig",
         .program_v2 => "src/program_v2.zig",
         .reducer_clause_v1 => "src/reducer_clause_v1.zig",
@@ -90,6 +108,11 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .kernel_machine_v1,
         .kernel_wasm_v1,
         .machine_v2_profile_v1,
+        .process_advance_v1,
+        .process_capsule_v1,
+        .process_effect_v1,
+        .process_kernel_wasm_v1,
+        .process_state_v1,
         => .image_runtime_semantics,
         .program_semantics_v1 => .shared_runtime_semantics,
         .agent_profile,
@@ -98,6 +121,7 @@ fn coreModuleRole(module: CoreModuleId) CoreModuleRole {
         .effect_v2,
         .image_emit_v1,
         .portable_value,
+        .process_v1,
         .program_v2,
         .reified_program_v1,
         .rnf,
@@ -116,6 +140,71 @@ fn requireDirectDependency(
         "build step '{s}' must directly depend on '{s}'",
         .{ owner.name, dependency.name },
     );
+}
+
+fn moduleInSet(
+    target: *std.Build.Module,
+    modules: []const *std.Build.Module,
+) bool {
+    for (modules) |module| {
+        if (module == target) return true;
+    }
+    return false;
+}
+
+fn requireExactModuleClosure(
+    label: []const u8,
+    root: *std.Build.Module,
+    expected: []const *std.Build.Module,
+) void {
+    var pending: [64]*std.Build.Module = undefined;
+    var pending_len: usize = 1;
+    pending[0] = root;
+    var observed: [64]*std.Build.Module = undefined;
+    var observed_len: usize = 0;
+
+    while (pending_len != 0) {
+        pending_len -= 1;
+        const module = pending[pending_len];
+        if (moduleInSet(module, observed[0..observed_len])) continue;
+        if (!moduleInSet(module, expected)) {
+            std.process.fatal(
+                "{s} reaches a module outside its admitted closure",
+                .{label},
+            );
+        }
+        if (observed_len == observed.len) {
+            std.process.fatal("{s} module closure exceeds proof capacity", .{label});
+        }
+        observed[observed_len] = module;
+        observed_len += 1;
+
+        for (module.import_table.keys(), module.import_table.values()) |name, dependency| {
+            if (!moduleInSet(dependency, expected)) {
+                std.process.fatal(
+                    "{s} import '{s}' reaches a module outside its admitted closure",
+                    .{ label, name },
+                );
+            }
+            if (pending_len == pending.len) {
+                std.process.fatal("{s} module traversal exceeds proof capacity", .{label});
+            }
+            pending[pending_len] = dependency;
+            pending_len += 1;
+        }
+    }
+
+    if (observed_len != expected.len) {
+        std.process.fatal(
+            "{s} module closure has {d} members; expected {d}",
+            .{ label, observed_len, expected.len },
+        );
+    }
+    for (expected) |module| {
+        if (!moduleInSet(module, observed[0..observed_len])) {
+            std.process.fatal("{s} module closure omitted an expected member", .{label});
+        }
+    }
 }
 
 comptime {
@@ -493,6 +582,46 @@ fn addCoreModules(
     const program_semantics_v1 = pure.program_semantics_v1;
     const image_v1 = pure.image_v1;
     const reducer_clause_v1 = pure.reducer_clause_v1;
+    const process_state_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_state_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    const process_capsule_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_capsule_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_capsule_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    process_capsule_v1.addImport("image_v1", image_v1);
+    process_capsule_v1.addImport("process_state_v1", process_state_v1);
+    const process_effect_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_effect_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_effect_v1.addImport("image_v1", image_v1);
+    process_effect_v1.addImport("process_state_v1", process_state_v1);
+    const process_advance_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_advance_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_advance_v1.addImport("dynamic_value_v1", dynamic_value_v1);
+    process_advance_v1.addImport("image_v1", image_v1);
+    process_advance_v1.addImport("process_effect_v1", process_effect_v1);
+    process_advance_v1.addImport("process_state_v1", process_state_v1);
+    process_advance_v1.addImport("reducer_clause_v1", reducer_clause_v1);
+    process_capsule_v1.addImport("process_advance_v1", process_advance_v1);
+    const process_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    process_v1.addImport("process_capsule_v1", process_capsule_v1);
+    process_v1.addImport("process_advance_v1", process_advance_v1);
+    process_v1.addImport("process_effect_v1", process_effect_v1);
+    process_v1.addImport("process_state_v1", process_state_v1);
     const machine = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.machine)),
         .target = target,
@@ -543,6 +672,30 @@ fn addCoreModules(
     });
     kernel_wasm_v1.addImport("image_v1", image_v1);
     kernel_wasm_v1.addImport("kernel_v1", kernel_v1);
+    const process_kernel_wasm_v1 = b.createModule(.{
+        .root_source_file = b.path(coreModulePath(.process_kernel_wasm_v1)),
+        .target = target,
+        .optimize = optimize,
+    });
+    const process_kernel_options = b.addOptions();
+    process_kernel_options.addOption(usize, "input_capacity", 32 << 20);
+    process_kernel_options.addOption(usize, "output_capacity", 16 << 20);
+    process_kernel_options.addOption(usize, "state_capacity", 8 << 20);
+    process_kernel_options.addOption(usize, "value_capacity", 4 << 20);
+    process_kernel_options.addOption(usize, "request_capacity", 4 << 20);
+    process_kernel_options.addOption(usize, "environment_capacity", 8 << 20);
+    process_kernel_options.addOption(usize, "scratch_capacity", 64 << 20);
+    process_kernel_options.addOption(usize, "error_capacity", 4 << 10);
+    process_kernel_wasm_v1.addImport("image_v1", image_v1);
+    process_kernel_wasm_v1.addImport(
+        "process_advance_v1",
+        process_advance_v1,
+    );
+    const process_kernel_options_module = process_kernel_options.createModule();
+    process_kernel_wasm_v1.addImport(
+        "process_kernel_options",
+        process_kernel_options_module,
+    );
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
         .target = target,
@@ -603,6 +756,39 @@ fn addCoreModules(
     });
     agent_profile.addImport("program_v2", program_v2);
 
+    requireExactModuleClosure("process_v1", process_v1, &.{
+        process_v1,
+        process_capsule_v1,
+        process_advance_v1,
+        process_effect_v1,
+        process_state_v1,
+        dynamic_value_v1,
+        image_v1,
+        reducer_clause_v1,
+        program_semantics_v1,
+        control_ir,
+        portable_value,
+        rnf,
+    });
+    requireExactModuleClosure(
+        "process_kernel_wasm_v1",
+        process_kernel_wasm_v1,
+        &.{
+            process_kernel_wasm_v1,
+            process_kernel_options_module,
+            process_advance_v1,
+            process_effect_v1,
+            process_state_v1,
+            dynamic_value_v1,
+            image_v1,
+            reducer_clause_v1,
+            program_semantics_v1,
+            control_ir,
+            portable_value,
+            rnf,
+        },
+    );
+
     return .{
         .agent_profile = agent_profile,
         .compiler = compiler,
@@ -619,6 +805,12 @@ fn addCoreModules(
         .machine_v2_metering_v1 = machine_v2_metering_v1,
         .machine_v2_profile_v1 = machine_v2_profile_v1,
         .portable_value = portable_value,
+        .process_advance_v1 = process_advance_v1,
+        .process_capsule_v1 = process_capsule_v1,
+        .process_effect_v1 = process_effect_v1,
+        .process_kernel_wasm_v1 = process_kernel_wasm_v1,
+        .process_state_v1 = process_state_v1,
+        .process_v1 = process_v1,
         .program_semantics_v1 = program_semantics_v1,
         .program_v2 = program_v2,
         .reducer_clause_v1 = reducer_clause_v1,
@@ -636,6 +828,7 @@ fn wirePublicImports(module: *std.Build.Module, core: CoreModules) void {
     module.addImport("kernel_v1", core.kernel_v1);
     module.addImport("machine", core.machine);
     module.addImport("portable_value", core.portable_value);
+    module.addImport("process_v1", core.process_v1);
     module.addImport("program_v2", core.program_v2);
 }
 
@@ -711,6 +904,21 @@ pub fn build(b: *std.Build) void {
     reification_operations_fixture.addImport("image_v1", host_core.image_v1);
     reification_operations_fixture.addImport("kernel_v1", host_core.kernel_v1);
     reification_operations_fixture.addImport("machine", host_core.machine);
+    const authored_failure_v2_fixture = b.createModule(.{
+        .root_source_file = b.path("test/authored_failure_v2_fixture.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    authored_failure_v2_fixture.addImport("control_ir", host_core.control_ir);
+    authored_failure_v2_fixture.addImport(
+        "portable_value",
+        host_core.portable_value,
+    );
+    authored_failure_v2_fixture.addImport("program_v2", host_core.program_v2);
+    reification_operations_fixture.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
+    );
     const reification_handler_fixture = programTestModule(
         b,
         host_core,
@@ -842,6 +1050,10 @@ pub fn build(b: *std.Build) void {
     program_operations.addImport("image_v1", host_core.image_v1);
     program_operations.addImport("kernel_v1", host_core.kernel_v1);
     program_operations.addImport("machine", host_core.machine);
+    program_operations.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
+    );
     const integer_boolean_operations = programTestModule(
         b,
         host_core,
@@ -1022,6 +1234,48 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     image_test.addImport("image_v1", host_core.image_v1);
+    const process_test = b.createModule(.{
+        .root_source_file = b.path("test/process_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    process_test.addImport("process_effect_v1", host_core.process_effect_v1);
+    process_test.addImport("process_capsule_v1", host_core.process_capsule_v1);
+    process_test.addImport("process_state_v1", host_core.process_state_v1);
+    const process_advance_test = b.createModule(.{
+        .root_source_file = b.path("test/process_advance_v1.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    process_advance_test.addImport("boundary", host_boundary);
+    process_advance_test.addImport(
+        "process_advance_v1",
+        host_core.process_advance_v1,
+    );
+    process_advance_test.addImport(
+        "process_state_v1",
+        host_core.process_state_v1,
+    );
+    process_advance_test.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
+    );
+    const process_recursion_fixture = programTestModule(
+        b,
+        host_core,
+        "test/machine_recursion.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    process_recursion_fixture.addImport("image_v1", host_core.image_v1);
+    process_recursion_fixture.addImport("kernel_v1", host_core.kernel_v1);
+    process_recursion_fixture.addImport("machine", host_core.machine);
+    process_advance_test.addImport(
+        "recursion_fixture",
+        process_recursion_fixture,
+    );
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -1042,6 +1296,10 @@ pub fn build(b: *std.Build) void {
     );
     constructor_invariants.addImport("image_v1", host_core.image_v1);
     constructor_invariants.addImport("kernel_v1", host_core.kernel_v1);
+    constructor_invariants.addImport(
+        "reducer_clause_v1",
+        host_core.reducer_clause_v1,
+    );
     const recursion = programTestModule(
         b,
         host_core,
@@ -1080,16 +1338,19 @@ pub fn build(b: *std.Build) void {
         "machine_v2_profile_v1",
         host_core.machine_v2_profile_v1,
     );
-    const agent_loop = programTestModule(
+    const effectful_decision_loop = programTestModule(
         b,
         host_core,
-        "test/agent_loop.zig",
+        "test/effectful_decision_loop.zig",
         b.graph.host,
         optimize,
         false,
         false,
     );
-    agent_loop.addImport("agent_profile", host_core.agent_profile);
+    effectful_decision_loop.addImport(
+        "agent_profile",
+        host_core.agent_profile,
+    );
 
     const performance_core = addCoreModules(
         b,
@@ -1136,6 +1397,36 @@ pub fn build(b: *std.Build) void {
     addTestArtifact(b, image_step, host_core.dynamic_value_v1);
     addTestArtifact(b, image_step, host_core.image_emit_v1);
     addTestArtifact(b, image_step, image_test);
+
+    const process_step = b.step(
+        "check-boundary-process-v1",
+        "Check canonical Process State and residual-effect records.",
+    );
+    addTestArtifact(b, process_step, process_test);
+    addTestArtifact(b, process_step, process_advance_test);
+    addTestArtifact(b, process_step, program_compile);
+    const process_surface_guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\reject() {
+        \\  pattern=$1
+        \\  shift
+        \\  if rg -n "$pattern" "$@"; then
+        \\    exit 1
+        \\  else
+        \\    status=$?
+        \\    [ "$status" -eq 1 ] || exit "$status"
+        \\  fi
+        \\}
+        \\reject 'MachineV2Profile|machine_v2|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded|ABL_RNF2' src/process_*.zig
+        \\reject '@import\("(agent_profile|driver|machine|machine_v2|kernel_v1|kernel_machine_v1|kernel_wasm_v1|world[^"]*|host[^"]*|capabil[^"]*)(\.zig)?"\)' src/process_*.zig
+        \\reject 'AgentDefinition|DecisionContract|DecisionView|World application|capability registry|host policy|credential|\b(Model|Prompt|Skill|Tool|Memory)\b' src/process_*.zig
+        \\reject '@import\("[^"]+\.zig"\)' src/process_*.zig src/dynamic_value_v1.zig src/image_v1.zig src/reducer_clause_v1.zig src/program_semantics_v1.zig src/control_ir.zig src/portable_value.zig src/rnf.zig
+        \\reject 'componentAdmission|Program\.component\(|build-time linkers?|World-facing component semantics|source projection|linker-owned (failure|reachability)' README.md docs
+        \\reject 'pub (const|fn) (component|componentAdmission|componentProjection|linkerAdmission|programComponent|sourceProjection|linkFacts|worldComponent|linker|system|world|host|capabilities)\b' src
+    });
+    process_step.dependOn(&process_surface_guard.step);
 
     const control_step = b.step(
         "check-boundary-rnf-control",
@@ -1212,7 +1503,7 @@ pub fn build(b: *std.Build) void {
         "check-boundary-agent-loop",
         "Check the typed model/tool agent loop across fresh instances.",
     );
-    addTestArtifact(b, agent_step, agent_loop);
+    addTestArtifact(b, agent_step, effectful_decision_loop);
 
     const parity_native_witness = programTestModule(
         b,
@@ -1266,6 +1557,223 @@ pub fn build(b: *std.Build) void {
     performance_wasm_executable.rdynamic = true;
 
     const wasm_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const process_kernel_wasm_executable = b.addExecutable(.{
+        .name = "boundary-process-kernel-v1",
+        .root_module = wasm_core.process_kernel_wasm_v1,
+    });
+    process_kernel_wasm_executable.entry = .disabled;
+    process_kernel_wasm_executable.rdynamic = true;
+    process_kernel_wasm_executable.export_memory = true;
+    process_kernel_wasm_executable.max_memory = 256 << 20;
+    const install_process_kernel = b.addInstallFileWithDir(
+        process_kernel_wasm_executable.getEmittedBin(),
+        .prefix,
+        "boundary-process-kernel-v1.wasm",
+    );
+    const emit_process_kernel_step = b.step(
+        "emit-boundary-process-kernel-v1",
+        "Emit the fixed import-free Boundary Process kernel.",
+    );
+    emit_process_kernel_step.dependOn(&install_process_kernel.step);
+    emit_process_kernel_step.dependOn(process_step);
+    process_step.dependOn(&process_kernel_wasm_executable.step);
+    const process_kernel_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/process_kernel_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    process_kernel_vector_module.addImport("boundary", host_boundary);
+    process_kernel_vector_module.addImport(
+        "process_advance_v1",
+        host_core.process_advance_v1,
+    );
+    process_kernel_vector_module.addImport(
+        "morphism_fixture",
+        reification_morphism_fixture,
+    );
+    process_kernel_vector_module.addImport(
+        "recursion_fixture",
+        reification_recursion_fixture,
+    );
+    process_kernel_vector_module.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
+    );
+    const process_kernel_vector_executable = b.addExecutable(.{
+        .name = "boundary-process-kernel-vector",
+        .root_module = process_kernel_vector_module,
+    });
+    const run_process_kernel_vector = b.addRunArtifact(
+        process_kernel_vector_executable,
+    );
+    const process_kernel_vector = run_process_kernel_vector.captureStdOut(.{
+        .basename = "boundary-process-kernel-vector.bin",
+    });
+    const constrained_process_kernel_options = b.addOptions();
+    constrained_process_kernel_options.addOption(
+        usize,
+        "input_capacity",
+        1 << 20,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "output_capacity",
+        64,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "state_capacity",
+        64 << 10,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "value_capacity",
+        64 << 10,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "request_capacity",
+        64 << 10,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "environment_capacity",
+        64 << 10,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "scratch_capacity",
+        1 << 20,
+    );
+    constrained_process_kernel_options.addOption(
+        usize,
+        "error_capacity",
+        4 << 10,
+    );
+    const constrained_process_kernel_module = b.createModule(.{
+        .root_source_file = b.path("src/process_kernel_wasm_v1.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    constrained_process_kernel_module.addImport(
+        "image_v1",
+        wasm_core.image_v1,
+    );
+    constrained_process_kernel_module.addImport(
+        "process_advance_v1",
+        wasm_core.process_advance_v1,
+    );
+    const constrained_process_kernel_options_module =
+        constrained_process_kernel_options.createModule();
+    constrained_process_kernel_module.addImport(
+        "process_kernel_options",
+        constrained_process_kernel_options_module,
+    );
+    requireExactModuleClosure(
+        "constrained_process_kernel_wasm_v1",
+        constrained_process_kernel_module,
+        &.{
+            constrained_process_kernel_module,
+            constrained_process_kernel_options_module,
+            wasm_core.process_advance_v1,
+            wasm_core.process_effect_v1,
+            wasm_core.process_state_v1,
+            wasm_core.dynamic_value_v1,
+            wasm_core.image_v1,
+            wasm_core.reducer_clause_v1,
+            wasm_core.program_semantics_v1,
+            wasm_core.control_ir,
+            wasm_core.portable_value,
+            wasm_core.rnf,
+        },
+    );
+    const constrained_process_kernel = b.addExecutable(.{
+        .name = "boundary-process-kernel-v1-constrained",
+        .root_module = constrained_process_kernel_module,
+    });
+    constrained_process_kernel.entry = .disabled;
+    constrained_process_kernel.rdynamic = true;
+    constrained_process_kernel.export_memory = true;
+    constrained_process_kernel.initial_memory = 4 << 20;
+    constrained_process_kernel.max_memory = 32 << 20;
+    const capacity_vector_module = b.createModule(.{
+        .root_source_file = b.path("test/process_kernel_capacity_vector.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    capacity_vector_module.addImport("boundary", host_boundary);
+    capacity_vector_module.addImport(
+        "process_advance_v1",
+        host_core.process_advance_v1,
+    );
+    capacity_vector_module.addImport(
+        "process_kernel_fixture",
+        process_kernel_vector_module,
+    );
+    const capacity_vector_executable = b.addExecutable(.{
+        .name = "boundary-process-kernel-capacity-vector",
+        .root_module = capacity_vector_module,
+    });
+    const run_process_kernel_wasm = b.addSystemCommand(&.{"node"});
+    run_process_kernel_wasm.addFileArg(
+        b.path("test/run_process_kernel_wasm.mjs"),
+    );
+    run_process_kernel_wasm.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    run_process_kernel_wasm.addFileArg(process_kernel_vector);
+    run_process_kernel_wasm.addArg("0,1,2,3,4");
+    process_step.dependOn(&run_process_kernel_wasm.step);
+    const check_existing_repository_repair_bpi1 = b.addSystemCommand(&.{"node"});
+    check_existing_repository_repair_bpi1.addFileArg(
+        b.path("test/check_existing_repository_repair_bpi1.mjs"),
+    );
+    check_existing_repository_repair_bpi1.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    check_existing_repository_repair_bpi1.addFileArg(b.path(
+        "conformance/process-v1/repository-repair.agent.bpi1.base64",
+    ));
+    check_existing_repository_repair_bpi1.addFileArg(b.path(
+        "conformance/process-v1/repository-repair.initial-args.bin.base64",
+    ));
+    process_step.dependOn(&check_existing_repository_repair_bpi1.step);
+    const run_constrained_process_kernel_wasm = b.addSystemCommand(&.{"node"});
+    run_constrained_process_kernel_wasm.addFileArg(
+        b.path("test/run_process_kernel_wasm.mjs"),
+    );
+    run_constrained_process_kernel_wasm.addFileArg(
+        constrained_process_kernel.getEmittedBin(),
+    );
+    run_constrained_process_kernel_wasm.addArtifactArg(
+        capacity_vector_executable,
+    );
+    run_constrained_process_kernel_wasm.addArg("5");
+    run_constrained_process_kernel_wasm.addArg("native");
+    process_step.dependOn(&run_constrained_process_kernel_wasm.step);
+    const check_process_step = b.addSystemCommand(&.{"node"});
+    check_process_step.addFileArg(b.path("test/check_process_step.mjs"));
+    check_process_step.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    check_process_step.addFileArg(process_kernel_vector);
+    check_process_step.addFileArg(
+        b.path("scripts/boundary-process-step.mjs"),
+    );
+    process_step.dependOn(&check_process_step.step);
+    const check_constrained_process_step = b.addSystemCommand(&.{"node"});
+    check_constrained_process_step.addFileArg(
+        b.path("test/check_process_step.mjs"),
+    );
+    check_constrained_process_step.addFileArg(
+        constrained_process_kernel.getEmittedBin(),
+    );
+    check_constrained_process_step.addArtifactArg(capacity_vector_executable);
+    check_constrained_process_step.addFileArg(
+        b.path("scripts/boundary-process-step.mjs"),
+    );
+    process_step.dependOn(&check_constrained_process_step.step);
+
     const kernel_wasm_executable = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1",
         .root_module = wasm_core.kernel_wasm_v1,
@@ -1274,7 +1782,46 @@ pub fn build(b: *std.Build) void {
     kernel_wasm_executable.rdynamic = true;
     kernel_wasm_executable.export_memory = true;
     kernel_wasm_executable.max_memory = 128 << 20;
+    const malformed_process_relay_kernel_module = b.createModule(.{
+        .root_source_file = b.path("test/process_relay_malformed_kernel.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const malformed_process_relay_kernel = b.addExecutable(.{
+        .name = "boundary-process-relay-malformed-kernel",
+        .root_module = malformed_process_relay_kernel_module,
+    });
+    malformed_process_relay_kernel.entry = .disabled;
+    malformed_process_relay_kernel.rdynamic = true;
+    malformed_process_relay_kernel.export_memory = true;
+    check_process_step.addFileArg(kernel_wasm_executable.getEmittedBin());
+    check_process_step.addFileArg(
+        malformed_process_relay_kernel.getEmittedBin(),
+    );
+    check_constrained_process_step.addFileArg(
+        kernel_wasm_executable.getEmittedBin(),
+    );
+    check_constrained_process_step.addFileArg(
+        malformed_process_relay_kernel.getEmittedBin(),
+    );
+    check_constrained_process_step.addArg("native");
     const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const process_kernel_wasm_reproducible = b.addExecutable(.{
+        .name = "boundary-process-kernel-v1-reproducible",
+        .root_module = wasm_repro_core.process_kernel_wasm_v1,
+    });
+    process_kernel_wasm_reproducible.entry = .disabled;
+    process_kernel_wasm_reproducible.rdynamic = true;
+    process_kernel_wasm_reproducible.export_memory = true;
+    process_kernel_wasm_reproducible.max_memory = 256 << 20;
+    const compare_process_kernel_wasm = b.addSystemCommand(&.{ "cmp", "-s" });
+    compare_process_kernel_wasm.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    compare_process_kernel_wasm.addFileArg(
+        process_kernel_wasm_reproducible.getEmittedBin(),
+    );
+    process_step.dependOn(&compare_process_kernel_wasm.step);
     const kernel_wasm_reproducible = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1-reproducible",
         .root_module = wasm_repro_core.kernel_wasm_v1,
@@ -1697,62 +2244,33 @@ pub fn build(b: *std.Build) void {
     deletion_step.dependOn(&deletion_command.step);
 
     const source_topology_proof = b.addWriteFiles();
+    var topology: std.Io.Writer.Allocating = .init(b.allocator);
+    topology.writer.print(
+        "core_module_count={d}\nsource_module root support src/root.zig\n",
+        .{std.meta.fields(CoreModules).len},
+    ) catch |err| std.process.fatal(
+        "failed to render Boundary module topology: {s}",
+        .{@errorName(err)},
+    );
+    inline for (std.meta.fields(CoreModuleId)) |field| {
+        const module: CoreModuleId = @enumFromInt(field.value);
+        topology.writer.print(
+            "source_module {s} {s} {s}\n",
+            .{
+                field.name,
+                @tagName(coreModuleRole(module)),
+                coreModulePath(module),
+            },
+        ) catch |err| std.process.fatal(
+            "failed to render Boundary module topology: {s}",
+            .{@errorName(err)},
+        );
+    }
     const topology_receipt = source_topology_proof.add(
         "boundary-core-module-topology.txt",
-        b.fmt(
-            "core_module_count={d}\n" ++
-                "source_module root support src/root.zig\n" ++
-                "source_module agent_profile {s} {s}\n" ++
-                "source_module compiler {s} {s}\n" ++
-                "source_module control_ir {s} {s}\n" ++
-                "source_module driver {s} {s}\n" ++
-                "source_module dynamic_value_v1 {s} {s}\n" ++
-                "source_module effect_v2 {s} {s}\n" ++
-                "source_module image_v1 {s} {s}\n" ++
-                "source_module image_emit_v1 {s} {s}\n" ++
-                "source_module kernel_v1 {s} {s}\n" ++
-                "source_module kernel_machine_v1 image_runtime_semantics src/kernel_machine_v1.zig\n" ++
-                "source_module kernel_wasm_v1 image_runtime_semantics src/kernel_wasm_v1.zig\n" ++
-                "source_module machine {s} {s}\n" ++
-                "source_module machine_v2_metering_v1 direct_runtime_semantics src/machine_v2_metering_v1.zig\n" ++
-                "source_module machine_v2_profile_v1 image_runtime_semantics src/machine_v2_profile_v1.zig\n" ++
-                "source_module portable_value {s} {s}\n" ++
-                "source_module program_semantics_v1 shared_runtime_semantics src/program_semantics_v1.zig\n" ++
-                "source_module program_v2 {s} {s}\n" ++
-                "source_module reducer_clause_v1 image_runtime_semantics src/reducer_clause_v1.zig\n" ++
-                "source_module reified_program_v1 {s} {s}\n" ++
-                "source_module rnf {s} {s}\n",
-            .{
-                std.meta.fields(CoreModules).len,
-                @tagName(coreModuleRole(.agent_profile)),
-                coreModulePath(.agent_profile),
-                @tagName(coreModuleRole(.compiler)),
-                coreModulePath(.compiler),
-                @tagName(coreModuleRole(.control_ir)),
-                coreModulePath(.control_ir),
-                @tagName(coreModuleRole(.driver)),
-                coreModulePath(.driver),
-                @tagName(coreModuleRole(.dynamic_value_v1)),
-                coreModulePath(.dynamic_value_v1),
-                @tagName(coreModuleRole(.effect_v2)),
-                coreModulePath(.effect_v2),
-                @tagName(coreModuleRole(.image_v1)),
-                coreModulePath(.image_v1),
-                @tagName(coreModuleRole(.image_emit_v1)),
-                coreModulePath(.image_emit_v1),
-                @tagName(coreModuleRole(.kernel_v1)),
-                coreModulePath(.kernel_v1),
-                @tagName(coreModuleRole(.machine)),
-                coreModulePath(.machine),
-                @tagName(coreModuleRole(.portable_value)),
-                coreModulePath(.portable_value),
-                @tagName(coreModuleRole(.program_v2)),
-                coreModulePath(.program_v2),
-                @tagName(coreModuleRole(.reified_program_v1)),
-                coreModulePath(.reified_program_v1),
-                @tagName(coreModuleRole(.rnf)),
-                coreModulePath(.rnf),
-            },
+        topology.toOwnedSlice() catch |err| std.process.fatal(
+            "failed to finalize Boundary module topology: {s}",
+            .{@errorName(err)},
         ),
     );
 
@@ -1880,6 +2398,14 @@ pub fn build(b: *std.Build) void {
             "effect site ids must be dense from zero",
         },
         .{
+            "test/compile_fail/effect_site_invalid_utf8.zig",
+            "effect site semantic_identity must be valid UTF-8",
+        },
+        .{
+            "test/compile_fail/effect_morphism_invalid_utf8.zig",
+            "effect morphism Target semantic_identity must be valid UTF-8",
+        },
+        .{
             "test/compile_fail/generated_reducer_limit.zig",
             "Boundary compiler blocked program: GeneratedReducerLimitExceeded",
         },
@@ -1890,6 +2416,10 @@ pub fn build(b: *std.Build) void {
         .{
             "test/compile_fail/missing_arithmetic_failure.zig",
             "Body.Failure must declare arithmetic_overflow",
+        },
+        .{
+            "test/compile_fail/authored_instruction_failure_operand.zig",
+            "authored instruction failure operands must be canonical Body.Failure constants",
         },
         .{
             "test/compile_fail/non_enum_failure_tagged_union.zig",
@@ -2056,7 +2586,7 @@ pub fn build(b: *std.Build) void {
         recursion,
         after,
         machine_yield,
-        agent_loop,
+        effectful_decision_loop,
     }) |integration_module| {
         addTestArtifactWithArgs(b, test_step, integration_module, test_args);
     }
@@ -2387,9 +2917,11 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Run the full Boundary Machine proof.");
     check_step.dependOn(release_proof_step);
     check_step.dependOn(receipt_step);
+    check_step.dependOn(process_step);
 
     requireDirectDependency(&receipt_command.step, release_proof_step);
     requireDirectDependency(receipt_step, &receipt_command.step);
     requireDirectDependency(check_step, release_proof_step);
     requireDirectDependency(check_step, receipt_step);
+    requireDirectDependency(check_step, process_step);
 }

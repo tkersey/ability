@@ -43,6 +43,17 @@ runtime value at that id and is admitted only when its type is exactly
 `Body.Failure`. Both lower through the same Machine ABI v2 `Outcome.failed`
 transition.
 
+A fallible instruction may append one canonical constant `Body.Failure` value
+operand per Boundary-defined failure role after its ordinary operands. This
+selects the exact authored Failure returned by that instruction and emits
+evaluator semantics version 2. Ordinary instructions retain the version-1
+role-name behavior.
+
+Authored Failure operands have type `Body.Failure`, are defined by canonical
+constant instructions, and appear in Boundary-defined role order. Boundary
+validates and executes this rule directly; compiler-private source,
+reachability, and canonicalization remain private.
+
 `compiler_limits` has type `boundary.ir.CompilerLimits`. It can lower the
 implementation ceilings for values, blocks, constructors, constructor
 environments, invariants, and generated reducer work. These admission ceilings
@@ -59,14 +70,17 @@ lowers the source effect to a statically typed helper call before RNF. The
 helper receives the source payload, returns the source resume type, and leaves
 no runtime dispatch surface.
 
-Programs have one executable route: `Program.compile`. There is no
-`Program.run`, `Program.Session`, runtime interpreter, loaded module, or
-fallback backend.
+Boundary has no source-language interpreter, runtime Zig-definition loader,
+callback registry, or host-owned continuation. `Program.compile` remains the
+direct specialization route; canonical BPI1 may also be evaluated one finite
+reducer segment at a time by a
+`boundary.process_v1.CapacityStorage(...).advance` method or the fixed
+import-free Process kernel.
 
 For local use, instantiate `boundary.Driver(Machine)`. The Driver owns only
 Machine state and handler-local resources; it repeatedly calls `Machine.step`
-and `Machine.resume`, so it cannot diverge semantically from World execution.
+and `Machine.resume`, so it shares the same compiled Machine semantics.
 
-`boundary.Agent.program` is an optional profile over this same compiler. Agent
-loops use ordinary typed sums, products, branches, budgets, and residual effect
-sites; they do not introduce an agent runtime or second reducer.
+`boundary.Agent` is deprecated compatibility surface. New agent-specific
+authoring belongs in the separate Agent package; both direct and Agent-authored
+programs lower to the same Boundary program semantics.

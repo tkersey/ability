@@ -4,7 +4,9 @@ const std = @import("std");
 
 pub const magic = "ABL_BPI1".*;
 pub const image_format_version: u16 = 1;
-pub const evaluator_semantics_version: u16 = 1;
+pub const evaluator_semantics_v1: u16 = 1;
+pub const evaluator_semantics_v2: u16 = 2;
+pub const evaluator_semantics_version: u16 = evaluator_semantics_v1;
 pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
@@ -78,6 +80,7 @@ pub const Section = struct {
 };
 
 pub const Header = struct {
+    evaluator_semantics_version: u16,
     total_length: u64,
     program_transition_digest: [32]u8,
     maximum_kernel_scratch_bytes: u64,
@@ -106,6 +109,8 @@ pub const ValidationWorkspace = struct {
     catalog_lengths: [1024]u32 = undefined,
     constant_used: [1024]bool = undefined,
     value_defined: [1024]bool = undefined,
+    canonical_failure_constant: [1024]bool = undefined,
+    authored_failure_operand: [1024]bool = undefined,
     canonical_schema_seen: [1024]bool = undefined,
     canonical_schema_stack: [2048]SchemaOrderTask = undefined,
 };
@@ -145,6 +150,103 @@ pub const ValidatedImage = struct {
     artifact_sha256: [32]u8,
 };
 
+/// Internal effect descriptor used by fixed image evaluators.
+/// The package root intentionally does not expose this byte-level surface.
+pub const EvaluatorEffect = struct {
+    ordinal: u32,
+    semantic_identity: []const u8,
+    payload_schema: u32,
+    resume_schema: u32,
+    semantic_digest: [32]u8,
+    ordinal_digest: [32]u8,
+};
+
+/// Borrow one validated segment record for an internal evaluator.
+pub fn evaluatorSegmentRecord(
+    image: ValidatedImage,
+    target: u16,
+) Error![]const u8 {
+    return imageSegmentRecord(image.catalogs, target);
+}
+
+/// Borrow one validated constructor record for an internal evaluator.
+pub fn evaluatorConstructorRecord(
+    image: ValidatedImage,
+    target: u32,
+) Error![]const u8 {
+    return imageConstructorRecord(image.catalogs, target);
+}
+
+/// Resolve one validated edge to its canonical continuation constructor.
+pub fn evaluatorTransitionConstructor(
+    image: ValidatedImage,
+    source: u16,
+    edge_kind: u8,
+    target: u16,
+) Error!u32 {
+    return transitionConstructorId(image.catalogs, source, edge_kind, target);
+}
+
+/// Locate the unique validated suspension constructor of one semantic kind.
+pub fn evaluatorSuspensionConstructor(
+    image: ValidatedImage,
+    source_segment: u16,
+    constructor_kind: u8,
+) Error!u32 {
+    for (0..image.constructor_count) |candidate| {
+        const constructor = try imageConstructorRecord(
+            image.catalogs,
+            @intCast(candidate),
+        );
+        if (constructor[8] == constructor_kind and
+            constructor[9] == 2 and
+            readInt(u16, constructor, 12) == source_segment)
+        {
+            return @intCast(candidate);
+        }
+    }
+    return error.InvalidConstructor;
+}
+
+/// Return the terminator offset of one already validated segment record.
+pub fn evaluatorSegmentTerminator(segment: []const u8) usize {
+    return imageSegmentTerminator(segment);
+}
+
+/// Borrow one validated residual-effect descriptor by dense ordinal.
+pub fn evaluatorEffect(
+    image: ValidatedImage,
+    target: u32,
+) Error!EvaluatorEffect {
+    const bytes = image.catalogs.envelope.section(.effects);
+    var cursor: usize = 4;
+    for (0..image.catalogs.effect_count) |ordinal| {
+        const encoded_ordinal = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const identity_length = readInt(u32, bytes, cursor);
+        cursor += 4;
+        const identity_end = cursor + identity_length;
+        const identity = bytes[cursor..identity_end];
+        cursor = identity_end;
+        const payload_schema = readInt(u32, bytes, cursor);
+        const resume_schema = readInt(u32, bytes, cursor + 4);
+        cursor += 12;
+        const semantic_digest = bytes[cursor..][0..32].*;
+        cursor += 32;
+        const ordinal_digest = bytes[cursor..][0..32].*;
+        cursor += 32;
+        if (ordinal == target) return .{
+            .ordinal = encoded_ordinal,
+            .semantic_identity = identity,
+            .payload_schema = payload_schema,
+            .resume_schema = resume_schema,
+            .semantic_digest = semantic_digest,
+            .ordinal_digest = ordinal_digest,
+        };
+    }
+    return error.InvalidEffect;
+}
+
 pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (image.len < header_length) return error.InvalidHeaderLength;
     if (!std.mem.eql(u8, image[0..magic.len], &magic)) {
@@ -153,7 +255,10 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     if (readInt(u16, image, 8) != image_format_version) {
         return error.UnsupportedImageVersion;
     }
-    if (readInt(u16, image, 10) != evaluator_semantics_version) {
+    const evaluator_version = readInt(u16, image, 10);
+    if (evaluator_version != evaluator_semantics_v1 and
+        evaluator_version != evaluator_semantics_v2)
+    {
         return error.UnsupportedEvaluatorSemantics;
     }
     if (readInt(u32, image, 12) != 0) return error.UnknownFlags;
@@ -202,6 +307,7 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     return .{
         .image = image,
         .header = .{
+            .evaluator_semantics_version = evaluator_version,
             .total_length = declared_total,
             .program_transition_digest = image[32..64].*,
             .maximum_kernel_scratch_bytes = readInt(u64, image, 64),
@@ -294,6 +400,14 @@ pub fn validateImage(
     try validateCanonicalSchemaOrder(catalogs, workspace);
     @memset(workspace.constant_used[0..catalogs.constant_count], false);
     @memset(workspace.value_defined[0..catalogs.value_count], false);
+    @memset(
+        workspace.canonical_failure_constant[0..catalogs.value_count],
+        false,
+    );
+    @memset(
+        workspace.authored_failure_operand[0..catalogs.value_count],
+        false,
+    );
     var next_constant: u32 = 0;
     var next_value: u32 = 0;
     const segment_count = try validateSegments(
@@ -301,8 +415,23 @@ pub fn validateImage(
         &workspace.constant_used,
         &next_constant,
         &workspace.value_defined,
+        &workspace.canonical_failure_constant,
+        &workspace.authored_failure_operand,
         &next_value,
     );
+    var authored_failure_used = false;
+    for (workspace.authored_failure_operand[0..catalogs.value_count], 0..) |used, value| {
+        if (!used) continue;
+        authored_failure_used = true;
+        if (!workspace.canonical_failure_constant[value]) {
+            return error.InvalidFailureMap;
+        }
+    }
+    if (catalogs.envelope.header.evaluator_semantics_version ==
+        evaluator_semantics_v2 and !authored_failure_used)
+    {
+        return error.InvalidFailureMap;
+    }
     for (workspace.constant_used[0..catalogs.constant_count]) |used| {
         if (!used) return error.InvalidConstant;
     }
@@ -775,28 +904,42 @@ fn effectDigest(
     payload_schema: u32,
     resume_schema: u32,
 ) Error![32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    semanticHashBytes(
-        &hasher,
-        if (ordinal == null)
-            "boundary-effect-site-semantic-contract-v1"
-        else
-            "boundary-effect-site-contract-v1",
-    );
-    if (ordinal) |value| semanticHashU32(&hasher, value);
-    semanticHashBytes(&hasher, identity);
     const payload_digest = dynamic_value_v1.schemaDigest(
         schemas,
         payload_schema,
         hash_tasks,
     ) catch return error.InvalidSchema;
-    hasher.update(&payload_digest);
     const resume_digest = dynamic_value_v1.schemaDigest(
         schemas,
         resume_schema,
         hash_tasks,
     ) catch return error.InvalidSchema;
+    if (ordinal == null) {
+        return effectSemanticDigest(identity, payload_digest, resume_digest);
+    }
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    semanticHashBytes(&hasher, "boundary-effect-site-contract-v1");
+    semanticHashU32(&hasher, ordinal.?);
+    semanticHashBytes(&hasher, identity);
+    hasher.update(&payload_digest);
     hasher.update(&resume_digest);
+    semanticHashBytes(&hasher, "single-resume");
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+/// Derive the stable semantic contract identity carried by one effect site.
+pub fn effectSemanticDigest(
+    semantic_identity: []const u8,
+    payload_schema_digest: [32]u8,
+    resume_schema_digest: [32]u8,
+) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    semanticHashBytes(&hasher, "boundary-effect-site-semantic-contract-v1");
+    semanticHashBytes(&hasher, semantic_identity);
+    hasher.update(&payload_schema_digest);
+    hasher.update(&resume_schema_digest);
     semanticHashBytes(&hasher, "single-resume");
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -943,6 +1086,8 @@ fn validateSegments(
     constant_used: *[1024]bool,
     next_constant: *u32,
     value_defined: *[1024]bool,
+    canonical_failure_constant: *[1024]bool,
+    authored_failure_operand: *[1024]bool,
     next_value: *u32,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
@@ -1006,6 +1151,8 @@ fn validateSegments(
                 next_constant,
                 &available,
                 value_defined,
+                canonical_failure_constant,
+                authored_failure_operand,
                 next_value,
             );
         }
@@ -1090,6 +1237,8 @@ fn validateInstruction(
     next_constant: *u32,
     available: *[1024]bool,
     value_defined: *[1024]bool,
+    canonical_failure_constant: *[1024]bool,
+    authored_failure_operand: *[1024]bool,
     next_value: *u32,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
@@ -1141,7 +1290,34 @@ fn validateInstruction(
         operand_count,
         immediate,
     );
-    for (program_semantics_v1.failureRolesForWire(wire_operation)) |role| {
+    canonical_failure_constant[result] = operation == 0 and
+        try catalogs.valueSchemaId(result) == catalogs.failure_schema_id;
+    const failure_roles = program_semantics_v1.failureRolesForWire(
+        wire_operation,
+    );
+    const base_operand_count = program_semantics_v1.fixedOperandCount(
+        wire_operation,
+    );
+    const authored_failures = base_operand_count != null and
+        catalogs.envelope.header.evaluator_semantics_version ==
+            evaluator_semantics_v2 and
+        failure_roles.len != 0 and
+        operand_count == base_operand_count.? + failure_roles.len;
+    if (authored_failures) {
+        for (0..failure_roles.len) |index| {
+            const failure_value = readInt(
+                u16,
+                bytes,
+                start + 16 + (base_operand_count.? + index) * 2,
+            );
+            if (try catalogs.valueSchemaId(failure_value) !=
+                catalogs.failure_schema_id)
+            {
+                return error.InvalidFailureMap;
+            }
+            authored_failure_operand[failure_value] = true;
+        }
+    } else for (failure_roles) |role| {
         if (!failureNameExists(
             catalogs,
             program_semantics_v1.failureRoleName(role),
@@ -1162,7 +1338,15 @@ fn validateInstructionSchemas(
     immediate: u32,
 ) Error!void {
     if (program_semantics_v1.fixedOperandCount(operation)) |expected| {
-        if (operand_count != expected) return error.InvalidInstruction;
+        const failure_count = program_semantics_v1.failureRolesForWire(
+            operation,
+        ).len;
+        const authored = catalogs.envelope.header.evaluator_semantics_version ==
+            evaluator_semantics_v2 and failure_count != 0 and
+            operand_count == expected + failure_count;
+        if (operand_count != expected and !authored) {
+            return error.InvalidInstruction;
+        }
     }
     const result_schema = valueSchema(catalogs, result);
     const result_node = catalogs.schemas.node(result_schema) catch

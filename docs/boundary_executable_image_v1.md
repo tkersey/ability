@@ -5,7 +5,7 @@ Executable truth is owned by
 `src/image_v1.zig`, `src/image_emit_v1.zig`, and the conformance vectors.
 
 The fixed header prefix is 76 bytes. It contains `ABL_BPI1`, image version 1,
-program-evaluator semantics version 1, flags, exact header and total lengths,
+the program-evaluator semantics version, flags, exact header and total lengths,
 section count, `program_transition_digest`, and derived schema/evaluator
 scratch maxima. A 240-byte directory follows, so the exact v1 header length is
 316 bytes.
@@ -32,6 +32,14 @@ Segment records have a 16-byte prefix and contain no metering word. Synthetic
 caller-fuel suspensions are normalized to semantic edges; explicit authored
 yields remain. Dead fields from the unreleased BEI1 draft were removed rather
 than preserved as archaeology.
+
+Evaluator semantics version 1 retains the original role-name lookup for
+instruction failures. Version 2 uses the same BPI1 container and instruction
+record layout, but permits each fallible instruction to append one canonical
+`Failure` value operand per failure role. Each operand must name a canonical
+constant definition and selects the exact authored failure returned by that
+instruction. Images without reachable authored-failure operands remain version
+1, so all existing canonical BPI1 bytes are unchanged.
 
 Validation checks the complete structure, dynamic values, graph references,
 constructor laws, effect/schema/program-transition digests, scratch requirements,

@@ -29,6 +29,21 @@ test "pure clause preserves source-width signed remainder overflow" {
     );
 }
 
+test "scratch tracker preserves u64 demand before physical narrowing" {
+    var output_bytes: u64 = 0;
+    var scratch_bytes: u64 = 0;
+    var tracker: clause.CapacityTracker = .{
+        .output_bytes = &output_bytes,
+        .scratch_bytes = &scratch_bytes,
+    };
+    const demand = @as(u64, std.math.maxInt(u32)) + 1;
+    try std.testing.expectError(
+        error.ScratchCapacity,
+        tracker.requireScratch(0, demand),
+    );
+    try std.testing.expectEqual(demand, scratch_bytes);
+}
+
 test "product construction streams more operands than the value catalog" {
     const operand_count: u16 = 1025;
     var instruction: [16 + @as(usize, operand_count) * 2]u8 =
@@ -53,6 +68,7 @@ test "product construction streams more operands than the value catalog" {
             &scratch,
             &scratch_cursor,
             &workspace,
+            null,
         ),
     );
     try std.testing.expectEqual(@as(usize, operand_count), slots[1].bytes.len);

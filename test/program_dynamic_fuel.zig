@@ -411,6 +411,108 @@ const SelectionMachine = program_v2.program(
     .maximum_machine_fuel = 4096,
 });
 
+const AuthoredSelectionFailure = enum { bad_position };
+const authored_selection_helper_instructions = [_]cir.Instruction{
+    .{
+        .kind = .constant,
+        .result = 5,
+        .operation = .{ .constant = 0 },
+    },
+    .{
+        .kind = .pure,
+        .result = 6,
+        .operands = &.{ 3, 4, 5 },
+        .operation = .vector_get,
+    },
+    .{
+        .kind = .pure,
+        .result = 7,
+        .operands = &.{6},
+        .operation = .text_length,
+    },
+};
+const authored_selection_blocks = [_]cir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &selection_root_instructions,
+        .terminator = .{ .@"suspend" = .{
+            .kind = .call,
+            .callee_function = 1,
+            .callee = .{
+                .target = 1,
+                .arguments = &selection_call_arguments,
+            },
+            .continuation = .{
+                .target = 2,
+                .arguments = &helper_return_arguments,
+            },
+            .resume_type = u32_type,
+        } },
+    },
+    .{
+        .id = 1,
+        .function_id = 1,
+        .parameters = &.{ 3, 4 },
+        .instructions = &authored_selection_helper_instructions,
+        .terminator = .{ .return_to_caller = 7 },
+    },
+    .{
+        .id = 2,
+        .role = .terminal_handoff,
+        .parameters = &.{8},
+        .terminator = .{ .return_value = 8 },
+    },
+};
+const AuthoredSelectionBody = struct {
+    pub const InitialArgs = VectorSelection;
+    pub const Result = u32;
+    pub const Failure = AuthoredSelectionFailure;
+    pub const constants = .{AuthoredSelectionFailure.bad_position};
+    pub const effect_sites = .{};
+    pub const schema_types = .{
+        Texts,
+        VectorSelection,
+        Text,
+        AuthoredSelectionFailure,
+    };
+    pub const control_ir: cir.Program = .{
+        .label = "helper-authored-vector-exact-sizing",
+        .value_types = &.{
+            selection_type,
+            texts_type,
+            u32_type,
+            texts_type,
+            u32_type,
+            cir.ValueType{ .schema = 3 },
+            selection_text_type,
+            u32_type,
+            u32_type,
+        },
+        .blocks = &authored_selection_blocks,
+        .entry = 0,
+        .result_type = u32_type,
+        .functions = &.{
+            .{ .id = 0, .entry = 0, .result_type = u32_type },
+            .{ .id = 1, .entry = 1, .result_type = u32_type },
+        },
+    };
+};
+const AuthoredSelectionProgram = program_v2.program(
+    "helper-authored-vector-exact-sizing",
+    AuthoredSelectionBody,
+);
+const AuthoredSelectionMachine = AuthoredSelectionProgram.compile(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 4096,
+});
+const AuthoredSelectionKernelMachine = AuthoredSelectionProgram.kernelMachineV2(.{
+    .maximum_frames = 4,
+    .maximum_state_bytes = 4096,
+    .maximum_machine_fuel = 4096,
+});
+
 fn requiredHelperFuel(comptime HelperMachine: type, input: anytype, expected: u32) !u64 {
     const state = try HelperMachine.initialState(std.testing.allocator, input);
     defer HelperMachine.deinitState(state);
@@ -481,6 +583,10 @@ fn requiredHelperFuel(comptime HelperMachine: type, input: anytype, expected: u3
 }
 
 test "helper activation exact sizing uses materialized product and vector values" {
+    try std.testing.expectEqual(
+        @as(u16, 2),
+        AuthoredSelectionProgram.image().evaluator_semantics_version,
+    );
     const short = try Text.fromSlice("a");
     const long = try Text.fromSlice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN");
 
@@ -529,4 +635,32 @@ test "helper activation exact sizing uses materialized product and vector values
         40,
     );
     try std.testing.expect(long_vector_fuel > short_vector_fuel);
+
+    const authored_short_fuel = try requiredHelperFuel(
+        AuthoredSelectionMachine,
+        VectorSelection{ .values = short_first, .index = 0 },
+        1,
+    );
+    const authored_long_fuel = try requiredHelperFuel(
+        AuthoredSelectionMachine,
+        VectorSelection{ .values = long_first, .index = 0 },
+        40,
+    );
+    try std.testing.expectEqual(
+        authored_short_fuel,
+        try requiredHelperFuel(
+            AuthoredSelectionKernelMachine,
+            VectorSelection{ .values = short_first, .index = 0 },
+            1,
+        ),
+    );
+    try std.testing.expectEqual(
+        authored_long_fuel,
+        try requiredHelperFuel(
+            AuthoredSelectionKernelMachine,
+            VectorSelection{ .values = long_first, .index = 0 },
+            40,
+        ),
+    );
+    try std.testing.expect(authored_long_fuel > authored_short_fuel);
 }

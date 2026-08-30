@@ -23,10 +23,11 @@ public callers authenticate image and profile together through
 Valid images describe effects but grant no authority; the kernel returns a
 typed request and stops.
 
-The finite byte-level BPI1 clause evaluator is internal. It is compiled and
-tested from a module graph that contains no Machine-v2 modules, but it is not a
-public operational API. The supported v1.6 execution surface remains the
-bounded Machine ABI v2 compatibility path.
+The byte-level BPI1 clause evaluator remains internal. The public Process ABI
+admits canonical bytes and exposes one finite reduction through a generated
+`boundary.process_v1.CapacityStorage(...).advance` method and the fixed
+import-free Process kernel. The bounded Machine ABI v2 path remains
+compatibility and specialization.
 
 The v2 compatibility claim is transition equivalence: outcome tag, caller fuel, State,
 request identity and payload, result, failure, and operational rejection must
@@ -36,7 +37,7 @@ That Boundary-local receipt reports only Boundary-owned observations. World and
 Agent compatibility remains proven in their owning repositories rather than
 being asserted without a downstream witness in Boundary's artifact.
 
-Debug names and source locations are not semantic image data. Boundary 1.6
-adds no runtime definition loader, callback registry, source interpreter, open
-Process ABI, or State migration mechanism. A later Process ABI may perform one
-finite reduction without a predetermined lifetime budget; it is not delivered here.
+Debug names and source locations are not semantic image data. Boundary adds no
+runtime definition loader, callback registry, source interpreter, or automatic
+State migration mechanism. Process ABI v1 performs one finite reduction per
+call without a predetermined semantic lifetime budget.

@@ -64,6 +64,21 @@ const CompiledMachine = Program.compile(.{
     .maximum_machine_fuel = 32,
 });
 
+test "Program exposes no component or linker projection" {
+    inline for (.{
+        "component",
+        "componentAdmission",
+        "componentProjection",
+        "linkerAdmission",
+        "programComponent",
+        "sourceProjection",
+        "linkFacts",
+        "worldComponent",
+    }) |linker_decl| {
+        try std.testing.expect(!@hasDecl(Program, linker_decl));
+    }
+}
+
 const CanonicalTextLookup = struct {
     pub const id: u32 = 0;
     pub const semantic_identity = "test.canonical-text.v1";

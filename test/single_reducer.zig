@@ -102,6 +102,20 @@ comptime {
     {
         @compileError("Boundary Program exposes a competing compilation route");
     }
+    for (.{
+        "component",
+        "componentAdmission",
+        "componentProjection",
+        "linkerAdmission",
+        "programComponent",
+        "sourceProjection",
+        "linkFacts",
+        "worldComponent",
+    }) |linker_decl| {
+        if (@hasDecl(Program, linker_decl)) {
+            @compileError("Boundary Program exposes a linker projection");
+        }
+    }
     if (@hasDecl(Image, "step") or @hasDecl(Image, "resume")) {
         @compileError("Boundary image product exposes reducer authority");
     }

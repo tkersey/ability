@@ -771,6 +771,34 @@ fn failureNamed(comptime Body: type, comptime name: []const u8) Body.Failure {
     @compileError("Body.Failure must declare " ++ name);
 }
 
+fn constantFailureAtValue(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime value: control_ir.ValueId,
+) Body.Failure {
+    inline for (program.blocks) |block| {
+        inline for (block.instructions) |candidate| {
+            if (candidate.result != value) continue;
+            return switch (candidate.operation) {
+                .constant => |index| blk: {
+                    if (@TypeOf(Body.constants[index]) != Body.Failure) {
+                        @compileError(
+                            "authored instruction failure operands must be canonical Body.Failure constants",
+                        );
+                    }
+                    break :blk Body.constants[index];
+                },
+                else => @compileError(
+                    "authored instruction failure operands must be canonical Body.Failure constants",
+                ),
+            };
+        }
+    }
+    @compileError(
+        "authored instruction failure operand has no constant definition",
+    );
+}
+
 fn failureFromTag(comptime Body: type, comptime tag: u16) Body.Failure {
     inline for (std.meta.fields(Body.Failure)) |field| {
         if (field.value == tag) {
@@ -799,7 +827,11 @@ fn requireOperandCount(
     comptime instruction: control_ir.Instruction,
     comptime expected: usize,
 ) void {
-    if (instruction.operands.len != expected) {
+    if (!program_semantics_v1.validOperandCount(
+        instruction.operation,
+        instruction.operands.len,
+        expected,
+    )) {
         @compileError(
             "Control IR operation has the wrong operand count",
         );
@@ -864,9 +896,31 @@ fn validateInstruction(
     )) {
         @compileError("Control IR operation has a noncanonical instruction kind");
     }
-    inline for (program_semantics_v1.failureRoles(
+    const failure_roles = program_semantics_v1.failureRoles(
         instruction.operation,
-    )) |role| {
+    );
+    if (program_semantics_v1.usesAuthoredFailures(
+        instruction.operation,
+        instruction.operands.len,
+    )) {
+        const base = program_semantics_v1.fixedOperandCount(
+            program_semantics_v1.wireOperation(instruction.operation),
+        ).?;
+        inline for (failure_roles, 0..) |_, index| {
+            if (operandType(Body, program, instruction, base + index) !=
+                Body.Failure)
+            {
+                @compileError(
+                    "authored instruction failure operands must use Body.Failure",
+                );
+            }
+            _ = constantFailureAtValue(
+                Body,
+                program,
+                instruction.operands[base + index],
+            );
+        }
+    } else inline for (failure_roles) |role| {
         _ = failureNamed(Body, program_semantics_v1.failureName(role));
     }
     switch (instruction.operation) {
@@ -1416,6 +1470,9 @@ fn validateBody(
         if (semantic_identity.len == 0) {
             @compileError("effect site semantic_identity must be non-empty");
         }
+        if (!std.unicode.utf8ValidateSlice(semantic_identity)) {
+            @compileError("effect site semantic_identity must be valid UTF-8");
+        }
         portable_value.assertPortable(Site.Payload);
         portable_value.assertPortable(Site.Resume);
     }
@@ -1460,6 +1517,11 @@ fn validateBody(
             if (target_identity.len == 0) {
                 @compileError(
                     "effect morphism Target semantic_identity must be non-empty",
+                );
+            }
+            if (!std.unicode.utf8ValidateSlice(target_identity)) {
+                @compileError(
+                    "effect morphism Target semantic_identity must be valid UTF-8",
                 );
             }
             portable_value.assertPortable(Target.Payload);
@@ -2231,6 +2293,22 @@ fn generatedReducerOperationCount(
     return total;
 }
 
+fn evaluatorSemanticsVersion(
+    comptime program: control_ir.Program,
+    comptime reachability: anytype,
+) u16 {
+    for (program.blocks) |block| {
+        if (!reachability.contains(block.id)) continue;
+        for (block.instructions) |instruction| {
+            if (program_semantics_v1.usesAuthoredFailures(
+                instruction.operation,
+                instruction.operands.len,
+            )) return 2;
+        }
+    }
+    return 1;
+}
+
 fn initialConstructorId(
     comptime program: control_ir.Program,
     comptime normal_form: anytype,
@@ -2320,6 +2398,10 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         semantic_canonicalization,
         false,
     );
+    const evaluator_semantics_version = comptime evaluatorSemanticsVersion(
+        program,
+        reachability,
+    );
     return reified_program_v1.Program(
         label,
         Body,
@@ -2333,6 +2415,7 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         initial_constructor_id,
         generated_operation_count,
         program_transition_digest,
+        evaluator_semantics_version,
     );
 }
 
@@ -2936,7 +3019,11 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
             if (comptime maybe_instruction == null) return null;
             const instruction = comptime maybe_instruction.?;
             if (instruction.operation != .vector_get or
-                instruction.operands.len != 2)
+                !program_semantics_v1.validOperandCount(
+                    instruction.operation,
+                    instruction.operands.len,
+                    2,
+                ))
             {
                 return null;
             }

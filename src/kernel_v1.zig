@@ -422,37 +422,30 @@ fn initialValidated(
     output_state: []u8,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
-    dynamic_value_v1.validateValue(
-        image.catalogs.schemas,
-        image.catalogs.initial_args_schema_id,
-        initial_args,
-        &workspace.value_tasks,
-    ) catch return error.InvalidInitialArgs;
     const constructor = constructorRecord(
         image,
         image.profile.initial_constructor_id,
     ) catch return error.InvalidImage;
-    const flags = readInt(u16, constructor, 10);
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    if (flags & 1 != 0 or activation_count != 0 or environment_count > 1) {
-        return error.InvalidImage;
-    }
-    var environment_length: usize = 0;
-    if (environment_count == 1) {
-        const value_id = readInt(u16, constructor, 24);
-        const schema_id = readInt(u32, constructor, 28);
-        if (image.catalogs.entry_parameter_count != 1 or
-            value_id != image.catalogs.entry_parameter_value_id or
-            schema_id != image.catalogs.initial_args_schema_id)
-        {
-            return error.InvalidImage;
-        }
-        environment_length = initial_args.len;
-    } else if (image.catalogs.entry_parameter_count == 1) {
-        // An unused entry argument is intentionally absent from RNF State.
-        environment_length = 0;
-    }
+    var slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** 1024;
+    reducer_clause_v1.bindInitialEnvironment(
+        image,
+        constructor,
+        initial_args,
+        &slots,
+        &activation_slots,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        error.InvalidBindings => return error.InvalidInitialArgs,
+        else => return error.InvalidImage,
+    };
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        null,
+        &activation_slots,
+        &slots,
+    ) catch return error.InvalidImage;
     const required = state_header_length + frame_header_length +
         environment_length;
     if (required > image.profile.maximum_state_bytes) {
@@ -489,9 +482,14 @@ fn initialValidated(
         image.profile.initial_constructor_id,
     );
     appendInt(u32, output_state, &cursor, environment_length);
-    if (environment_length != 0) {
-        appendBytes(output_state, &cursor, initial_args);
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        null,
+        &activation_slots,
+        &slots,
+        output_state[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
     if (cursor != required) return error.InvalidImage;
     try validateStateValidated(image, output_state[0..required], workspace);
     return required;
@@ -508,20 +506,23 @@ fn validateStateValidated(
     const frame_count = readInt(u32, state, 60);
     var cursor: usize = state_header_length;
     var top_kind: u8 = 0;
-    var previous_offset: ?usize = null;
     var previous_constructor: []const u8 = &.{};
+    var previous_slots = [_]Slot{.{}} ** 1024;
     for (0..frame_count) |frame_index| {
-        const frame_offset = cursor;
         const constructor_id = readInt(u32, state, cursor);
         const environment_length = readInt(u32, state, cursor + 4);
         cursor += frame_header_length;
         const environment_end = cursor + environment_length;
         const constructor = try constructorRecord(image, constructor_id);
         top_kind = constructor[8];
-        validateEnvironment(
+        var slots = [_]Slot{.{}} ** 1024;
+        var activation_slots = [_]Slot{.{}} ** 1024;
+        const loaded = validateEnvironment(
             image,
             constructor,
             state[cursor..environment_end],
+            &slots,
+            &activation_slots,
             workspace,
         ) catch |err| switch (err) {
             error.ScratchCapacity => return error.ScratchCapacity,
@@ -536,20 +537,19 @@ fn validateStateValidated(
         } else {
             try validateStackPair(
                 image,
-                state,
-                previous_offset.?,
                 previous_constructor,
-                frame_offset,
+                &previous_slots,
                 constructor,
-                workspace,
+                loaded.activation_entry,
+                &activation_slots,
             );
         }
-        previous_offset = frame_offset;
         previous_constructor = constructor;
+        previous_slots = slots;
         cursor = environment_end;
     }
     if ((top_kind == 3 and sequence == 0) or
-        isAwaitCallConstructor(image, previous_constructor))
+        reducer_clause_v1.isAwaitCallConstructor(image, previous_constructor))
     {
         return error.InvalidState;
     }
@@ -605,129 +605,36 @@ fn validateStateEnvelope(
     }
 }
 
-fn isAwaitCallConstructor(
-    image: ValidatedProgram,
-    constructor: []const u8,
-) bool {
-    if (constructor.len < 24 or constructor[8] != 4 or constructor[9] != 2) {
-        return false;
-    }
-    const segment = segmentRecord(
-        image,
-        readInt(u16, constructor, 12),
-    ) catch return false;
-    const terminator = segmentTerminatorOffset(segment);
-    return segment[terminator + 4] == 2 and segment[terminator + 8] == 1;
-}
-
 fn validateStackPair(
     image: ValidatedProgram,
-    state: []const u8,
-    parent_offset: usize,
     parent_constructor: []const u8,
-    child_offset: usize,
+    parent_slots: *const [1024]Slot,
     child_constructor: []const u8,
-    workspace: *image_v1.ValidationWorkspace,
+    child_activation_entry: ?u32,
+    child_slots: *const [1024]Slot,
 ) Error!void {
-    if (!isAwaitCallConstructor(image, parent_constructor)) {
-        return error.InvalidState;
-    }
     const parent_segment_id = readInt(u16, parent_constructor, 12);
     const parent_segment = try segmentRecord(image, parent_segment_id);
-    const terminator = segmentTerminatorOffset(parent_segment);
-    const payload = terminator + 8;
-    const callee_function = readInt(u16, parent_segment, payload + 8);
-    const callee = suspensionCallee(parent_segment, terminator);
-    if (callee.len < 4) return error.InvalidState;
-    const target_segment_id = readInt(u16, callee, 0);
-    const child_segment = try segmentRecord(
-        image,
-        readInt(u16, child_constructor, 12),
+    const callee = suspensionCallee(
+        parent_segment,
+        segmentTerminatorOffset(parent_segment),
     );
-    if (readInt(u16, child_segment, 6) != callee_function or
-        readInt(u16, child_constructor, 10) & 1 == 0)
-    {
-        return error.InvalidState;
-    }
-    const child_environment_length = readInt(u32, state, child_offset + 4);
-    const child_environment = state[child_offset + 8 ..][0..child_environment_length];
-    if (child_environment.len < 4) return error.InvalidState;
-    const call_entry_constructor = try transitionConstructor(
+    if (callee.len < 4) return error.InvalidState;
+    const expected_call_entry = try transitionConstructor(
         image,
         parent_segment_id,
         3,
-        target_segment_id,
+        readInt(u16, callee, 0),
     );
-    if (readInt(u32, child_environment, 0) != call_entry_constructor) {
-        return error.InvalidState;
-    }
-
-    var parent_slots = [_]Slot{.{}} ** 1024;
-    var child_slots = [_]Slot{.{}} ** 1024;
-    var child_activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &parent_slots);
-    try initializeZeroWidthSlots(image, &child_slots);
-    try initializeZeroWidthSlots(image, &child_activation_slots);
-    try loadFrameEnvironment(
+    try reducer_clause_v1.validateStackPair(
         image,
-        state,
-        parent_offset,
         parent_constructor,
-        &parent_slots,
-        workspace,
-    );
-    try loadActivationSlots(
-        image,
-        state,
-        child_offset,
+        parent_slots,
         child_constructor,
-        &child_activation_slots,
-        workspace,
+        child_activation_entry,
+        child_slots,
+        expected_call_entry,
     );
-    try loadFrameEnvironment(
-        image,
-        state,
-        child_offset,
-        child_constructor,
-        &child_slots,
-        workspace,
-    );
-    const target_segment = try segmentRecord(image, target_segment_id);
-    const count = readInt(u16, callee, 2);
-    if (count != readInt(u16, target_segment, 10)) return error.InvalidState;
-    for (0..count) |index| {
-        const argument = 4 + index * 4;
-        if (callee[argument] != 0) return error.InvalidState;
-        const source_value = readInt(u16, callee, argument + 2);
-        const target_value = readInt(u16, target_segment, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsActivationValue(
-            child_constructor,
-            target_value,
-        )) continue;
-        if (!parent_slots[source_value].initialized or
-            !child_activation_slots[target_value].initialized or
-            !std.mem.eql(
-                u8,
-                parent_slots[source_value].bytes,
-                child_activation_slots[target_value].bytes,
-            ))
-        {
-            return error.InvalidState;
-        }
-    }
-}
-
-fn constructorRetainsActivationValue(
-    constructor: []const u8,
-    value: u16,
-) bool {
-    const activation_count = readInt(u16, constructor, 16);
-    var cursor: usize = 24;
-    for (0..activation_count) |_| {
-        if (readInt(u16, constructor, cursor) == value) return true;
-        cursor += 8;
-    }
-    return false;
 }
 
 fn currentValidated(
@@ -743,26 +650,25 @@ fn currentValidated(
     const segment_id = readInt(u16, constructor, 12);
     const segment = try segmentRecord(image, segment_id);
     const terminator = segmentTerminatorOffset(segment);
-    if (segment[terminator + 4] != 2 or segment[terminator + 8] != 0) {
-        return error.InvalidState;
-    }
-    const payload = terminator + 8;
-    const site_ordinal = readInt(u32, segment, payload + 4);
-    const request_count = readInt(u16, segment, payload + 10);
-    if (request_count != 1) return error.InvalidImage;
-    const request_value = readInt(u16, segment, payload + 12);
+    const suspension = reducer_clause_v1.suspensionView(
+        segment,
+        terminator,
+    ) catch return error.InvalidState;
+    const effect = switch (suspension) {
+        .effect => |effect| effect,
+        else => return error.InvalidState,
+    };
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
-    if (!slots[request_value].initialized) return error.InvalidState;
-    if (output_payload.len < slots[request_value].bytes.len) {
+    if (!slots[effect.request_value].initialized) return error.InvalidState;
+    if (output_payload.len < slots[effect.request_value].bytes.len) {
         return error.OutputCapacity;
     }
     @memcpy(
-        output_payload[0..slots[request_value].bytes.len],
-        slots[request_value].bytes,
+        output_payload[0..slots[effect.request_value].bytes.len],
+        slots[effect.request_value].bytes,
     );
-    const canonical_payload = output_payload[0..slots[request_value].bytes.len];
+    const canonical_payload = output_payload[0..slots[effect.request_value].bytes.len];
     const sequence = readInt(u64, state, 44);
     return .{
         .state = state,
@@ -771,7 +677,7 @@ fn currentValidated(
             image,
             state,
             constructor_id,
-            site_ordinal,
+            effect.site_ordinal,
             canonical_payload,
             sequence,
         ),
@@ -793,34 +699,36 @@ fn resumeValidated(
     const segment_id = readInt(u16, constructor, 12);
     const segment = try segmentRecord(image, segment_id);
     const terminator = segmentTerminatorOffset(segment);
-    const payload = terminator + 8;
-    const site_ordinal = readInt(u32, segment, payload + 4);
-    const request_value = readInt(u16, segment, payload + 12);
+    const suspension = reducer_clause_v1.suspensionView(
+        segment,
+        terminator,
+    ) catch return error.InvalidState;
+    const effect = switch (suspension) {
+        .effect => |effect| effect,
+        else => return error.InvalidState,
+    };
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
-    if (!slots[request_value].initialized) return error.InvalidState;
+    if (!slots[effect.request_value].initialized) return error.InvalidState;
     const expected = try requestIdentity(
         image,
         state,
         constructor_id,
-        site_ordinal,
-        slots[request_value].bytes,
+        effect.site_ordinal,
+        slots[effect.request_value].bytes,
         readInt(u64, state, 44),
     );
     if (!requestIdentityEqual(expected, identity)) return error.InvalidState;
-    const resume_schema = try effectResumeSchema(image, site_ordinal);
+    const resume_schema = try effectResumeSchema(image, effect.site_ordinal);
     dynamic_value_v1.validateValue(
         image.catalogs.schemas,
         resume_schema,
         response,
         &workspace.value_tasks,
     ) catch return error.InvalidState;
-    const continuation = suspensionContinuation(segment, terminator);
+    const continuation = effect.continuation;
     const target_segment = readInt(u16, continuation, 0);
     const target = try segmentRecord(image, target_segment);
-    const argument_count = readInt(u16, continuation, 2);
-    if (argument_count != readInt(u16, target, 10)) return error.InvalidImage;
     const next_constructor = try transitionConstructor(
         image,
         segment_id,
@@ -831,25 +739,13 @@ fn resumeValidated(
         image,
         next_constructor,
     );
-    for (0..argument_count) |index| {
-        const argument_offset = 4 + index * 4;
-        const target_value = readInt(u16, target, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(next_constructor_record, target_value)) {
-            continue;
-        }
-        switch (continuation[argument_offset]) {
-            0 => {
-                const source_value = readInt(u16, continuation, argument_offset + 2);
-                if (!slots[source_value].initialized) return error.InvalidState;
-                slots[target_value] = slots[source_value];
-            },
-            1 => slots[target_value] = .{
-                .bytes = response,
-                .initialized = true,
-            },
-            else => return error.InvalidImage,
-        }
-    }
+    try reducer_clause_v1.applyEdge(
+        next_constructor_record,
+        target,
+        continuation,
+        response,
+        &slots,
+    );
     const successor = try encodeTopFrame(
         image,
         state,
@@ -1008,7 +904,6 @@ fn preflightCurrentSegment(
     const minimum_cost = image.profile.segmentCost(segment_id) catch
         return error.InvalidImage;
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     const top_offset = try topFrameOffset(state);
     const environment_length = readInt(u32, state, top_offset + 4);
@@ -1097,6 +992,7 @@ fn stepSegment(
         output_value,
         scratch,
         workspace,
+        null,
     ) catch |err| return switch (err) {
         error.InvalidBindings => error.InvalidState,
         else => err,
@@ -1316,10 +1212,7 @@ fn transitionState(
     workspace: *image_v1.ValidationWorkspace,
 ) Error![]const u8 {
     const target_segment = readInt(u16, edge, 0);
-    const argument_count = readInt(u16, edge, 2);
     const target = try segmentRecord(image, target_segment);
-    const parameter_count = readInt(u16, target, 10);
-    if (argument_count != parameter_count) return error.InvalidImage;
     const constructor_id = try transitionConstructor(
         image,
         source_segment,
@@ -1327,15 +1220,13 @@ fn transitionState(
         target_segment,
     );
     const constructor = try constructorRecord(image, constructor_id);
-    for (0..argument_count) |index| {
-        const argument_offset = 4 + index * 4;
-        if (edge[argument_offset] != 0) return error.UnsupportedOperation;
-        const source_value = readInt(u16, edge, argument_offset + 2);
-        const target_value = readInt(u16, target, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(constructor, target_value)) continue;
-        if (!slots[source_value].initialized) return error.InvalidState;
-        slots[target_value] = slots[source_value];
-    }
+    try reducer_clause_v1.applyEdge(
+        constructor,
+        target,
+        edge,
+        null,
+        slots,
+    );
     return encodeTopFrame(
         image,
         state,
@@ -1346,17 +1237,6 @@ fn transitionState(
         output,
         workspace,
     );
-}
-
-fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        if (readInt(u16, constructor, cursor) == value) return true;
-        cursor += 8;
-    }
-    return false;
 }
 
 fn encodeTopFrame(
@@ -1388,9 +1268,7 @@ fn encodeTopFrame(
         activation_entry = readInt(u32, current_environment, 0);
     }
     const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
     var activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &activation_slots);
     if (activation_count != 0) {
         try loadActivationSlots(
             image,
@@ -1401,22 +1279,15 @@ fn encodeTopFrame(
             workspace,
         );
     }
-    var environment_length: usize = if (activation_entry != null) 4 else 0;
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        if (!slot.initialized) return error.InvalidState;
-        environment_length = std.math.add(
-            usize,
-            environment_length,
-            slot.bytes.len,
-        ) catch return error.InvalidState;
-        field_cursor += 8;
-    }
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+    ) catch |err| switch (err) {
+        error.OutputCapacity => return error.OutputCapacity,
+        else => return error.InvalidState,
+    };
     const frame_length = std.math.add(
         usize,
         frame_header_length,
@@ -1438,17 +1309,15 @@ fn encodeTopFrame(
     var cursor = top_offset;
     appendInt(u32, output, &cursor, constructor_id);
     appendInt(u32, output, &cursor, environment_length);
-    if (activation_entry) |entry| appendInt(u32, output, &cursor, entry);
-    field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        appendBytes(output, &cursor, slot.bytes);
-        field_cursor += 8;
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+        output[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
+    if (cursor != required) return error.InvalidState;
     return output[0..required];
 }
 
@@ -1503,13 +1372,7 @@ fn awaitCallConstructor(
     return error.InvalidImage;
 }
 
-fn suspensionCallee(segment: []const u8, terminator: usize) []const u8 {
-    const payload = terminator + 8;
-    const request_count = readInt(u16, segment, payload + 10);
-    const cursor = payload + 12 + @as(usize, request_count) * 2;
-    if (segment[cursor] != 1) return &.{};
-    return segment[cursor + 4 ..];
-}
+const suspensionCallee = reducer_clause_v1.suspensionCallee;
 
 fn applyValueEdge(
     image: ValidatedProgram,
@@ -1520,17 +1383,13 @@ fn applyValueEdge(
 ) Error!void {
     const target = try segmentRecord(image, target_segment);
     const constructor = try constructorRecord(image, target_constructor);
-    const count = readInt(u16, edge, 2);
-    if (count != readInt(u16, target, 10)) return error.InvalidImage;
-    for (0..count) |index| {
-        const argument = 4 + index * 4;
-        if (edge[argument] != 0) return error.InvalidImage;
-        const source_value = readInt(u16, edge, argument + 2);
-        const target_value = readInt(u16, target, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(constructor, target_value)) continue;
-        if (!slots[source_value].initialized) return error.InvalidState;
-        slots[target_value] = slots[source_value];
-    }
+    try reducer_clause_v1.applyEdge(
+        constructor,
+        target,
+        edge,
+        null,
+        slots,
+    );
 }
 
 fn appendFrame(
@@ -1546,20 +1405,15 @@ fn appendFrame(
     }
     const constructor = try constructorRecord(image, constructor_id);
     if (readInt(u16, constructor, 10) & 1 == 0) return error.InvalidImage;
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var environment_length: usize = 4;
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        if (!slots[value].initialized) return error.InvalidState;
-        environment_length = std.math.add(
-            usize,
-            environment_length,
-            slots[value].bytes.len,
-        ) catch return error.OutputCapacity;
-        field_cursor += 8;
-    }
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        constructor_id,
+        slots,
+        slots,
+    ) catch |err| switch (err) {
+        error.OutputCapacity => return error.OutputCapacity,
+        else => return error.InvalidState,
+    };
     const frame_length = std.math.add(
         usize,
         frame_header_length,
@@ -1579,13 +1433,15 @@ fn appendFrame(
     var cursor = parent.len;
     appendInt(u32, output, &cursor, constructor_id);
     appendInt(u32, output, &cursor, environment_length);
-    appendInt(u32, output, &cursor, constructor_id);
-    field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        appendBytes(output, &cursor, slots[value].bytes);
-        field_cursor += 8;
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        constructor_id,
+        slots,
+        slots,
+        output[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
+    if (cursor != required) return error.InvalidState;
     return output[0..required];
 }
 
@@ -1606,7 +1462,6 @@ fn returnToCaller(
         return error.InvalidState;
     }
     var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
     try loadFrameEnvironment(
         image,
         state,
@@ -1623,10 +1478,6 @@ fn returnToCaller(
     );
     const target_segment_id = readInt(u16, continuation, 0);
     const target_segment = try segmentRecord(image, target_segment_id);
-    const argument_count = readInt(u16, continuation, 2);
-    if (argument_count != readInt(u16, target_segment, 10)) {
-        return error.InvalidImage;
-    }
     const next_constructor = try transitionConstructor(
         image,
         parent_segment_id,
@@ -1637,25 +1488,13 @@ fn returnToCaller(
         image,
         next_constructor,
     );
-    for (0..argument_count) |index| {
-        const argument = 4 + index * 4;
-        const target_value = readInt(u16, target_segment, image_v1.segment_prefix_length + index * 2);
-        if (!constructorRetainsValue(next_constructor_record, target_value)) {
-            continue;
-        }
-        switch (continuation[argument]) {
-            0 => {
-                const source_value = readInt(u16, continuation, argument + 2);
-                if (!slots[source_value].initialized) return error.InvalidState;
-                slots[target_value] = slots[source_value];
-            },
-            1 => slots[target_value] = .{
-                .bytes = return_value,
-                .initialized = true,
-            },
-            else => return error.InvalidImage,
-        }
-    }
+    try reducer_clause_v1.applyEdge(
+        next_constructor_record,
+        target_segment,
+        continuation,
+        return_value,
+        &slots,
+    );
     return replaceFrameAndTruncate(
         image,
         state,
@@ -1774,9 +1613,7 @@ fn hashInt(
     hasher.update(&bytes);
 }
 
-fn edgeLength(edge: []const u8) usize {
-    return 4 + @as(usize, readInt(u16, edge, 2)) * 4;
-}
+const edgeLength = reducer_clause_v1.edgeLength;
 
 fn topFrameOffset(state: []const u8) Error!usize {
     const frame_count = readInt(u32, state, 60);
@@ -1830,9 +1667,7 @@ fn replaceFrameAndTruncate(
         activation_entry = readInt(u32, current_environment, 0);
     }
     const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
     var activation_slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &activation_slots);
     if (activation_count != 0) {
         try loadActivationSlots(
             image,
@@ -1843,22 +1678,15 @@ fn replaceFrameAndTruncate(
             workspace,
         );
     }
-    var environment_length: usize = if (activation_entry != null) 4 else 0;
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        if (!slot.initialized) return error.InvalidState;
-        environment_length = std.math.add(
-            usize,
-            environment_length,
-            slot.bytes.len,
-        ) catch return error.OutputCapacity;
-        field_cursor += 8;
-    }
+    const environment_length = reducer_clause_v1.environmentEncodedLength(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+    ) catch |err| switch (err) {
+        error.OutputCapacity => return error.OutputCapacity,
+        else => return error.InvalidState,
+    };
     const frame_length = std.math.add(
         usize,
         frame_header_length,
@@ -1880,17 +1708,15 @@ fn replaceFrameAndTruncate(
     var cursor = frame_offset;
     appendInt(u32, output, &cursor, constructor_id);
     appendInt(u32, output, &cursor, environment_length);
-    if (activation_entry) |entry| appendInt(u32, output, &cursor, entry);
-    field_cursor = 24;
-    for (0..@as(u32, activation_count) + environment_count) |index| {
-        const value = readInt(u16, constructor, field_cursor);
-        const slot = if (index < activation_count)
-            activation_slots[value]
-        else
-            slots[value];
-        appendBytes(output, &cursor, slot.bytes);
-        field_cursor += 8;
-    }
+    const environment = try reducer_clause_v1.encodeEnvironmentSlots(
+        constructor,
+        activation_entry,
+        &activation_slots,
+        slots,
+        output[cursor..][0..environment_length],
+    );
+    cursor += environment.len;
+    if (cursor != required) return error.InvalidState;
     return output[0..required];
 }
 
@@ -1931,28 +1757,17 @@ fn loadFrameEnvironment(
 ) Error!void {
     const environment_length = readInt(u32, state, frame_offset + 4);
     const environment = state[frame_offset + 8 ..][0..environment_length];
-    var value_cursor: usize = 0;
-    if (readInt(u16, constructor, 10) & 1 != 0) value_cursor = 4;
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var field_cursor: usize = 24;
-    for (0..@as(u32, activation_count) + environment_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema_id = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema_id,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        const encoded = environment[value_cursor .. value_cursor + consumed];
-        slots[value] = .{
-            .bytes = encoded,
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
+    _ = reducer_clause_v1.decodeEnvironmentSlots(
+        image,
+        constructor,
+        environment,
+        slots,
+        null,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        else => return error.InvalidState,
+    };
 }
 
 fn loadActivationSlots(
@@ -1965,25 +1780,18 @@ fn loadActivationSlots(
 ) Error!void {
     const environment_length = readInt(u32, state, frame_offset + 4);
     const environment = state[frame_offset + 8 ..][0..environment_length];
-    var value_cursor: usize = 0;
-    if (readInt(u16, constructor, 10) & 1 != 0) value_cursor = 4;
-    var field_cursor: usize = 24;
-    for (0..readInt(u16, constructor, 16)) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema_id = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema_id,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        slots[value] = .{
-            .bytes = environment[value_cursor .. value_cursor + consumed],
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
+    var current_slots = [_]Slot{.{}} ** 1024;
+    _ = reducer_clause_v1.decodeEnvironmentSlots(
+        image,
+        constructor,
+        environment,
+        &current_slots,
+        slots,
+        workspace,
+    ) catch |err| switch (err) {
+        error.ScratchCapacity => return error.ScratchCapacity,
+        else => return error.InvalidState,
+    };
 }
 
 fn topConstructorId(state: []const u8) Error!u32 {
@@ -2024,469 +1832,29 @@ fn segmentTerminatorOffset(segment: []const u8) usize {
     return cursor;
 }
 
-fn suspensionContinuation(segment: []const u8, terminator: usize) []const u8 {
-    const payload = terminator + 8;
-    const request_count = readInt(u16, segment, payload + 10);
-    var cursor = payload + 12 + @as(usize, request_count) * 2;
-    const callee_present = segment[cursor] == 1;
-    cursor += 4;
-    if (callee_present) cursor += edgeLength(segment[cursor..]);
-    return segment[cursor..];
-}
+const suspensionContinuation = reducer_clause_v1.suspensionContinuation;
 
 fn validateEnvironment(
     image: anytype,
     constructor: []const u8,
     environment: []const u8,
-    workspace: *image_v1.ValidationWorkspace,
-) Error!void {
-    const flags = readInt(u16, constructor, 10);
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    var field_cursor: usize = 24;
-    var value_cursor: usize = 0;
-    var slots = [_]Slot{.{}} ** 1024;
-    try initializeZeroWidthSlots(image, &slots);
-    if (flags & 1 != 0) {
-        if (environment.len < 4) return error.InvalidState;
-        const entry_constructor = readInt(u32, environment, 0);
-        _ = constructorRecord(image, entry_constructor) catch
-            return error.InvalidState;
-        value_cursor = 4;
-    }
-    const field_count = @as(u32, activation_count) + environment_count;
-    for (0..field_count) |_| {
-        const value = readInt(u16, constructor, field_cursor);
-        const schema_id = readInt(u32, constructor, field_cursor + 4);
-        const consumed = dynamic_value_v1.validateValuePrefix(
-            image.catalogs.schemas,
-            schema_id,
-            environment[value_cursor..],
-            &workspace.value_tasks,
-        ) catch return error.InvalidState;
-        slots[value] = .{
-            .bytes = environment[value_cursor .. value_cursor + consumed],
-            .initialized = true,
-        };
-        value_cursor += consumed;
-        field_cursor += 8;
-    }
-    if (value_cursor != environment.len) return error.InvalidState;
-    try validatePathInvariants(image, constructor, &slots, workspace);
-}
-
-fn validatePathInvariants(
-    image: anytype,
-    constructor: []const u8,
     slots: *[1024]Slot,
+    activation_slots: *[1024]Slot,
     workspace: *image_v1.ValidationWorkspace,
-) Error!void {
-    const activation_count = readInt(u16, constructor, 16);
-    const environment_count = readInt(u16, constructor, 18);
-    const invariant_count = readInt(u16, constructor, 20);
-    var cursor: usize = 24 +
-        (@as(usize, activation_count) + environment_count) * 8;
-    for (0..invariant_count) |_| {
-        const length = readInt(u32, constructor, cursor);
-        const tag = constructor[cursor + 4];
-        const payload = cursor + 8;
-        const accepted = switch (tag) {
-            0 => blk: {
-                const value = readInt(u16, constructor, payload);
-                break :blk slots[value].initialized and
-                    slots[value].bytes.len == 1 and
-                    (slots[value].bytes[0] == 1) ==
-                        (constructor[payload + 2] == 1);
-            },
-            1, 5 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                1,
-                0,
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            2 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                20,
-                0,
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            3 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                21 + constructor[payload + 6],
-                0,
-                &.{
-                    readInt(u16, constructor, payload + 2),
-                    readInt(u16, constructor, payload + 4),
-                },
-                slots,
-                workspace,
-            ),
-            4, 7 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                23,
-                0,
-                &.{
-                    readInt(u16, constructor, payload + 2),
-                    readInt(u16, constructor, payload + 4),
-                    readInt(u16, constructor, payload + 6),
-                },
-                slots,
-                workspace,
-            ),
-            6 => try validateInvariantConstant(
-                image,
-                readInt(u16, constructor, payload),
-                constructor[payload + 4],
-                readInt(u64, constructor, payload + 12),
-                slots,
-            ),
-            8 => blk: {
-                const result = readInt(u16, constructor, payload);
-                const definition = readInt(u16, constructor, payload + 2);
-                const operand_count = readInt(u16, constructor, payload + 4);
-                const operand_bytes = constructor[payload + 8 ..][0 .. @as(usize, operand_count) * 2];
-                const instruction = try definingInstruction(image, definition);
-                break :blk try validateComputedResultEncoded(
-                    image,
-                    result,
-                    readInt(u16, instruction, 6),
-                    readInt(u32, instruction, 12),
-                    operand_bytes,
-                    operand_count,
-                    slots,
-                    workspace,
-                );
-            },
-            9 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                25,
-                readInt(u16, constructor, payload + 4),
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            10 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                29,
-                readInt(u16, constructor, payload + 4),
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            11 => blk: {
-                const bounded = readInt(u16, constructor, payload + 2);
-                const operation: u16 = switch ((try reducer_clause_v1.valueNode(image, bounded)).kind) {
-                    .vector => 34,
-                    .text => 53,
-                    .bytes => 54,
-                    else => return error.InvalidState,
-                };
-                break :blk try validateComputedResult(
-                    image,
-                    readInt(u16, constructor, payload),
-                    operation,
-                    0,
-                    &.{bounded},
-                    slots,
-                    workspace,
-                );
-            },
-            12 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                if (constructor[payload + 4] == 0) 8 else 15,
-                0,
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            13 => blk: {
-                const operations = [_]u16{ 3, 4, 5, 6, 7, 16, 17, 18 };
-                const operation = constructor[payload + 6];
-                if (operation >= operations.len) return error.InvalidState;
-                break :blk try validateComputedResult(
-                    image,
-                    readInt(u16, constructor, payload),
-                    operations[operation],
-                    0,
-                    &.{
-                        readInt(u16, constructor, payload + 2),
-                        readInt(u16, constructor, payload + 4),
-                    },
-                    slots,
-                    workspace,
-                );
-            },
-            14 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                19,
-                0,
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            15 => blk: {
-                const value = readInt(u16, constructor, payload);
-                if (!slots[value].initialized) break :blk false;
-                var zero = true;
-                for (slots[value].bytes) |byte| zero = zero and byte == 0;
-                break :blk zero == (constructor[payload + 2] == 1);
-            },
-            16 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                2,
-                0,
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            17 => blk: {
-                const left_id = readInt(u16, constructor, payload);
-                const right_id = readInt(u16, constructor, payload + 2);
-                if (!slots[left_id].initialized or !slots[right_id].initialized) {
-                    break :blk false;
-                }
-                const left = reducer_clause_v1.decodeInteger(
-                    try reducer_clause_v1.valueKind(image, left_id),
-                    slots[left_id].bytes,
-                ) catch break :blk false;
-                const right = reducer_clause_v1.decodeInteger(
-                    try reducer_clause_v1.valueKind(image, right_id),
-                    slots[right_id].bytes,
-                ) catch break :blk false;
-                const operation: u16 = 9 + constructor[payload + 4];
-                break :blk reducer_clause_v1.compareIntegers(left, right, operation) ==
-                    (constructor[payload + 5] == 1);
-            },
-            18 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                9 + constructor[payload + 6],
-                0,
-                &.{
-                    readInt(u16, constructor, payload + 2),
-                    readInt(u16, constructor, payload + 4),
-                },
-                slots,
-                workspace,
-            ),
-            19 => blk: {
-                const value = readInt(u16, constructor, payload);
-                if (!slots[value].initialized) break :blk false;
-                const actual = algebraicCaseIndex(
-                    image,
-                    value,
-                    slots[value].bytes,
-                ) catch break :blk false;
-                break :blk (actual == readInt(u16, constructor, payload + 2)) ==
-                    (constructor[payload + 4] == 1);
-            },
-            20 => try validateComputedResult(
-                image,
-                readInt(u16, constructor, payload),
-                28,
-                readInt(u16, constructor, payload + 4),
-                &.{readInt(u16, constructor, payload + 2)},
-                slots,
-                workspace,
-            ),
-            else => return error.InvalidState,
-        };
-        if (!accepted) return error.InvalidState;
-        cursor += length;
-    }
-}
-
-fn definingInstruction(
-    image: anytype,
-    definition: u16,
-) Error![]const u8 {
-    for (0..image.segment_count) |segment_id| {
-        const segment = try segmentRecord(image, @intCast(segment_id));
-        var cursor: usize = image_v1.segment_prefix_length + @as(usize, readInt(u16, segment, 10)) * 2;
-        for (0..readInt(u32, segment, 12)) |_| {
-            const length = readInt(u32, segment, cursor);
-            if (readInt(u16, segment, cursor + 8) == definition) {
-                return segment[cursor .. cursor + length];
-            }
-            cursor += length;
-        }
-    }
-    return error.InvalidState;
-}
-
-fn validateComputedResult(
-    image: anytype,
-    result: u16,
-    operation: u16,
-    immediate: u32,
-    operands: []const u16,
-    slots: *[1024]Slot,
-    workspace: *image_v1.ValidationWorkspace,
-) Error!bool {
-    var operand_bytes: [6]u8 = undefined;
-    if (operands.len > operand_bytes.len / 2) return false;
-    for (operands, 0..) |operand, index| {
-        std.mem.writeInt(
-            u16,
-            operand_bytes[index * 2 ..][0..2],
-            operand,
-            .little,
-        );
-    }
-    return validateComputedResultEncoded(
+) Error!reducer_clause_v1.LoadedEnvironment {
+    const loaded = try reducer_clause_v1.loadEnvironmentSlots(
         image,
-        result,
-        operation,
-        immediate,
-        operand_bytes[0 .. operands.len * 2],
-        @intCast(operands.len),
+        constructor,
+        environment,
         slots,
+        activation_slots,
         workspace,
     );
-}
-
-fn validateComputedResultEncoded(
-    image: anytype,
-    result: u16,
-    operation: u16,
-    immediate: u32,
-    operand_bytes: []const u8,
-    operand_count: u16,
-    slots: *[1024]Slot,
-    workspace: *image_v1.ValidationWorkspace,
-) Error!bool {
-    if (!slots[result].initialized or
-        operand_bytes.len != @as(usize, operand_count) * 2)
-    {
-        return false;
-    }
-    if (operation == 24) {
-        return reducer_clause_v1.productConstructMatches(
-            slots[result].bytes,
-            operand_bytes,
-            operand_count,
-            slots,
-        );
-    }
-    const instruction_length = 16 + operand_bytes.len;
-    if (instruction_length > workspace.invariant_instruction.len) {
-        return error.ScratchCapacity;
-    }
-    const instruction = workspace.invariant_instruction[0..instruction_length];
-    @memset(instruction, 0);
-    std.mem.writeInt(u32, instruction[0..4], @intCast(instruction_length), .little);
-    std.mem.writeInt(u16, instruction[6..8], operation, .little);
-    std.mem.writeInt(u16, instruction[8..10], result, .little);
-    std.mem.writeInt(u16, instruction[10..12], operand_count, .little);
-    std.mem.writeInt(u32, instruction[12..16], immediate, .little);
-    @memcpy(instruction[16..], operand_bytes);
-    const expected = slots[result];
-    defer slots[result] = expected;
-    var scratch_cursor: usize = 0;
-    const failure = if (operation == 0) blk: {
-        slots[result] = .{
-            .bytes = try reducer_clause_v1.constantBytes(image, immediate),
-            .initialized = true,
-        };
-        break :blk null;
-    } else if (operation == 1) blk: {
-        if (operand_count != 1) return false;
-        const operand = readInt(u16, operand_bytes, 0);
-        if (operand >= slots.len or !slots[operand].initialized) return false;
-        slots[result] = slots[operand];
-        break :blk null;
-    } else if (operation <= 23 or operation == 57)
-        try reducer_clause_v1.executeScalarOperation(
-            image,
-            instruction,
-            result,
-            slots,
-            workspace.invariant_result,
-            &scratch_cursor,
-        )
-    else if (operation <= 56)
-        try reducer_clause_v1.executeCompositeOperation(
-            image,
-            instruction,
-            result,
-            slots,
-            workspace.invariant_result,
-            &scratch_cursor,
-            workspace,
-        )
-    else
-        return error.InvalidState;
-    return failure == null and slots[result].initialized and
-        std.mem.eql(u8, expected.bytes, slots[result].bytes);
-}
-
-fn validateInvariantConstant(
-    image: anytype,
-    result: u16,
-    kind: u8,
-    payload: u64,
-    slots: *const [1024]Slot,
-) Error!bool {
-    if (!slots[result].initialized) return false;
-    return switch (kind) {
-        0 => slots[result].bytes.len == 1 and
-            slots[result].bytes[0] == @as(u8, @intCast(payload)),
-        1 => blk: {
-            const value = try reducer_clause_v1.decodeInteger(
-                try reducer_clause_v1.valueKind(image, result),
-                slots[result].bytes,
-            );
-            break :blk value.signed and reducer_clause_v1.signedValue(value) == @as(i64, @bitCast(payload));
-        },
-        2 => blk: {
-            const value = try reducer_clause_v1.decodeInteger(
-                try reducer_clause_v1.valueKind(image, result),
-                slots[result].bytes,
-            );
-            break :blk !value.signed and value.raw == payload;
-        },
-        3 => (try algebraicCaseIndex(
-            image,
-            result,
-            slots[result].bytes,
-        )) == payload,
-        else => error.InvalidState,
-    };
-}
-
-fn algebraicCaseIndex(
-    image: anytype,
-    value: u16,
-    bytes: []const u8,
-) Error!u16 {
-    const node = try reducer_clause_v1.valueNode(image, value);
-    return switch (node.kind) {
-        .optional => if (bytes[0] == 0) 0 else 1,
-        .sum => blk: {
-            const tag = readInt(u32, bytes, 0);
-            const count = readInt(u32, node.payload, 4);
-            for (0..count) |index| {
-                if (readInt(u32, node.payload, 8 + index * 8) == tag) {
-                    break :blk @intCast(index);
-                }
-            }
+    if (loaded.activation_entry) |entry_constructor| {
+        _ = constructorRecord(image, entry_constructor) catch
             return error.InvalidState;
-        },
-        else => error.InvalidState,
-    };
+    }
+    return loaded;
 }
 
 fn constructorRecord(

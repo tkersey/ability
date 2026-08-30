@@ -16,6 +16,18 @@ const ResidualLookup = effect.site(
     u32,
     u32,
 );
+const UnicodeSource = effect.site(
+    0,
+    "source.café.v1",
+    u32,
+    u32,
+);
+const UnicodeTarget = effect.site(
+    0,
+    "residual.工具.v1",
+    u32,
+    u32,
+);
 
 const u32_type: cir.ValueType = .{ .scalar = .u32 };
 const resume_arguments = [_]cir.EdgeArgument{.@"resume"};
@@ -78,6 +90,26 @@ fn DirectBody() type {
     };
 }
 
+fn UnicodeMorphismBody() type {
+    return struct {
+        pub const InitialArgs = u32;
+        pub const Result = u32;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{UnicodeSource};
+        pub const effect_morphisms = .{
+            effect.morphism(0, UnicodeTarget),
+        };
+        pub const schema_types = .{};
+        pub const control_ir: cir.Program = .{
+            .label = "unicode-effect-morphism",
+            .value_types = &.{ u32_type, u32_type },
+            .blocks = &blocks,
+            .entry = 0,
+            .result_type = u32_type,
+        };
+    };
+}
+
 const options: machine.Options = .{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
@@ -92,6 +124,11 @@ const Direct = program_v2.program(
     "direct-effect",
     DirectBody(),
 ).compile(options);
+const UnicodeProgram = program_v2.program(
+    "unicode-effect-morphism",
+    UnicodeMorphismBody(),
+);
+const UnicodeMachine = UnicodeProgram.compile(options);
 
 pub const ReificationBaselineBody = MorphismBody();
 pub const ReificationBaselineProgram = MorphedProgram;
@@ -135,4 +172,12 @@ test "declarative effect morphism lowers to the canonical residual contract" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 11), done.value().*);
+}
+
+test "effect identities admit valid multibyte UTF-8" {
+    try std.testing.expectEqualStrings(
+        "residual.工具.v1",
+        UnicodeMachine.EffectRow.site(0).semantic_identity,
+    );
+    try std.testing.expect(UnicodeProgram.image().bytes.len > 0);
 }

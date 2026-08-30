@@ -5,6 +5,7 @@ const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
+const reducer_clause_v1 = @import("reducer_clause_v1");
 const std = @import("std");
 
 const state_header_length: usize = 8 + 2 + 2 + 32 + 8 + 8 + 4 + 4;
@@ -2374,6 +2375,38 @@ test "predecessor-defined live-through values retain local definitions" {
         state,
     );
     defer std.testing.allocator.free(encoded);
+    const image_bytes = LiveThroughProgram.image().bytes;
+    var image_workspace: image_v1.ValidationWorkspace = .{};
+    const image = try image_v1.validateImage(&image_bytes, &image_workspace);
+    const constructor_id = std.mem.readInt(
+        u32,
+        encoded[state_header_length..][0..4],
+        .little,
+    );
+    const constructor = try image_v1.evaluatorConstructorRecord(
+        image,
+        constructor_id,
+    );
+    const environment_length = std.mem.readInt(
+        u32,
+        encoded[state_header_length + 4 ..][0..4],
+        .little,
+    );
+    const environment = encoded[first_environment_offset..][0..environment_length];
+    var slots = [_]reducer_clause_v1.Slot{.{}} ** 1024;
+    var activation_slots = [_]reducer_clause_v1.Slot{.{}} ** 1024;
+    var projection_workspace: image_v1.ValidationWorkspace = .{};
+    var invariant_sentinel = [_]u8{0xa5} ** 64;
+    projection_workspace.invariant_result = &invariant_sentinel;
+    _ = try reducer_clause_v1.decodeEnvironmentSlots(
+        image,
+        constructor,
+        environment,
+        &slots,
+        &activation_slots,
+        &projection_workspace,
+    );
+    try std.testing.expect(std.mem.allEqual(u8, &invariant_sentinel, 0xa5));
     const forged = try std.testing.allocator.dupe(u8, encoded);
     defer std.testing.allocator.free(forged);
     std.mem.writeInt(
