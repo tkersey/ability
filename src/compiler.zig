@@ -3019,7 +3019,11 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
             if (comptime maybe_instruction == null) return null;
             const instruction = comptime maybe_instruction.?;
             if (instruction.operation != .vector_get or
-                instruction.operands.len != 2)
+                !program_semantics_v1.validOperandCount(
+                    instruction.operation,
+                    instruction.operands.len,
+                    2,
+                ))
             {
                 return null;
             }
