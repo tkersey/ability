@@ -859,6 +859,37 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const test_args = parseTestArgs(b);
+    const process_corpus_release_epoch = std.mem.find(
+        u8,
+        @embedFile("build.zig.zon"),
+        ".version = \"1.7.0\"",
+    ) != null;
+    const process_kernel_wasm_path = b.option(
+        []const u8,
+        "process-kernel-wasm",
+        "Absolute path to the exact Boundary v1.7.0 Process kernel; disables network acquisition.",
+    );
+    if (process_kernel_wasm_path) |path| {
+        if (!std.Io.Dir.path.isAbsolute(path)) {
+            std.process.fatal(
+                "-Dprocess-kernel-wasm must be an absolute path: {s}",
+                .{path},
+            );
+        }
+    }
+    const world_process_host_path = b.option(
+        []const u8,
+        "world-process-host",
+        "Absolute path to a pinned World Process-host worktree for release-staging validation.",
+    );
+    if (world_process_host_path) |path| {
+        if (!std.Io.Dir.path.isAbsolute(path)) {
+            std.process.fatal(
+                "-Dworld-process-host must be an absolute path: {s}",
+                .{path},
+            );
+        }
+    }
     const core = addCoreModules(b, target, optimize);
     const host_core = addCoreModules(b, b.graph.host, optimize);
 
@@ -1822,6 +1853,169 @@ pub fn build(b: *std.Build) void {
         process_kernel_wasm_reproducible.getEmittedBin(),
     );
     process_step.dependOn(&compare_process_kernel_wasm.step);
+    const process_corpus_scope_guard = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\expected=4fd4cd959ea283a6b5af12a228f0d80a102683e3
+        \\tag_commit=$(git rev-parse --verify 'v1.7.0^{commit}')
+        \\test "$tag_commit" = "$expected"
+        \\git diff --quiet "$tag_commit" -- build.zig.zon
+        \\changed=$(
+        \\  {
+        \\    git diff --name-only "$tag_commit" -- src examples
+        \\    git ls-files --others --exclude-standard -- src examples
+        \\  } | sort -u
+        \\)
+        \\if test -n "$changed"; then
+        \\  printf '%s\n' "$changed" >&2
+        \\  exit 1
+        \\fi
+    });
+    process_corpus_scope_guard.setCwd(b.path("."));
+    process_corpus_scope_guard.has_side_effects = true;
+    const process_corpus_generator_commit = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "set -eu; git rev-parse --verify 'HEAD^{commit}' | tr -d '\\n'",
+    });
+    process_corpus_generator_commit.setCwd(b.path("."));
+    process_corpus_generator_commit.has_side_effects = true;
+    const process_corpus_generator_commit_file =
+        process_corpus_generator_commit.captureStdOut(.{
+            .basename = "boundary-process-v1-conformance-generator-commit.txt",
+        });
+    const process_corpus_builder = b.addSystemCommand(&.{"node"});
+    process_corpus_builder.addFileArg(b.path(
+        "scripts/build_process_conformance_corpus.mjs",
+    ));
+    process_corpus_builder.addFileInput(b.path(
+        "scripts/check_process_conformance_corpus.mjs",
+    ));
+    process_corpus_builder.has_side_effects = true;
+    if (process_kernel_wasm_path) |path| {
+        process_corpus_builder.addArg("--kernel");
+        process_corpus_builder.addFileArg(.{ .cwd_relative = path });
+    }
+    process_corpus_builder.addArg("--local-kernel");
+    process_corpus_builder.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    process_corpus_builder.addArg("--vector-emitter");
+    process_corpus_builder.addArtifactArg(process_kernel_vector_executable);
+    process_corpus_builder.addArg("--capacity-emitter");
+    process_corpus_builder.addArtifactArg(capacity_vector_executable);
+    process_corpus_builder.addArg("--generator-commit");
+    process_corpus_builder.addFileContentArg(
+        process_corpus_generator_commit_file,
+    );
+    if (world_process_host_path) |path| {
+        const world_root: std.Build.LazyPath = .{ .cwd_relative = path };
+        const world_validator = world_root.path(
+            b,
+            "scripts/acquire_process_conformance_assets.mjs",
+        );
+        const world_commit_command = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            "set -eu; git rev-parse --verify 'HEAD^{commit}' | tr -d '\\n'",
+        });
+        world_commit_command.setCwd(world_root);
+        world_commit_command.has_side_effects = true;
+        const world_commit = world_commit_command.captureStdOut(.{
+            .basename = "world-process-host-commit.txt",
+        });
+        const world_validator_sha_command = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            "set -eu; shasum -a 256 \"$1\" | awk '{printf \"%s\", $1}'",
+            "sh",
+        });
+        world_validator_sha_command.addFileArg(world_validator);
+        const world_validator_sha =
+            world_validator_sha_command.captureStdOut(.{
+                .basename = "world-process-validator-sha256.txt",
+            });
+        process_corpus_builder.addArg("--world-validator");
+        process_corpus_builder.addFileArg(world_validator);
+        process_corpus_builder.addArg("--world-commit");
+        process_corpus_builder.addFileContentArg(world_commit);
+        process_corpus_builder.addArg("--world-validator-sha256");
+        process_corpus_builder.addFileContentArg(world_validator_sha);
+    }
+    process_corpus_builder.addArg("--output-dir");
+    const process_corpus_output = process_corpus_builder.addOutputDirectoryArg(
+        "boundary-process-v1-conformance",
+    );
+    const process_corpus_manifest = process_corpus_output.path(
+        b,
+        "boundary-process-v1-conformance-corpus.json",
+    );
+    const process_corpus_payload = process_corpus_output.path(
+        b,
+        "boundary-process-v1-conformance-corpus.bin",
+    );
+    const process_corpus_receipt = process_corpus_output.path(
+        b,
+        "boundary-process-v1-conformance-generation-receipt.json",
+    );
+    const process_corpus_validator = b.addSystemCommand(&.{"node"});
+    process_corpus_validator.addFileArg(b.path(
+        "scripts/check_process_conformance_corpus.mjs",
+    ));
+    process_corpus_validator.addFileArg(process_corpus_manifest);
+    process_corpus_validator.addFileArg(process_corpus_payload);
+    const process_corpus_negative = b.addSystemCommand(&.{"node"});
+    process_corpus_negative.addFileArg(b.path(
+        "test/process_conformance_corpus_v1.mjs",
+    ));
+    process_corpus_negative.addFileInput(b.path(
+        "scripts/build_process_conformance_corpus.mjs",
+    ));
+    process_corpus_negative.addFileInput(b.path(
+        "scripts/check_process_conformance_corpus.mjs",
+    ));
+    process_corpus_negative.addFileArg(process_corpus_manifest);
+    process_corpus_negative.addFileArg(process_corpus_payload);
+    process_corpus_negative.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    const process_corpus_check_step = b.step(
+        "check-boundary-process-v1-conformance-corpus",
+        "Build and verify the immutable Boundary v1.7.0 Process corpus.",
+    );
+    process_corpus_check_step.dependOn(&process_corpus_builder.step);
+    process_corpus_check_step.dependOn(&process_corpus_validator.step);
+    process_corpus_check_step.dependOn(&process_corpus_negative.step);
+    process_corpus_check_step.dependOn(&process_corpus_scope_guard.step);
+    process_corpus_check_step.dependOn(&compare_process_kernel_wasm.step);
+    const install_process_corpus_manifest = b.addInstallFile(
+        process_corpus_manifest,
+        "boundary-process-v1-conformance/boundary-process-v1-conformance-corpus.json",
+    );
+    const install_process_corpus_payload = b.addInstallFile(
+        process_corpus_payload,
+        "boundary-process-v1-conformance/boundary-process-v1-conformance-corpus.bin",
+    );
+    const install_process_corpus_receipt = b.addInstallFile(
+        process_corpus_receipt,
+        "boundary-process-v1-conformance/boundary-process-v1-conformance-generation-receipt.json",
+    );
+    inline for (.{
+        install_process_corpus_manifest,
+        install_process_corpus_payload,
+        install_process_corpus_receipt,
+    }) |installation| installation.step.dependOn(process_corpus_check_step);
+    const emit_process_corpus_step = b.step(
+        "emit-boundary-process-v1-conformance-corpus",
+        "Install the exact Process corpus pair and local generation receipt.",
+    );
+    emit_process_corpus_step.dependOn(process_corpus_check_step);
+    inline for (.{
+        install_process_corpus_manifest,
+        install_process_corpus_payload,
+        install_process_corpus_receipt,
+    }) |installation| emit_process_corpus_step.dependOn(&installation.step);
     const kernel_wasm_reproducible = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1-reproducible",
         .root_module = wasm_repro_core.kernel_wasm_v1,
@@ -2918,10 +3112,16 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(release_proof_step);
     check_step.dependOn(receipt_step);
     check_step.dependOn(process_step);
+    if (process_corpus_release_epoch) {
+        check_step.dependOn(process_corpus_check_step);
+    }
 
     requireDirectDependency(&receipt_command.step, release_proof_step);
     requireDirectDependency(receipt_step, &receipt_command.step);
     requireDirectDependency(check_step, release_proof_step);
     requireDirectDependency(check_step, receipt_step);
     requireDirectDependency(check_step, process_step);
+    if (process_corpus_release_epoch) {
+        requireDirectDependency(check_step, process_corpus_check_step);
+    }
 }

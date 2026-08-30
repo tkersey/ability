@@ -93,6 +93,7 @@ authority crosses the Machine boundary.
 - [Boundary Program Image v1](docs/boundary_executable_image_v1.md)
 - [Machine v2 Kernel v1](docs/boundary_kernel_v1.md)
 - [Process ABI v1](docs/process_v1.md)
+- [Process ABI v1 conformance corpus](docs/process_conformance_corpus_v1.md)
 - [Specialization equivalence](docs/specialization_equivalence.md)
 - [Migration to Boundary 1.7](docs/migration_to_1_7.md)
 - [Migration to Boundary 1.6](docs/migration_to_1_6.md)
@@ -113,8 +114,20 @@ Focused gates include `check-boundary-machine`, `check-boundary-rnf`,
 `check-boundary-machine-native-wasm`,
 `check-boundary-machine-no-interpreter`, and
 `check-boundary-machine-deletion`. Process conformance is available through
-`check-boundary-process-v1` and `emit-boundary-process-kernel-v1`. The aggregate also runs the real v0.7
-performance comparison and emits the Boundary-owned completion fields through
+`check-boundary-process-v1` and `emit-boundary-process-kernel-v1`. The immutable
+Boundary v1.7.0 Process corpus has its own check and emit steps:
+
+```text
+zig build check-boundary-process-v1-conformance-corpus -Dprocess-kernel-wasm=/absolute/path/boundary-process-kernel-v1.wasm --summary all
+zig build emit-boundary-process-v1-conformance-corpus -Dprocess-kernel-wasm=/absolute/path/boundary-process-kernel-v1.wasm --summary all
+```
+
+The explicit kernel path makes both operations network-free while retaining
+all kernel identity checks. Without it, the builder acquires and verifies the
+exact `v1.7.0` release asset. Release staging additionally supplies
+`-Dworld-process-host=/absolute/path/world-process-host-v1` so the local receipt
+binds the pinned World validator. The aggregate also runs the real v0.7 performance
+comparison and emits the Boundary-owned completion fields through
 `check-boundary-machine-receipt`.
 
 The aggregate is a release-owner gate and its historical performance lane

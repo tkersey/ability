@@ -104,9 +104,34 @@ new arena cannot be omitted from the calculation or its omission witness. Each
 growth delta uses the arena's aligned physical size rather than only its logical
 payload length.
 
+## Published conformance corpus
+
+The Boundary v1.7.0 evidence backfill is defined by the Process ABI v1
+host-conformance assets
+`boundary-process-v1-conformance-corpus.json` and
+`boundary-process-v1-conformance-corpus.bin`. Boundary owns their canonical
+inputs and expected `ABL_PKO1` bytes because it owns both the native Process
+reference semantics and the fixed `boundary-process-kernel-v1.wasm`. Each
+expected outcome is admitted only after the native result and the exact released
+kernel result are byte-identical.
+
+The corpus is an immutable conformance oracle for external hosts such as World.
+World consumes and checks the Boundary-owned bytes; it does not author expected
+Process outcomes. The corpus is not required for ordinary Boundary compilation
+or execution and is not a runtime, host, scheduler, linker, or semantic layer.
+See [Process ABI v1 conformance corpus](process_conformance_corpus_v1.md) for the
+producer tuple, vector inventory, payload partition, capacity witness, and
+release-backfill rules.
+
 Run:
 
 ```text
 zig build check-boundary-process-v1 --summary all
 zig build emit-boundary-process-kernel-v1
+zig build check-boundary-process-v1-conformance-corpus -Dprocess-kernel-wasm=/absolute/path/boundary-process-kernel-v1.wasm --summary all
+zig build emit-boundary-process-v1-conformance-corpus -Dprocess-kernel-wasm=/absolute/path/boundary-process-kernel-v1.wasm --summary all
 ```
+
+Release staging adds
+`-Dworld-process-host=/absolute/path/world-process-host-v1` so the local receipt
+binds successful validation by the pinned World #47 source.
