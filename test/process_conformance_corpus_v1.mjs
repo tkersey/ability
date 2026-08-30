@@ -8,6 +8,7 @@ import path from "node:path";
 import {
   CORPUS_IDENTITY,
   CorpusValidationError,
+  EXPECTED_ARTIFACT_IDS,
   MAX_MANIFEST_BYTES,
   MAX_PAYLOAD_BYTES,
   VECTOR_DESCRIPTORS,
@@ -88,12 +89,12 @@ async function expectRejectAsync(label, operation, ErrorType, expectedCodes = []
   negativeCaseCount += 1;
 }
 
-function rejectManifest(label, mutate, payload = payloadBytes) {
+function rejectManifest(label, mutate, expectedCode = null, payload = payloadBytes) {
   expectReject(label, () => {
     const candidate = cloneManifest();
     mutate(candidate);
     validateCorpusBytes(canonicalJsonBytes(candidate), payload);
-  }, CorpusValidationError);
+  }, CorpusValidationError, expectedCode === null ? [] : [expectedCode]);
 }
 
 function refreshDigests(manifest, payload) {
@@ -113,7 +114,7 @@ function refreshDigests(manifest, payload) {
   }
 }
 
-function rejectPayloadMutation(label, artifactId, mutate) {
+function rejectPayloadMutation(label, artifactId, mutate, expectedCode = null) {
   expectReject(label, () => {
     const candidate = cloneManifest();
     const payload = Buffer.from(payloadBytes);
@@ -122,7 +123,7 @@ function rejectPayloadMutation(label, artifactId, mutate) {
     mutate(payload.subarray(artifact.offset, artifact.offset + artifact.byteLength));
     refreshDigests(candidate, payload);
     validateCorpusBytes(canonicalJsonBytes(candidate), payload);
-  }, CorpusValidationError);
+  }, CorpusValidationError, expectedCode === null ? [] : [expectedCode]);
 }
 
 // Locked producer, Boundary, and kernel identity.
@@ -171,14 +172,14 @@ rejectManifest("expected artifact digest divergence", (manifest) => {
 
 // Canonical ABL_PKO1 syntax and kind binding, with all digests recomputed so
 // rejection cannot be credited to a stale hash.
-rejectPayloadMutation("malformed PKO1", "typed-effect-initial.outcome", (bytes) => { bytes[0] ^= 1; });
-rejectPayloadMutation("high-bit PKO1 magic", "typed-effect-initial.outcome", (bytes) => { bytes[0] |= 0x80; });
-rejectPayloadMutation("PKO1 kind mismatch", "recursion-complete.outcome", (bytes) => { bytes[10] = 0; });
+rejectPayloadMutation("malformed PKO1", "typed-effect-initial.outcome", (bytes) => { bytes[0] ^= 1; }, "CORPUS_OUTCOME_INVALID");
+rejectPayloadMutation("high-bit PKO1 magic", "typed-effect-initial.outcome", (bytes) => { bytes[0] |= 0x80; }, "CORPUS_OUTCOME_INVALID");
+rejectPayloadMutation("PKO1 kind mismatch", "recursion-complete.outcome", (bytes) => { bytes[10] = 0; }, "CORPUS_OUTCOME_KIND_MISMATCH");
 rejectPayloadMutation("high-bit ERQ1 magic", "typed-effect-initial.outcome", (bytes) => {
   const primary = Number(bytes.readBigUInt64LE(12));
   bytes[32 + primary] |= 0x80;
 });
-rejectPayloadMutation("high-bit ERS1 magic", "typed-resume.effect-result", (bytes) => { bytes[0] |= 0x80; });
+rejectPayloadMutation("high-bit ERS1 magic", "typed-resume.effect-result", (bytes) => { bytes[0] |= 0x80; }, "CORPUS_EFFECT_INVALID");
 rejectPayloadMutation("authored failure tag drift", "authored-failure-v2-bad-math.outcome", (bytes) => {
   bytes.writeUInt32LE(99, 32);
 });
@@ -194,13 +195,15 @@ expectReject("high-bit PKI1 magic", () => {
 // Exact vector-local artifact inventory and complete ordered partition.
 rejectManifest("duplicate artifact id", (manifest) => { manifest.artifacts[1].id = manifest.artifacts[0].id; });
 rejectManifest("invalid artifact id", (manifest) => { manifest.artifacts[0].id = "Invalid"; });
-rejectManifest("artifact gap", (manifest) => { manifest.artifacts[1].offset += 1; });
-rejectManifest("artifact overlap", (manifest) => { manifest.artifacts[1].offset -= 1; });
+rejectManifest("artifact gap", (manifest) => { manifest.artifacts[1].offset += 1; }, "CORPUS_PARTITION_INVALID");
+rejectManifest("artifact overlap", (manifest) => { manifest.artifacts[1].offset -= 1; }, "CORPUS_PARTITION_INVALID");
 rejectManifest("artifact outside payload", (manifest) => {
   const artifact = manifest.artifacts.at(-1);
   artifact.byteLength = manifest.payload.byteLength;
-});
-rejectManifest("payload not fully covered", (manifest) => { manifest.artifacts.at(-1).byteLength -= 1; });
+}, "CORPUS_PARTITION_INVALID");
+rejectManifest("payload not fully covered", (manifest) => {
+  manifest.artifacts.at(-1).byteLength -= 1;
+}, "CORPUS_PARTITION_INVALID");
 rejectManifest("unreferenced artifact", (manifest) => {
   manifest.vectors[0].image = manifest.vectors[1].image;
 });
@@ -378,9 +381,53 @@ const parityRecords = VECTOR_DESCRIPTORS.map((descriptor) => {
     kernelOutcome: Buffer.from(outcome),
   });
 });
-const reconstructed = buildCorpusFromParityRecords(parityRecords);
+const constructedArtifactIds = [];
+const reconstructed = buildCorpusFromParityRecords(parityRecords, {
+  onArtifactConstruction: (id) => constructedArtifactIds.push(id),
+});
+if (constructedArtifactIds.length !== EXPECTED_ARTIFACT_IDS.length ||
+    constructedArtifactIds.some((id, index) => id !== EXPECTED_ARTIFACT_IDS[index])) {
+  throw new Error(
+    `valid reconstruction observed noncanonical artifact construction: ${JSON.stringify(constructedArtifactIds)}`,
+  );
+}
 if (!reconstructed.manifestBytes.equals(manifestBytes) || !reconstructed.payloadBytes.equals(payloadBytes)) {
   throw new Error("public corpus did not reconstruct through the canonical builder");
+}
+
+// The construction callback runs after parity verification. Mutating every
+// caller-owned buffer from that callback must not alter the verified snapshot
+// used to construct the corpus.
+const mutableAliasRecords = parityRecords.map((record) => ({
+  id: record.id,
+  operation: record.operation,
+  input: parseKernelInput(Buffer.from(record.input.bytes), `${record.id} mutable alias PKI1`),
+  nativeOutcome: Buffer.from(record.nativeOutcome),
+  kernelOutcome: Buffer.from(record.kernelOutcome),
+}));
+let mutableAliasesChanged = false;
+const ownedSnapshotReconstruction = buildCorpusFromParityRecords(mutableAliasRecords, {
+  onArtifactConstruction: () => {
+    if (mutableAliasesChanged) return;
+    mutableAliasesChanged = true;
+    for (const record of mutableAliasRecords) {
+      for (const bytes of [
+        record.input.bytes,
+        record.input.image,
+        record.input.instance,
+        record.input.effectResult,
+        record.nativeOutcome,
+        record.kernelOutcome,
+      ]) {
+        if (bytes !== null && bytes.length !== 0) bytes[0] ^= 0xff;
+      }
+    }
+  },
+});
+if (!mutableAliasesChanged ||
+    !ownedSnapshotReconstruction.manifestBytes.equals(reconstructed.manifestBytes) ||
+    !ownedSnapshotReconstruction.payloadBytes.equals(reconstructed.payloadBytes)) {
+  throw new Error("artifact construction did not use an owned verified-parity snapshot");
 }
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "boundary-process-corpus-negative-"));

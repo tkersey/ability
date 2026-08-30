@@ -531,9 +531,25 @@ function verifyParityRecords(records) {
   for (const record of records) {
     assertOutcomeParity(record.id, record.nativeOutcome, record.kernelOutcome);
   }
+  const ownedRecords = records.map((record) => Object.freeze({
+    id: record.id,
+    operation: record.operation,
+    input: Object.freeze({
+      bytes: Buffer.from(record.input.bytes),
+      instanceKind: record.input.instanceKind,
+      effectResultPresent: record.input.effectResultPresent,
+      image: Buffer.from(record.input.image),
+      instance: Buffer.from(record.input.instance),
+      effectResult: record.input.effectResult === null
+        ? null
+        : Buffer.from(record.input.effectResult),
+    }),
+    nativeOutcome: Buffer.from(record.nativeOutcome),
+    kernelOutcome: Buffer.from(record.kernelOutcome),
+  }));
   return Object.freeze({
     [verifiedParityBrand]: true,
-    records: Object.freeze([...records]),
+    records: Object.freeze(ownedRecords),
   });
 }
 
@@ -898,10 +914,12 @@ export function validateWorldSourceIdentity(options) {
 async function validateWithWorld(options, manifestBytes, payloadBytes) {
   const supplied = [options.worldValidator, options.worldCommit, options.worldValidatorSha256];
   if (supplied.every((value) => value === undefined)) return false;
-  const { observedDigest } = validateWorldSourceIdentity(options);
+  const { source, observedDigest } = validateWorldSourceIdentity(options);
   let module;
   try {
-    module = await import(`${pathToFileURL(path.resolve(options.worldValidator)).href}?sha256=${observedDigest}`);
+    module = await import(
+      `data:text/javascript;base64,${source.toString("base64")}#sha256=${observedDigest}`,
+    );
   } catch (error) {
     fail("WORLD_CONTRACT_REJECTED", "could not load the pinned World validator", {
       cause: error?.message ?? String(error),
