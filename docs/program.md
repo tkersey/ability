@@ -48,10 +48,11 @@ operand per Boundary-defined failure role after its ordinary operands. This
 selects the exact authored Failure returned by that instruction and emits
 evaluator semantics version 2. Ordinary instructions retain the version-1
 role-name behavior.
-`Program.componentAdmission().instructionFailureProjection(instruction)`
-normalizes both forms to the ordinary operand count plus admitted Failure tags
-in role order for generic build-time linkers; it does not expose the raw clause
-evaluator.
+
+Authored Failure operands have type `Body.Failure`, are defined by canonical
+constant instructions, and appear in Boundary-defined role order. Boundary
+validates and executes this rule directly; compiler-private source,
+reachability, and canonicalization remain private.
 
 `compiler_limits` has type `boundary.ir.CompilerLimits`. It can lower the
 implementation ceilings for values, blocks, constructors, constructor
@@ -78,7 +79,7 @@ import-free Process kernel.
 
 For local use, instantiate `boundary.Driver(Machine)`. The Driver owns only
 Machine state and handler-local resources; it repeatedly calls `Machine.step`
-and `Machine.resume`, so it cannot diverge semantically from World execution.
+and `Machine.resume`, so it shares the same compiled Machine semantics.
 
 `boundary.Agent` is deprecated compatibility surface. New agent-specific
 authoring belongs in the separate Agent package; both direct and Agent-authored

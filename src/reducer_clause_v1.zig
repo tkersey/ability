@@ -768,6 +768,30 @@ pub fn constantBytes(
     return error.InvalidImage;
 }
 
+fn ordinaryInstructionOperandCount(
+    image: anytype,
+    instruction: []const u8,
+) Error!u16 {
+    const operation = std.enums.fromInt(
+        program_semantics_v1.WireOperation,
+        readInt(u16, instruction, 6),
+    ) orelse return error.InvalidImage;
+    const actual = readInt(u16, instruction, 10);
+    const base = program_semantics_v1.fixedOperandCount(operation) orelse
+        return actual;
+    if (actual == base) return base;
+    const failure_count = program_semantics_v1.failureRolesForWire(
+        operation,
+    ).len;
+    if (image.catalogs.envelope.header.evaluator_semantics_version ==
+        image_v1.evaluator_semantics_v2 and failure_count != 0 and
+        actual == base + failure_count)
+    {
+        return base;
+    }
+    return error.InvalidImage;
+}
+
 pub fn executeScalarOperation(
     image: anytype,
     instruction: []const u8,
@@ -779,14 +803,19 @@ pub fn executeScalarOperation(
 ) Error!?u32 {
     const operation = readInt(u16, instruction, 6);
     const operand_count = readInt(u16, instruction, 10);
+    const ordinary_operand_count = try ordinaryInstructionOperandCount(
+        image,
+        instruction,
+    );
     var operands: [3]u16 = undefined;
-    if (operand_count > operands.len) return error.InvalidImage;
+    if (ordinary_operand_count > operands.len) return error.InvalidImage;
     for (0..operand_count) |index| {
-        operands[index] = readInt(u16, instruction, 16 + index * 2);
-        if (!slots[operands[index]].initialized) return error.InvalidBindings;
+        const operand = readInt(u16, instruction, 16 + index * 2);
+        if (!slots[operand].initialized) return error.InvalidBindings;
+        if (index < ordinary_operand_count) operands[index] = operand;
     }
     if (operation == 23) {
-        if (operand_count != 3 or slots[operands[0]].bytes.len != 1) {
+        if (ordinary_operand_count != 3 or slots[operands[0]].bytes.len != 1) {
             return error.InvalidImage;
         }
         slots[result] = slots[
@@ -798,7 +827,7 @@ pub fn executeScalarOperation(
         return null;
     }
     if (operation == 57) {
-        if (operand_count != 1 or slots[operands[0]].bytes.len != 4) {
+        if (ordinary_operand_count != 1 or slots[operands[0]].bytes.len != 4) {
             return error.InvalidImage;
         }
         slots[result] = slots[operands[0]];
@@ -920,10 +949,14 @@ pub fn executeCompositeOperation(
 ) Error!?u32 {
     const operation = readInt(u16, instruction, 6);
     const operand_count = readInt(u16, instruction, 10);
+    const ordinary_operand_count = try ordinaryInstructionOperandCount(
+        image,
+        instruction,
+    );
     const immediate = readInt(u32, instruction, 12);
     if (operation == 24) {
         var length: usize = 0;
-        for (0..operand_count) |index| {
+        for (0..ordinary_operand_count) |index| {
             const operand = readInt(u16, instruction, 16 + index * 2);
             if (!slots[operand].initialized) return error.InvalidBindings;
             length = std.math.add(
@@ -934,7 +967,7 @@ pub fn executeCompositeOperation(
         }
         const output = try allocateScratch(scratch, scratch_cursor, capacity, length);
         var cursor: usize = 0;
-        for (0..operand_count) |index| {
+        for (0..ordinary_operand_count) |index| {
             const operand = readInt(u16, instruction, 16 + index * 2);
             @memcpy(
                 output[cursor..][0..slots[operand].bytes.len],
@@ -946,10 +979,11 @@ pub fn executeCompositeOperation(
         return null;
     }
     var operands: [3]u16 = undefined;
-    if (operand_count > operands.len) return error.InvalidImage;
+    if (ordinary_operand_count > operands.len) return error.InvalidImage;
     for (0..operand_count) |index| {
-        operands[index] = readInt(u16, instruction, 16 + index * 2);
-        if (!slots[operands[index]].initialized) return error.InvalidBindings;
+        const operand = readInt(u16, instruction, 16 + index * 2);
+        if (!slots[operand].initialized) return error.InvalidBindings;
+        if (index < ordinary_operand_count) operands[index] = operand;
     }
     switch (operation) {
         24 => unreachable,
@@ -995,7 +1029,10 @@ pub fn executeCompositeOperation(
             if (immediate >= case_count) return error.InvalidImage;
             const case_offset = 8 + @as(usize, immediate) * 8;
             const tag = readInt(u32, node.payload, case_offset);
-            const payload = if (operand_count == 0) &.{} else slots[operands[0]].bytes;
+            const payload = if (ordinary_operand_count == 0)
+                &.{}
+            else
+                slots[operands[0]].bytes;
             const output = try allocateScratch(
                 scratch,
                 scratch_cursor,

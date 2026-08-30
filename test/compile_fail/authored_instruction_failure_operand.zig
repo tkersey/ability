@@ -48,7 +48,7 @@ const Body = struct {
     pub const effect_sites = .{};
     pub const schema_types = .{FailureType};
     pub const control_ir: cir.Program = .{
-        .label = "dynamic-instruction-failure-operand",
+        .label = "authored-instruction-failure-operand",
         .value_types = &.{
             .{ .scalar = .u8 },
             .{ .scalar = .u8 },
@@ -63,5 +63,5 @@ const Body = struct {
 };
 
 comptime {
-    _ = program_v2.program("dynamic-instruction-failure-operand", Body);
+    _ = program_v2.program("authored-instruction-failure-operand", Body);
 }

@@ -30,30 +30,6 @@ fn constructorFieldsEqual(
     return true;
 }
 
-/// Return the authenticated build-time component projection for one canonical
-/// Boundary Program.
-///
-/// Consumers must use this owner function instead of trusting a structurally
-/// compatible `componentAdmission` declaration supplied by an arbitrary type.
-pub fn componentAdmission(comptime Program: type) type {
-    if (!@hasDecl(Program, "program_label") or
-        !@hasDecl(Program, "component"))
-    {
-        @compileError(
-            "Boundary component admission requires a canonical Boundary Program",
-        );
-    }
-    const label: []const u8 = Program.program_label;
-    const Body = Program.component();
-    const Canonical = program(label, Body);
-    if (Canonical != Program) {
-        @compileError(
-            "Boundary component admission requires a canonical Boundary Program",
-        );
-    }
-    return Canonical.componentAdmission();
-}
-
 /// Declare one typed Boundary source program with one Machine meaning.
 pub fn program(comptime label: []const u8, comptime Body: type) type {
     const Reified = compiler.ReifiedFor(label, Body);
@@ -86,62 +62,6 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
         /// Compile-time-only whole-program value catalog size for proof.
         pub const reachable_value_catalog_bytes =
             Definition.reachable_value_catalog_bytes;
-
-        /// Return the exact generic compiler input used by World linking.
-        ///
-        /// Optional declarations remain optional; this projection deliberately
-        /// introduces no second owner that can drift from the source Body.
-        pub fn component() type {
-            return Body;
-        }
-
-        /// Return the admitted compiler facts needed by build-time linkers.
-        ///
-        /// This projection carries Boundary-owned validation, reachability,
-        /// canonical source mappings, residual analysis, and compatibility
-        /// metering without transferring graph-composition authority.
-        pub fn componentAdmission() type {
-            return struct {
-                pub const SourceBody = Body;
-                pub const source_control_ir = Body.control_ir;
-                pub const semantic_control_ir = Reified.control;
-                pub const reachability = Reified.reachability;
-                pub const semantic_canonicalization =
-                    Reified.semantic_canonicalization;
-                pub const residual_effects = Reified.residual_effects;
-                pub const effective_block_costs =
-                    MachineV2Lowering.effective_block_costs;
-                pub const program_transition_digest =
-                    Reified.program_transition_digest;
-                pub const machine_v2_semantic_digest =
-                    MachineV2Lowering.machine_v2_semantic_digest;
-                pub const evaluator_semantics_version =
-                    Reified.evaluator_semantics_version;
-
-                /// Return the source Failure tags, in evaluator role order,
-                /// that a linker must map when it embeds this instruction in
-                /// a Program with a different Failure type.
-                pub fn instructionFailureTags(
-                    comptime instruction: anytype,
-                ) @TypeOf(compiler.instructionFailureTags(Body, instruction)) {
-                    return compiler.instructionFailureTags(Body, instruction);
-                }
-
-                /// Normalize evaluator-v1 role defaults and evaluator-v2
-                /// authored constants into one linker-owned source view.
-                pub fn instructionFailureProjection(
-                    comptime instruction: anytype,
-                ) @TypeOf(compiler.instructionFailureProjection(
-                    Body,
-                    instruction,
-                )) {
-                    return compiler.instructionFailureProjection(
-                        Body,
-                        instruction,
-                    );
-                }
-            };
-        }
 
         /// Compile this program to its sole direct Boundary Machine.
         pub fn compileV2(comptime options: machine.Options) type {

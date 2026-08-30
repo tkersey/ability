@@ -783,68 +783,20 @@ fn constantFailureAtValue(
                 .constant => |index| blk: {
                     if (@TypeOf(Body.constants[index]) != Body.Failure) {
                         @compileError(
-                            "mapped instruction failure operands must be canonical Body.Failure constants",
+                            "authored instruction failure operands must be canonical Body.Failure constants",
                         );
                     }
                     break :blk Body.constants[index];
                 },
                 else => @compileError(
-                    "mapped instruction failure operands must be canonical Body.Failure constants",
+                    "authored instruction failure operands must be canonical Body.Failure constants",
                 ),
             };
         }
     }
     @compileError(
-        "mapped instruction failure operand has no constant definition",
+        "authored instruction failure operand has no constant definition",
     );
-}
-
-pub fn instructionFailureProjection(
-    comptime Body: type,
-    comptime instruction: anytype,
-) struct {
-    ordinary_operand_count: usize,
-    failure_tags: [
-        program_semantics_v1.failureRoles(
-            instruction.operation,
-        ).len
-    ]u32,
-} {
-    const roles = comptime program_semantics_v1.failureRoles(
-        instruction.operation,
-    );
-    const ordinary_operand_count = comptime program_semantics_v1.fixedOperandCount(
-        program_semantics_v1.wireOperation(instruction.operation),
-    ) orelse instruction.operands.len;
-    var tags: [roles.len]u32 = undefined;
-    inline for (roles, 0..) |role, index| {
-        const failure = if (comptime program_semantics_v1.usesMappedFailures(
-            instruction.operation,
-            instruction.operands.len,
-        ))
-            constantFailureAtValue(
-                Body,
-                Body.control_ir,
-                instruction.operands[ordinary_operand_count + index],
-            )
-        else
-            failureNamed(
-                Body,
-                program_semantics_v1.failureName(role),
-            );
-        tags[index] = @intCast(@intFromEnum(failure));
-    }
-    return .{
-        .ordinary_operand_count = ordinary_operand_count,
-        .failure_tags = tags,
-    };
-}
-
-pub fn instructionFailureTags(
-    comptime Body: type,
-    comptime instruction: anytype,
-) [program_semantics_v1.failureRoles(instruction.operation).len]u32 {
-    return instructionFailureProjection(Body, instruction).failure_tags;
 }
 
 fn failureFromTag(comptime Body: type, comptime tag: u16) Body.Failure {
@@ -947,7 +899,7 @@ fn validateInstruction(
     const failure_roles = program_semantics_v1.failureRoles(
         instruction.operation,
     );
-    if (program_semantics_v1.usesMappedFailures(
+    if (program_semantics_v1.usesAuthoredFailures(
         instruction.operation,
         instruction.operands.len,
     )) {
@@ -959,7 +911,7 @@ fn validateInstruction(
                 Body.Failure)
             {
                 @compileError(
-                    "mapped instruction failure operands must use Body.Failure",
+                    "authored instruction failure operands must use Body.Failure",
                 );
             }
             _ = constantFailureAtValue(
@@ -2348,7 +2300,7 @@ fn evaluatorSemanticsVersion(
     for (program.blocks) |block| {
         if (!reachability.contains(block.id)) continue;
         for (block.instructions) |instruction| {
-            if (program_semantics_v1.usesMappedFailures(
+            if (program_semantics_v1.usesAuthoredFailures(
                 instruction.operation,
                 instruction.operands.len,
             )) return 2;

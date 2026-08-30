@@ -27,12 +27,13 @@ src/reducer_clause_v1.zig
 src/reified_program_v1.zig
 src/rnf.zig
 src/root.zig
+test/authored_failure_v2_fixture.zig
+test/compile_fail/authored_instruction_failure_operand.zig
 test/compile_fail/dead_control_malformed_constant.zig
 test/compile_fail/dead_control_schema_reference.zig
 test/compile_fail/driver_response_type_mismatch.zig
 test/compile_fail/driver_semantic_contract_mismatch.zig
 test/compile_fail/driver_semantic_site_mismatch.zig
-test/compile_fail/dynamic_instruction_failure_operand.zig
 test/compile_fail/effect_handler_type_mismatch.zig
 test/compile_fail/effect_morphism_invalid_utf8.zig
 test/compile_fail/effect_morphism_type_mismatch.zig
@@ -72,6 +73,7 @@ test/machine_yield.zig
 test/process_advance_v1.zig
 test/process_kernel_capacity_vector.zig
 test/process_kernel_vector.zig
+test/process_relay_malformed_kernel.zig
 test/process_v1.zig
 test/program_algebraic_collection_operations.zig
 test/program_compile.zig

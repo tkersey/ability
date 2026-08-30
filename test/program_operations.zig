@@ -1,3 +1,4 @@
+const authored_failure = @import("authored_failure_v2_fixture");
 const cir = @import("control_ir");
 const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
@@ -132,76 +133,6 @@ const PureMachine = Program.compile(pure_options);
 const PureImage = Program.image();
 const PureProfile = Program.machineV2Profile(pure_options);
 
-const MappedFailure = enum { mapped };
-const mapped_failure_value_types = [_]cir.ValueType{
-    .{ .scalar = .u8 },
-    .{ .scalar = .u8 },
-    .{ .schema = 0 },
-    .{ .scalar = .u8 },
-};
-const mapped_failure_instructions = [_]cir.Instruction{
-    .{
-        .kind = .constant,
-        .result = 0,
-        .operation = .{ .constant = 0 },
-    },
-    .{
-        .kind = .constant,
-        .result = 1,
-        .operation = .{ .constant = 1 },
-    },
-    .{
-        .kind = .constant,
-        .result = 2,
-        .operation = .{ .constant = 2 },
-    },
-    .{
-        .kind = .pure,
-        .result = 3,
-        .operands = &.{ 0, 1, 2 },
-        .operation = .integer_add,
-    },
-};
-const mapped_failure_blocks = [_]cir.Block{.{
-    .id = 0,
-    .instructions = &mapped_failure_instructions,
-    .terminator = .{ .return_value = 3 },
-}};
-const MappedFailureBody = struct {
-    pub const InitialArgs = void;
-    pub const Result = u8;
-    pub const Failure = MappedFailure;
-    pub const constants = .{
-        @as(u8, std.math.maxInt(u8)),
-        @as(u8, 1),
-        MappedFailure.mapped,
-    };
-    pub const effect_sites = .{};
-    pub const schema_types = .{MappedFailure};
-    pub const control_ir: cir.Program = .{
-        .label = "mapped-instruction-failure",
-        .value_types = &mapped_failure_value_types,
-        .blocks = &mapped_failure_blocks,
-        .entry = 0,
-        .result_type = .{ .scalar = .u8 },
-    };
-};
-const MappedFailureProgram = program_v2.program(
-    "mapped-instruction-failure",
-    MappedFailureBody,
-);
-const MappedFailureImage = MappedFailureProgram.image();
-const MappedFailureMachine = MappedFailureProgram.compile(.{
-    .maximum_frames = 2,
-    .maximum_state_bytes = 1024,
-    .maximum_machine_fuel = 32,
-});
-const MappedFailureProfile = MappedFailureProgram.machineV2Profile(.{
-    .maximum_frames = 2,
-    .maximum_state_bytes = 1024,
-    .maximum_machine_fuel = 32,
-});
-
 pub const ReificationBaselineBody = Body;
 pub const ReificationBaselineProgram = Program;
 pub const ReificationBaselineMachine = PureMachine;
@@ -305,81 +236,107 @@ test "compiled pure operations construct products vectors and text" {
     );
 }
 
-test "evaluator semantics v2 maps an instruction failure through explicit operands" {
-    const projection = MappedFailureProgram.componentAdmission()
-        .instructionFailureProjection(mapped_failure_instructions[3]);
-    try std.testing.expectEqual(@as(usize, 2), projection.ordinary_operand_count);
-    try std.testing.expectEqual(
-        @as(u32, @intFromEnum(MappedFailure.mapped)),
-        projection.failure_tags[0],
+fn expectAuthoredFailure(
+    input: bool,
+    expected: authored_failure.Failure,
+) !void {
+    const state = try authored_failure.Machine.initialState(
+        std.testing.allocator,
+        input,
     );
-    try std.testing.expectEqual(
-        image_v1.evaluator_semantics_v2,
-        MappedFailureImage.evaluator_semantics_version,
-    );
-    try std.testing.expectEqual(
-        image_v1.evaluator_semantics_v2,
-        std.mem.readInt(u16, MappedFailureImage.bytes[10..12], .little),
-    );
-
-    const state = try MappedFailureMachine.initialState(std.testing.allocator, {});
-    defer MappedFailureMachine.deinitState(state);
-    var fuel: u64 = 32;
-    switch (try MappedFailureMachine.step(state, &fuel)) {
+    defer authored_failure.Machine.deinitState(state);
+    var fuel: u64 = 64;
+    switch (try authored_failure.Machine.step(state, &fuel)) {
         .failed => |failure| switch (failure) {
             .authored => |authored| try std.testing.expectEqual(
-                MappedFailure.mapped,
+                expected,
                 authored,
             ),
             else => return error.TestUnexpectedResult,
         },
         else => return error.TestUnexpectedResult,
     }
+}
 
-    var workspace: image_v1.ValidationWorkspace = .{};
-    const image = try image_v1.validateImage(
-        &MappedFailureImage.bytes,
-        &workspace,
+fn instructionOperandOffset(
+    image: []const u8,
+    target_result: u16,
+    operand_index: usize,
+) !usize {
+    const envelope = try image_v1.validateEnvelope(image);
+    const section_offset: usize = @intCast(envelope.sections[7].offset);
+    const segment_count = std.mem.readInt(
+        u32,
+        image[section_offset..][0..4],
+        .little,
     );
-    const bound = try kernel_v1.bindMachineV2(
-        image,
-        &MappedFailureProfile.bytes,
-        &workspace,
-    );
-    var kernel_state: [1024]u8 = undefined;
-    var invariant_scratch: [1024]u8 = undefined;
-    const state_length = try kernel_v1.initial(
-        bound,
-        &.{},
-        &kernel_state,
-        &invariant_scratch,
-        &workspace,
-    );
-    var next_state: [1024]u8 = undefined;
-    var output: [4]u8 = undefined;
-    var scratch: [4096]u8 = undefined;
-    var kernel_fuel: u64 = 32;
-    const outcome = try kernel_v1.step(
-        bound,
-        kernel_state[0..state_length],
-        &kernel_fuel,
-        &next_state,
-        &output,
-        &scratch,
-        &workspace,
-    );
-    const failure_bytes = switch (outcome) {
-        .failed => |bytes| bytes,
-        else => return error.TestUnexpectedResult,
-    };
+    var segment_cursor = section_offset + 4;
+    for (0..segment_count) |_| {
+        const segment_length = std.mem.readInt(
+            u32,
+            image[segment_cursor..][0..4],
+            .little,
+        );
+        const parameter_count = std.mem.readInt(
+            u16,
+            image[segment_cursor + 10 ..][0..2],
+            .little,
+        );
+        const instruction_count = std.mem.readInt(
+            u32,
+            image[segment_cursor + 12 ..][0..4],
+            .little,
+        );
+        var cursor = segment_cursor + image_v1.segment_prefix_length +
+            @as(usize, parameter_count) * 2;
+        for (0..instruction_count) |_| {
+            const instruction_length = std.mem.readInt(
+                u32,
+                image[cursor..][0..4],
+                .little,
+            );
+            if (std.mem.readInt(
+                u16,
+                image[cursor + 8 ..][0..2],
+                .little,
+            ) == target_result) return cursor + 16 + operand_index * 2;
+            cursor += instruction_length;
+        }
+        segment_cursor += segment_length;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "evaluator semantics v2 returns direct authored failure values" {
     try std.testing.expectEqual(
-        @as(u32, @intFromEnum(MappedFailure.mapped)),
-        std.mem.readInt(u32, failure_bytes[0..4], .little),
+        image_v1.evaluator_semantics_v2,
+        authored_failure.Image.evaluator_semantics_version,
+    );
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v2,
+        std.mem.readInt(
+            u16,
+            authored_failure.Image.bytes[10..12],
+            .little,
+        ),
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(
+        &authored_failure.Image.bytes,
+        &workspace,
+    );
+    try expectAuthoredFailure(
+        authored_failure.bad_math_input,
+        .bad_math,
+    );
+    try expectAuthoredFailure(
+        authored_failure.bad_position_input,
+        .bad_position,
     );
 }
 
 test "evaluator semantics v1 rejects explicit instruction failure operands" {
-    var downgraded = MappedFailureImage.bytes;
+    var downgraded = authored_failure.Image.bytes;
     std.mem.writeInt(
         u16,
         downgraded[10..12],
@@ -390,6 +347,155 @@ test "evaluator semantics v1 rejects explicit instruction failure operands" {
     try std.testing.expectError(
         error.InvalidInstruction,
         image_v1.validateImage(&downgraded, &workspace),
+    );
+}
+
+test "evaluator semantics v2 requires an authored failure operand" {
+    var promoted = PureImage.bytes;
+    std.mem.writeInt(
+        u16,
+        promoted[10..12],
+        image_v1.evaluator_semantics_v2,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidFailureMap,
+        image_v1.validateImage(&promoted, &workspace),
+    );
+}
+
+test "evaluator semantics v2 requires canonical constant provenance" {
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(
+        &authored_failure.AdmissionImage.bytes,
+        &workspace,
+    );
+    inline for (.{
+        authored_failure.admission_parameter_value,
+        authored_failure.admission_copy_value,
+        authored_failure.admission_computed_value,
+    }) |value| {
+        var malformed = authored_failure.AdmissionImage.bytes;
+        const offset = try instructionOperandOffset(
+            &malformed,
+            authored_failure.admission_result_value,
+            2,
+        );
+        std.mem.writeInt(
+            u16,
+            malformed[offset..][0..2],
+            value,
+            .little,
+        );
+        workspace = .{};
+        try std.testing.expectError(
+            error.InvalidFailureMap,
+            image_v1.validateImage(&malformed, &workspace),
+        );
+    }
+}
+
+test "unreachable authored failures do not upgrade BPI1" {
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v1,
+        authored_failure.UnreachableAuthoredImage.evaluator_semantics_version,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &authored_failure.UnreachableV1Image.bytes,
+        &authored_failure.UnreachableAuthoredImage.bytes,
+    );
+}
+
+test "two-role authored division selects the exact failure role" {
+    const success_state = try authored_failure.DivisionMachine.initialState(
+        std.testing.allocator,
+        authored_failure.division_success_input,
+    );
+    defer authored_failure.DivisionMachine.deinitState(success_state);
+    var success_fuel: u64 = 32;
+    const done = switch (try authored_failure.DivisionMachine.step(
+        success_state,
+        &success_fuel,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(i8, 4), done.value().*);
+
+    inline for (.{
+        .{ authored_failure.division_overflow_input, authored_failure.Failure.bad_math },
+        .{ authored_failure.division_by_zero_input, authored_failure.Failure.bad_position },
+    }) |case| {
+        const state = try authored_failure.DivisionMachine.initialState(
+            std.testing.allocator,
+            case[0],
+        );
+        defer authored_failure.DivisionMachine.deinitState(state);
+        var fuel: u64 = 32;
+        switch (try authored_failure.DivisionMachine.step(state, &fuel)) {
+            .failed => |failure| switch (failure) {
+                .authored => |authored| try std.testing.expectEqual(
+                    case[1],
+                    authored,
+                ),
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(
+        &authored_failure.DivisionImage.bytes,
+        &workspace,
+    );
+}
+
+test "authored composite operations separate ordinary and failure operands" {
+    const success_state = try authored_failure.CompositeMachine.initialState(
+        std.testing.allocator,
+        authored_failure.composite_success_input,
+    );
+    defer authored_failure.CompositeMachine.deinitState(success_state);
+    var success_fuel: u64 = 32;
+    const done = switch (try authored_failure.CompositeMachine.step(
+        success_state,
+        &success_fuel,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqual(@as(u32, 1), try done.value().len());
+    try std.testing.expectEqual(@as(u8, 9), (try done.value().get(0)).?);
+
+    const failure_state = try authored_failure.CompositeMachine.initialState(
+        std.testing.allocator,
+        authored_failure.composite_failure_input,
+    );
+    defer authored_failure.CompositeMachine.deinitState(failure_state);
+    var failure_fuel: u64 = 32;
+    switch (try authored_failure.CompositeMachine.step(
+        failure_state,
+        &failure_fuel,
+    )) {
+        .failed => |failure| switch (failure) {
+            .authored => |authored| try std.testing.expectEqual(
+                authored_failure.Failure.bad_position,
+                authored,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(
+        &authored_failure.CompositeImage.bytes,
+        &workspace,
     );
 }
 

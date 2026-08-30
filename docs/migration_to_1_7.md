@@ -4,6 +4,12 @@ Boundary 1.7 adds the open Process ABI v1 and the fixed import-free Process
 kernel while retaining BPI1 v1, Machine ABI v2, MachineV2Profile, and the fixed
 Machine-v2 kernel as compatibility surfaces.
 
+Boundary 1.7 also adds direct authored instruction-failure values. A fallible
+Control IR instruction may append one canonical `Body.Failure` constant for
+each Boundary-defined failure role, in role order, without changing the BPI1
+container format. This release does not add a component linker, World system
+linker, capability host, or host runtime.
+
 New portable execution should use `boundary.process_v1` with BPI1 plus initial
 arguments or canonical `ABL_PST1` Process State. One `advance` invocation
 performs exactly one finite reducer segment and carries no caller fuel,

@@ -64,52 +64,19 @@ const CompiledMachine = Program.compile(.{
     .maximum_machine_fuel = 32,
 });
 
-test "Program exposes one generic pre-RNF component projection" {
-    const Component = Program.component();
-    try std.testing.expect(Component.InitialArgs == Body.InitialArgs);
-    try std.testing.expect(Component.Result == Body.Result);
-    try std.testing.expect(Component.Failure == Body.Failure);
-    try std.testing.expect(Component == Body);
-    try std.testing.expectEqual(Body.effect_sites.len, Component.effect_sites.len);
-    try std.testing.expectEqual(Body.control_ir.blocks.len, Component.control_ir.blocks.len);
-    try std.testing.expect(!@hasDecl(Component, "effect_handlers"));
-    try std.testing.expect(!@hasDecl(Component, "effect_morphisms"));
-}
-
-test "Program exposes admitted component compiler facts" {
-    const Admission = program_v2.componentAdmission(Program);
-    try std.testing.expect(Admission == Program.componentAdmission());
-    try std.testing.expect(Admission.SourceBody == Body);
-    try std.testing.expectEqualSlices(
-        u8,
-        &Program.program_transition_digest,
-        &Admission.program_transition_digest,
-    );
-    try std.testing.expectEqualSlices(
-        u8,
-        &Program.machine_v2_semantic_digest,
-        &Admission.machine_v2_semantic_digest,
-    );
-    try std.testing.expectEqual(
-        Body.control_ir.blocks.len,
-        Admission.source_control_ir.blocks.len,
-    );
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        Admission.reachability.count,
-    );
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        Admission.semantic_canonicalization.block_count,
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        Admission.residual_effects.residual_count,
-    );
-    try std.testing.expectEqual(
-        @as(u64, 1),
-        Admission.effective_block_costs[0],
-    );
+test "Program exposes no component or linker projection" {
+    inline for (.{
+        "component",
+        "componentAdmission",
+        "componentProjection",
+        "linkerAdmission",
+        "programComponent",
+        "sourceProjection",
+        "linkFacts",
+        "worldComponent",
+    }) |linker_decl| {
+        try std.testing.expect(!@hasDecl(Program, linker_decl));
+    }
 }
 
 const CanonicalTextLookup = struct {

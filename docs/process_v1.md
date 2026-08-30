@@ -9,6 +9,11 @@ The Process kernel accepts BPI1 evaluator semantics versions 1 and 2. Version
 2 adds instruction-local authored-failure operands without changing the BPI1
 container, State format, Process ABI, or any version-1 image bytes.
 
+The Process ABI evaluates arbitrary BPI1 programs. It contains no Agent, World,
+host, model, prompt, skill, tool, or capability semantics. A frontend may
+produce BPI1 and a host may answer residual effects, but neither role changes
+the Process state machine or fixed kernel.
+
 Outcomes are progressed State, a self-contained `ABL_ERQ1` Effect Request,
 explicitly yielded State, completed Result, authored Failure, or transactional
 operational `NeedsCapacity`. Matching resumes use `ABL_ERS1`; wrong-request,
@@ -69,18 +74,20 @@ Public State and Capsule encoders complete semantic admission before their
 first caller-output write, so semantic rejection leaves output byte-identical.
 
 The fixed `boundary-process-kernel-v1.wasm` module imports nothing and retains
-no authoritative Process State between calls. The generic
-`scripts/boundary-process-step.mjs` adapter asks the kernel to prepare its
-canonical input header from `u64` sizes obtained from open regular-file
-descriptors before reading payload bytes. When preparation admits the input,
+no authoritative Process State between calls. The non-normative
+`scripts/boundary-process-step.mjs` reference byte relay is not a persistent
+runtime, capability host, or World implementation. It asks the kernel to
+prepare its canonical input header from `u64` sizes obtained from open
+regular-file descriptors before reading payload bytes. When preparation admits
+the input,
 the adapter reads exactly those bytes through the same descriptors, rejects a
 changed device, inode, length, modification time, or change time, copies only
 BPI1 and instance/result bytes, invokes one kernel operation, writes the
 canonical outcome bytes, and exits. The kernel itself is
 also admitted as one nonblocking regular-file descriptor before materialization.
-The reference relay's 64 MiB kernel ceiling is an operational limit of that
-host implementation, not Process semantics; a larger compatible fixed kernel
-can be transferred to another conforming host.
+The reference relay's 64 MiB kernel ceiling is its own operational limit, not
+Process semantics; another conforming embedding may carry a larger compatible
+fixed kernel.
 If the fixed input arena cannot hold those payloads, preparation returns a
 canonical transactional `NeedsCapacity` outcome before any payload copy.
 Kernel-input and kernel-outcome framing uses `u64` component lengths. The

@@ -155,7 +155,7 @@ pub const Instruction = struct {
 
 /// Number of explicit Body.Failure operands appended after an operation's
 /// ordinary operands when the instruction uses evaluator semantics v2.
-pub fn mappedFailureOperandCount(operation: InstructionOperation) usize {
+pub fn authoredFailureOperandCount(operation: InstructionOperation) usize {
     return switch (operation) {
         .integer_divide,
         .integer_remainder,
@@ -189,8 +189,9 @@ pub fn validInstructionOperandCount(
     actual: usize,
     base: usize,
 ) bool {
-    const mapped = mappedFailureOperandCount(operation);
-    return actual == base or (mapped != 0 and actual == base + mapped);
+    const authored = authoredFailureOperandCount(operation);
+    return actual == base or
+        (authored != 0 and actual == base + authored);
 }
 
 /// One value supplied to a successor block parameter.

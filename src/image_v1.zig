@@ -109,6 +109,8 @@ pub const ValidationWorkspace = struct {
     catalog_lengths: [1024]u32 = undefined,
     constant_used: [1024]bool = undefined,
     value_defined: [1024]bool = undefined,
+    canonical_failure_constant: [1024]bool = undefined,
+    authored_failure_operand: [1024]bool = undefined,
     canonical_schema_seen: [1024]bool = undefined,
     canonical_schema_stack: [2048]SchemaOrderTask = undefined,
 };
@@ -398,6 +400,14 @@ pub fn validateImage(
     try validateCanonicalSchemaOrder(catalogs, workspace);
     @memset(workspace.constant_used[0..catalogs.constant_count], false);
     @memset(workspace.value_defined[0..catalogs.value_count], false);
+    @memset(
+        workspace.canonical_failure_constant[0..catalogs.value_count],
+        false,
+    );
+    @memset(
+        workspace.authored_failure_operand[0..catalogs.value_count],
+        false,
+    );
     var next_constant: u32 = 0;
     var next_value: u32 = 0;
     const segment_count = try validateSegments(
@@ -405,8 +415,23 @@ pub fn validateImage(
         &workspace.constant_used,
         &next_constant,
         &workspace.value_defined,
+        &workspace.canonical_failure_constant,
+        &workspace.authored_failure_operand,
         &next_value,
     );
+    var authored_failure_used = false;
+    for (workspace.authored_failure_operand[0..catalogs.value_count], 0..) |used, value| {
+        if (!used) continue;
+        authored_failure_used = true;
+        if (!workspace.canonical_failure_constant[value]) {
+            return error.InvalidFailureMap;
+        }
+    }
+    if (catalogs.envelope.header.evaluator_semantics_version ==
+        evaluator_semantics_v2 and !authored_failure_used)
+    {
+        return error.InvalidFailureMap;
+    }
     for (workspace.constant_used[0..catalogs.constant_count]) |used| {
         if (!used) return error.InvalidConstant;
     }
@@ -1061,6 +1086,8 @@ fn validateSegments(
     constant_used: *[1024]bool,
     next_constant: *u32,
     value_defined: *[1024]bool,
+    canonical_failure_constant: *[1024]bool,
+    authored_failure_operand: *[1024]bool,
     next_value: *u32,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
@@ -1124,6 +1151,8 @@ fn validateSegments(
                 next_constant,
                 &available,
                 value_defined,
+                canonical_failure_constant,
+                authored_failure_operand,
                 next_value,
             );
         }
@@ -1208,6 +1237,8 @@ fn validateInstruction(
     next_constant: *u32,
     available: *[1024]bool,
     value_defined: *[1024]bool,
+    canonical_failure_constant: *[1024]bool,
+    authored_failure_operand: *[1024]bool,
     next_value: *u32,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
@@ -1259,18 +1290,20 @@ fn validateInstruction(
         operand_count,
         immediate,
     );
+    canonical_failure_constant[result] = operation == 0 and
+        try catalogs.valueSchemaId(result) == catalogs.failure_schema_id;
     const failure_roles = program_semantics_v1.failureRolesForWire(
         wire_operation,
     );
     const base_operand_count = program_semantics_v1.fixedOperandCount(
         wire_operation,
     );
-    const mapped_failures = base_operand_count != null and
+    const authored_failures = base_operand_count != null and
         catalogs.envelope.header.evaluator_semantics_version ==
             evaluator_semantics_v2 and
         failure_roles.len != 0 and
         operand_count == base_operand_count.? + failure_roles.len;
-    if (mapped_failures) {
+    if (authored_failures) {
         for (0..failure_roles.len) |index| {
             const failure_value = readInt(
                 u16,
@@ -1282,6 +1315,7 @@ fn validateInstruction(
             {
                 return error.InvalidFailureMap;
             }
+            authored_failure_operand[failure_value] = true;
         }
     } else for (failure_roles) |role| {
         if (!failureNameExists(
@@ -1307,10 +1341,10 @@ fn validateInstructionSchemas(
         const failure_count = program_semantics_v1.failureRolesForWire(
             operation,
         ).len;
-        const mapped = catalogs.envelope.header.evaluator_semantics_version ==
+        const authored = catalogs.envelope.header.evaluator_semantics_version ==
             evaluator_semantics_v2 and failure_count != 0 and
             operand_count == expected + failure_count;
-        if (operand_count != expected and !mapped) {
+        if (operand_count != expected and !authored) {
             return error.InvalidInstruction;
         }
     }

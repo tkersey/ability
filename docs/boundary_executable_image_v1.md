@@ -36,9 +36,10 @@ than preserved as archaeology.
 Evaluator semantics version 1 retains the original role-name lookup for
 instruction failures. Version 2 uses the same BPI1 container and instruction
 record layout, but permits each fallible instruction to append one canonical
-`Failure` value operand per failure role. Those operands select the exact
-authored failure returned by that instruction. Images without mapped failure
-operands remain version 1, so all existing canonical BPI1 bytes are unchanged.
+`Failure` value operand per failure role. Each operand must name a canonical
+constant definition and selects the exact authored failure returned by that
+instruction. Images without reachable authored-failure operands remain version
+1, so all existing canonical BPI1 bytes are unchanged.
 
 Validation checks the complete structure, dynamic values, graph references,
 constructor laws, effect/schema/program-transition digests, scratch requirements,

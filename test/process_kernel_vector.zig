@@ -1,5 +1,8 @@
+const authored_failure = @import("authored_failure_v2_fixture");
 const boundary = @import("boundary");
+const morphism_fixture = @import("morphism_fixture");
 const process_advance_v1 = @import("process_advance_v1");
+const recursion_fixture = @import("recursion_fixture");
 const std = @import("std");
 
 const Lookup = boundary.effect.site(
@@ -140,62 +143,8 @@ const FailedImage = boundary.program(
     FailedBody,
 ).image();
 
-const MappedFailure = enum { mapped };
-const mapped_failure_blocks = [_]boundary.ir.Block{.{
-    .id = 0,
-    .instructions = &.{
-        .{
-            .kind = .constant,
-            .result = 0,
-            .operation = .{ .constant = 0 },
-        },
-        .{
-            .kind = .constant,
-            .result = 1,
-            .operation = .{ .constant = 1 },
-        },
-        .{
-            .kind = .constant,
-            .result = 2,
-            .operation = .{ .constant = 2 },
-        },
-        .{
-            .kind = .pure,
-            .result = 3,
-            .operands = &.{ 0, 1, 2 },
-            .operation = .integer_add,
-        },
-    },
-    .terminator = .{ .return_value = 3 },
-}};
-const MappedFailureBody = struct {
-    pub const InitialArgs = void;
-    pub const Result = u8;
-    pub const Failure = MappedFailure;
-    pub const constants = .{
-        @as(u8, std.math.maxInt(u8)),
-        @as(u8, 1),
-        MappedFailure.mapped,
-    };
-    pub const effect_sites = .{};
-    pub const schema_types = .{MappedFailure};
-    pub const control_ir: boundary.ir.Program = .{
-        .label = "process-kernel-mapped-failure",
-        .value_types = &.{
-            .{ .scalar = .u8 },
-            .{ .scalar = .u8 },
-            .{ .schema = 0 },
-            .{ .scalar = .u8 },
-        },
-        .blocks = &mapped_failure_blocks,
-        .entry = 0,
-        .result_type = .{ .scalar = .u8 },
-    };
-};
-const MappedFailureImage = boundary.program(
-    "process-kernel-mapped-failure",
-    MappedFailureBody,
-).image();
+const MorphismImage = morphism_fixture.ReificationBaselineProgram.image();
+const RecursionImage = recursion_fixture.ProcessRecursionProgram.image();
 
 const Storage = struct {
     state: [64 * 1024]u8 = undefined,
@@ -220,28 +169,40 @@ const Storage = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    try writeInt(stdout, 15);
+
+    var left: Storage = .{};
+    var right: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
     var initial: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial, 17, .little);
-
-    var first_storage: Storage = .{};
-    var first_workspace: boundary.image.ValidationWorkspace = .{};
     const first = try process_advance_v1.advance(
         &Image.bytes,
         .{ .initial_args = &initial },
         null,
-        first_storage.buffers(),
-        &first_workspace,
+        left.buffers(),
+        &workspace,
     );
+    try writeVector(stdout, &Image.bytes, .{ .initial_args = &initial }, null, first);
     const pending = first.requested;
 
-    var second_storage: Storage = .{};
-    var second_workspace: boundary.image.ValidationWorkspace = .{};
+    workspace = .{};
     const second = try process_advance_v1.advance(
         &Image.bytes,
         .{ .process_state = pending.state },
         null,
-        second_storage.buffers(),
-        &second_workspace,
+        right.buffers(),
+        &workspace,
+    );
+    try writeVector(
+        stdout,
+        &Image.bytes,
+        .{ .process_state = pending.state },
+        null,
+        second,
     );
 
     const request = try boundary.process_v1.effect.validateRequest(
@@ -256,131 +217,275 @@ pub fn main(init: std.process.Init) !void {
         .resume_schema_digest = request.resume_schema_digest,
         .@"resume" = &resume_value,
     }, &result_storage);
-    var third_storage: Storage = .{};
-    var third_workspace: boundary.image.ValidationWorkspace = .{};
+    right = .{};
+    workspace = .{};
     const third = try process_advance_v1.advance(
         &Image.bytes,
         .{ .process_state = pending.state },
         result,
-        third_storage.buffers(),
-        &third_workspace,
+        right.buffers(),
+        &workspace,
     );
-    var fourth_storage: Storage = .{};
-    var fourth_workspace: boundary.image.ValidationWorkspace = .{};
+    try writeVector(
+        stdout,
+        &Image.bytes,
+        .{ .process_state = pending.state },
+        result,
+        third,
+    );
+
+    right = .{};
+    workspace = .{};
     const fourth = try process_advance_v1.advance(
         &ProgressedImage.bytes,
         .{ .initial_args = &initial },
         null,
-        fourth_storage.buffers(),
-        &fourth_workspace,
+        right.buffers(),
+        &workspace,
     );
-    var fifth_storage: Storage = .{};
-    var fifth_workspace: boundary.image.ValidationWorkspace = .{};
+    try writeVector(
+        stdout,
+        &ProgressedImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        fourth,
+    );
+
+    right = .{};
+    workspace = .{};
     const fifth = try process_advance_v1.advance(
         &YieldedImage.bytes,
         .{ .initial_args = &initial },
         null,
-        fifth_storage.buffers(),
-        &fifth_workspace,
+        right.buffers(),
+        &workspace,
     );
-    var sixth_storage: Storage = .{};
-    var sixth_workspace: boundary.image.ValidationWorkspace = .{};
+    try writeVector(
+        stdout,
+        &YieldedImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        fifth,
+    );
+
+    right = .{};
+    workspace = .{};
     const sixth = try process_advance_v1.advance(
         &FailedImage.bytes,
         .{ .initial_args = &.{} },
         null,
-        sixth_storage.buffers(),
-        &sixth_workspace,
+        right.buffers(),
+        &workspace,
     );
-    var seventh_storage: Storage = .{};
-    var seventh_workspace: boundary.image.ValidationWorkspace = .{};
-    const seventh = try process_advance_v1.advance(
-        &MappedFailureImage.bytes,
+    try writeVector(
+        stdout,
+        &FailedImage.bytes,
         .{ .initial_args = &.{} },
         null,
-        seventh_storage.buffers(),
-        &seventh_workspace,
+        sixth,
     );
 
-    var input_one_storage: [128 * 1024]u8 = undefined;
-    var input_two_storage: [128 * 1024]u8 = undefined;
-    var input_three_storage: [128 * 1024]u8 = undefined;
-    var input_four_storage: [128 * 1024]u8 = undefined;
-    var input_five_storage: [128 * 1024]u8 = undefined;
-    var input_six_storage: [128 * 1024]u8 = undefined;
-    var input_seven_storage: [128 * 1024]u8 = undefined;
-    const inputs = [_][]const u8{
-        try process_advance_v1.encodeKernelInput(
-            &Image.bytes,
-            .{ .initial_args = &initial },
-            null,
-            &input_one_storage,
-        ),
-        try process_advance_v1.encodeKernelInput(
-            &Image.bytes,
-            .{ .process_state = pending.state },
-            null,
-            &input_two_storage,
-        ),
-        try process_advance_v1.encodeKernelInput(
-            &Image.bytes,
-            .{ .process_state = pending.state },
-            result,
-            &input_three_storage,
-        ),
-        try process_advance_v1.encodeKernelInput(
-            &ProgressedImage.bytes,
-            .{ .initial_args = &initial },
-            null,
-            &input_four_storage,
-        ),
-        try process_advance_v1.encodeKernelInput(
-            &YieldedImage.bytes,
-            .{ .initial_args = &initial },
-            null,
-            &input_five_storage,
-        ),
-        try process_advance_v1.encodeKernelInput(
-            &FailedImage.bytes,
-            .{ .initial_args = &.{} },
-            null,
-            &input_six_storage,
-        ),
-        try process_advance_v1.encodeKernelInput(
-            &MappedFailureImage.bytes,
-            .{ .initial_args = &.{} },
-            null,
-            &input_seven_storage,
-        ),
-    };
-    var output_one_storage: [128 * 1024]u8 = undefined;
-    var output_two_storage: [128 * 1024]u8 = undefined;
-    var output_three_storage: [128 * 1024]u8 = undefined;
-    var output_four_storage: [128 * 1024]u8 = undefined;
-    var output_five_storage: [128 * 1024]u8 = undefined;
-    var output_six_storage: [128 * 1024]u8 = undefined;
-    var output_seven_storage: [128 * 1024]u8 = undefined;
-    const outputs = [_][]const u8{
-        try process_advance_v1.encodeOutcome(first, &output_one_storage),
-        try process_advance_v1.encodeOutcome(second, &output_two_storage),
-        try process_advance_v1.encodeOutcome(third, &output_three_storage),
-        try process_advance_v1.encodeOutcome(fourth, &output_four_storage),
-        try process_advance_v1.encodeOutcome(fifth, &output_five_storage),
-        try process_advance_v1.encodeOutcome(sixth, &output_six_storage),
-        try process_advance_v1.encodeOutcome(seventh, &output_seven_storage),
-    };
+    try writeAuthoredFailureVectors(stdout);
+    try writeMorphismVector(stdout);
+    try writeRecursionVectors(stdout);
 
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    try writeInt(stdout, @intCast(inputs.len));
-    for (inputs, outputs) |input, output| {
-        try writeInt(stdout, @intCast(input.len));
-        try writeInt(stdout, @intCast(output.len));
-        try stdout.writeAll(input);
-        try stdout.writeAll(output);
-    }
     try stdout.flush();
+}
+
+fn writeAuthoredFailureVectors(writer: *std.Io.Writer) !void {
+    if (authored_failure.Image.evaluator_semantics_version !=
+        boundary.image.evaluator_semantics_v2 or
+        authored_failure.DivisionImage.evaluator_semantics_version !=
+            boundary.image.evaluator_semantics_v2)
+    {
+        return error.ExpectedAuthoredFailureV2Image;
+    }
+    try writeAuthoredFailureCase(
+        writer,
+        &authored_failure.bad_math_initial_args,
+        authored_failure.bad_math_failure_tag,
+    );
+    try writeAuthoredFailureCase(
+        writer,
+        &authored_failure.bad_position_initial_args,
+        authored_failure.bad_position_failure_tag,
+    );
+
+    var storage: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const success = try advanceAndWrite(
+        writer,
+        &authored_failure.DivisionImage.bytes,
+        .{ .initial_args = &authored_failure.division_success_initial_args },
+        null,
+        &storage,
+        &workspace,
+    );
+    const quotient = success.completed;
+    if (quotient.len != 1 or quotient[0] != 4) {
+        return error.UnexpectedAuthoredFailureSuccess;
+    }
+}
+
+fn writeAuthoredFailureCase(
+    writer: *std.Io.Writer,
+    initial_args: []const u8,
+    expected_tag: u32,
+) !void {
+    var left: Storage = .{};
+    var right: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const started = try advanceAndWrite(
+        writer,
+        &authored_failure.Image.bytes,
+        .{ .initial_args = initial_args },
+        null,
+        &left,
+        &workspace,
+    );
+    const state = started.progressed;
+    workspace = .{};
+    const failed = try advanceAndWrite(
+        writer,
+        &authored_failure.Image.bytes,
+        .{ .process_state = state },
+        null,
+        &right,
+        &workspace,
+    );
+    try expectFailureTag(failed, expected_tag);
+}
+
+fn writeMorphismVector(writer: *std.Io.Writer) !void {
+    var initial: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial, 7, .little);
+    var storage: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const outcome = try advanceAndWrite(
+        writer,
+        &MorphismImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        &storage,
+        &workspace,
+    );
+    const request = try boundary.process_v1.effect.validateRequest(
+        outcome.requested.request,
+        MorphismImage.program_transition_digest,
+    );
+    if (!std.mem.eql(
+        u8,
+        request.effect_semantic_identity,
+        "residual.lookup.v2",
+    ) or !std.mem.eql(u8, request.payload, &initial)) {
+        return error.UnexpectedMorphedRequest;
+    }
+}
+
+fn writeRecursionVectors(writer: *std.Io.Writer) !void {
+    var initial: [4]u8 = undefined;
+    std.mem.writeInt(u32, &initial, 1, .little);
+    var left: Storage = .{};
+    var right: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const called = try advanceAndWrite(
+        writer,
+        &RecursionImage.bytes,
+        .{ .initial_args = &initial },
+        null,
+        &left,
+        &workspace,
+    );
+    const call_state = called.progressed;
+    try expectFrameCount(call_state, 2);
+
+    workspace = .{};
+    const branched = try advanceAndWrite(
+        writer,
+        &RecursionImage.bytes,
+        .{ .process_state = call_state },
+        null,
+        &right,
+        &workspace,
+    );
+    const branch_state = branched.progressed;
+    try expectFrameCount(branch_state, 2);
+
+    left = .{};
+    workspace = .{};
+    const recurred = try advanceAndWrite(
+        writer,
+        &RecursionImage.bytes,
+        .{ .process_state = branch_state },
+        null,
+        &left,
+        &workspace,
+    );
+    try expectFrameCount(recurred.progressed, 3);
+}
+
+fn advanceAndWrite(
+    writer: *std.Io.Writer,
+    image: []const u8,
+    instance: process_advance_v1.Instance,
+    effect_result: ?[]const u8,
+    storage: *Storage,
+    workspace: *boundary.image.ValidationWorkspace,
+) !process_advance_v1.Outcome {
+    const outcome = try process_advance_v1.advance(
+        image,
+        instance,
+        effect_result,
+        storage.buffers(),
+        workspace,
+    );
+    try writeVector(writer, image, instance, effect_result, outcome);
+    return outcome;
+}
+
+fn writeVector(
+    writer: *std.Io.Writer,
+    image: []const u8,
+    instance: process_advance_v1.Instance,
+    effect_result: ?[]const u8,
+    outcome: process_advance_v1.Outcome,
+) !void {
+    var input_storage: [128 * 1024]u8 = undefined;
+    var output_storage: [128 * 1024]u8 = undefined;
+    const input = try process_advance_v1.encodeKernelInput(
+        image,
+        instance,
+        effect_result,
+        &input_storage,
+    );
+    const output = try process_advance_v1.encodeOutcome(
+        outcome,
+        &output_storage,
+    );
+    try writeInt(writer, @intCast(input.len));
+    try writeInt(writer, @intCast(output.len));
+    try writer.writeAll(input);
+    try writer.writeAll(output);
+}
+
+fn expectFailureTag(outcome: process_advance_v1.Outcome, expected: u32) !void {
+    const failure = switch (outcome) {
+        .authored_failure => |bytes| bytes,
+        else => return error.ExpectedAuthoredFailure,
+    };
+    if (failure.len != 4 or
+        std.mem.readInt(u32, failure[0..4], .little) != expected)
+    {
+        return error.UnexpectedAuthoredFailureTag;
+    }
+}
+
+fn expectFrameCount(state: []const u8, expected: u64) !void {
+    const view = try boundary.process_v1.state.validateEncoding(
+        state,
+        RecursionImage.program_transition_digest,
+    );
+    if (view.frame_count != expected) return error.UnexpectedFrameCount;
 }
 
 fn writeInt(writer: *std.Io.Writer, value: u32) !void {

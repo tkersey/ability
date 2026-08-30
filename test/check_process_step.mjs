@@ -7,13 +7,17 @@ const kernel = process.argv[2];
 const vectorSource = process.argv[3];
 const adapter = process.argv[4];
 const wrongKernel = process.argv[5];
+const malformedKernel = process.argv[6];
+if (malformedKernel === undefined) {
+  throw new Error("missing malformed Process relay kernel fixture");
+}
 const kernelInstance = new WebAssembly.Instance(
   new WebAssembly.Module(fs.readFileSync(kernel)),
   {},
 );
 const kernelInputCapacity =
   kernelInstance.exports.boundary_process_kernel_input_capacity();
-const vector = process.argv[6] === "native"
+const vector = process.argv[7] === "native"
   ? nativeVector(kernelInstance, vectorSource)
   : fs.readFileSync(vectorSource);
 let cursor = 0;
@@ -197,6 +201,75 @@ try {
         "unsupported Boundary Process kernel ABI",
       )) {
     throw new Error("boundary-process-step accepted a different kernel ABI");
+  }
+  const invokeMalformedKernel = (instanceLength) => {
+    const malformedInitial = path.join(
+      temporary,
+      "malformed-kernel-" + instanceLength + ".initial",
+    );
+    fs.writeFileSync(malformedInitial, Buffer.alloc(instanceLength));
+    return spawnSync(process.execPath, [
+      adapter,
+      "--kernel", malformedKernel,
+      "--image", emptyImage,
+      "--initial-args", malformedInitial,
+    ]);
+  };
+  const malformedCases = [
+    {
+      instanceLength: 1,
+      expected: "kernel output pointer is outside exported memory",
+    },
+    {
+      instanceLength: 2,
+      expected: "kernel output length is not an exact safe integer",
+    },
+    {
+      instanceLength: 3,
+      expected: "kernel output range is outside exported memory",
+    },
+  ];
+  for (const malformedCase of malformedCases) {
+    const malformed = invokeMalformedKernel(malformedCase.instanceLength);
+    if (malformed.status === 0 ||
+        !malformed.stderr.toString("utf8").includes(
+          malformedCase.expected,
+        )) {
+      throw new Error(
+        "relay accepted malformed kernel output mode " +
+          malformedCase.instanceLength,
+      );
+    }
+  }
+  const grown = invokeMalformedKernel(4);
+  if (grown.status !== 0 || grown.stdout.toString("ascii") !== "GROW") {
+    throw new Error("relay used a detached memory view after kernel growth");
+  }
+  const malformedErrorCases = [
+    {
+      instanceLength: 5,
+      expected: "kernel error pointer is outside exported memory",
+    },
+    {
+      instanceLength: 6,
+      expected: "kernel error length is not an exact safe integer",
+    },
+    {
+      instanceLength: 7,
+      expected: "kernel error range is outside exported memory",
+    },
+  ];
+  for (const malformedCase of malformedErrorCases) {
+    const malformed = invokeMalformedKernel(malformedCase.instanceLength);
+    if (malformed.status === 0 ||
+        !malformed.stderr.toString("utf8").includes(
+          malformedCase.expected,
+        )) {
+      throw new Error(
+        "relay accepted malformed kernel error mode " +
+          malformedCase.instanceLength,
+      );
+    }
   }
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

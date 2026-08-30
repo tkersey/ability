@@ -142,6 +142,71 @@ fn requireDirectDependency(
     );
 }
 
+fn moduleInSet(
+    target: *std.Build.Module,
+    modules: []const *std.Build.Module,
+) bool {
+    for (modules) |module| {
+        if (module == target) return true;
+    }
+    return false;
+}
+
+fn requireExactModuleClosure(
+    label: []const u8,
+    root: *std.Build.Module,
+    expected: []const *std.Build.Module,
+) void {
+    var pending: [64]*std.Build.Module = undefined;
+    var pending_len: usize = 1;
+    pending[0] = root;
+    var observed: [64]*std.Build.Module = undefined;
+    var observed_len: usize = 0;
+
+    while (pending_len != 0) {
+        pending_len -= 1;
+        const module = pending[pending_len];
+        if (moduleInSet(module, observed[0..observed_len])) continue;
+        if (!moduleInSet(module, expected)) {
+            std.process.fatal(
+                "{s} reaches a module outside its admitted closure",
+                .{label},
+            );
+        }
+        if (observed_len == observed.len) {
+            std.process.fatal("{s} module closure exceeds proof capacity", .{label});
+        }
+        observed[observed_len] = module;
+        observed_len += 1;
+
+        for (module.import_table.keys(), module.import_table.values()) |name, dependency| {
+            if (!moduleInSet(dependency, expected)) {
+                std.process.fatal(
+                    "{s} import '{s}' reaches a module outside its admitted closure",
+                    .{ label, name },
+                );
+            }
+            if (pending_len == pending.len) {
+                std.process.fatal("{s} module traversal exceeds proof capacity", .{label});
+            }
+            pending[pending_len] = dependency;
+            pending_len += 1;
+        }
+    }
+
+    if (observed_len != expected.len) {
+        std.process.fatal(
+            "{s} module closure has {d} members; expected {d}",
+            .{ label, observed_len, expected.len },
+        );
+    }
+    for (expected) |module| {
+        if (!moduleInSet(module, observed[0..observed_len])) {
+            std.process.fatal("{s} module closure omitted an expected member", .{label});
+        }
+    }
+}
+
 comptime {
     @setEvalBranchQuota(50_000);
     const module_fields = std.meta.fields(CoreModules);
@@ -626,9 +691,10 @@ fn addCoreModules(
         "process_advance_v1",
         process_advance_v1,
     );
-    process_kernel_wasm_v1.addOptions(
+    const process_kernel_options_module = process_kernel_options.createModule();
+    process_kernel_wasm_v1.addImport(
         "process_kernel_options",
-        process_kernel_options,
+        process_kernel_options_module,
     );
     const image_emit_v1 = b.createModule(.{
         .root_source_file = b.path(coreModulePath(.image_emit_v1)),
@@ -689,6 +755,39 @@ fn addCoreModules(
         .optimize = optimize,
     });
     agent_profile.addImport("program_v2", program_v2);
+
+    requireExactModuleClosure("process_v1", process_v1, &.{
+        process_v1,
+        process_capsule_v1,
+        process_advance_v1,
+        process_effect_v1,
+        process_state_v1,
+        dynamic_value_v1,
+        image_v1,
+        reducer_clause_v1,
+        program_semantics_v1,
+        control_ir,
+        portable_value,
+        rnf,
+    });
+    requireExactModuleClosure(
+        "process_kernel_wasm_v1",
+        process_kernel_wasm_v1,
+        &.{
+            process_kernel_wasm_v1,
+            process_kernel_options_module,
+            process_advance_v1,
+            process_effect_v1,
+            process_state_v1,
+            dynamic_value_v1,
+            image_v1,
+            reducer_clause_v1,
+            program_semantics_v1,
+            control_ir,
+            portable_value,
+            rnf,
+        },
+    );
 
     return .{
         .agent_profile = agent_profile,
@@ -805,6 +904,21 @@ pub fn build(b: *std.Build) void {
     reification_operations_fixture.addImport("image_v1", host_core.image_v1);
     reification_operations_fixture.addImport("kernel_v1", host_core.kernel_v1);
     reification_operations_fixture.addImport("machine", host_core.machine);
+    const authored_failure_v2_fixture = b.createModule(.{
+        .root_source_file = b.path("test/authored_failure_v2_fixture.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    authored_failure_v2_fixture.addImport("control_ir", host_core.control_ir);
+    authored_failure_v2_fixture.addImport(
+        "portable_value",
+        host_core.portable_value,
+    );
+    authored_failure_v2_fixture.addImport("program_v2", host_core.program_v2);
+    reification_operations_fixture.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
+    );
     const reification_handler_fixture = programTestModule(
         b,
         host_core,
@@ -936,6 +1050,10 @@ pub fn build(b: *std.Build) void {
     program_operations.addImport("image_v1", host_core.image_v1);
     program_operations.addImport("kernel_v1", host_core.kernel_v1);
     program_operations.addImport("machine", host_core.machine);
+    program_operations.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
+    );
     const integer_boolean_operations = programTestModule(
         b,
         host_core,
@@ -1138,6 +1256,10 @@ pub fn build(b: *std.Build) void {
         "process_state_v1",
         host_core.process_state_v1,
     );
+    process_advance_test.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
+    );
     const process_recursion_fixture = programTestModule(
         b,
         host_core,
@@ -1286,7 +1408,23 @@ pub fn build(b: *std.Build) void {
     const process_surface_guard = b.addSystemCommand(&.{
         "sh",
         "-c",
-        "if rg -n 'MachineV2Profile|machine_v2|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded|ABL_RNF2' src/process_*.zig; then exit 1; fi; if rg -n '@import\\(\"(machine|machine_v2|kernel)' src/process_*.zig; then exit 1; fi",
+        \\set -eu
+        \\reject() {
+        \\  pattern=$1
+        \\  shift
+        \\  if rg -n "$pattern" "$@"; then
+        \\    exit 1
+        \\  else
+        \\    status=$?
+        \\    [ "$status" -eq 1 ] || exit "$status"
+        \\  fi
+        \\}
+        \\reject 'MachineV2Profile|machine_v2|caller_fuel|cumulative_fuel|maximum_machine_fuel|maximum_frames|maximum_state_bytes|execution_budget_exceeded|frame_depth_exceeded|ABL_RNF2' src/process_*.zig
+        \\reject '@import\("(agent_profile|driver|machine|machine_v2|kernel_v1|kernel_machine_v1|kernel_wasm_v1|world[^"]*|host[^"]*|capabil[^"]*)(\.zig)?"\)' src/process_*.zig
+        \\reject 'AgentDefinition|DecisionContract|DecisionView|World application|capability registry|host policy|credential|\b(Model|Prompt|Skill|Tool|Memory)\b' src/process_*.zig
+        \\reject '@import\("[^"]+\.zig"\)' src/process_*.zig src/dynamic_value_v1.zig src/image_v1.zig src/reducer_clause_v1.zig src/program_semantics_v1.zig src/control_ir.zig src/portable_value.zig src/rnf.zig
+        \\reject 'componentAdmission|Program\.component\(|build-time linkers?|World-facing component semantics|source projection|linker-owned (failure|reachability)' README.md docs
+        \\reject 'pub (const|fn) (component|componentAdmission|componentProjection|linkerAdmission|programComponent|sourceProjection|linkFacts|worldComponent|linker|system|world|host|capabilities)\b' src
     });
     process_step.dependOn(&process_surface_guard.step);
 
@@ -1437,6 +1575,7 @@ pub fn build(b: *std.Build) void {
         "Emit the fixed import-free Boundary Process kernel.",
     );
     emit_process_kernel_step.dependOn(&install_process_kernel.step);
+    emit_process_kernel_step.dependOn(process_step);
     process_step.dependOn(&process_kernel_wasm_executable.step);
     const process_kernel_vector_module = b.createModule(.{
         .root_source_file = b.path("test/process_kernel_vector.zig"),
@@ -1447,6 +1586,18 @@ pub fn build(b: *std.Build) void {
     process_kernel_vector_module.addImport(
         "process_advance_v1",
         host_core.process_advance_v1,
+    );
+    process_kernel_vector_module.addImport(
+        "morphism_fixture",
+        reification_morphism_fixture,
+    );
+    process_kernel_vector_module.addImport(
+        "recursion_fixture",
+        reification_recursion_fixture,
+    );
+    process_kernel_vector_module.addImport(
+        "authored_failure_v2_fixture",
+        authored_failure_v2_fixture,
     );
     const process_kernel_vector_executable = b.addExecutable(.{
         .name = "boundary-process-kernel-vector",
@@ -1512,9 +1663,29 @@ pub fn build(b: *std.Build) void {
         "process_advance_v1",
         wasm_core.process_advance_v1,
     );
-    constrained_process_kernel_module.addOptions(
+    const constrained_process_kernel_options_module =
+        constrained_process_kernel_options.createModule();
+    constrained_process_kernel_module.addImport(
         "process_kernel_options",
-        constrained_process_kernel_options,
+        constrained_process_kernel_options_module,
+    );
+    requireExactModuleClosure(
+        "constrained_process_kernel_wasm_v1",
+        constrained_process_kernel_module,
+        &.{
+            constrained_process_kernel_module,
+            constrained_process_kernel_options_module,
+            wasm_core.process_advance_v1,
+            wasm_core.process_effect_v1,
+            wasm_core.process_state_v1,
+            wasm_core.dynamic_value_v1,
+            wasm_core.image_v1,
+            wasm_core.reducer_clause_v1,
+            wasm_core.program_semantics_v1,
+            wasm_core.control_ir,
+            wasm_core.portable_value,
+            wasm_core.rnf,
+        },
     );
     const constrained_process_kernel = b.addExecutable(.{
         .name = "boundary-process-kernel-v1-constrained",
@@ -1611,12 +1782,46 @@ pub fn build(b: *std.Build) void {
     kernel_wasm_executable.rdynamic = true;
     kernel_wasm_executable.export_memory = true;
     kernel_wasm_executable.max_memory = 128 << 20;
+    const malformed_process_relay_kernel_module = b.createModule(.{
+        .root_source_file = b.path("test/process_relay_malformed_kernel.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const malformed_process_relay_kernel = b.addExecutable(.{
+        .name = "boundary-process-relay-malformed-kernel",
+        .root_module = malformed_process_relay_kernel_module,
+    });
+    malformed_process_relay_kernel.entry = .disabled;
+    malformed_process_relay_kernel.rdynamic = true;
+    malformed_process_relay_kernel.export_memory = true;
     check_process_step.addFileArg(kernel_wasm_executable.getEmittedBin());
+    check_process_step.addFileArg(
+        malformed_process_relay_kernel.getEmittedBin(),
+    );
     check_constrained_process_step.addFileArg(
         kernel_wasm_executable.getEmittedBin(),
     );
+    check_constrained_process_step.addFileArg(
+        malformed_process_relay_kernel.getEmittedBin(),
+    );
     check_constrained_process_step.addArg("native");
     const wasm_repro_core = addCoreModules(b, wasm_target, .ReleaseSmall);
+    const process_kernel_wasm_reproducible = b.addExecutable(.{
+        .name = "boundary-process-kernel-v1-reproducible",
+        .root_module = wasm_repro_core.process_kernel_wasm_v1,
+    });
+    process_kernel_wasm_reproducible.entry = .disabled;
+    process_kernel_wasm_reproducible.rdynamic = true;
+    process_kernel_wasm_reproducible.export_memory = true;
+    process_kernel_wasm_reproducible.max_memory = 256 << 20;
+    const compare_process_kernel_wasm = b.addSystemCommand(&.{ "cmp", "-s" });
+    compare_process_kernel_wasm.addFileArg(
+        process_kernel_wasm_executable.getEmittedBin(),
+    );
+    compare_process_kernel_wasm.addFileArg(
+        process_kernel_wasm_reproducible.getEmittedBin(),
+    );
+    process_step.dependOn(&compare_process_kernel_wasm.step);
     const kernel_wasm_reproducible = b.addExecutable(.{
         .name = "boundary-machine-v2-kernel-v1-reproducible",
         .root_module = wasm_repro_core.kernel_wasm_v1,
@@ -2213,8 +2418,8 @@ pub fn build(b: *std.Build) void {
             "Body.Failure must declare arithmetic_overflow",
         },
         .{
-            "test/compile_fail/dynamic_instruction_failure_operand.zig",
-            "mapped instruction failure operands must be canonical Body.Failure constants",
+            "test/compile_fail/authored_instruction_failure_operand.zig",
+            "authored instruction failure operands must be canonical Body.Failure constants",
         },
         .{
             "test/compile_fail/non_enum_failure_tagged_union.zig",

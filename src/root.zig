@@ -66,10 +66,7 @@ pub const schema = portable_value;
 pub const ir = control_ir;
 /// Declare one typed Boundary source program with one Machine meaning.
 pub const program = program_v2.program;
-/// Authenticate one canonical Boundary Program and expose its build-time
-/// component projection.
-pub const componentAdmission = program_v2.componentAdmission;
-/// Local driver over the same compiled Machine used by World.
+/// Local driver over the same compiled Machine used by embeddings.
 pub const Driver = driver.Driver;
 /// Deprecated compatibility profile. Agent-specific authoring belongs in the
 /// separate Agent package and will be removed in the next major release.
@@ -115,6 +112,22 @@ test "Boundary root exposes one compiler and no legacy runtime" {
     try std.testing.expect(!@hasDecl(@This(), "clause"));
     try std.testing.expect(!@hasDecl(@This(), "program_evaluator"));
     try std.testing.expect(!@hasDecl(@This(), "internal_evaluator"));
+    inline for (.{
+        "componentAdmission",
+        "componentProjection",
+        "linkerAdmission",
+        "programComponent",
+        "sourceProjection",
+        "linkFacts",
+        "worldComponent",
+        "linker",
+        "system",
+        "world",
+        "host",
+        "capabilities",
+    }) |linker_decl| {
+        try std.testing.expect(!@hasDecl(@This(), linker_decl));
+    }
     try std.testing.expect(@hasDecl(@This(), "machine_v2"));
     try std.testing.expect(@hasDecl(@This(), "process_v1"));
     try std.testing.expect(!@hasDecl(process_v1, "encodeOutcome"));

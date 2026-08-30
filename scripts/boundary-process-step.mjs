@@ -40,7 +40,6 @@ try {
       exports.boundary_process_kernel_abi_version() !== 1) {
     throw new Error("unsupported Boundary Process kernel ABI");
   }
-  const memory = new Uint8Array(exports.memory.buffer);
   const inputLength = exports.boundary_process_kernel_prepare_input(
     statePath === undefined ? 0 : 1,
     imageFile.generation.size,
@@ -50,7 +49,7 @@ try {
   );
   if (inputLength === 0) {
     verifyGenerations([imageFile, instanceFile, resultFile]);
-    const capacity = kernelOutput(exports, memory);
+    const capacity = kernelOutput(exports);
     if (capacity.length === 0) {
       throw new Error("kernel cannot prepare the Process input");
     }
@@ -64,6 +63,7 @@ try {
     let payload = wasmOffset(
       exports.boundary_process_kernel_input_payload_ptr(),
     );
+    const memory = new Uint8Array(exports.memory.buffer);
     memory.set(image, payload);
     payload += image.length;
     memory.set(instance, payload);
@@ -71,22 +71,60 @@ try {
     memory.set(result, payload);
     const status = exports.boundary_process_kernel_execute(inputLength);
     if (status !== 0) {
-      const start = wasmOffset(exports.boundary_process_kernel_error_ptr());
-      const length = exports.boundary_process_kernel_error_len();
-      throw new Error(
-        Buffer.from(memory.subarray(start, start + length)).toString("utf8"),
-      );
+      throw new Error(kernelError(exports).toString("utf8"));
     }
-    process.stdout.write(kernelOutput(exports, memory));
+    process.stdout.write(kernelOutput(exports));
   }
 } finally {
   for (const file of opened) fs.closeSync(file.fd);
 }
 
-function kernelOutput(exports, memory) {
-  const start = wasmOffset(exports.boundary_process_kernel_output_ptr());
-  const length = Number(exports.boundary_process_kernel_output_len());
+function kernelOutput(exports) {
+  return kernelBytes(
+    exports,
+    exports.boundary_process_kernel_output_ptr(),
+    exports.boundary_process_kernel_output_len(),
+    "kernel output",
+  );
+}
+
+function kernelError(exports) {
+  return kernelBytes(
+    exports,
+    exports.boundary_process_kernel_error_ptr(),
+    exports.boundary_process_kernel_error_len(),
+    "kernel error",
+  );
+}
+
+function kernelBytes(exports, pointerValue, lengthValue, label) {
+  const start = wasmOffset(pointerValue);
+  const length = wasmLength(lengthValue, label);
+  const memory = new Uint8Array(exports.memory.buffer);
+  if (start > memory.length) {
+    throw new Error(label + " pointer is outside exported memory");
+  }
+  if (length > memory.length - start) {
+    throw new Error(label + " range is outside exported memory");
+  }
   return Buffer.from(memory.subarray(start, start + length));
+}
+
+function wasmLength(value, label) {
+  if (typeof value === "bigint") {
+    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(label + " length is not an exact safe integer");
+    }
+    return Number(value);
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(label + " length is not an exact safe integer");
+  }
+  const unsigned = value >>> 0;
+  if (value !== unsigned && value !== (unsigned | 0)) {
+    throw new Error(label + " length is not an exact safe integer");
+  }
+  return unsigned;
 }
 
 function wasmOffset(value) {

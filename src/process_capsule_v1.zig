@@ -143,19 +143,15 @@ fn validateInput(
             workspace,
         ),
         .initial_args => {
-            const state_capacity = std.math.add(
-                usize,
+            const arenas = try initialValidationArenas(
                 input.instance.len,
-                128,
-            ) catch return error.ScratchCapacity;
-            if (invariant_scratch.len < state_capacity) {
-                return error.ScratchCapacity;
-            }
+                invariant_scratch,
+            );
             process_advance_v1.validateInitialArgs(
                 input.image,
                 input.instance,
-                invariant_scratch[0..state_capacity],
-                invariant_scratch[state_capacity..],
+                arenas.candidate_state,
+                arenas.environment_and_invariants,
                 workspace,
             ) catch |err| switch (err) {
                 error.InvalidInitialArgs, error.InvalidProcessState => return error.InvalidCapsule,
@@ -163,6 +159,46 @@ fn validateInput(
             };
         },
     }
+}
+
+const InitialValidationArenas = struct {
+    candidate_state: []u8,
+    environment_and_invariants: []u8,
+};
+
+fn initialValidationArenas(
+    initial_args_length: usize,
+    scratch: []u8,
+) Error!InitialValidationArenas {
+    const state_capacity = std.math.add(
+        usize,
+        initial_args_length,
+        128,
+    ) catch return error.ScratchCapacity;
+    const required = std.math.add(
+        usize,
+        state_capacity,
+        initial_args_length,
+    ) catch return error.ScratchCapacity;
+    if (scratch.len < required) return error.ScratchCapacity;
+    return .{
+        .candidate_state = scratch[0..state_capacity],
+        .environment_and_invariants = scratch[state_capacity..],
+    };
+}
+
+test "initial Capsule scratch reserves candidate State and retained environment" {
+    var exact: [136]u8 = undefined;
+    const arenas = try initialValidationArenas(4, &exact);
+    try std.testing.expectEqual(@as(usize, 132), arenas.candidate_state.len);
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        arenas.environment_and_invariants.len,
+    );
+    try std.testing.expectError(
+        error.ScratchCapacity,
+        initialValidationArenas(4, exact[0 .. exact.len - 1]),
+    );
 }
 
 fn decode(bytes: []const u8) Error!View {

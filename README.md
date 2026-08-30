@@ -1,6 +1,6 @@
 # Boundary
 
-Boundary is a Zig compiler and fixed Process interpreter for portable,
+Boundary is a general compiler and fixed Process interpreter for portable,
 defunctionalized algebraic effects. It separates one canonical program meaning
 from both open Process semantics and bounded Machine ABI v2 compatibility:
 
@@ -45,7 +45,7 @@ native callback.
 The primary construction is:
 
 ```zig
-const Program = boundary.program("research-agent", Body);
+const Program = boundary.program("portable-program", Body);
 
 const machine_options: boundary.MachineOptions = .{
     .state_encoding = .rnf_v1,

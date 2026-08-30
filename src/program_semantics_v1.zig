@@ -381,7 +381,7 @@ pub fn validOperandCount(
     return control_ir.validInstructionOperandCount(operation, actual, base);
 }
 
-pub fn usesMappedFailures(
+pub fn usesAuthoredFailures(
     comptime operation: control_ir.InstructionOperation,
     operand_count: usize,
 ) bool {
@@ -397,7 +397,7 @@ fn failureForInstruction(
     store: anytype,
     comptime role: FailureRole,
 ) Body.Failure {
-    if (comptime !usesMappedFailures(
+    if (comptime !usesAuthoredFailures(
         instruction.operation,
         instruction.operands.len,
     )) {

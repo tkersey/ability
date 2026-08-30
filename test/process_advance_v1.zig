@@ -1,3 +1,4 @@
+const authored_failure = @import("authored_failure_v2_fixture");
 const boundary = @import("boundary");
 const process_advance_v1 = @import("process_advance_v1");
 const process_state_v1 = @import("process_state_v1");
@@ -84,63 +85,6 @@ const CompletedBody = struct {
 const CompletedImage = boundary.program(
     "process-completed",
     CompletedBody,
-).image();
-
-const MappedFailure = enum { mapped };
-const mapped_failure_blocks = [_]boundary.ir.Block{.{
-    .id = 0,
-    .instructions = &.{
-        .{
-            .kind = .constant,
-            .result = 0,
-            .operation = .{ .constant = 0 },
-        },
-        .{
-            .kind = .constant,
-            .result = 1,
-            .operation = .{ .constant = 1 },
-        },
-        .{
-            .kind = .constant,
-            .result = 2,
-            .operation = .{ .constant = 2 },
-        },
-        .{
-            .kind = .pure,
-            .result = 3,
-            .operands = &.{ 0, 1, 2 },
-            .operation = .integer_add,
-        },
-    },
-    .terminator = .{ .return_value = 3 },
-}};
-const MappedFailureBody = struct {
-    pub const InitialArgs = void;
-    pub const Result = u8;
-    pub const Failure = MappedFailure;
-    pub const constants = .{
-        @as(u8, std.math.maxInt(u8)),
-        @as(u8, 1),
-        MappedFailure.mapped,
-    };
-    pub const effect_sites = .{};
-    pub const schema_types = .{MappedFailure};
-    pub const control_ir: boundary.ir.Program = .{
-        .label = "process-mapped-instruction-failure",
-        .value_types = &.{
-            .{ .scalar = .u8 },
-            .{ .scalar = .u8 },
-            .{ .schema = 0 },
-            .{ .scalar = .u8 },
-        },
-        .blocks = &mapped_failure_blocks,
-        .entry = 0,
-        .result_type = .{ .scalar = .u8 },
-    };
-};
-const MappedFailureImage = boundary.program(
-    "process-mapped-instruction-failure",
-    MappedFailureBody,
 ).image();
 
 const call_arguments = [_]boundary.ir.EdgeArgument{.{ .value = 0 }};
@@ -422,24 +366,91 @@ const DeepStorage = struct {
     }
 };
 
-test "Process advance executes evaluator semantics v2 mapped failures" {
+fn expectProcessAuthoredFailure(
+    image: []const u8,
+    initial_args: []const u8,
+    expected_tag: u32,
+) !void {
+    var first_storage: Storage = .{};
+    var first_workspace: boundary.image.ValidationWorkspace = .{};
+    const first = try process_advance_v1.advance(
+        image,
+        .{ .initial_args = initial_args },
+        null,
+        first_storage.buffers(),
+        &first_workspace,
+    );
+    switch (first) {
+        .authored_failure => |failure| try std.testing.expectEqual(
+            expected_tag,
+            std.mem.readInt(u32, failure[0..4], .little),
+        ),
+        .progressed => |state| {
+            var second_storage: Storage = .{};
+            var second_workspace: boundary.image.ValidationWorkspace = .{};
+            const second = try process_advance_v1.advance(
+                image,
+                .{ .process_state = state },
+                null,
+                second_storage.buffers(),
+                &second_workspace,
+            );
+            const failure = switch (second) {
+                .authored_failure => |value| value,
+                else => return error.UnexpectedProcessOutcome,
+            };
+            try std.testing.expectEqual(
+                expected_tag,
+                std.mem.readInt(u32, failure[0..4], .little),
+            );
+        },
+        else => return error.UnexpectedProcessOutcome,
+    }
+}
+
+test "Process advance executes direct authored failures" {
     try std.testing.expectEqual(
         boundary.image.evaluator_semantics_v2,
-        MappedFailureImage.evaluator_semantics_version,
+        authored_failure.Image.evaluator_semantics_version,
     );
+    try expectProcessAuthoredFailure(
+        &authored_failure.Image.bytes,
+        &authored_failure.bad_math_initial_args,
+        authored_failure.bad_math_failure_tag,
+    );
+    try expectProcessAuthoredFailure(
+        &authored_failure.Image.bytes,
+        &authored_failure.bad_position_initial_args,
+        authored_failure.bad_position_failure_tag,
+    );
+    try expectProcessAuthoredFailure(
+        &authored_failure.DivisionImage.bytes,
+        &authored_failure.division_overflow_initial_args,
+        authored_failure.bad_math_failure_tag,
+    );
+    try expectProcessAuthoredFailure(
+        &authored_failure.DivisionImage.bytes,
+        &authored_failure.division_by_zero_initial_args,
+        authored_failure.bad_position_failure_tag,
+    );
+    try expectProcessAuthoredFailure(
+        &authored_failure.CompositeImage.bytes,
+        &authored_failure.composite_failure_initial_args,
+        authored_failure.composite_failure_tag,
+    );
+
     var storage: Storage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
-    const outcome = try process_advance_v1.advance(
-        &MappedFailureImage.bytes,
-        .{ .initial_args = &.{} },
+    const success = try process_advance_v1.advance(
+        &authored_failure.DivisionImage.bytes,
+        .{ .initial_args = &authored_failure.division_success_initial_args },
         null,
         storage.buffers(),
         &workspace,
     );
-    const failure = outcome.authored_failure;
     try std.testing.expectEqual(
-        @as(u32, @intFromEnum(MappedFailure.mapped)),
-        std.mem.readInt(u32, failure[0..4], .little),
+        @as(i8, 4),
+        @as(i8, @bitCast(success.completed[0])),
     );
 }
 
