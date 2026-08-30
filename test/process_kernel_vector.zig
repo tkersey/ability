@@ -168,11 +168,79 @@ const Storage = struct {
     }
 };
 
+const EmissionMode = enum { legacy, conformance };
+
+const Emission = struct {
+    writer: *std.Io.Writer,
+    mode: EmissionMode,
+
+    fn writeHeader(self: @This(), count: u32) !void {
+        switch (self.mode) {
+            .legacy => try writeInt(self.writer, count),
+            .conformance => {
+                try self.writer.writeAll("BPCGEN1\x00");
+                try writeUnsigned(self.writer, u32, 1);
+                try writeUnsigned(self.writer, u32, count);
+            },
+        }
+    }
+
+    fn writeVector(
+        self: @This(),
+        id: []const u8,
+        image: []const u8,
+        instance: process_advance_v1.Instance,
+        effect_result: ?[]const u8,
+        outcome: process_advance_v1.Outcome,
+    ) !void {
+        var input_storage: [128 * 1024]u8 = undefined;
+        var output_storage: [128 * 1024]u8 = undefined;
+        const input = try process_advance_v1.encodeKernelInput(
+            image,
+            instance,
+            effect_result,
+            &input_storage,
+        );
+        const output = try process_advance_v1.encodeOutcome(
+            outcome,
+            &output_storage,
+        );
+        switch (self.mode) {
+            .legacy => {
+                try writeInt(self.writer, @intCast(input.len));
+                try writeInt(self.writer, @intCast(output.len));
+            },
+            .conformance => {
+                try writeUnsigned(self.writer, u16, @intCast(id.len));
+                try self.writer.writeAll(&.{ 0, 0 });
+                try writeUnsigned(self.writer, u64, @intCast(input.len));
+                try writeUnsigned(self.writer, u64, @intCast(output.len));
+                try self.writer.writeAll(id);
+            },
+        }
+        try self.writer.writeAll(input);
+        try self.writer.writeAll(output);
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
+    var arguments = std.process.Args.Iterator.init(init.minimal.args);
+    defer arguments.deinit();
+    _ = arguments.skip();
+    const mode: EmissionMode = if (arguments.next()) |argument|
+        if (std.mem.eql(u8, argument, "--conformance-corpus-v1"))
+            .conformance
+        else
+            return error.UnexpectedArgument
+    else
+        .legacy;
+    if (arguments.next() != null) return error.UnexpectedArgument;
+
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    try writeInt(stdout, 15);
+    const emission: Emission = .{ .writer = stdout, .mode = mode };
+    try emission.writeHeader(if (mode == .conformance) 19 else 15);
 
     var left: Storage = .{};
     var right: Storage = .{};
@@ -186,7 +254,13 @@ pub fn main(init: std.process.Init) !void {
         left.buffers(),
         &workspace,
     );
-    try writeVector(stdout, &Image.bytes, .{ .initial_args = &initial }, null, first);
+    try emission.writeVector(
+        "typed-effect-initial",
+        &Image.bytes,
+        .{ .initial_args = &initial },
+        null,
+        first,
+    );
     const pending = first.requested;
 
     workspace = .{};
@@ -197,18 +271,26 @@ pub fn main(init: std.process.Init) !void {
         right.buffers(),
         &workspace,
     );
-    try writeVector(
-        stdout,
+    try emission.writeVector(
+        "pending-request-reconstruction",
         &Image.bytes,
         .{ .process_state = pending.state },
         null,
         second,
     );
+    try expectEquivalentRequests(first, second);
 
     const request = try boundary.process_v1.effect.validateRequest(
         pending.request,
         Image.program_transition_digest,
     );
+    if (!std.mem.eql(
+        u8,
+        request.effect_semantic_identity,
+        "process.kernel.fixture.lookup.v1",
+    ) or !std.mem.eql(u8, request.payload, &initial)) {
+        return error.UnexpectedTypedRequest;
+    }
     var resume_value: [4]u8 = undefined;
     std.mem.writeInt(u32, &resume_value, 29, .little);
     var result_storage: [256]u8 = undefined;
@@ -226,13 +308,14 @@ pub fn main(init: std.process.Init) !void {
         right.buffers(),
         &workspace,
     );
-    try writeVector(
-        stdout,
+    try emission.writeVector(
+        "typed-resume",
         &Image.bytes,
         .{ .process_state = pending.state },
         result,
         third,
     );
+    try expectU32Result(third, 29);
 
     right = .{};
     workspace = .{};
@@ -243,13 +326,14 @@ pub fn main(init: std.process.Init) !void {
         right.buffers(),
         &workspace,
     );
-    try writeVector(
-        stdout,
+    try emission.writeVector(
+        "initial-progress",
         &ProgressedImage.bytes,
         .{ .initial_args = &initial },
         null,
         fourth,
     );
+    _ = fourth.progressed;
 
     right = .{};
     workspace = .{};
@@ -260,16 +344,22 @@ pub fn main(init: std.process.Init) !void {
         right.buffers(),
         &workspace,
     );
-    try writeVector(
-        stdout,
+    try emission.writeVector(
+        "explicit-yield",
         &YieldedImage.bytes,
         .{ .initial_args = &initial },
         null,
         fifth,
     );
+    _ = fifth.explicitly_yielded;
 
     right = .{};
     workspace = .{};
+    if (FailedImage.evaluator_semantics_version !=
+        boundary.image.evaluator_semantics_v1)
+    {
+        return error.ExpectedAuthoredFailureV1Image;
+    }
     const sixth = try process_advance_v1.advance(
         &FailedImage.bytes,
         .{ .initial_args = &.{} },
@@ -277,22 +367,23 @@ pub fn main(init: std.process.Init) !void {
         right.buffers(),
         &workspace,
     );
-    try writeVector(
-        stdout,
+    try emission.writeVector(
+        "authored-failure-v1",
         &FailedImage.bytes,
         .{ .initial_args = &.{} },
         null,
         sixth,
     );
+    try expectFailureTag(sixth, 0);
 
-    try writeAuthoredFailureVectors(stdout);
-    try writeMorphismVector(stdout);
-    try writeRecursionVectors(stdout);
+    try writeAuthoredFailureVectors(emission);
+    try writeMorphismVector(emission);
+    try writeRecursionVectors(emission);
 
     try stdout.flush();
 }
 
-fn writeAuthoredFailureVectors(writer: *std.Io.Writer) !void {
+fn writeAuthoredFailureVectors(emission: Emission) !void {
     if (authored_failure.Image.evaluator_semantics_version !=
         boundary.image.evaluator_semantics_v2 or
         authored_failure.DivisionImage.evaluator_semantics_version !=
@@ -301,12 +392,16 @@ fn writeAuthoredFailureVectors(writer: *std.Io.Writer) !void {
         return error.ExpectedAuthoredFailureV2Image;
     }
     try writeAuthoredFailureCase(
-        writer,
+        emission,
+        "authored-failure-v2-bad-math-progress",
+        "authored-failure-v2-bad-math",
         &authored_failure.bad_math_initial_args,
         authored_failure.bad_math_failure_tag,
     );
     try writeAuthoredFailureCase(
-        writer,
+        emission,
+        "authored-failure-v2-bad-position-progress",
+        "authored-failure-v2-bad-position",
         &authored_failure.bad_position_initial_args,
         authored_failure.bad_position_failure_tag,
     );
@@ -314,7 +409,8 @@ fn writeAuthoredFailureVectors(writer: *std.Io.Writer) !void {
     var storage: Storage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
     const success = try advanceAndWrite(
-        writer,
+        emission,
+        "authored-failure-v2-success",
         &authored_failure.DivisionImage.bytes,
         .{ .initial_args = &authored_failure.division_success_initial_args },
         null,
@@ -328,7 +424,9 @@ fn writeAuthoredFailureVectors(writer: *std.Io.Writer) !void {
 }
 
 fn writeAuthoredFailureCase(
-    writer: *std.Io.Writer,
+    emission: Emission,
+    started_id: []const u8,
+    failed_id: []const u8,
     initial_args: []const u8,
     expected_tag: u32,
 ) !void {
@@ -336,7 +434,8 @@ fn writeAuthoredFailureCase(
     var right: Storage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
     const started = try advanceAndWrite(
-        writer,
+        emission,
+        started_id,
         &authored_failure.Image.bytes,
         .{ .initial_args = initial_args },
         null,
@@ -346,7 +445,8 @@ fn writeAuthoredFailureCase(
     const state = started.progressed;
     workspace = .{};
     const failed = try advanceAndWrite(
-        writer,
+        emission,
+        failed_id,
         &authored_failure.Image.bytes,
         .{ .process_state = state },
         null,
@@ -356,13 +456,14 @@ fn writeAuthoredFailureCase(
     try expectFailureTag(failed, expected_tag);
 }
 
-fn writeMorphismVector(writer: *std.Io.Writer) !void {
+fn writeMorphismVector(emission: Emission) !void {
     var initial: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial, 7, .little);
     var storage: Storage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
     const outcome = try advanceAndWrite(
-        writer,
+        emission,
+        "effect-morphism",
         &MorphismImage.bytes,
         .{ .initial_args = &initial },
         null,
@@ -382,14 +483,15 @@ fn writeMorphismVector(writer: *std.Io.Writer) !void {
     }
 }
 
-fn writeRecursionVectors(writer: *std.Io.Writer) !void {
+fn writeRecursionVectors(emission: Emission) !void {
     var initial: [4]u8 = undefined;
     std.mem.writeInt(u32, &initial, 1, .little);
     var left: Storage = .{};
     var right: Storage = .{};
     var workspace: boundary.image.ValidationWorkspace = .{};
     const called = try advanceAndWrite(
-        writer,
+        emission,
+        "recursion-call",
         &RecursionImage.bytes,
         .{ .initial_args = &initial },
         null,
@@ -401,7 +503,8 @@ fn writeRecursionVectors(writer: *std.Io.Writer) !void {
 
     workspace = .{};
     const branched = try advanceAndWrite(
-        writer,
+        emission,
+        "recursion-branch",
         &RecursionImage.bytes,
         .{ .process_state = call_state },
         null,
@@ -414,18 +517,77 @@ fn writeRecursionVectors(writer: *std.Io.Writer) !void {
     left = .{};
     workspace = .{};
     const recurred = try advanceAndWrite(
-        writer,
+        emission,
+        "recursion-recur",
         &RecursionImage.bytes,
         .{ .process_state = branch_state },
         null,
         &left,
         &workspace,
     );
-    try expectFrameCount(recurred.progressed, 3);
+    const recur_state = recurred.progressed;
+    try expectFrameCount(recur_state, 3);
+    if (emission.mode == .legacy) return;
+
+    right = .{};
+    workspace = .{};
+    const base = try advanceAndWrite(
+        emission,
+        "recursion-base-branch",
+        &RecursionImage.bytes,
+        .{ .process_state = recur_state },
+        null,
+        &right,
+        &workspace,
+    );
+    const base_state = base.progressed;
+    try expectFrameCount(base_state, 3);
+
+    left = .{};
+    workspace = .{};
+    const inner = try advanceAndWrite(
+        emission,
+        "recursion-return-inner",
+        &RecursionImage.bytes,
+        .{ .process_state = base_state },
+        null,
+        &left,
+        &workspace,
+    );
+    const inner_state = inner.progressed;
+    try expectFrameCount(inner_state, 2);
+
+    right = .{};
+    workspace = .{};
+    const root = try advanceAndWrite(
+        emission,
+        "recursion-return-root",
+        &RecursionImage.bytes,
+        .{ .process_state = inner_state },
+        null,
+        &right,
+        &workspace,
+    );
+    const root_state = root.progressed;
+    try expectFrameCount(root_state, 1);
+
+    left = .{};
+    workspace = .{};
+    const completed = try advanceAndWrite(
+        emission,
+        "recursion-complete",
+        &RecursionImage.bytes,
+        .{ .process_state = root_state },
+        null,
+        &left,
+        &workspace,
+    );
+    try expectU32Result(completed, 1);
 }
 
 fn advanceAndWrite(
-    writer: *std.Io.Writer,
+    emission: Emission,
+    id: []const u8,
     image: []const u8,
     instance: process_advance_v1.Instance,
     effect_result: ?[]const u8,
@@ -439,33 +601,46 @@ fn advanceAndWrite(
         storage.buffers(),
         workspace,
     );
-    try writeVector(writer, image, instance, effect_result, outcome);
+    try emission.writeVector(id, image, instance, effect_result, outcome);
     return outcome;
 }
 
-fn writeVector(
-    writer: *std.Io.Writer,
-    image: []const u8,
-    instance: process_advance_v1.Instance,
-    effect_result: ?[]const u8,
-    outcome: process_advance_v1.Outcome,
+fn expectEquivalentRequests(
+    left: process_advance_v1.Outcome,
+    right: process_advance_v1.Outcome,
 ) !void {
-    var input_storage: [128 * 1024]u8 = undefined;
-    var output_storage: [128 * 1024]u8 = undefined;
-    const input = try process_advance_v1.encodeKernelInput(
-        image,
-        instance,
-        effect_result,
-        &input_storage,
-    );
-    const output = try process_advance_v1.encodeOutcome(
-        outcome,
-        &output_storage,
-    );
-    try writeInt(writer, @intCast(input.len));
-    try writeInt(writer, @intCast(output.len));
-    try writer.writeAll(input);
-    try writer.writeAll(output);
+    const left_request = switch (left) {
+        .requested => |requested| requested,
+        else => return error.ExpectedRequested,
+    };
+    const right_request = switch (right) {
+        .requested => |requested| requested,
+        else => return error.ExpectedRequested,
+    };
+    if (!std.mem.eql(u8, left_request.state, right_request.state) or
+        !std.mem.eql(u8, left_request.request, right_request.request))
+    {
+        return error.PendingRequestReconstructionMismatch;
+    }
+    var left_storage: [128 * 1024]u8 = undefined;
+    var right_storage: [128 * 1024]u8 = undefined;
+    const left_bytes = try process_advance_v1.encodeOutcome(left, &left_storage);
+    const right_bytes = try process_advance_v1.encodeOutcome(right, &right_storage);
+    if (!std.mem.eql(u8, left_bytes, right_bytes)) {
+        return error.PendingOutcomeReconstructionMismatch;
+    }
+}
+
+fn expectU32Result(outcome: process_advance_v1.Outcome, expected: u32) !void {
+    const result = switch (outcome) {
+        .completed => |bytes| bytes,
+        else => return error.ExpectedCompleted,
+    };
+    if (result.len != @sizeOf(u32) or
+        std.mem.readInt(u32, result[0..@sizeOf(u32)], .little) != expected)
+    {
+        return error.UnexpectedCompletedResult;
+    }
 }
 
 fn expectFailureTag(outcome: process_advance_v1.Outcome, expected: u32) !void {
@@ -491,5 +666,11 @@ fn expectFrameCount(state: []const u8, expected: u64) !void {
 fn writeInt(writer: *std.Io.Writer, value: u32) !void {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .little);
+    try writer.writeAll(&bytes);
+}
+
+fn writeUnsigned(writer: *std.Io.Writer, comptime T: type, value: T) !void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
     try writer.writeAll(&bytes);
 }
