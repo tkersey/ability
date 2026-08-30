@@ -94,6 +94,7 @@ authority crosses the Machine boundary.
 - [Machine v2 Kernel v1](docs/boundary_kernel_v1.md)
 - [Process ABI v1](docs/process_v1.md)
 - [Specialization equivalence](docs/specialization_equivalence.md)
+- [Migration to Boundary 1.7](docs/migration_to_1_7.md)
 - [Migration to Boundary 1.6](docs/migration_to_1_6.md)
 - [Migration from Boundary 0.7](docs/migration_from_0_7.md)
 

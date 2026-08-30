@@ -10,7 +10,7 @@ const process_v1_module = @import("process_v1");
 const program_v2 = @import("program_v2");
 
 /// Published Boundary package identity.
-pub const package_version = "1.6.1";
+pub const package_version = "1.7.0";
 
 /// Public typed residual-effect authoring namespace.
 pub const effect = effect_v2;
@@ -83,9 +83,10 @@ pub const Vector = portable_value.Vector;
 /// Identity-bearing Machine compiler options.
 pub const MachineOptions = machine.Options;
 
-test "Boundary 1.0 root exposes one compiler and no legacy runtime" {
+test "Boundary root exposes one compiler and no legacy runtime" {
     const std = @import("std");
 
+    try std.testing.expectEqualStrings("1.7.0", package_version);
     try std.testing.expect(@hasDecl(@This(), "program"));
     try std.testing.expect(@hasDecl(@This(), "Driver"));
     try std.testing.expect(@hasDecl(@This(), "Agent"));

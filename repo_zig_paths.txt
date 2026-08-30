@@ -34,8 +34,10 @@ test/compile_fail/driver_semantic_contract_mismatch.zig
 test/compile_fail/driver_semantic_site_mismatch.zig
 test/compile_fail/dynamic_instruction_failure_operand.zig
 test/compile_fail/effect_handler_type_mismatch.zig
+test/compile_fail/effect_morphism_invalid_utf8.zig
 test/compile_fail/effect_morphism_type_mismatch.zig
 test/compile_fail/effect_resume_type_mismatch.zig
+test/compile_fail/effect_site_invalid_utf8.zig
 test/compile_fail/effect_site_ordinal_mismatch.zig
 test/compile_fail/forged_portable_container_marker.zig
 test/compile_fail/generated_container_product_access.zig

@@ -2193,6 +2193,14 @@ pub fn build(b: *std.Build) void {
             "effect site ids must be dense from zero",
         },
         .{
+            "test/compile_fail/effect_site_invalid_utf8.zig",
+            "effect site semantic_identity must be valid UTF-8",
+        },
+        .{
+            "test/compile_fail/effect_morphism_invalid_utf8.zig",
+            "effect morphism Target semantic_identity must be valid UTF-8",
+        },
+        .{
             "test/compile_fail/generated_reducer_limit.zig",
             "Boundary compiler blocked program: GeneratedReducerLimitExceeded",
         },

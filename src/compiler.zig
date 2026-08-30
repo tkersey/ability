@@ -1518,6 +1518,9 @@ fn validateBody(
         if (semantic_identity.len == 0) {
             @compileError("effect site semantic_identity must be non-empty");
         }
+        if (!std.unicode.utf8ValidateSlice(semantic_identity)) {
+            @compileError("effect site semantic_identity must be valid UTF-8");
+        }
         portable_value.assertPortable(Site.Payload);
         portable_value.assertPortable(Site.Resume);
     }
@@ -1562,6 +1565,11 @@ fn validateBody(
             if (target_identity.len == 0) {
                 @compileError(
                     "effect morphism Target semantic_identity must be non-empty",
+                );
+            }
+            if (!std.unicode.utf8ValidateSlice(target_identity)) {
+                @compileError(
+                    "effect morphism Target semantic_identity must be valid UTF-8",
                 );
             }
             portable_value.assertPortable(Target.Payload);
