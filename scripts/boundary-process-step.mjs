@@ -60,6 +60,7 @@ try {
     const result = resultFile === null
       ? Buffer.alloc(0)
       : readExact(resultFile, "result");
+    verifyGenerations([imageFile, instanceFile, resultFile]);
     let payload = wasmOffset(
       exports.boundary_process_kernel_input_payload_ptr(),
     );

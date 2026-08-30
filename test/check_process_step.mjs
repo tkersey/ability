@@ -166,6 +166,69 @@ try {
       )) {
     throw new Error("relay admitted a changing file generation");
   }
+  const earlierImage = path.join(temporary, "system-0.bpi1");
+  const laterInstance = path.join(temporary, "instance-0.bin");
+  const mutationPreload = path.join(temporary, "mutate-earlier-input.cjs");
+  fs.writeFileSync(mutationPreload, `
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const originalWriteSync = fs.writeSync;
+    const openedPaths = new Map();
+    fs.openSync = function(file, ...args) {
+      const descriptor = originalOpenSync.call(fs, file, ...args);
+      if (typeof file === "string") {
+        openedPaths.set(descriptor, path.resolve(file));
+      }
+      return descriptor;
+    };
+    let mutated = false;
+    fs.readSync = function(descriptor, ...args) {
+      if (!mutated && openedPaths.get(descriptor) ===
+          path.resolve(process.env.BOUNDARY_RELAY_TRIGGER_PATH)) {
+        mutated = true;
+        const target = originalOpenSync.call(
+          fs,
+          process.env.BOUNDARY_RELAY_MUTATE_PATH,
+          "a",
+        );
+        try {
+          originalWriteSync.call(fs, target, Buffer.from([0]));
+          fs.fsyncSync(target);
+        } finally {
+          fs.closeSync(target);
+        }
+      }
+      return originalReadSync.call(fs, descriptor, ...args);
+    };
+  `);
+  const crossFileGeneration = spawnSync(process.execPath, [
+    adapter,
+    "--kernel", kernel,
+    "--image", earlierImage,
+    "--initial-args", laterInstance,
+  ], {
+    env: {
+      ...process.env,
+      NODE_OPTIONS: [
+        process.env.NODE_OPTIONS,
+        "--require=" + mutationPreload,
+      ].filter(Boolean).join(" "),
+      BOUNDARY_RELAY_MUTATE_PATH: earlierImage,
+      BOUNDARY_RELAY_TRIGGER_PATH: laterInstance,
+    },
+  });
+  if (crossFileGeneration.status === 0 ||
+      !crossFileGeneration.stderr.toString("utf8").includes(
+        "image changed after preflight",
+      )) {
+    throw new Error(
+      "relay admitted a cross-file generation change: status=" +
+        crossFileGeneration.status + " stderr=" +
+        crossFileGeneration.stderr.toString("utf8"),
+    );
+  }
   const nonRegular = spawnSync(process.execPath, [
     adapter,
     "--kernel", kernel,
