@@ -6,6 +6,7 @@ const machine = @import("machine");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
+const text_byte_at = @import("text_byte_at_fixture");
 
 const Title = portable_value.Text(16);
 const Digest = portable_value.Text(32);
@@ -361,6 +362,83 @@ test "evaluator semantics v2 requires an authored failure operand" {
     var workspace: image_v1.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.InvalidFailureMap,
+        image_v1.validateImage(&promoted, &workspace),
+    );
+}
+
+test "evaluator semantics v3 projects canonical Text bytes" {
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v3,
+        text_byte_at.Image.evaluator_semantics_version,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(&text_byte_at.Image.bytes, &workspace);
+
+    inline for (.{
+        .{ @as(u32, 0), @as(u8, 0xc3) },
+        .{ @as(u32, 1), @as(u8, 0xa9) },
+        .{ @as(u32, 2), @as(u8, '"') },
+    }) |case| {
+        const state = try text_byte_at.Machine.initialState(
+            std.testing.allocator,
+            text_byte_at.input(case[0]),
+        );
+        defer text_byte_at.Machine.deinitState(state);
+        var fuel: u64 = 32;
+        const done = switch (try text_byte_at.Machine.step(state, &fuel)) {
+            .done => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer done.deinit();
+        try std.testing.expectEqual(case[1], done.value().*);
+    }
+}
+
+test "evaluator semantics v3 returns the authored invalid-index failure" {
+    const state = try text_byte_at.Machine.initialState(
+        std.testing.allocator,
+        text_byte_at.input(3),
+    );
+    defer text_byte_at.Machine.deinitState(state);
+    var fuel: u64 = 32;
+    switch (try text_byte_at.Machine.step(state, &fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |value| try std.testing.expectEqual(
+                text_byte_at.Failure.bad_index,
+                value,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "evaluator semantics v2 rejects the v3 Text operation" {
+    var downgraded = text_byte_at.Image.bytes;
+    std.mem.writeInt(
+        u16,
+        downgraded[10..12],
+        image_v1.evaluator_semantics_v2,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidInstruction,
+        image_v1.validateImage(&downgraded, &workspace),
+    );
+}
+
+test "evaluator semantics v3 requires a v3 operation" {
+    var promoted = PureImage.bytes;
+    std.mem.writeInt(
+        u16,
+        promoted[10..12],
+        image_v1.evaluator_semantics_v3,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidInstruction,
         image_v1.validateImage(&promoted, &workspace),
     );
 }

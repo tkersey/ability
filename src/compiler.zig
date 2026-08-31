@@ -1261,6 +1261,15 @@ fn validateInstruction(
                 @compileError("text_length requires Text -> u32");
             }
         },
+        .text_byte_at => {
+            requireOperandCount(instruction, 2);
+            if (!isText(operandType(Body, program, instruction, 0)) or
+                operandType(Body, program, instruction, 1) != u32 or
+                Result != u8)
+            {
+                @compileError("text_byte_at requires Text, u32 -> u8");
+            }
+        },
         .text_append => {
             requireOperandCount(instruction, 2);
             const Destination = operandType(Body, program, instruction, 0);
@@ -2297,16 +2306,18 @@ fn evaluatorSemanticsVersion(
     comptime program: control_ir.Program,
     comptime reachability: anytype,
 ) u16 {
+    var result: u16 = 1;
     for (program.blocks) |block| {
         if (!reachability.contains(block.id)) continue;
         for (block.instructions) |instruction| {
+            if (instruction.operation == .text_byte_at) return 3;
             if (program_semantics_v1.usesAuthoredFailures(
                 instruction.operation,
                 instruction.operands.len,
-            )) return 2;
+            )) result = 2;
         }
     }
-    return 1;
+    return result;
 }
 
 fn initialConstructorId(
