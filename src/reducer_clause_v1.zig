@@ -274,7 +274,7 @@ pub fn evaluateClause(
                 &scratch_cursor,
                 capacity,
             ),
-            24...56, 58 => try executeCompositeOperation(
+            24...56, 58, 59 => try executeCompositeOperation(
                 image,
                 segment[cursor .. cursor + instruction_length],
                 result,
@@ -1437,6 +1437,28 @@ pub fn executeCompositeOperation(
                 .initialized = true,
             };
         },
+        59 => {
+            const bytes = sequencePayload(slots[operands[0]].bytes);
+            const index = readInt(u32, slots[operands[1]].bytes, 0);
+            if (index >= bytes.len) {
+                return try instructionFailureTag(
+                    image,
+                    instruction,
+                    slots,
+                    "invalid_index",
+                );
+            }
+            slots[result] = .{
+                .bytes = try writeRaw(
+                    scratch,
+                    scratch_cursor,
+                    capacity,
+                    .u8,
+                    bytes[index],
+                ),
+                .initialized = true,
+            };
+        },
         else => return error.UnsupportedOperation,
     }
     return null;
@@ -2197,7 +2219,7 @@ fn validateComputedResultEncoded(
             &scratch_cursor,
             capacity,
         )
-    else if (operation <= 56 or operation == 58)
+    else if (operation <= 56 or operation == 58 or operation == 59)
         try executeCompositeOperation(
             image,
             instruction,

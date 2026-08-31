@@ -1267,13 +1267,13 @@ fn validateInstruction(
         operation,
     ) orelse return error.InvalidInstruction;
     const expected_kind: u8 = if (operation <= 2) @intCast(operation) else 3;
-    if (bytes[start + 5] != 0 or operation > 58 or kind != expected_kind or
+    if (bytes[start + 5] != 0 or operation > 59 or kind != expected_kind or
         result >= catalogs.value_count or
         end != start + 16 + @as(usize, operand_count) * 2)
     {
         return error.InvalidInstruction;
     }
-    if (wire_operation == .text_byte_at) {
+    if (wire_operation == .text_byte_at or wire_operation == .bytes_byte_at) {
         if (catalogs.envelope.header.evaluator_semantics_version !=
             evaluator_semantics_v3)
         {
@@ -1639,6 +1639,10 @@ fn validateInstructionSchemas(
             return error.InvalidInstruction,
         .text_byte_at => if (result_node.kind != .u8 or
             (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32)
+            return error.InvalidInstruction,
+        .bytes_byte_at => if (result_node.kind != .u8 or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .bytes or
             (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32)
             return error.InvalidInstruction,
         .text_compare => if (result_node.kind != .i8 or

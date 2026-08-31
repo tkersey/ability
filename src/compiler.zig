@@ -13,7 +13,7 @@ const implementation_limits: control_ir.CompilerLimits = .{
     .maximum_blocks = 128,
     .maximum_constructors = 256,
     .maximum_environment_fields = 128,
-    .maximum_invariant_terms = 64,
+    .maximum_invariant_terms = 128,
     .maximum_generated_operations = 32_768,
 };
 const compiler_evaluation_branch_quota = 500_000_000;
@@ -294,6 +294,7 @@ fn addSegmentEdgeValues(
 fn segmentStoreType(
     comptime Body: type,
     comptime program: control_ir.Program,
+    comptime normal_form: anytype,
     comptime constructor: anytype,
     comptime canonical: anytype,
 ) type {
@@ -343,6 +344,25 @@ fn segmentStoreType(
             included[@intCast(value)] = true;
         },
     }
+    inline for (normal_form.entryTransitionSlice()) |transition| {
+        if (transition.source_block != block.id) continue;
+        const target = normal_form.constructors[transition.constructor_id];
+        inline for (target.environmentFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+        inline for (target.activationFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+    }
+    inline for (normal_form.constructorSlice()) |target| {
+        if (target.source_block != block.id) continue;
+        inline for (target.environmentFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+        inline for (target.activationFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+    }
 
     var fields: [canonical.value_count]rnf.EnvironmentField = undefined;
     var field_count: usize = 0;
@@ -376,6 +396,7 @@ fn maximumSegmentStoreSize(
             @sizeOf(segmentStoreType(
                 Body,
                 program,
+                normal_form,
                 constructor,
                 canonical,
             )),
@@ -1268,6 +1289,15 @@ fn validateInstruction(
                 Result != u8)
             {
                 @compileError("text_byte_at requires Text, u32 -> u8");
+            }
+        },
+        .bytes_byte_at => {
+            requireOperandCount(instruction, 2);
+            if (!isBytes(operandType(Body, program, instruction, 0)) or
+                operandType(Body, program, instruction, 1) != u32 or
+                Result != u8)
+            {
+                @compileError("bytes_byte_at requires Bytes, u32 -> u8");
             }
         },
         .text_append => {
@@ -2310,7 +2340,8 @@ fn evaluatorSemanticsVersion(
     for (program.blocks) |block| {
         if (!reachability.contains(block.id)) continue;
         for (block.instructions) |instruction| {
-            if (instruction.operation == .text_byte_at) return 3;
+            if (instruction.operation == .text_byte_at or
+                instruction.operation == .bytes_byte_at) return 3;
             if (program_semantics_v1.usesAuthoredFailures(
                 instruction.operation,
                 instruction.operands.len,
@@ -2704,6 +2735,7 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
             return segmentStoreType(
                 Body,
                 program,
+                normal_form,
                 normal_form.constructors[constructor_id],
                 semantic_canonicalization,
             );
