@@ -274,7 +274,7 @@ pub fn evaluateClause(
                 &scratch_cursor,
                 capacity,
             ),
-            24...56 => try executeCompositeOperation(
+            24...56, 58 => try executeCompositeOperation(
                 image,
                 segment[cursor .. cursor + instruction_length],
                 result,
@@ -783,7 +783,7 @@ fn ordinaryInstructionOperandCount(
     const failure_count = program_semantics_v1.failureRolesForWire(
         operation,
     ).len;
-    if (image.catalogs.envelope.header.evaluator_semantics_version ==
+    if (image.catalogs.envelope.header.evaluator_semantics_version >=
         image_v1.evaluator_semantics_v2 and failure_count != 0 and
         actual == base + failure_count)
     {
@@ -1415,6 +1415,28 @@ pub fn executeCompositeOperation(
                 .initialized = true,
             };
         },
+        58 => {
+            const text = sequencePayload(slots[operands[0]].bytes);
+            const index = readInt(u32, slots[operands[1]].bytes, 0);
+            if (index >= text.len) {
+                return try instructionFailureTag(
+                    image,
+                    instruction,
+                    slots,
+                    "invalid_index",
+                );
+            }
+            slots[result] = .{
+                .bytes = try writeRaw(
+                    scratch,
+                    scratch_cursor,
+                    capacity,
+                    .u8,
+                    text[index],
+                ),
+                .initialized = true,
+            };
+        },
         else => return error.UnsupportedOperation,
     }
     return null;
@@ -1745,7 +1767,7 @@ fn instructionFailureTag(
         return error.InvalidImage;
     const roles = program_semantics_v1.failureRolesForWire(operation);
     const operand_count = readInt(u16, instruction, 10);
-    if (image.catalogs.envelope.header.evaluator_semantics_version ==
+    if (image.catalogs.envelope.header.evaluator_semantics_version >=
         image_v1.evaluator_semantics_v2 and roles.len != 0 and
         operand_count == base + roles.len)
     {

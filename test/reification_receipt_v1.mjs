@@ -312,8 +312,8 @@ try {
   ];
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
   if (
-    receipt.boundary_version !== "1.7.0" ||
-    receipt.kernel_release_version !== "1.7.0" ||
+    receipt.boundary_version !== "1.8.0" ||
+    receipt.kernel_release_version !== "1.8.0" ||
     receipt.image_profile_invariance_passed !== true ||
     receipt.baseline_digest_count !== 10 ||
     receipt.canonical_image_fixture_count !== 2 ||

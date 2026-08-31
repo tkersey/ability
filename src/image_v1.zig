@@ -6,6 +6,7 @@ pub const magic = "ABL_BPI1".*;
 pub const image_format_version: u16 = 1;
 pub const evaluator_semantics_v1: u16 = 1;
 pub const evaluator_semantics_v2: u16 = 2;
+pub const evaluator_semantics_v3: u16 = 3;
 pub const evaluator_semantics_version: u16 = evaluator_semantics_v1;
 pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
@@ -257,7 +258,8 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     }
     const evaluator_version = readInt(u16, image, 10);
     if (evaluator_version != evaluator_semantics_v1 and
-        evaluator_version != evaluator_semantics_v2)
+        evaluator_version != evaluator_semantics_v2 and
+        evaluator_version != evaluator_semantics_v3)
     {
         return error.UnsupportedEvaluatorSemantics;
     }
@@ -410,6 +412,7 @@ pub fn validateImage(
     );
     var next_constant: u32 = 0;
     var next_value: u32 = 0;
+    var v3_operation_used = false;
     const segment_count = try validateSegments(
         catalogs,
         &workspace.constant_used,
@@ -418,6 +421,7 @@ pub fn validateImage(
         &workspace.canonical_failure_constant,
         &workspace.authored_failure_operand,
         &next_value,
+        &v3_operation_used,
     );
     var authored_failure_used = false;
     for (workspace.authored_failure_operand[0..catalogs.value_count], 0..) |used, value| {
@@ -431,6 +435,11 @@ pub fn validateImage(
         evaluator_semantics_v2 and !authored_failure_used)
     {
         return error.InvalidFailureMap;
+    }
+    if (catalogs.envelope.header.evaluator_semantics_version ==
+        evaluator_semantics_v3 and !v3_operation_used)
+    {
+        return error.InvalidInstruction;
     }
     for (workspace.constant_used[0..catalogs.constant_count]) |used| {
         if (!used) return error.InvalidConstant;
@@ -1089,6 +1098,7 @@ fn validateSegments(
     canonical_failure_constant: *[1024]bool,
     authored_failure_operand: *[1024]bool,
     next_value: *u32,
+    v3_operation_used: *bool,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
     if (bytes.len < 4) return error.InvalidSegment;
@@ -1154,6 +1164,7 @@ fn validateSegments(
                 canonical_failure_constant,
                 authored_failure_operand,
                 next_value,
+                v3_operation_used,
             );
         }
         cursor = try validateTerminator(
@@ -1240,6 +1251,7 @@ fn validateInstruction(
     canonical_failure_constant: *[1024]bool,
     authored_failure_operand: *[1024]bool,
     next_value: *u32,
+    v3_operation_used: *bool,
 ) Error!usize {
     if (segment_end - start < 16) return error.InvalidInstruction;
     const end = recordEnd(bytes, start, 16) catch
@@ -1255,11 +1267,19 @@ fn validateInstruction(
         operation,
     ) orelse return error.InvalidInstruction;
     const expected_kind: u8 = if (operation <= 2) @intCast(operation) else 3;
-    if (bytes[start + 5] != 0 or operation > 57 or kind != expected_kind or
+    if (bytes[start + 5] != 0 or operation > 58 or kind != expected_kind or
         result >= catalogs.value_count or
         end != start + 16 + @as(usize, operand_count) * 2)
     {
         return error.InvalidInstruction;
+    }
+    if (wire_operation == .text_byte_at) {
+        if (catalogs.envelope.header.evaluator_semantics_version !=
+            evaluator_semantics_v3)
+        {
+            return error.InvalidInstruction;
+        }
+        v3_operation_used.* = true;
     }
     if (operation == 0) {
         if (immediate >= catalogs.constant_count) return error.InvalidInstruction;
@@ -1299,7 +1319,7 @@ fn validateInstruction(
         wire_operation,
     );
     const authored_failures = base_operand_count != null and
-        catalogs.envelope.header.evaluator_semantics_version ==
+        catalogs.envelope.header.evaluator_semantics_version >=
             evaluator_semantics_v2 and
         failure_roles.len != 0 and
         operand_count == base_operand_count.? + failure_roles.len;
@@ -1341,7 +1361,7 @@ fn validateInstructionSchemas(
         const failure_count = program_semantics_v1.failureRolesForWire(
             operation,
         ).len;
-        const authored = catalogs.envelope.header.evaluator_semantics_version ==
+        const authored = catalogs.envelope.header.evaluator_semantics_version >=
             evaluator_semantics_v2 and failure_count != 0 and
             operand_count == expected + failure_count;
         if (operand_count != expected and !authored) {
@@ -1616,6 +1636,10 @@ fn validateInstructionSchemas(
             (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
             (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32 or
             (try Operand.node(catalogs, operand_bytes, 2)).kind != .u32)
+            return error.InvalidInstruction,
+        .text_byte_at => if (result_node.kind != .u8 or
+            (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or
+            (try Operand.node(catalogs, operand_bytes, 1)).kind != .u32)
             return error.InvalidInstruction,
         .text_compare => if (result_node.kind != .i8 or
             (try Operand.node(catalogs, operand_bytes, 0)).kind != .text or

@@ -53,6 +53,8 @@ branching, product construction/extraction, vector construction and access, and
 bounded text/byte construction. Text and Bytes expose canonical logical length,
 copy, comparison, join, and append operations; Bytes also admits one-byte
 scalar append, while Text admits Unicode-scalar and integer formatting.
+Text additionally permits checked read-only projection of one byte from its
+canonical UTF-8 payload; an out-of-range byte index is an authored failure.
 Ordering returns an error for malformed logical lengths, and Text ordering
 also rejects invalid UTF-8 before comparing bytes. Operations charge
 deterministic fuel.

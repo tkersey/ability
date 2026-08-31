@@ -946,6 +946,12 @@ pub fn build(b: *std.Build) void {
         host_core.portable_value,
     );
     authored_failure_v2_fixture.addImport("program_v2", host_core.program_v2);
+    const text_byte_at_fixture = b.createModule(.{
+        .root_source_file = b.path("test/text_byte_at_fixture.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    text_byte_at_fixture.addImport("boundary", host_boundary);
     reification_operations_fixture.addImport(
         "authored_failure_v2_fixture",
         authored_failure_v2_fixture,
@@ -1085,6 +1091,7 @@ pub fn build(b: *std.Build) void {
         "authored_failure_v2_fixture",
         authored_failure_v2_fixture,
     );
+    program_operations.addImport("text_byte_at_fixture", text_byte_at_fixture);
     const integer_boolean_operations = programTestModule(
         b,
         host_core,
@@ -1629,6 +1636,10 @@ pub fn build(b: *std.Build) void {
     process_kernel_vector_module.addImport(
         "authored_failure_v2_fixture",
         authored_failure_v2_fixture,
+    );
+    process_kernel_vector_module.addImport(
+        "text_byte_at_fixture",
+        text_byte_at_fixture,
     );
     const process_kernel_vector_executable = b.addExecutable(.{
         .name = "boundary-process-kernel-vector",

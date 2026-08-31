@@ -4,6 +4,7 @@ const morphism_fixture = @import("morphism_fixture");
 const process_advance_v1 = @import("process_advance_v1");
 const recursion_fixture = @import("recursion_fixture");
 const std = @import("std");
+const text_byte_at = @import("text_byte_at_fixture");
 
 const Lookup = boundary.effect.site(
     0,
@@ -240,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const emission: Emission = .{ .writer = stdout, .mode = mode };
-    try emission.writeHeader(if (mode == .conformance) 19 else 15);
+    try emission.writeHeader(if (mode == .conformance) 19 else 17);
 
     var left: Storage = .{};
     var right: Storage = .{};
@@ -377,10 +378,62 @@ pub fn main(init: std.process.Init) !void {
     try expectFailureTag(sixth, 0);
 
     try writeAuthoredFailureVectors(emission);
+    if (mode == .legacy) try writeTextByteAtVectors(emission);
     try writeMorphismVector(emission);
     try writeRecursionVectors(emission);
 
     try stdout.flush();
+}
+
+fn writeTextByteAtVectors(emission: Emission) !void {
+    if (text_byte_at.Image.evaluator_semantics_version !=
+        boundary.image.evaluator_semantics_v3)
+    {
+        return error.ExpectedTextByteAtV3Image;
+    }
+    const maximum_input = comptime boundary.schema.maximumEncodedSize(
+        text_byte_at.Input,
+    );
+    var initial: [maximum_input]u8 = undefined;
+    var storage: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+
+    const success_length = try boundary.schema.encode(
+        text_byte_at.Input,
+        text_byte_at.input(2),
+        &initial,
+    );
+    const completed = try advanceAndWrite(
+        emission,
+        "text-byte-at-v3-success",
+        &text_byte_at.Image.bytes,
+        .{ .initial_args = initial[0..success_length] },
+        null,
+        &storage,
+        &workspace,
+    );
+    const value = completed.completed;
+    if (value.len != 1 or value[0] != '"') {
+        return error.UnexpectedTextByteAtValue;
+    }
+
+    storage = .{};
+    workspace = .{};
+    const failure_length = try boundary.schema.encode(
+        text_byte_at.Input,
+        text_byte_at.input(3),
+        &initial,
+    );
+    const failed = try advanceAndWrite(
+        emission,
+        "text-byte-at-v3-invalid-index",
+        &text_byte_at.Image.bytes,
+        .{ .initial_args = initial[0..failure_length] },
+        null,
+        &storage,
+        &workspace,
+    );
+    try expectFailureTag(failed, @intFromEnum(text_byte_at.Failure.bad_index));
 }
 
 fn writeAuthoredFailureVectors(emission: Emission) !void {

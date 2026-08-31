@@ -65,8 +65,8 @@ const proofCount = (name) => {
 };
 const receipt = {
   format: "boundary-reification-receipt/v1",
-  boundary_version: "1.7.0",
-  kernel_release_version: "1.7.0",
+  boundary_version: "1.8.0",
+  kernel_release_version: "1.8.0",
   zig_version: "0.16.0",
   image_format: "BPI1",
   image_magic: "ABL_BPI1",
