@@ -2197,7 +2197,7 @@ fn validateComputedResultEncoded(
             &scratch_cursor,
             capacity,
         )
-    else if (operation <= 56)
+    else if (operation <= 56 or operation == 58)
         try executeCompositeOperation(
             image,
             instruction,

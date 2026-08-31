@@ -241,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const emission: Emission = .{ .writer = stdout, .mode = mode };
-    try emission.writeHeader(if (mode == .conformance) 19 else 17);
+    try emission.writeHeader(if (mode == .conformance) 19 else 18);
 
     var left: Storage = .{};
     var right: Storage = .{};
@@ -403,13 +403,25 @@ fn writeTextByteAtVectors(emission: Emission) !void {
         text_byte_at.input(2),
         &initial,
     );
-    const completed = try advanceAndWrite(
+    const progressed = try advanceAndWrite(
         emission,
-        "text-byte-at-v3-success",
+        "text-byte-at-v3-progress",
         &text_byte_at.Image.bytes,
         .{ .initial_args = initial[0..success_length] },
         null,
         &storage,
+        &workspace,
+    );
+    const state = progressed.progressed;
+    var successor_storage: Storage = .{};
+    workspace = .{};
+    const completed = try advanceAndWrite(
+        emission,
+        "text-byte-at-v3-success",
+        &text_byte_at.Image.bytes,
+        .{ .process_state = state },
+        null,
+        &successor_storage,
         &workspace,
     );
     const value = completed.completed;
