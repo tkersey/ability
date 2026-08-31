@@ -11,7 +11,9 @@ pub const evaluator_semantics_version: u16 = evaluator_semantics_v1;
 pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
-pub const maximum_catalog_entries: u32 = 1024;
+pub const maximum_catalog_entries: u32 = 2048;
+pub const maximum_segment_entries: u32 = 256;
+pub const maximum_constructor_entries: u32 = 512;
 pub const segment_prefix_length: u32 = 16;
 pub const header_length: u32 = fixed_prefix_length +
     section_count * section_descriptor_length;
@@ -99,20 +101,20 @@ pub const ValidatedEnvelope = struct {
 };
 
 pub const ValidationWorkspace = struct {
-    schema_nodes: [1024]dynamic_value_v1.NodeIndex = undefined,
+    schema_nodes: [maximum_catalog_entries]dynamic_value_v1.NodeIndex = undefined,
     value_tasks: [2048]dynamic_value_v1.ValueTask = undefined,
     schema_hash_tasks: [8192]dynamic_value_v1.SchemaHashTask = undefined,
     invariant_instruction: [16 + 2 * 1024]u8 = undefined,
     invariant_result: []u8 = &.{},
-    catalog_digests: [1024][32]u8 = undefined,
-    catalog_keys: [1024]u32 = undefined,
-    catalog_offsets: [1024]u32 = undefined,
-    catalog_lengths: [1024]u32 = undefined,
-    constant_used: [1024]bool = undefined,
-    value_defined: [1024]bool = undefined,
-    canonical_failure_constant: [1024]bool = undefined,
-    authored_failure_operand: [1024]bool = undefined,
-    canonical_schema_seen: [1024]bool = undefined,
+    catalog_digests: [maximum_catalog_entries][32]u8 = undefined,
+    catalog_keys: [maximum_catalog_entries]u32 = undefined,
+    catalog_offsets: [maximum_catalog_entries]u32 = undefined,
+    catalog_lengths: [maximum_catalog_entries]u32 = undefined,
+    constant_used: [maximum_catalog_entries]bool = undefined,
+    value_defined: [maximum_catalog_entries]bool = undefined,
+    canonical_failure_constant: [maximum_catalog_entries]bool = undefined,
+    authored_failure_operand: [maximum_catalog_entries]bool = undefined,
+    canonical_schema_seen: [maximum_catalog_entries]bool = undefined,
     canonical_schema_stack: [2048]SchemaOrderTask = undefined,
 };
 
@@ -1092,18 +1094,18 @@ fn validateCatalogUse(catalogs: Catalogs, segment_count: u32) Error!void {
 
 fn validateSegments(
     catalogs: Catalogs,
-    constant_used: *[1024]bool,
+    constant_used: *[maximum_catalog_entries]bool,
     next_constant: *u32,
-    value_defined: *[1024]bool,
-    canonical_failure_constant: *[1024]bool,
-    authored_failure_operand: *[1024]bool,
+    value_defined: *[maximum_catalog_entries]bool,
+    canonical_failure_constant: *[maximum_catalog_entries]bool,
+    authored_failure_operand: *[maximum_catalog_entries]bool,
     next_value: *u32,
     v3_operation_used: *bool,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
     if (bytes.len < 4) return error.InvalidSegment;
     const count = readInt(u32, bytes, 0);
-    if (count == 0 or count > 128) return error.InvalidSegment;
+    if (count == 0 or count > maximum_segment_entries) return error.InvalidSegment;
     var cursor: usize = 4;
     for (0..count) |segment_id| {
         if (bytes.len - cursor < segment_prefix_length) return error.InvalidSegment;
@@ -1121,7 +1123,7 @@ fn validateSegments(
         const parameter_count = readInt(u16, bytes, cursor + 10);
         const instruction_count = readInt(u32, bytes, cursor + 12);
         const function_id = readInt(u16, bytes, cursor + 6);
-        var available = [_]bool{false} ** 1024;
+        var available = [_]bool{false} ** maximum_catalog_entries;
         for (0..catalogs.value_count) |value| {
             const schema = catalogs.schemas.node(
                 try catalogs.valueSchemaId(@intCast(value)),
@@ -1184,13 +1186,13 @@ fn validateSegments(
 fn addGuaranteedConstructorValues(
     catalogs: Catalogs,
     segment_id: u16,
-    available: *[1024]bool,
+    available: *[maximum_catalog_entries]bool,
 ) Error!void {
     const bytes = catalogs.envelope.section(.constructors);
     if (bytes.len < 4) return error.InvalidConstructor;
     const count = readInt(u32, bytes, 0);
-    if (count == 0 or count > 256) return error.InvalidConstructor;
-    var guaranteed = [_]bool{false} ** 1024;
+    if (count == 0 or count > maximum_constructor_entries) return error.InvalidConstructor;
+    var guaranteed = [_]bool{false} ** maximum_catalog_entries;
     var found = false;
     var cursor: usize = 4;
     for (0..count) |_| {
@@ -1201,9 +1203,9 @@ fn addGuaranteedConstructorValues(
         if (readInt(u16, bytes, cursor + 12) == segment_id and
             kind != 3 and !(kind == 4 and origin == 2))
         {
-            var activation_seen = [_]bool{false} ** 1024;
-            var environment_seen = [_]bool{false} ** 1024;
-            var retained = [_]bool{false} ** 1024;
+            var activation_seen = [_]bool{false} ** maximum_catalog_entries;
+            var environment_seen = [_]bool{false} ** maximum_catalog_entries;
+            var retained = [_]bool{false} ** maximum_catalog_entries;
             const activation_count = readInt(u16, bytes, cursor + 16);
             const environment_count = readInt(u16, bytes, cursor + 18);
             var field_cursor = cursor + 24;
@@ -1244,12 +1246,12 @@ fn validateInstruction(
     bytes: []const u8,
     start: usize,
     segment_end: usize,
-    constant_used: *[1024]bool,
+    constant_used: *[maximum_catalog_entries]bool,
     next_constant: *u32,
-    available: *[1024]bool,
-    value_defined: *[1024]bool,
-    canonical_failure_constant: *[1024]bool,
-    authored_failure_operand: *[1024]bool,
+    available: *[maximum_catalog_entries]bool,
+    value_defined: *[maximum_catalog_entries]bool,
+    canonical_failure_constant: *[maximum_catalog_entries]bool,
+    authored_failure_operand: *[maximum_catalog_entries]bool,
     next_value: *u32,
     v3_operation_used: *bool,
 ) Error!usize {
@@ -1778,7 +1780,7 @@ fn validateTerminator(
     start: usize,
     segment_end: usize,
     function_id: u16,
-    available: *const [1024]bool,
+    available: *const [maximum_catalog_entries]bool,
 ) Error!usize {
     if (segment_end - start < 8) return error.InvalidTerminator;
     const end = recordEnd(bytes, start, 8) catch
@@ -1909,7 +1911,7 @@ fn validateSuspension(
     bytes: []const u8,
     cursor: *usize,
     end: usize,
-    available: *const [1024]bool,
+    available: *const [maximum_catalog_entries]bool,
     function_id: u16,
 ) Error!void {
     if (end - cursor.* < 20) return error.InvalidTerminator;
@@ -2011,7 +2013,7 @@ fn validateEdge(
     cursor: *usize,
     end: usize,
     resume_schema: ?u32,
-    available: *const [1024]bool,
+    available: *const [maximum_catalog_entries]bool,
     expected_function: u16,
     expected_target: ?u16,
     required_resume_count: u16,
@@ -2108,7 +2110,7 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
     const bytes = catalogs.envelope.section(.constructors);
     if (bytes.len < 4) return error.InvalidConstructor;
     const count = readInt(u32, bytes, 0);
-    if (count == 0 or count > 256) return error.InvalidConstructor;
+    if (count == 0 or count > maximum_constructor_entries) return error.InvalidConstructor;
     var cursor: usize = 4;
     for (0..count) |constructor_id| {
         if (bytes.len - cursor < 24) return error.InvalidConstructor;
@@ -2155,9 +2157,9 @@ fn validateConstructors(catalogs: Catalogs, segment_count: u32) Error!u32 {
         }
         cursor += 24;
         const field_count = @as(u32, activation_count) + environment_count;
-        var activation_seen = [_]bool{false} ** 1024;
-        var environment_seen = [_]bool{false} ** 1024;
-        var retained = [_]bool{false} ** 1024;
+        var activation_seen = [_]bool{false} ** maximum_catalog_entries;
+        var environment_seen = [_]bool{false} ** maximum_catalog_entries;
+        var retained = [_]bool{false} ** maximum_catalog_entries;
         for (0..field_count) |index| {
             if (end - cursor < 8) return error.InvalidConstructor;
             const value = readInt(u16, bytes, cursor);
@@ -2351,7 +2353,7 @@ fn validateInvariant(
 fn validateInvariantRetention(
     catalogs: Catalogs,
     invariant: []const u8,
-    retained: *const [1024]bool,
+    retained: *const [maximum_catalog_entries]bool,
 ) Error!void {
     const tag = invariant[4];
     const payload = 8;
@@ -2406,7 +2408,7 @@ fn validateInvariantRetention(
 
 fn requireRetainedInvariantValue(
     catalogs: Catalogs,
-    retained: *const [1024]bool,
+    retained: *const [maximum_catalog_entries]bool,
     value: u16,
 ) Error!void {
     if (value >= catalogs.value_count) return error.InvalidInvariant;
@@ -2952,8 +2954,8 @@ fn validateConstructorExecution(
     segment_count: u32,
     constructor_count: u32,
 ) Error!void {
-    var transition_role = [_]bool{false} ** 256;
-    var suspension_role = [_]bool{false} ** 256;
+    var transition_role = [_]bool{false} ** maximum_constructor_entries;
+    var suspension_role = [_]bool{false} ** maximum_constructor_entries;
     const transitions = catalogs.envelope.section(.entry_transitions);
     const transition_count = readInt(u32, transitions, 0);
     for (0..transition_count) |index| {
@@ -3033,7 +3035,7 @@ fn validateConsumedParametersRetained(
     for (0..segment_count) |segment_id| {
         const segment = imageSegmentRecord(catalogs, @intCast(segment_id)) catch
             return error.InvalidSegment;
-        var required = [_]bool{false} ** 1024;
+        var required = [_]bool{false} ** maximum_catalog_entries;
         const parameter_count = readInt(u16, segment, 10);
         var cursor = segment_prefix_length + @as(usize, parameter_count) * 2;
         for (0..readInt(u32, segment, 12)) |_| {
@@ -3052,7 +3054,7 @@ fn validateConsumedParametersRetained(
             cursor,
             &required,
         );
-        var guaranteed = [_]bool{false} ** 1024;
+        var guaranteed = [_]bool{false} ** maximum_catalog_entries;
         try addGuaranteedConstructorValues(
             catalogs,
             @intCast(segment_id),
@@ -3081,7 +3083,7 @@ fn markTerminatorConsumedValues(
     source: u16,
     segment: []const u8,
     terminator: usize,
-    required: *[1024]bool,
+    required: *[maximum_catalog_entries]bool,
 ) Error!void {
     const kind = segment[terminator + 4];
     const payload = terminator + 8;
@@ -3156,7 +3158,7 @@ fn markEdgeConsumedValues(
     source: u16,
     edge_kind: u8,
     edge: []const u8,
-    required: *[1024]bool,
+    required: *[maximum_catalog_entries]bool,
 ) Error!void {
     const target = readInt(u16, edge, 0);
     const constructor_id = transitionConstructorId(
@@ -3400,7 +3402,7 @@ fn segmentValueAvailableAtTerminator(
     const schema = catalogs.schemas.node(valueSchema(catalogs, value)) catch
         return error.InvalidConstructor;
     if (schema.maximum_encoded_size == 0) return true;
-    var available = [_]bool{false} ** 1024;
+    var available = [_]bool{false} ** maximum_catalog_entries;
     try addGuaranteedConstructorValues(catalogs, segment_id, &available);
     const segment = imageSegmentRecord(catalogs, segment_id) catch
         return error.InvalidConstructor;
@@ -3456,8 +3458,8 @@ fn validateSegmentReachability(
     catalogs: Catalogs,
     segment_count: u32,
 ) Error!void {
-    var reachable = [_]bool{false} ** 128;
-    var worklist: [128]u16 = undefined;
+    var reachable = [_]bool{false} ** maximum_segment_entries;
+    var worklist: [maximum_segment_entries]u16 = undefined;
     var head: usize = 0;
     var tail: usize = 1;
     reachable[catalogs.entry_segment_id] = true;

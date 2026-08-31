@@ -57,6 +57,7 @@ test/compile_fail/portable_sentinel_array.zig
 test/compile_fail/portable_usize.zig
 test/compile_fail/undersized_machine_state.zig
 test/compile_fail/vector_uninhabited_element.zig
+test/compiler_capacity_v1.zig
 test/effectful_decision_loop.zig
 test/emit_one_effect_image.zig
 test/emit_one_effect_profile.zig

@@ -1138,6 +1138,15 @@ pub fn build(b: *std.Build) void {
         true,
         true,
     );
+    const compiler_capacity = programTestModule(
+        b,
+        host_core,
+        "test/compiler_capacity_v1.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
     const program_dynamic_fuel = programTestModule(
         b,
         host_core,
@@ -1479,6 +1488,7 @@ pub fn build(b: *std.Build) void {
     );
     addTestArtifact(b, control_step, core.control_ir);
     addTestArtifact(b, control_step, core.rnf);
+    addTestArtifact(b, control_step, compiler_capacity);
     addTestArtifact(b, control_step, constructor_invariants);
     addTestArtifact(b, control_step, machine_yield);
     addTestArtifact(b, control_step, program_dead_control);
@@ -1747,7 +1757,7 @@ pub fn build(b: *std.Build) void {
     constrained_process_kernel.entry = .disabled;
     constrained_process_kernel.rdynamic = true;
     constrained_process_kernel.export_memory = true;
-    constrained_process_kernel.initial_memory = 4 << 20;
+    constrained_process_kernel.initial_memory = 8 << 20;
     constrained_process_kernel.max_memory = 32 << 20;
     const capacity_vector_module = b.createModule(.{
         .root_source_file = b.path("test/process_kernel_capacity_vector.zig"),

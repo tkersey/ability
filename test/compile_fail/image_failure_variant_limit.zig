@@ -4,9 +4,9 @@ const std = @import("std");
 
 fn LargeFailure() type {
     @setEvalBranchQuota(1_000_000);
-    var names: [1025][:0]const u8 = undefined;
-    var values: [1025]u16 = undefined;
-    inline for (0..1025) |index| {
+    var names: [2049][:0]const u8 = undefined;
+    var values: [2049]u16 = undefined;
+    inline for (0..2049) |index| {
         names[index] = std.fmt.comptimePrint("failure_{d}", .{index});
         values[index] = @intCast(index);
     }
