@@ -21,6 +21,7 @@ const value_types = [_]boundary.ir.ValueType{
     .{ .scalar = .u8 },
     .{ .scalar = .u8 },
     .{ .scalar = .u8 },
+    .{ .scalar = .u8 },
 };
 
 const instructions = [_]boundary.ir.Instruction{
@@ -65,12 +66,23 @@ const instructions = [_]boundary.ir.Instruction{
     },
 };
 
-const blocks = [_]boundary.ir.Block{.{
-    .id = 0,
-    .parameters = &.{0},
-    .instructions = &instructions,
-    .terminator = .{ .return_value = 7 },
-}};
+const byte_arguments = [_]boundary.ir.EdgeArgument{.{ .value = 7 }};
+const blocks = [_]boundary.ir.Block{
+    .{
+        .id = 0,
+        .parameters = &.{0},
+        .instructions = &instructions,
+        .terminator = .{ .jump = .{
+            .target = 1,
+            .arguments = &byte_arguments,
+        } },
+    },
+    .{
+        .id = 1,
+        .parameters = &.{8},
+        .terminator = .{ .return_value = 8 },
+    },
+};
 
 const Body = struct {
     pub const InitialArgs = Input;
