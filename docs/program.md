@@ -42,6 +42,10 @@ The operation takes a `u32` byte index, returns `u8`, and uses the standard
 `invalid_index` failure role. It exposes no pointer, storage slack, or mutable
 view. Reachable use emits evaluator semantics version 3.
 
+`bytes_byte_at` applies the same checked byte-index law to canonical Bytes. It
+preserves arbitrary payload bytes, including malformed UTF-8, and likewise
+uses `invalid_index` without exposing spare storage.
+
 Failures have two source forms. `.fail = tag` retains the compile-time failure
 tag used by existing programs. `.fail_value = value_id` returns the exact
 runtime value at that id and is admitted only when its type is exactly
@@ -55,9 +59,9 @@ evaluator semantics version 2. Ordinary instructions retain the version-1
 role-name behavior.
 
 Evaluator semantics version 3 retains version-2 authored failures and admits
-the generic `text_byte_at` operation. Images without that reachable operation
-remain version 1 or 2, so their canonical bytes and transition identities do
-not change.
+the generic byte-projection operations. Images without a reachable version-3
+operation remain version 1 or 2, so their canonical bytes and transition
+identities do not change.
 
 Authored Failure operands have type `Body.Failure`, are defined by canonical
 constant instructions, and appear in Boundary-defined role order. Boundary

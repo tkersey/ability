@@ -1,4 +1,5 @@
 const authored_failure = @import("authored_failure_v2_fixture");
+const bytes_byte_at = @import("bytes_byte_at_fixture");
 const cir = @import("control_ir");
 const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
@@ -391,6 +392,53 @@ test "evaluator semantics v3 projects canonical Text bytes" {
         };
         defer done.deinit();
         try std.testing.expectEqual(case[1], done.value().*);
+    }
+}
+
+test "evaluator semantics v3 projects arbitrary canonical Bytes" {
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v3,
+        bytes_byte_at.Image.evaluator_semantics_version,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(&bytes_byte_at.Image.bytes, &workspace);
+
+    inline for (.{
+        .{ @as(u32, 0), @as(u8, 0xff) },
+        .{ @as(u32, 1), @as(u8, 0x00) },
+        .{ @as(u32, 2), @as(u8, 0x80) },
+    }) |case| {
+        const state = try bytes_byte_at.Machine.initialState(
+            std.testing.allocator,
+            bytes_byte_at.input(case[0]),
+        );
+        defer bytes_byte_at.Machine.deinitState(state);
+        var fuel: u64 = 32;
+        const done = switch (try bytes_byte_at.Machine.step(state, &fuel)) {
+            .done => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer done.deinit();
+        try std.testing.expectEqual(case[1], done.value().*);
+    }
+}
+
+test "evaluator semantics v3 rejects an invalid Bytes index" {
+    const state = try bytes_byte_at.Machine.initialState(
+        std.testing.allocator,
+        bytes_byte_at.input(3),
+    );
+    defer bytes_byte_at.Machine.deinitState(state);
+    var fuel: u64 = 32;
+    switch (try bytes_byte_at.Machine.step(state, &fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |value| try std.testing.expectEqual(
+                bytes_byte_at.Failure.bad_index,
+                value,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
     }
 }
 

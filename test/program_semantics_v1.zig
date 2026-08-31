@@ -63,10 +63,11 @@ const operations = [_]control_ir.InstructionOperation{
     .bytes_join,
     .enum_to_u32,
     .text_byte_at,
+    .bytes_byte_at,
 };
 
 test "BPI1 operation tags are exhaustive and independent of current enum tags" {
-    try std.testing.expectEqual(@as(usize, 59), operations.len);
+    try std.testing.expectEqual(@as(usize, 60), operations.len);
     inline for (operations, 0..) |operation, expected_tag| {
         try std.testing.expectEqual(
             @as(u16, @intCast(expected_tag)),
@@ -119,6 +120,11 @@ test "operation failure roles have one pure owner" {
         reducer.FailureRole,
         &.{.invalid_index},
         reducer.failureRoles(.text_byte_at),
+    );
+    try std.testing.expectEqualSlices(
+        reducer.FailureRole,
+        &.{.invalid_index},
+        reducer.failureRoles(.bytes_byte_at),
     );
     try std.testing.expectEqualSlices(
         reducer.FailureRole,

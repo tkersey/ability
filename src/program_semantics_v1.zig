@@ -203,6 +203,7 @@ pub const WireOperation = enum(u16) {
     bytes_join = 56,
     enum_to_u32 = 57,
     text_byte_at = 58,
+    bytes_byte_at = 59,
 };
 
 /// Canonical fixed arity for BPI1 operation tags. Product and sum
@@ -263,6 +264,7 @@ pub fn fixedOperandCount(operation: WireOperation) ?u16 {
         .bytes_append_scalar,
         .bytes_compare,
         .text_byte_at,
+        .bytes_byte_at,
         => 2,
         .select,
         .vector_set,
@@ -338,6 +340,7 @@ pub fn wireOperation(
         .bytes_join => .bytes_join,
         .enum_to_u32 => .enum_to_u32,
         .text_byte_at => .text_byte_at,
+        .bytes_byte_at => .bytes_byte_at,
     };
 }
 
@@ -432,7 +435,7 @@ pub fn failureRolesForWire(operation: WireOperation) []const FailureRole {
             .division_by_zero,
         },
         .sum_extract => &.{.invalid_variant},
-        .vector_get, .vector_set, .text_byte_at => &.{.invalid_index},
+        .vector_get, .vector_set, .text_byte_at, .bytes_byte_at => &.{.invalid_index},
         .text_append_scalar, .text_copy => &.{
             .capacity_exceeded,
             .invalid_utf8,
@@ -987,6 +990,25 @@ pub noinline fn executeTypedInstructions(
                     Backend.valueName(instruction.operands[0]),
                 );
                 const bytes = text.slice() catch unreachable;
+                const index = @field(
+                    store,
+                    Backend.valueName(instruction.operands[1]),
+                );
+                if (index >= bytes.len) return failureForInstruction(
+                    Body,
+                    Backend,
+                    instruction,
+                    store,
+                    .invalid_index,
+                );
+                @field(store, result_name) = bytes[index];
+            },
+            .bytes_byte_at => {
+                const bytes_value = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                const bytes = bytes_value.slice() catch unreachable;
                 const index = @field(
                     store,
                     Backend.valueName(instruction.operands[1]),
