@@ -1,10 +1,11 @@
 # Migration to Boundary 1.8
 
-Boundary 1.8 adds two generic Control IR operations:
+Boundary 1.8 adds three generic Control IR operations:
 
 ```text
 text_byte_at(Text, u32) -> u8
 bytes_byte_at(Bytes, u32) -> u8
+text_to_bytes(Text<N>) -> Bytes<M> where M >= N
 ```
 
 The index addresses the value's canonical logical payload. `text_byte_at`
@@ -12,6 +13,10 @@ observes UTF-8 code units after Text validation; `bytes_byte_at` preserves
 arbitrary bytes without text decoding. Out-of-range access uses the standard
 `invalid_index` failure role, including authored Failure operands. Neither
 operation exposes storage slack or a borrowed view.
+
+`text_to_bytes` reifies validated Text's exact canonical UTF-8 payload as
+capacity-compatible Bytes. It is total because compilation and image admission
+prove the destination bound before execution.
 
 Programs that reach either byte-projection operation emit BPI1 evaluator
 semantics version 3.

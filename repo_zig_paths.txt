@@ -97,3 +97,4 @@ test/research_digest_v2.zig
 test/run_machine_native.zig
 test/single_reducer.zig
 test/text_byte_at_fixture.zig
+test/text_to_bytes_fixture.zig

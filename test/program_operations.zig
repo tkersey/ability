@@ -8,6 +8,7 @@ const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 const text_byte_at = @import("text_byte_at_fixture");
+const text_to_bytes = @import("text_to_bytes_fixture");
 
 const Title = portable_value.Text(16);
 const Digest = portable_value.Text(32);
@@ -440,6 +441,29 @@ test "evaluator semantics v3 rejects an invalid Bytes index" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "evaluator semantics v3 reifies validated Text payload bytes" {
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v3,
+        text_to_bytes.Image.evaluator_semantics_version,
+    );
+    const state = try text_to_bytes.Machine.initialState(
+        std.testing.allocator,
+        text_to_bytes.input,
+    );
+    defer text_to_bytes.Machine.deinitState(state);
+    var fuel: u64 = 8;
+    const done = switch (try text_to_bytes.Machine.step(state, &fuel)) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer done.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        "é\x00",
+        try done.value().slice(),
+    );
 }
 
 test "evaluator semantics v3 returns the authored invalid-index failure" {

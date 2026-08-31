@@ -7,9 +7,10 @@ exactly one finite BPI1 reducer segment.
 
 The Process kernel accepts BPI1 evaluator semantics versions 1, 2, and 3.
 Version 2 adds instruction-local authored-failure operands. Version 3 adds the
-generic `text_byte_at` and `bytes_byte_at` operations over canonical sequence
-payloads while retaining version-2 failure selection. Neither changes the BPI1
-container, State format, Process ABI, or any earlier image bytes.
+generic `text_byte_at`, `bytes_byte_at`, and `text_to_bytes` operations over
+canonical sequence payloads while retaining version-2 failure selection.
+Neither changes the BPI1 container, State format, Process ABI, or any earlier
+image bytes.
 
 The Process ABI evaluates arbitrary BPI1 programs. It contains no Agent, World,
 host, model, prompt, skill, tool, or capability semantics. A frontend may

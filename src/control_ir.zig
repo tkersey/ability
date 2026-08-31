@@ -147,6 +147,8 @@ pub const InstructionOperation = union(enum) {
     text_byte_at,
     /// Project one byte from canonical bounded Bytes.
     bytes_byte_at,
+    /// Reify validated Text's canonical UTF-8 payload as bounded Bytes.
+    text_to_bytes,
 };
 
 /// One explicit typed Control IR value definition.
@@ -780,6 +782,7 @@ pub fn validate(
                 .vector_length,
                 .text_length,
                 .bytes_length,
+                .text_to_bytes,
                 .vector_pop,
                 .vector_clear,
                 => if (instruction.kind != .pure or

@@ -204,6 +204,7 @@ pub const WireOperation = enum(u16) {
     enum_to_u32 = 57,
     text_byte_at = 58,
     bytes_byte_at = 59,
+    text_to_bytes = 60,
 };
 
 /// Canonical fixed arity for BPI1 operation tags. Product and sum
@@ -234,6 +235,7 @@ pub fn fixedOperandCount(operation: WireOperation) ?u16 {
         .text_length,
         .bytes_length,
         .enum_to_u32,
+        .text_to_bytes,
         => 1,
         .integer_add,
         .integer_subtract,
@@ -341,6 +343,7 @@ pub fn wireOperation(
         .enum_to_u32 => .enum_to_u32,
         .text_byte_at => .text_byte_at,
         .bytes_byte_at => .bytes_byte_at,
+        .text_to_bytes => .text_to_bytes,
     };
 }
 
@@ -487,6 +490,7 @@ pub fn failureRolesForWire(operation: WireOperation) []const FailureRole {
         .text_length,
         .bytes_length,
         .enum_to_u32,
+        .text_to_bytes,
         => &.{},
     };
 }
@@ -1021,6 +1025,16 @@ pub noinline fn executeTypedInstructions(
                     .invalid_index,
                 );
                 @field(store, result_name) = bytes[index];
+            },
+            .text_to_bytes => {
+                const ResultType = @FieldType(ValueCatalog, result_name);
+                const text = @field(
+                    store,
+                    Backend.valueName(instruction.operands[0]),
+                );
+                @field(store, result_name) = ResultType.fromSlice(
+                    text.slice() catch unreachable,
+                ) catch unreachable;
             },
             .text_append => {
                 var text = @field(

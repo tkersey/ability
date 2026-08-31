@@ -265,7 +265,7 @@ pub fn evaluateClause(
                 slots[result] = slots[operand];
                 break :blk null;
             },
-            2...23, 57 => try executeScalarOperation(
+            2...23, 57, 60 => try executeScalarOperation(
                 image,
                 segment[cursor .. cursor + instruction_length],
                 result,
@@ -830,6 +830,11 @@ pub fn executeScalarOperation(
         if (ordinary_operand_count != 1 or slots[operands[0]].bytes.len != 4) {
             return error.InvalidImage;
         }
+        slots[result] = slots[operands[0]];
+        return null;
+    }
+    if (operation == 60) {
+        if (ordinary_operand_count != 1) return error.InvalidImage;
         slots[result] = slots[operands[0]];
         return null;
     }
@@ -2209,7 +2214,7 @@ fn validateComputedResultEncoded(
         if (operand >= slots.len or !slots[operand].initialized) return false;
         slots[result] = slots[operand];
         break :blk null;
-    } else if (operation <= 23 or operation == 57)
+    } else if (operation <= 23 or operation == 57 or operation == 60)
         try executeScalarOperation(
             image,
             instruction,

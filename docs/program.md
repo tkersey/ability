@@ -46,6 +46,10 @@ view. Reachable use emits evaluator semantics version 3.
 preserves arbitrary payload bytes, including malformed UTF-8, and likewise
 uses `invalid_index` without exposing spare storage.
 
+`text_to_bytes` copies validated Text's canonical UTF-8 payload into a Bytes
+result whose declared capacity is at least the Text capacity. The proof makes
+the operation total and exposes no storage slack.
+
 Failures have two source forms. `.fail = tag` retains the compile-time failure
 tag used by existing programs. `.fail_value = value_id` returns the exact
 runtime value at that id and is admitted only when its type is exactly

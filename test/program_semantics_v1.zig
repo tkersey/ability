@@ -64,10 +64,11 @@ const operations = [_]control_ir.InstructionOperation{
     .enum_to_u32,
     .text_byte_at,
     .bytes_byte_at,
+    .text_to_bytes,
 };
 
 test "BPI1 operation tags are exhaustive and independent of current enum tags" {
-    try std.testing.expectEqual(@as(usize, 60), operations.len);
+    try std.testing.expectEqual(@as(usize, 61), operations.len);
     inline for (operations, 0..) |operation, expected_tag| {
         try std.testing.expectEqual(
             @as(u16, @intCast(expected_tag)),

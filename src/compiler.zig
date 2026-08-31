@@ -1309,6 +1309,15 @@ fn validateInstruction(
                 @compileError("bytes_byte_at requires Bytes, u32 -> u8");
             }
         },
+        .text_to_bytes => {
+            requireOperandCount(instruction, 1);
+            const Text = operandType(Body, program, instruction, 0);
+            if (!isText(Text) or !isBytes(Result) or
+                Result.maximum_length < Text.maximum_length)
+            {
+                @compileError("text_to_bytes requires Text -> capacity-compatible Bytes");
+            }
+        },
         .text_append => {
             requireOperandCount(instruction, 2);
             const Destination = operandType(Body, program, instruction, 0);
@@ -2350,7 +2359,8 @@ fn evaluatorSemanticsVersion(
         if (!reachability.contains(block.id)) continue;
         for (block.instructions) |instruction| {
             if (instruction.operation == .text_byte_at or
-                instruction.operation == .bytes_byte_at) return 3;
+                instruction.operation == .bytes_byte_at or
+                instruction.operation == .text_to_bytes) return 3;
             if (program_semantics_v1.usesAuthoredFailures(
                 instruction.operation,
                 instruction.operands.len,

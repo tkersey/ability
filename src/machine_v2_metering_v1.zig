@@ -152,6 +152,7 @@ pub fn resultEncodedBytes(
         .bytes_compare,
         .text_byte_at,
         .bytes_byte_at,
+        .text_to_bytes,
         => maximum,
     };
 }

@@ -6,6 +6,7 @@ const process_advance_v1 = @import("process_advance_v1");
 const recursion_fixture = @import("recursion_fixture");
 const std = @import("std");
 const text_byte_at = @import("text_byte_at_fixture");
+const text_to_bytes = @import("text_to_bytes_fixture");
 
 const Lookup = boundary.effect.site(
     0,
@@ -242,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const emission: Emission = .{ .writer = stdout, .mode = mode };
-    try emission.writeHeader(if (mode == .conformance) 19 else 21);
+    try emission.writeHeader(if (mode == .conformance) 19 else 22);
 
     var left: Storage = .{};
     var right: Storage = .{};
@@ -382,11 +383,48 @@ pub fn main(init: std.process.Init) !void {
     if (mode == .legacy) {
         try writeTextByteAtVectors(emission);
         try writeBytesByteAtVectors(emission);
+        try writeTextToBytesVector(emission);
     }
     try writeMorphismVector(emission);
     try writeRecursionVectors(emission);
 
     try stdout.flush();
+}
+
+fn writeTextToBytesVector(emission: Emission) !void {
+    if (text_to_bytes.Image.evaluator_semantics_version !=
+        boundary.image.evaluator_semantics_v3)
+    {
+        return error.ExpectedTextToBytesV3Image;
+    }
+    const maximum = comptime boundary.schema.maximumEncodedSize(text_to_bytes.Text);
+    var initial: [maximum]u8 = undefined;
+    const length = try boundary.schema.encode(
+        text_to_bytes.Text,
+        text_to_bytes.input,
+        &initial,
+    );
+    var storage: Storage = .{};
+    var workspace: boundary.image.ValidationWorkspace = .{};
+    const completed = try advanceAndWrite(
+        emission,
+        "text-to-bytes-v3",
+        &text_to_bytes.Image.bytes,
+        .{ .initial_args = initial[0..length] },
+        null,
+        &storage,
+        &workspace,
+    );
+    const value = completed.completed;
+    var expected: [maximum]u8 = undefined;
+    const expected_length = try boundary.schema.encode(
+        text_to_bytes.Bytes,
+        text_to_bytes.Bytes.fromSlice("é\x00") catch unreachable,
+        &expected,
+    );
+    if (!std.mem.eql(u8, value, expected[0..expected_length])) {
+        return error.UnexpectedTextToBytesValue;
+    }
 }
 
 fn writeBytesByteAtVectors(emission: Emission) !void {
