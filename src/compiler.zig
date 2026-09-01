@@ -9,14 +9,14 @@ const rnf = @import("rnf");
 const std = @import("std");
 
 const implementation_limits: control_ir.CompilerLimits = .{
-    .maximum_values = 2048,
-    .maximum_blocks = 320,
+    .maximum_values = 4096,
+    .maximum_blocks = 512,
     .maximum_constructors = 768,
     .maximum_environment_fields = 256,
     .maximum_invariant_terms = 128,
     .maximum_generated_operations = 32_768,
 };
-const compiler_evaluation_branch_quota = 500_000_000;
+const compiler_evaluation_branch_quota = 2_000_000_000;
 const ResidualResponseMode = enum {
     single_resume,
 };

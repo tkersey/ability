@@ -3227,9 +3227,8 @@ pub fn NormalForm(
         ) Error!void {
             const original = environment.*;
             var representable: AnalysisFactSet = .{};
-            for (original.bits, 0..) |present, value_index| {
-                if (!present) continue;
-                const value: control_ir.ValueId = @intCast(value_index);
+            for (original.values[0..original.len]) |value| {
+                if (!original.contains(value)) continue;
                 switch (try program.valueType(value)) {
                     .scalar => |scalar| if (scalar == .boolean) {
                         var boolean_visited = Set.empty();
@@ -3266,9 +3265,8 @@ pub fn NormalForm(
                 try facts.insert(term);
             }
             var visited = Set.empty();
-            for (original.bits, 0..) |present, value_index| {
-                if (!present) continue;
-                const value: control_ir.ValueId = @intCast(value_index);
+            for (original.values[0..original.len]) |value| {
+                if (!original.contains(value)) continue;
                 var has_definition = false;
                 for (representable.terms[0..representable.len]) |term| {
                     if (term.definitionResult() == value) {
@@ -3464,13 +3462,13 @@ pub fn NormalForm(
             for (result.terms.terms[0..result.direct_len]) |term| {
                 term.addRequired(&direct_values);
             }
-            for (direct_values.bits, 0..) |present, value_index| {
-                if (!present) continue;
+            for (direct_values.values[0..direct_values.len]) |value| {
+                if (!direct_values.contains(value)) continue;
                 var definition_visited = Set.empty();
                 _ = try collectValueDefinition(
                     program,
                     constant_values,
-                    @intCast(value_index),
+                    value,
                     &result.terms,
                     &definition_visited,
                 );
