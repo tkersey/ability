@@ -1,4 +1,5 @@
 const control_ir = @import("control_ir");
+const image_v1 = @import("image_v1");
 const machine = @import("machine");
 const machine_v2_metering_v1 = @import("machine_v2_metering_v1");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
@@ -2390,7 +2391,13 @@ fn generatedReducerOperationCount(
 fn evaluatorSemanticsVersion(
     comptime program: control_ir.Program,
     comptime reachability: anytype,
+    comptime canonical_value_count: usize,
 ) u16 {
+    if (canonical_value_count > image_v1.legacy_maximum_catalog_entries or
+        reachability.count > image_v1.legacy_maximum_segment_entries)
+    {
+        return image_v1.evaluator_semantics_v4;
+    }
     var result: u16 = 1;
     for (program.blocks) |block| {
         if (!reachability.contains(block.id)) continue;
@@ -2499,6 +2506,7 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
     const evaluator_semantics_version = comptime evaluatorSemanticsVersion(
         program,
         reachability,
+        semantic_canonicalization.value_count,
     );
     return reified_program_v1.Program(
         label,

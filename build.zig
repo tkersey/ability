@@ -678,13 +678,13 @@ fn addCoreModules(
         .optimize = optimize,
     });
     const process_kernel_options = b.addOptions();
-    process_kernel_options.addOption(usize, "input_capacity", 32 << 20);
-    process_kernel_options.addOption(usize, "output_capacity", 16 << 20);
-    process_kernel_options.addOption(usize, "state_capacity", 8 << 20);
-    process_kernel_options.addOption(usize, "value_capacity", 4 << 20);
-    process_kernel_options.addOption(usize, "request_capacity", 4 << 20);
-    process_kernel_options.addOption(usize, "environment_capacity", 8 << 20);
-    process_kernel_options.addOption(usize, "scratch_capacity", 64 << 20);
+    process_kernel_options.addOption(usize, "input_capacity", 1 << 20);
+    process_kernel_options.addOption(usize, "output_capacity", 1 << 20);
+    process_kernel_options.addOption(usize, "state_capacity", 512 << 10);
+    process_kernel_options.addOption(usize, "value_capacity", 256 << 10);
+    process_kernel_options.addOption(usize, "request_capacity", 256 << 10);
+    process_kernel_options.addOption(usize, "environment_capacity", 512 << 10);
+    process_kernel_options.addOption(usize, "scratch_capacity", 1280 << 10);
     process_kernel_options.addOption(usize, "error_capacity", 4 << 10);
     process_kernel_wasm_v1.addImport("image_v1", image_v1);
     process_kernel_wasm_v1.addImport(
@@ -722,6 +722,7 @@ fn addCoreModules(
         .optimize = optimize,
     });
     compiler.addImport("control_ir", control_ir);
+    compiler.addImport("image_v1", image_v1);
     compiler.addImport("machine", machine);
     compiler.addImport("machine_v2_metering_v1", machine_v2_metering_v1);
     compiler.addImport("machine_v2_profile_v1", machine_v2_profile_v1);

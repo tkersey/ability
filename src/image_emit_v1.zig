@@ -895,11 +895,18 @@ pub fn encodeProgramImage(
         u64,
         output,
         64,
-        conservativeKernelScratchRuntime(
-            Reified,
-            schemas.node_count,
-            maximum_single_value_bytes,
-        ),
+        if (Reified.evaluator_semantics_version >= image_v1.evaluator_semantics_v4)
+            conservativeKernelScratchRuntime(
+                Reified,
+                schemas.node_count,
+                maximum_single_value_bytes,
+            )
+        else
+            legacyKernelScratchRuntime(
+                Reified,
+                schemas.node_count,
+                maximum_single_value_bytes,
+            ),
     );
     writeAt(
         u32,
@@ -1108,6 +1115,49 @@ fn writeProgramTransitionsRuntime(
 }
 
 fn conservativeKernelScratchRuntime(
+    comptime Reified: type,
+    schema_node_count: usize,
+    maximum_single_value_bytes: u32,
+) u64 {
+    const segment_value_bytes = comptime blk: {
+        var maximum: u64 = 0;
+        for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
+            const source_block = Reified.semantic_canonicalization
+                .block_dense_to_source[dense_block];
+            var total: u64 = 0;
+            for (Reified.control.blocks[source_block].instructions) |instruction| {
+                if (program_semantics_v1.wireTag(instruction.operation) < 2) {
+                    continue;
+                }
+                const Value = Reified.portableType(
+                    Reified.control.value_types[instruction.result],
+                );
+                total = std.math.add(
+                    u64,
+                    total,
+                    portable_value.maximumEncodedSize(Value),
+                ) catch @compileError("BPI1 segment scratch requirement overflows u64");
+            }
+            maximum = @max(maximum, total);
+        }
+        break :blk maximum;
+    };
+    const value_metadata = std.math.mul(
+        u64,
+        Reified.semantic_canonicalization.value_count,
+        16,
+    ) catch unreachable;
+    const schema_stack = std.math.mul(u64, schema_node_count, 16) catch
+        unreachable;
+    const framing = std.math.add(
+        u64,
+        std.math.mul(u64, maximum_single_value_bytes, 3) catch unreachable,
+        176,
+    ) catch unreachable;
+    return segment_value_bytes +| value_metadata +| schema_stack +| framing;
+}
+
+fn legacyKernelScratchRuntime(
     comptime Reified: type,
     schema_node_count: usize,
     maximum_single_value_bytes: u32,

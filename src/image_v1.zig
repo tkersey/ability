@@ -7,12 +7,15 @@ pub const image_format_version: u16 = 1;
 pub const evaluator_semantics_v1: u16 = 1;
 pub const evaluator_semantics_v2: u16 = 2;
 pub const evaluator_semantics_v3: u16 = 3;
+pub const evaluator_semantics_v4: u16 = 4;
 pub const evaluator_semantics_version: u16 = evaluator_semantics_v1;
 pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
 pub const maximum_catalog_entries: u32 = 4096;
 pub const maximum_segment_entries: u32 = 512;
+pub const legacy_maximum_catalog_entries: u32 = 2048;
+pub const legacy_maximum_segment_entries: u32 = 320;
 pub const maximum_constructor_entries: u32 = 768;
 pub const segment_prefix_length: u32 = 16;
 pub const header_length: u32 = fixed_prefix_length +
@@ -116,6 +119,13 @@ pub const ValidationWorkspace = struct {
     authored_failure_operand: [maximum_catalog_entries]bool = undefined,
     canonical_schema_seen: [maximum_catalog_entries]bool = undefined,
     canonical_schema_stack: [2048]SchemaOrderTask = undefined,
+    segment_offsets: [maximum_segment_entries]u32 = undefined,
+    segment_lengths: [maximum_segment_entries]u32 = undefined,
+    constructor_offsets: [maximum_constructor_entries]u32 = undefined,
+    constructor_lengths: [maximum_constructor_entries]u32 = undefined,
+    zero_width_values: [maximum_catalog_entries]bool = undefined,
+    segment_constructor_first: [maximum_segment_entries]u16 = undefined,
+    constructor_next: [maximum_constructor_entries]u16 = undefined,
 };
 
 pub const SchemaOrderTask = struct {
@@ -139,6 +149,10 @@ pub const Catalogs = struct {
     functions_section: []const u8,
     entry_parameter_count: u16,
     entry_parameter_value_id: u16,
+    segment_offsets: *const [maximum_segment_entries]u32,
+    segment_lengths: *const [maximum_segment_entries]u32,
+    constructor_offsets: *const [maximum_constructor_entries]u32,
+    constructor_lengths: *const [maximum_constructor_entries]u32,
 
     pub fn valueSchemaId(self: Catalogs, value: u16) Error!u32 {
         if (value >= self.value_count) return error.InvalidValue;
@@ -261,7 +275,8 @@ pub fn validateEnvelope(image: []const u8) Error!ValidatedEnvelope {
     const evaluator_version = readInt(u16, image, 10);
     if (evaluator_version != evaluator_semantics_v1 and
         evaluator_version != evaluator_semantics_v2 and
-        evaluator_version != evaluator_semantics_v3)
+        evaluator_version != evaluator_semantics_v3 and
+        evaluator_version != evaluator_semantics_v4)
     {
         return error.UnsupportedEvaluatorSemantics;
     }
@@ -360,8 +375,20 @@ pub fn validateCatalogs(
         workspace,
     );
     const values = try validateValues(envelope.section(.values), schemas);
+    if (envelope.header.evaluator_semantics_version < evaluator_semantics_v4 and
+        values.count > legacy_maximum_catalog_entries)
+    {
+        return error.InvalidValue;
+    }
     if (envelope.header.maximum_kernel_scratch_bytes !=
-        try deriveKernelScratch(schemas, values))
+        if (envelope.header.evaluator_semantics_version >= evaluator_semantics_v4)
+            try deriveKernelScratch(
+                schemas,
+                values,
+                envelope.section(.segments),
+            )
+        else
+            try deriveLegacyKernelScratch(schemas, values))
     {
         return error.ScratchRequirementMismatch;
     }
@@ -376,6 +403,22 @@ pub fn validateCatalogs(
     const function_count = try validateFunctions(
         envelope.section(.functions),
         schemas,
+    );
+    try indexRecords(
+        envelope.section(.segments),
+        segment_prefix_length,
+        maximum_segment_entries,
+        &workspace.segment_offsets,
+        &workspace.segment_lengths,
+        error.InvalidSegment,
+    );
+    try indexRecords(
+        envelope.section(.constructors),
+        24,
+        maximum_constructor_entries,
+        &workspace.constructor_offsets,
+        &workspace.constructor_lengths,
+        error.InvalidConstructor,
     );
     return .{
         .envelope = envelope,
@@ -393,6 +436,10 @@ pub fn validateCatalogs(
         .functions_section = envelope.section(.functions),
         .entry_parameter_count = roots.entry_parameter_count,
         .entry_parameter_value_id = roots.entry_parameter_value_id,
+        .segment_offsets = &workspace.segment_offsets,
+        .segment_lengths = &workspace.segment_lengths,
+        .constructor_offsets = &workspace.constructor_offsets,
+        .constructor_lengths = &workspace.constructor_lengths,
     };
 }
 
@@ -401,6 +448,8 @@ pub fn validateImage(
     workspace: *ValidationWorkspace,
 ) Error!ValidatedImage {
     const catalogs = try validateCatalogs(image, workspace);
+    try indexZeroWidthValues(catalogs, workspace);
+    try indexGuaranteedConstructors(catalogs, workspace);
     try validateCanonicalSchemaOrder(catalogs, workspace);
     @memset(workspace.constant_used[0..catalogs.constant_count], false);
     @memset(workspace.value_defined[0..catalogs.value_count], false);
@@ -424,7 +473,21 @@ pub fn validateImage(
         &workspace.authored_failure_operand,
         &next_value,
         &v3_operation_used,
+        workspace,
     );
+    if (catalogs.envelope.header.evaluator_semantics_version <
+        evaluator_semantics_v4 and
+        segment_count > legacy_maximum_segment_entries)
+    {
+        return error.InvalidSegment;
+    }
+    if (catalogs.envelope.header.evaluator_semantics_version ==
+        evaluator_semantics_v4 and
+        catalogs.value_count <= legacy_maximum_catalog_entries and
+        segment_count <= legacy_maximum_segment_entries)
+    {
+        return error.InvalidInstruction;
+    }
     var authored_failure_used = false;
     for (workspace.authored_failure_operand[0..catalogs.value_count], 0..) |used, value| {
         if (!used) continue;
@@ -463,9 +526,14 @@ pub fn validateImage(
         return error.UnreachableEntry;
     }
     try validateInitialTuple(catalogs);
-    try validateConstructorExecution(catalogs, segment_count, constructor_count);
+    try validateConstructorExecution(
+        catalogs,
+        segment_count,
+        constructor_count,
+        workspace,
+    );
     try validateDirectBranchInvariants(catalogs);
-    try validateConsumedParametersRetained(catalogs, segment_count);
+    try validateConsumedParametersRetained(catalogs, segment_count, workspace);
     try validateSegmentReachability(catalogs, segment_count);
     const program_digest = try computeProgramTransitionDigest(
         catalogs,
@@ -987,6 +1055,39 @@ fn validateValues(
 fn deriveKernelScratch(
     schemas: dynamic_value_v1.Table,
     values: Values,
+    segments: []const u8,
+) Error!u64 {
+    const segment_value_bytes = try maximumSegmentScratch(
+        schemas,
+        values,
+        segments,
+    );
+    const value_metadata = std.math.mul(u64, values.count, 16) catch
+        return error.LengthOverflow;
+    const schema_stack = std.math.mul(u64, schemas.count(), 16) catch
+        return error.LengthOverflow;
+    var maximum_single: u64 = 0;
+    for (schemas.nodes) |node| {
+        maximum_single = @max(maximum_single, node.maximum_encoded_size);
+    }
+    const framing = std.math.add(
+        u64,
+        std.math.mul(u64, maximum_single, 3) catch
+            return error.LengthOverflow,
+        176,
+    ) catch return error.LengthOverflow;
+    return std.math.add(
+        u64,
+        std.math.add(u64, segment_value_bytes, value_metadata) catch
+            return error.LengthOverflow,
+        std.math.add(u64, schema_stack, framing) catch
+            return error.LengthOverflow,
+    ) catch error.LengthOverflow;
+}
+
+fn deriveLegacyKernelScratch(
+    schemas: dynamic_value_v1.Table,
+    values: Values,
 ) Error!u64 {
     var value_bytes: u64 = 0;
     for (0..values.count) |value| {
@@ -1019,6 +1120,61 @@ fn deriveKernelScratch(
         std.math.add(u64, schema_stack, framing) catch
             return error.LengthOverflow,
     ) catch error.LengthOverflow;
+}
+
+fn maximumSegmentScratch(
+    schemas: dynamic_value_v1.Table,
+    values: Values,
+    bytes: []const u8,
+) Error!u64 {
+    if (bytes.len < 4) return error.InvalidSegment;
+    const count = readInt(u32, bytes, 0);
+    if (count == 0 or count > maximum_segment_entries) {
+        return error.InvalidSegment;
+    }
+    var maximum: u64 = 0;
+    var segment_cursor: usize = 4;
+    for (0..count) |_| {
+        const segment_end = recordEnd(
+            bytes,
+            segment_cursor,
+            segment_prefix_length,
+        ) catch return error.InvalidSegment;
+        var cursor = segment_cursor + segment_prefix_length;
+        const parameter_bytes = std.math.mul(
+            usize,
+            readInt(u16, bytes, segment_cursor + 10),
+            2,
+        ) catch return error.InvalidSegment;
+        cursor = std.math.add(usize, cursor, parameter_bytes) catch
+            return error.InvalidSegment;
+        if (cursor > segment_end) return error.InvalidSegment;
+        var total: u64 = 0;
+        for (0..readInt(u32, bytes, segment_cursor + 12)) |_| {
+            const instruction_end = recordEnd(bytes, cursor, 16) catch
+                return error.InvalidSegment;
+            if (instruction_end > segment_end) return error.InvalidSegment;
+            const operation = readInt(u16, bytes, cursor + 6);
+            const result = readInt(u16, bytes, cursor + 8);
+            if (operation > 60 or result >= values.count) {
+                return error.InvalidSegment;
+            }
+            if (operation >= 2) {
+                const schema = schemas.node(values.schemaId(result)) catch
+                    return error.InvalidSchema;
+                total = std.math.add(
+                    u64,
+                    total,
+                    schema.maximum_encoded_size,
+                ) catch return error.LengthOverflow;
+            }
+            cursor = instruction_end;
+        }
+        maximum = @max(maximum, total);
+        segment_cursor = segment_end;
+    }
+    if (segment_cursor != bytes.len) return error.InvalidSegment;
+    return maximum;
 }
 
 fn validateFunctions(
@@ -1103,6 +1259,7 @@ fn validateSegments(
     authored_failure_operand: *[maximum_catalog_entries]bool,
     next_value: *u32,
     v3_operation_used: *bool,
+    workspace: *const ValidationWorkspace,
 ) Error!u32 {
     const bytes = catalogs.envelope.section(.segments);
     if (bytes.len < 4) return error.InvalidSegment;
@@ -1125,17 +1282,12 @@ fn validateSegments(
         const parameter_count = readInt(u16, bytes, cursor + 10);
         const instruction_count = readInt(u32, bytes, cursor + 12);
         const function_id = readInt(u16, bytes, cursor + 6);
-        var available = [_]bool{false} ** maximum_catalog_entries;
-        for (0..catalogs.value_count) |value| {
-            const schema = catalogs.schemas.node(
-                try catalogs.valueSchemaId(@intCast(value)),
-            ) catch return error.InvalidSegment;
-            if (schema.maximum_encoded_size == 0) available[value] = true;
-        }
+        var available = workspace.zero_width_values;
         try addGuaranteedConstructorValues(
             catalogs,
             @intCast(segment_id),
             &available,
+            workspace,
         );
         cursor += segment_prefix_length;
         for (0..parameter_count) |index| {
@@ -1189,57 +1341,85 @@ fn addGuaranteedConstructorValues(
     catalogs: Catalogs,
     segment_id: u16,
     available: *[maximum_catalog_entries]bool,
+    workspace: *const ValidationWorkspace,
 ) Error!void {
+    if (segment_id >= maximum_segment_entries) return error.InvalidSegment;
     const bytes = catalogs.envelope.section(.constructors);
-    if (bytes.len < 4) return error.InvalidConstructor;
-    const count = readInt(u32, bytes, 0);
-    if (count == 0 or count > maximum_constructor_entries) return error.InvalidConstructor;
     var guaranteed = [_]bool{false} ** maximum_catalog_entries;
     var found = false;
-    var cursor: usize = 4;
-    for (0..count) |_| {
-        const end = recordEnd(bytes, cursor, 24) catch
-            return error.InvalidConstructor;
-        const kind = bytes[cursor + 8];
-        const origin = bytes[cursor + 9];
-        if (readInt(u16, bytes, cursor + 12) == segment_id and
-            kind != 3 and !(kind == 4 and origin == 2))
-        {
-            var activation_seen = [_]bool{false} ** maximum_catalog_entries;
-            var environment_seen = [_]bool{false} ** maximum_catalog_entries;
-            var retained = [_]bool{false} ** maximum_catalog_entries;
-            const activation_count = readInt(u16, bytes, cursor + 16);
-            const environment_count = readInt(u16, bytes, cursor + 18);
-            var field_cursor = cursor + 24;
-            for (0..@as(u32, activation_count) + environment_count) |index| {
-                if (end - field_cursor < 8) return error.InvalidConstructor;
-                const value = readInt(u16, bytes, field_cursor);
-                if (value >= catalogs.value_count) {
-                    return error.InvalidConstructor;
-                }
-                const seen = if (index < activation_count)
-                    &activation_seen
-                else
-                    &environment_seen;
-                if (seen[value]) return error.InvalidConstructor;
-                seen[value] = true;
-                retained[value] = true;
-                field_cursor += 8;
-            }
-            if (!found) {
-                guaranteed = retained;
-                found = true;
-            } else {
-                for (0..catalogs.value_count) |value| {
-                    guaranteed[value] = guaranteed[value] and retained[value];
-                }
+    var constructor_id = workspace.segment_constructor_first[segment_id];
+    while (constructor_id != std.math.maxInt(u16)) {
+        const cursor: usize = catalogs.constructor_offsets[constructor_id];
+        const end = cursor + catalogs.constructor_lengths[constructor_id];
+        var activation_seen = [_]bool{false} ** maximum_catalog_entries;
+        var environment_seen = [_]bool{false} ** maximum_catalog_entries;
+        var retained = [_]bool{false} ** maximum_catalog_entries;
+        const activation_count = readInt(u16, bytes, cursor + 16);
+        const environment_count = readInt(u16, bytes, cursor + 18);
+        var field_cursor = cursor + 24;
+        for (0..@as(u32, activation_count) + environment_count) |index| {
+            if (end - field_cursor < 8) return error.InvalidConstructor;
+            const value = readInt(u16, bytes, field_cursor);
+            if (value >= catalogs.value_count) return error.InvalidConstructor;
+            const seen = if (index < activation_count)
+                &activation_seen
+            else
+                &environment_seen;
+            if (seen[value]) return error.InvalidConstructor;
+            seen[value] = true;
+            retained[value] = true;
+            field_cursor += 8;
+        }
+        if (!found) {
+            guaranteed = retained;
+            found = true;
+        } else {
+            for (0..catalogs.value_count) |value| {
+                guaranteed[value] = guaranteed[value] and retained[value];
             }
         }
-        cursor = end;
+        constructor_id = workspace.constructor_next[constructor_id];
     }
     if (!found) return error.InvalidSegment;
     for (0..catalogs.value_count) |value| {
         available[value] = available[value] or guaranteed[value];
+    }
+}
+
+fn indexGuaranteedConstructors(
+    catalogs: Catalogs,
+    workspace: *ValidationWorkspace,
+) Error!void {
+    const bytes = catalogs.envelope.section(.constructors);
+    const count = readInt(u32, bytes, 0);
+    @memset(&workspace.segment_constructor_first, std.math.maxInt(u16));
+    var constructor_id: u32 = count;
+    while (constructor_id != 0) {
+        constructor_id -= 1;
+        const cursor: usize = catalogs.constructor_offsets[constructor_id];
+        const kind = bytes[cursor + 8];
+        const origin = bytes[cursor + 9];
+        const segment_id = readInt(u16, bytes, cursor + 12);
+        if (segment_id >= maximum_segment_entries) {
+            return error.InvalidConstructor;
+        }
+        if (kind == 3 or (kind == 4 and origin == 2)) continue;
+        workspace.constructor_next[constructor_id] =
+            workspace.segment_constructor_first[segment_id];
+        workspace.segment_constructor_first[segment_id] = @intCast(constructor_id);
+    }
+}
+
+fn indexZeroWidthValues(
+    catalogs: Catalogs,
+    workspace: *ValidationWorkspace,
+) Error!void {
+    @memset(&workspace.zero_width_values, false);
+    for (0..catalogs.value_count) |value| {
+        const schema = catalogs.schemas.node(
+            try catalogs.valueSchemaId(@intCast(value)),
+        ) catch return error.InvalidSegment;
+        workspace.zero_width_values[value] = schema.maximum_encoded_size == 0;
     }
 }
 
@@ -1281,7 +1461,7 @@ fn validateInstruction(
         wire_operation == .bytes_byte_at or
         wire_operation == .text_to_bytes)
     {
-        if (catalogs.envelope.header.evaluator_semantics_version !=
+        if (catalogs.envelope.header.evaluator_semantics_version <
             evaluator_semantics_v3)
         {
             return error.InvalidInstruction;
@@ -2246,13 +2426,10 @@ fn expectedConstructorKind(
 
 fn imageSegmentRecord(catalogs: Catalogs, target: u16) Error![]const u8 {
     const bytes = catalogs.envelope.section(.segments);
-    var cursor: usize = 4;
-    for (0..readInt(u32, bytes, 0)) |id| {
-        const end = try recordEnd(bytes, cursor, segment_prefix_length);
-        if (id == target) return bytes[cursor..end];
-        cursor = end;
-    }
-    return error.InvalidConstructor;
+    if (target >= readInt(u32, bytes, 0)) return error.InvalidConstructor;
+    const offset: usize = catalogs.segment_offsets[target];
+    const length: usize = catalogs.segment_lengths[target];
+    return bytes[offset .. offset + length];
 }
 
 fn imageSegmentTerminator(segment: []const u8) usize {
@@ -2963,9 +3140,12 @@ fn validateConstructorExecution(
     catalogs: Catalogs,
     segment_count: u32,
     constructor_count: u32,
+    workspace: *const ValidationWorkspace,
 ) Error!void {
     var transition_role = [_]bool{false} ** maximum_constructor_entries;
     var suspension_role = [_]bool{false} ** maximum_constructor_entries;
+    var source_available = [_]bool{false} ** maximum_catalog_entries;
+    var available_source: ?u16 = null;
     const transitions = catalogs.envelope.section(.entry_transitions);
     const transition_count = readInt(u32, transitions, 0);
     for (0..transition_count) |index| {
@@ -2974,6 +3154,15 @@ fn validateConstructorExecution(
         const edge_kind = transitions[offset + 2];
         const target = readInt(u16, transitions, offset + 4);
         const constructor_id = readInt(u32, transitions, offset + 8);
+        if (available_source == null or available_source.? != source) {
+            try segmentAvailableAtTerminator(
+                catalogs,
+                source,
+                &source_available,
+                workspace,
+            );
+            available_source = source;
+        }
         transition_role[constructor_id] = true;
         const constructor = imageConstructorRecord(
             catalogs,
@@ -2991,6 +3180,7 @@ fn validateConstructorExecution(
             source,
             target,
             edge,
+            &source_available,
         );
     }
 
@@ -3007,6 +3197,12 @@ fn validateConstructorExecution(
             else => return error.InvalidTerminator,
         };
         var matched: ?u32 = null;
+        try segmentAvailableAtTerminator(
+            catalogs,
+            @intCast(source),
+            &source_available,
+            workspace,
+        );
         for (0..constructor_count) |constructor_id| {
             const constructor = imageConstructorRecord(
                 catalogs,
@@ -3023,6 +3219,7 @@ fn validateConstructorExecution(
                 catalogs,
                 constructor,
                 @intCast(source),
+                &source_available,
             );
         }
         const constructor_id = matched orelse return error.InvalidConstructor;
@@ -3041,6 +3238,7 @@ fn validateConstructorExecution(
 fn validateConsumedParametersRetained(
     catalogs: Catalogs,
     segment_count: u32,
+    workspace: *const ValidationWorkspace,
 ) Error!void {
     for (0..segment_count) |segment_id| {
         const segment = imageSegmentRecord(catalogs, @intCast(segment_id)) catch
@@ -3069,6 +3267,7 @@ fn validateConsumedParametersRetained(
             catalogs,
             @intCast(segment_id),
             &guaranteed,
+            workspace,
         );
         for (0..parameter_count) |index| {
             const parameter = readInt(
@@ -3231,6 +3430,7 @@ fn validateTransitionConstructorFields(
     source: u16,
     target: u16,
     edge: []const u8,
+    source_available: *const [maximum_catalog_entries]bool,
 ) Error!void {
     const target_segment = imageSegmentRecord(catalogs, target) catch
         return error.InvalidConstructor;
@@ -3249,6 +3449,7 @@ fn validateTransitionConstructorFields(
             target_segment,
             edge,
             value,
+            source_available,
         )) return error.InvalidConstructor;
         cursor += 8;
     }
@@ -3364,6 +3565,7 @@ fn constructorFieldMaterializable(
     target_segment: []const u8,
     edge: []const u8,
     value: u16,
+    source_available: *const [maximum_catalog_entries]bool,
 ) Error!bool {
     const schema = catalogs.schemas.node(valueSchema(catalogs, value)) catch
         return error.InvalidConstructor;
@@ -3377,43 +3579,45 @@ fn constructorFieldMaterializable(
         ) != value) continue;
         const argument = 4 + index * 4;
         if (edge[argument] == 1) return true;
-        return segmentValueAvailableAtTerminator(
-            catalogs,
-            source,
-            readInt(u16, edge, argument + 2),
-        );
+        return source_available[readInt(u16, edge, argument + 2)];
     }
-    return segmentValueAvailableAtTerminator(catalogs, source, value);
+    _ = source;
+    return source_available[value];
 }
 
 fn validateSuspensionConstructorFields(
     catalogs: Catalogs,
     constructor: []const u8,
     source: u16,
+    source_available: *const [maximum_catalog_entries]bool,
 ) Error!void {
+    _ = catalogs;
+    _ = source;
     var cursor: usize = 24;
     const field_count = @as(u32, readInt(u16, constructor, 16)) +
         readInt(u16, constructor, 18);
     for (0..field_count) |_| {
         const value = readInt(u16, constructor, cursor);
-        if (!try segmentValueAvailableAtTerminator(catalogs, source, value)) {
+        if (!source_available[value]) {
             return error.InvalidConstructor;
         }
         cursor += 8;
     }
 }
 
-fn segmentValueAvailableAtTerminator(
+fn segmentAvailableAtTerminator(
     catalogs: Catalogs,
     segment_id: u16,
-    value: u16,
-) Error!bool {
-    if (value >= catalogs.value_count) return false;
-    const schema = catalogs.schemas.node(valueSchema(catalogs, value)) catch
-        return error.InvalidConstructor;
-    if (schema.maximum_encoded_size == 0) return true;
-    var available = [_]bool{false} ** maximum_catalog_entries;
-    try addGuaranteedConstructorValues(catalogs, segment_id, &available);
+    available: *[maximum_catalog_entries]bool,
+    workspace: *const ValidationWorkspace,
+) Error!void {
+    available.* = workspace.zero_width_values;
+    try addGuaranteedConstructorValues(
+        catalogs,
+        segment_id,
+        available,
+        workspace,
+    );
     const segment = imageSegmentRecord(catalogs, segment_id) catch
         return error.InvalidConstructor;
     var cursor = segment_prefix_length +
@@ -3424,7 +3628,6 @@ fn segmentValueAvailableAtTerminator(
         available[readInt(u16, segment, cursor + 8)] = true;
         cursor = end;
     }
-    return available[value];
 }
 
 fn imageTransitionEdge(
@@ -3594,13 +3797,10 @@ fn imageConstructorRecord(
     target: u32,
 ) Error![]const u8 {
     const bytes = catalogs.envelope.section(.constructors);
-    var cursor: usize = 4;
-    for (0..readInt(u32, bytes, 0)) |constructor| {
-        const end = try recordEnd(bytes, cursor, segment_prefix_length);
-        if (constructor == target) return bytes[cursor..end];
-        cursor = end;
-    }
-    return error.InvalidTransition;
+    if (target >= readInt(u32, bytes, 0)) return error.InvalidTransition;
+    const offset: usize = catalogs.constructor_offsets[target];
+    const length: usize = catalogs.constructor_lengths[target];
+    return bytes[offset .. offset + length];
 }
 
 fn imageEdgeLength(edge: []const u8) usize {
@@ -3626,6 +3826,30 @@ fn recordEnd(bytes: []const u8, start: usize, minimum: usize) Error!usize {
         return error.LengthOverflow;
     if (end > bytes.len) return error.LengthMismatch;
     return end;
+}
+
+fn indexRecords(
+    bytes: []const u8,
+    minimum_record_bytes: usize,
+    maximum_records: u32,
+    offsets: anytype,
+    lengths: anytype,
+    failure: Error,
+) Error!void {
+    if (bytes.len < 4) return failure;
+    const count = readInt(u32, bytes, 0);
+    if (count == 0 or count > maximum_records) return failure;
+    var cursor: usize = 4;
+    for (0..count) |index| {
+        const end = recordEnd(bytes, cursor, minimum_record_bytes) catch
+            return failure;
+        offsets[index] = std.math.cast(u32, cursor) orelse
+            return error.LengthOverflow;
+        lengths[index] = std.math.cast(u32, end - cursor) orelse
+            return error.LengthOverflow;
+        cursor = end;
+    }
+    if (cursor != bytes.len) return failure;
 }
 
 fn takeCatalogSlice(

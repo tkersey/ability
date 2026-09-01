@@ -1999,6 +1999,7 @@ pub fn NormalForm(
             resume_target: ?control_ir.BlockId,
             environment_set: Set,
             invariants: FactSet,
+            path_fact_candidates: ?*const AnalysisFactSet,
             canonical_values: *const CanonicalValues,
             liveness: *const Liveness,
         ) Error!u32 {
@@ -2017,6 +2018,19 @@ pub fn NormalForm(
                 &required,
                 &ordered_invariants,
             );
+            for (ordered_invariants.terms[0..ordered_invariants.len]) |term| {
+                term.addRequired(&required);
+            }
+            if (path_fact_candidates) |candidates| {
+                for (candidates.terms[0..candidates.len]) |term| switch (term) {
+                    .boolean => |predicate| {
+                        if (required.contains(predicate.value)) {
+                            try ordered_invariants.insert(term);
+                        }
+                    },
+                    else => unreachable,
+                };
+            }
             ordered_invariants.canonicalize(canonical_values);
             if (comptime maximum_invariant_terms == 0) {
                 if (ordered_invariants.len != 0) {
@@ -3715,11 +3729,8 @@ pub fn NormalForm(
                         false;
                 const retain_for_invariant =
                     index < generated.direct_len or
-                    (index == generated.direct_len and switch (term) {
-                        .boolean => |path_fact| !generated.direct_complete or
-                            definition_witnesses.contains(path_fact.value),
-                        else => unreachable,
-                    }) or
+                    (index == generated.direct_len and
+                        !generated.direct_complete) or
                     (index > generated.direct_len and
                         retain_definition);
                 try projectTermInto(
@@ -4039,6 +4050,30 @@ pub fn NormalForm(
                     &facts,
                 );
             }
+            var path_fact_candidates: AnalysisFactSet = .{};
+            if (generated.direct_complete and
+                generated.terms.len > generated.direct_len)
+            {
+                switch (generated.terms.terms[generated.direct_len]) {
+                    .boolean => |predicate| {
+                        const projected = projectValues(
+                            program,
+                            source_block,
+                            edge,
+                            &environment,
+                            true,
+                            predicate.value,
+                        );
+                        for (projected.slice()) |value| {
+                            try path_fact_candidates.insert(.{ .boolean = .{
+                                .value = value,
+                                .expected = predicate.expected,
+                            } });
+                        }
+                    },
+                    else => unreachable,
+                }
+            }
             const constructor_id = try result.appendConstructor(
                 program,
                 constant_values,
@@ -4051,6 +4086,7 @@ pub fn NormalForm(
                 edge.target,
                 environment,
                 facts,
+                &path_fact_candidates,
                 canonical_values,
                 liveness,
             );
@@ -4113,6 +4149,7 @@ pub fn NormalForm(
                 program.entry,
                 liveness.entry_live[entry_index],
                 .{},
+                null,
                 &canonical_values,
                 &liveness,
             );
@@ -4266,6 +4303,7 @@ pub fn NormalForm(
                             suspension.continuation.target,
                             environment,
                             suspension_facts,
+                            null,
                             &canonical_values,
                             &liveness,
                         );
@@ -4786,47 +4824,45 @@ test "RNF propagates branch facts through transparent jumps" {
     return error.TestExpectedEqual;
 }
 
-test "RNF retains a direct predicate when future definitions retain it" {
+test "RNF retains a direct predicate required by an incoming definition" {
     const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
     const bool_type: control_ir.ValueType = .{ .scalar = .boolean };
-    const entry_instructions = [_]control_ir.Instruction{.{
-        .kind = .pure,
-        .result = 2,
-        .operands = &.{ 0, 1 },
-        .operation = .integer_equal,
-    }};
-    const then_instructions = [_]control_ir.Instruction{.{
-        .kind = .pure,
-        .result = 3,
-        .operands = &.{2},
-        .operation = .boolean_not,
-    }};
-    const else_instructions = [_]control_ir.Instruction{.{
-        .kind = .pure,
-        .result = 4,
-        .operands = &.{2},
-        .operation = .boolean_not,
-    }};
+    const entry_instructions = [_]control_ir.Instruction{
+        .{
+            .kind = .pure,
+            .result = 2,
+            .operands = &.{ 0, 1 },
+            .operation = .integer_equal,
+        },
+        .{
+            .kind = .pure,
+            .result = 3,
+            .operands = &.{2},
+            .operation = .boolean_not,
+        },
+    };
     const blocks = [_]control_ir.Block{
         .{
             .id = 0,
             .parameters = &.{ 0, 1 },
             .instructions = &entry_instructions,
-            .terminator = .{ .branch = .{
-                .condition = 2,
-                .then_edge = .{ .target = 1 },
-                .else_edge = .{ .target = 2 },
-            } },
+            .terminator = .{ .jump = .{ .target = 1 } },
         },
         .{
             .id = 1,
-            .instructions = &then_instructions,
-            .terminator = .{ .return_value = 3 },
+            .terminator = .{ .branch = .{
+                .condition = 2,
+                .then_edge = .{ .target = 2 },
+                .else_edge = .{ .target = 3 },
+            } },
         },
         .{
             .id = 2,
-            .instructions = &else_instructions,
-            .terminator = .{ .return_value = 4 },
+            .terminator = .{ .return_value = 3 },
+        },
+        .{
+            .id = 3,
+            .terminator = .{ .return_value = 3 },
         },
     };
     const program: control_ir.Program = .{
@@ -4836,17 +4872,16 @@ test "RNF retains a direct predicate when future definitions retain it" {
             u32_type,
             bool_type,
             bool_type,
-            bool_type,
         },
         .blocks = &blocks,
         .entry = 0,
         .result_type = bool_type,
     };
 
-    const normal_form = try NormalForm(8, 4, 8, 8, 8).synthesize(program);
+    const normal_form = try NormalForm(8, 8, 8, 8, 8).synthesize(program);
     var matched: usize = 0;
     for (normal_form.entryTransitionSlice()) |transition| {
-        if (transition.source_block != 0 or
+        if (transition.source_block != 1 or
             (transition.edge_kind != .branch_then and
                 transition.edge_kind != .branch_else))
         {
