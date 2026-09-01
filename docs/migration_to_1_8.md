@@ -24,7 +24,7 @@ Version 3 retains version-2 authored-failure semantics and does not change the
 BPI1 container, Process State, or Process ABI. Programs that do not reach the
 new operation retain their prior evaluator version and byte-identical images.
 
-Compiler-only ceilings now admit 2,048 typed values, 256 blocks, 512
+Compiler-only ceilings now admit 2,048 typed values, 320 blocks, 768
 constructors, 256 constructor-environment fields, and 128 invariant terms.
 These bounds admit deeply staged first-order programs without changing BPI1
 field widths. They are compile/validation resource limits, not runtime, State,

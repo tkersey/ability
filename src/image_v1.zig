@@ -12,8 +12,8 @@ pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
 pub const maximum_catalog_entries: u32 = 2048;
-pub const maximum_segment_entries: u32 = 256;
-pub const maximum_constructor_entries: u32 = 512;
+pub const maximum_segment_entries: u32 = 320;
+pub const maximum_constructor_entries: u32 = 768;
 pub const segment_prefix_length: u32 = 16;
 pub const header_length: u32 = fixed_prefix_length +
     section_count * section_descriptor_length;

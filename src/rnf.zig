@@ -6,6 +6,20 @@ const std = @import("std");
 pub const maximum_executable_definition_operands: usize =
     (control_ir.CompilerLimits{}).maximum_values;
 
+const InvariantInputs = struct {
+    values: [maximum_executable_definition_operands]control_ir.ValueId = undefined,
+    len: usize = 0,
+
+    fn insert(self: *@This(), value: control_ir.ValueId) bool {
+        for (self.values[0..self.len]) |existing| {
+            if (existing == value) return false;
+        }
+        self.values[self.len] = value;
+        self.len += 1;
+        return true;
+    }
+};
+
 /// Compiler classifications for generated continuation constructors.
 pub const ConstructorKind = enum {
     entry,
@@ -290,6 +304,12 @@ pub const InvariantTerm = union(enum) {
             => {},
         }
         return changed;
+    }
+
+    fn definitionInputs(self: InvariantTerm) InvariantInputs {
+        var result: InvariantInputs = .{};
+        _ = self.addDefinitionInputs(&result);
+        return result;
     }
 
     fn addRequired(self: InvariantTerm, required: anytype) void {
@@ -1153,11 +1173,14 @@ pub fn NormalForm(
         values: [maximum_values]control_ir.ValueId = undefined,
         present: [maximum_values]bool =
             [_]bool{false} ** maximum_values,
+        ordinals: [maximum_values]usize =
+            [_]usize{std.math.maxInt(usize)} ** maximum_values,
         len: usize = 0,
 
         fn bind(self: *@This(), value: control_ir.ValueId) void {
             if (self.present[@intCast(value)]) return;
             self.present[@intCast(value)] = true;
+            self.ordinals[@intCast(value)] = self.len;
             self.values[self.len] = value;
             self.len += 1;
         }
@@ -1184,10 +1207,9 @@ pub fn NormalForm(
             self: @This(),
             value: control_ir.ValueId,
         ) usize {
-            for (self.values[0..self.len], 0..) |candidate, index| {
-                if (candidate == value) return index;
-            }
-            unreachable;
+            const result = self.ordinals[@intCast(value)];
+            if (result >= self.len) unreachable;
+            return result;
         }
     };
     const FactSet = struct {
@@ -1650,11 +1672,8 @@ pub fn NormalForm(
             const definitions = generated.terms.terms[generated.direct_len + 1 .. generated.terms.len];
             var future_dependent = Set.empty();
             for (definitions) |term| {
-                var inputs = Set.empty();
-                _ = term.addDefinitionInputs(&inputs);
-                for (inputs.bits, 0..) |present, value_index| {
-                    if (!present) continue;
-                    const value: control_ir.ValueId = @intCast(value_index);
+                const inputs = term.definitionInputs();
+                for (inputs.values[0..inputs.len]) |value| {
                     if (projectValues(
                         program,
                         source_block,
@@ -1671,11 +1690,9 @@ pub fn NormalForm(
                 var changed = false;
                 for (definitions) |term| {
                     const result = term.definitionResult() orelse continue;
-                    var inputs = Set.empty();
-                    _ = term.addDefinitionInputs(&inputs);
-                    for (inputs.bits, 0..) |present, value_index| {
-                        if (!present or
-                            !future_dependent.bits[value_index]) continue;
+                    const inputs = term.definitionInputs();
+                    for (inputs.values[0..inputs.len]) |value| {
+                        if (!future_dependent.contains(value)) continue;
                         changed = future_dependent.insert(result) or changed;
                         break;
                     }

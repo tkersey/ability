@@ -10,8 +10,8 @@ const std = @import("std");
 
 const implementation_limits: control_ir.CompilerLimits = .{
     .maximum_values = 2048,
-    .maximum_blocks = 256,
-    .maximum_constructors = 512,
+    .maximum_blocks = 320,
+    .maximum_constructors = 768,
     .maximum_environment_fields = 256,
     .maximum_invariant_terms = 128,
     .maximum_generated_operations = 32_768,
