@@ -3715,8 +3715,11 @@ pub fn NormalForm(
                         false;
                 const retain_for_invariant =
                     index < generated.direct_len or
-                    (index == generated.direct_len and
-                        !generated.direct_complete) or
+                    (index == generated.direct_len and switch (term) {
+                        .boolean => |path_fact| !generated.direct_complete or
+                            definition_witnesses.contains(path_fact.value),
+                        else => unreachable,
+                    }) or
                     (index > generated.direct_len and
                         retain_definition);
                 try projectTermInto(
@@ -4781,6 +4784,93 @@ test "RNF propagates branch facts through transparent jumps" {
         return;
     }
     return error.TestExpectedEqual;
+}
+
+test "RNF retains a direct predicate when future definitions retain it" {
+    const u32_type: control_ir.ValueType = .{ .scalar = .u32 };
+    const bool_type: control_ir.ValueType = .{ .scalar = .boolean };
+    const entry_instructions = [_]control_ir.Instruction{.{
+        .kind = .pure,
+        .result = 2,
+        .operands = &.{ 0, 1 },
+        .operation = .integer_equal,
+    }};
+    const then_instructions = [_]control_ir.Instruction{.{
+        .kind = .pure,
+        .result = 3,
+        .operands = &.{2},
+        .operation = .boolean_not,
+    }};
+    const else_instructions = [_]control_ir.Instruction{.{
+        .kind = .pure,
+        .result = 4,
+        .operands = &.{2},
+        .operation = .boolean_not,
+    }};
+    const blocks = [_]control_ir.Block{
+        .{
+            .id = 0,
+            .parameters = &.{ 0, 1 },
+            .instructions = &entry_instructions,
+            .terminator = .{ .branch = .{
+                .condition = 2,
+                .then_edge = .{ .target = 1 },
+                .else_edge = .{ .target = 2 },
+            } },
+        },
+        .{
+            .id = 1,
+            .instructions = &then_instructions,
+            .terminator = .{ .return_value = 3 },
+        },
+        .{
+            .id = 2,
+            .instructions = &else_instructions,
+            .terminator = .{ .return_value = 4 },
+        },
+    };
+    const program: control_ir.Program = .{
+        .label = "retained-direct-predicate",
+        .value_types = &.{
+            u32_type,
+            u32_type,
+            bool_type,
+            bool_type,
+            bool_type,
+        },
+        .blocks = &blocks,
+        .entry = 0,
+        .result_type = bool_type,
+    };
+
+    const normal_form = try NormalForm(8, 4, 8, 8, 8).synthesize(program);
+    var matched: usize = 0;
+    for (normal_form.entryTransitionSlice()) |transition| {
+        if (transition.source_block != 0 or
+            (transition.edge_kind != .branch_then and
+                transition.edge_kind != .branch_else))
+        {
+            continue;
+        }
+        const expected = transition.edge_kind == .branch_then;
+        const constructor = normal_form.constructors[transition.constructor_id];
+        var predicate_retained = false;
+        for (constructor.environmentFields()) |field| {
+            predicate_retained = predicate_retained or field.value == 2;
+        }
+        try std.testing.expect(predicate_retained);
+        var witness_retained = false;
+        for (constructor.invariantTerms()) |term| switch (term) {
+            .boolean => |predicate| {
+                witness_retained = witness_retained or
+                    (predicate.value == 2 and predicate.expected == expected);
+            },
+            else => {},
+        };
+        try std.testing.expect(witness_retained);
+        matched += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), matched);
 }
 
 test "RNF normalizes Boolean composition into local definition equations" {
