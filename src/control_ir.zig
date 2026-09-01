@@ -366,7 +366,6 @@ pub const ValidationError = error{
 pub fn Reachability(comptime maximum_blocks: usize) type {
     return struct {
         const Self = @This();
-
         reachable: [maximum_blocks]bool =
             [_]bool{false} ** maximum_blocks,
         source_to_dense: [maximum_blocks]?BlockId =
@@ -487,11 +486,36 @@ pub fn Reachability(comptime maximum_blocks: usize) type {
 pub fn ValueSet(comptime maximum_values: usize) type {
     return struct {
         const Self = @This();
+        const word_bits = @bitSizeOf(u64);
+        const word_count = (maximum_values + word_bits - 1) / word_bits;
 
-        bits: [maximum_values]bool = [_]bool{false} ** maximum_values,
-        listed: [maximum_values]bool = [_]bool{false} ** maximum_values,
-        values: [maximum_values]ValueId = undefined,
-        len: usize = 0,
+        bits: [word_count]u64 = [_]u64{0} ** word_count,
+
+        pub const Iterator = struct {
+            set: *const Self,
+            word_index: usize = 0,
+            remaining: u64 = if (word_count == 0) 0 else undefined,
+
+            fn init(set: *const Self) @This() {
+                return .{
+                    .set = set,
+                    .remaining = if (word_count == 0) 0 else set.bits[0],
+                };
+            }
+
+            pub fn next(self: *@This()) ?ValueId {
+                while (self.remaining == 0) {
+                    self.word_index += 1;
+                    if (self.word_index == word_count) return null;
+                    self.remaining = self.set.bits[self.word_index];
+                }
+                const bit: usize = @intCast(@ctz(self.remaining));
+                self.remaining &= self.remaining - 1;
+                const index = self.word_index * word_bits + bit;
+                if (index >= maximum_values) return null;
+                return @intCast(index);
+            }
+        };
 
         /// Construct an empty set.
         pub fn empty() Self {
@@ -501,51 +525,55 @@ pub fn ValueSet(comptime maximum_values: usize) type {
         /// Insert one value, returning whether the set changed.
         pub fn insert(self: *Self, value: ValueId) bool {
             const index: usize = @intCast(value);
-            if (self.bits[index]) return false;
-            self.bits[index] = true;
-            if (!self.listed[index]) {
-                self.listed[index] = true;
-                self.values[self.len] = value;
-                self.len += 1;
-            }
+            const word = index / word_bits;
+            const mask = @as(u64, 1) << @intCast(index % word_bits);
+            if (self.bits[word] & mask != 0) return false;
+            self.bits[word] |= mask;
             return true;
         }
 
         /// Remove one value, returning whether the set changed.
         pub fn remove(self: *Self, value: ValueId) bool {
             const index: usize = @intCast(value);
-            if (!self.bits[index]) return false;
-            self.bits[index] = false;
+            const word = index / word_bits;
+            const mask = @as(u64, 1) << @intCast(index % word_bits);
+            if (self.bits[word] & mask == 0) return false;
+            self.bits[word] &= ~mask;
             return true;
         }
 
         /// Whether one value belongs to the set.
-        pub fn contains(self: Self, value: ValueId) bool {
-            return self.bits[@intCast(value)];
+        pub fn contains(self: *const Self, value: ValueId) bool {
+            const index: usize = @intCast(value);
+            return self.bits[index / word_bits] &
+                (@as(u64, 1) << @intCast(index % word_bits)) != 0;
         }
 
         /// Merge another set, returning whether the receiver changed.
-        pub fn merge(self: *Self, other: Self) bool {
+        pub fn merge(self: *Self, other: *const Self) bool {
             var changed = false;
-            for (other.values[0..other.len]) |value| {
-                if (!other.contains(value)) continue;
-                changed = self.insert(value) or changed;
+            for (&self.bits, other.bits) |*destination, source| {
+                const merged = destination.* | source;
+                changed = changed or merged != destination.*;
+                destination.* = merged;
             }
             return changed;
         }
 
         /// Compare two sets.
-        pub fn eql(self: Self, other: Self) bool {
-            return std.mem.eql(bool, &self.bits, &other.bits);
+        pub fn eql(self: *const Self, other: *const Self) bool {
+            return std.mem.eql(u64, &self.bits, &other.bits);
         }
 
         /// Count contained values.
-        pub fn count(self: Self) usize {
+        pub fn count(self: *const Self) usize {
             var total: usize = 0;
-            for (self.values[0..self.len]) |value| {
-                if (self.contains(value)) total += 1;
-            }
+            for (self.bits) |word| total += @popCount(word);
             return total;
+        }
+
+        pub fn iterator(self: *const Self) Iterator {
+            return Iterator.init(self);
         }
     };
 }
@@ -1203,6 +1231,76 @@ pub fn Liveness(
     const Set = ValueSet(maximum_values);
     return struct {
         const Self = @This();
+        const Predecessors = struct {
+            const maximum_edges = maximum_blocks * 2;
+            starts: [maximum_blocks]usize = [_]usize{0} ** maximum_blocks,
+            counts: [maximum_blocks]usize = [_]usize{0} ** maximum_blocks,
+            sources: [maximum_edges]BlockId = undefined,
+
+            const Successors = struct {
+                values: [2]BlockId = undefined,
+                len: usize = 0,
+
+                fn add(self: *@This(), value: BlockId) void {
+                    for (self.values[0..self.len]) |existing| {
+                        if (existing == value) return;
+                    }
+                    self.values[self.len] = value;
+                    self.len += 1;
+                }
+            };
+
+            fn successors(block: Block) Successors {
+                var result: Successors = .{};
+                switch (block.terminator) {
+                    .jump => |edge| result.add(edge.target),
+                    .branch => |branch| {
+                        result.add(branch.then_edge.target);
+                        result.add(branch.else_edge.target);
+                    },
+                    .@"suspend" => |suspension| {
+                        result.add(suspension.continuation.target);
+                        if (suspension.callee) |callee| result.add(callee.target);
+                    },
+                    .return_value, .return_to_caller, .fail, .fail_value => {},
+                }
+                return result;
+            }
+
+            fn analyze(program: Program) @This() {
+                var result: @This() = .{};
+                for (program.blocks) |block| {
+                    const outgoing = successors(block);
+                    for (outgoing.values[0..outgoing.len]) |target| {
+                        result.counts[@intCast(target)] += 1;
+                    }
+                }
+                var next: usize = 0;
+                for (&result.starts, result.counts) |*start, count| {
+                    start.* = next;
+                    next += count;
+                }
+                if (next > maximum_edges) unreachable;
+                var cursors = result.starts;
+                for (program.blocks) |block| {
+                    const outgoing = successors(block);
+                    for (outgoing.values[0..outgoing.len]) |target| {
+                        const index = cursors[@intCast(target)];
+                        result.sources[index] = block.id;
+                        cursors[@intCast(target)] += 1;
+                    }
+                }
+                return result;
+            }
+
+            fn forTarget(
+                self: *const @This(),
+                target: BlockId,
+            ) []const BlockId {
+                const index: usize = @intCast(target);
+                return self.sources[self.starts[index] .. self.starts[index] + self.counts[index]];
+            }
+        };
 
         live_in: [maximum_blocks]Set = [_]Set{Set.empty()} ** maximum_blocks,
         entry_live: [maximum_blocks]Set = [_]Set{Set.empty()} ** maximum_blocks,
@@ -1210,13 +1308,13 @@ pub fn Liveness(
         iteration_count: usize = 0,
 
         fn transferEdge(
-            self: Self,
+            self: *const Self,
             program: Program,
             edge: Edge,
             destination: *Set,
         ) void {
             const target_index: usize = @intCast(edge.target);
-            _ = destination.merge(self.live_in[target_index]);
+            _ = destination.merge(&self.live_in[target_index]);
             const target = program.blocks[target_index];
             for (target.parameters, edge.arguments) |parameter, argument| {
                 if (!self.entry_live[target_index].contains(parameter)) continue;
@@ -1227,7 +1325,7 @@ pub fn Liveness(
             }
         }
 
-        fn blockOut(self: Self, program: Program, block: Block) Set {
+        fn blockOut(self: *const Self, program: Program, block: Block) Set {
             var result = Set.empty();
             switch (block.terminator) {
                 .jump => |edge| self.transferEdge(program, edge, &result),
@@ -1244,7 +1342,7 @@ pub fn Liveness(
         }
 
         fn addTerminatorUses(
-            self: Self,
+            self: *const Self,
             program: Program,
             block: Block,
             set: *Set,
@@ -1283,51 +1381,67 @@ pub fn Liveness(
         pub fn analyze(program: Program) ValidationError!Self {
             try validate(maximum_values, maximum_blocks, program);
             var analysis: Self = .{};
-            const maximum_iterations = program.blocks.len * (program.value_types.len + 1) + 1;
-
-            while (analysis.iteration_count < maximum_iterations) {
-                analysis.iteration_count += 1;
-                var changed = false;
-                var remaining = program.blocks.len;
-                while (remaining > 0) {
-                    remaining -= 1;
-                    const block = program.blocks[remaining];
-                    const outgoing = analysis.blockOut(program, block);
-                    var live = outgoing;
-                    analysis.addTerminatorUses(program, block, &live);
-
-                    var instruction_index = block.instructions.len;
-                    while (instruction_index > 0) {
-                        instruction_index -= 1;
-                        const instruction = block.instructions[instruction_index];
-                        _ = live.remove(instruction.result);
-                        for (instruction.operands) |operand| _ = live.insert(operand);
-                    }
-
-                    const entry_live = live;
-                    for (block.parameters) |parameter| _ = live.remove(parameter);
-
-                    if (!analysis.live_out[remaining].eql(outgoing)) {
-                        analysis.live_out[remaining] = outgoing;
-                        changed = true;
-                    }
-                    if (!analysis.entry_live[remaining].eql(entry_live)) {
-                        analysis.entry_live[remaining] = entry_live;
-                        changed = true;
-                    }
-                    if (!analysis.live_in[remaining].eql(live)) {
-                        analysis.live_in[remaining] = live;
-                        changed = true;
-                    }
-                }
-                if (!changed) return analysis;
+            const predecessors = Predecessors.analyze(program);
+            const maximum_iterations = program.blocks.len *
+                (program.value_types.len + 1) + 1;
+            var queue: [maximum_blocks]BlockId = undefined;
+            var queued = [_]bool{false} ** maximum_blocks;
+            var head: usize = 0;
+            var length: usize = program.blocks.len;
+            for (0..program.blocks.len) |index| {
+                const block = program.blocks[program.blocks.len - index - 1];
+                queue[index] = block.id;
+                queued[@intCast(block.id)] = true;
             }
-            return error.LivenessDidNotConverge;
+
+            while (length != 0) {
+                if (analysis.iteration_count == maximum_iterations) {
+                    return error.LivenessDidNotConverge;
+                }
+                analysis.iteration_count += 1;
+                const block_id = queue[head];
+                head = (head + 1) % maximum_blocks;
+                length -= 1;
+                queued[@intCast(block_id)] = false;
+                const block_index: usize = @intCast(block_id);
+                const block = program.blocks[block_index];
+                const outgoing = analysis.blockOut(program, block);
+                var live = outgoing;
+                analysis.addTerminatorUses(program, block, &live);
+
+                var instruction_index = block.instructions.len;
+                while (instruction_index > 0) {
+                    instruction_index -= 1;
+                    const instruction = block.instructions[instruction_index];
+                    _ = live.remove(instruction.result);
+                    for (instruction.operands) |operand| _ = live.insert(operand);
+                }
+
+                const entry_live = live;
+                for (block.parameters) |parameter| _ = live.remove(parameter);
+
+                const changed = !analysis.live_out[block_index].eql(&outgoing) or
+                    !analysis.entry_live[block_index].eql(&entry_live) or
+                    !analysis.live_in[block_index].eql(&live);
+                if (!changed) continue;
+                analysis.live_out[block_index] = outgoing;
+                analysis.entry_live[block_index] = entry_live;
+                analysis.live_in[block_index] = live;
+                for (predecessors.forTarget(block_id)) |source| {
+                    const source_index: usize = @intCast(source);
+                    if (queued[source_index]) continue;
+                    const tail = (head + length) % maximum_blocks;
+                    queue[tail] = source;
+                    length += 1;
+                    queued[source_index] = true;
+                }
+            }
+            return analysis;
         }
 
         /// Values that must cross one explicit edge, excluding a resume value
         /// produced by the boundary itself.
-        pub fn edgeEnvironment(self: Self, program: Program, edge: Edge) Set {
+        pub fn edgeEnvironment(self: *const Self, program: Program, edge: Edge) Set {
             var result = Set.empty();
             self.transferEdge(program, edge, &result);
             return result;

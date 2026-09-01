@@ -1169,6 +1169,207 @@ pub fn NormalForm(
     );
     const Liveness = control_ir.Liveness(maximum_values, maximum_blocks);
     const ReachabilityType = control_ir.Reachability(maximum_blocks);
+    const CycleEdges = struct {
+        const unassigned = std.math.maxInt(u16);
+        components: [maximum_blocks]u16 = [_]u16{unassigned} ** maximum_blocks,
+        component_sizes: [maximum_blocks]usize = [_]usize{0} ** maximum_blocks,
+
+        const Successors = struct {
+            values: [2]control_ir.BlockId = undefined,
+            len: usize = 0,
+
+            fn add(self: *@This(), value: control_ir.BlockId) void {
+                for (self.values[0..self.len]) |existing| {
+                    if (existing == value) return;
+                }
+                self.values[self.len] = value;
+                self.len += 1;
+            }
+        };
+
+        const Tarjan = struct {
+            indices: [maximum_blocks]usize =
+                [_]usize{std.math.maxInt(usize)} ** maximum_blocks,
+            lowlinks: [maximum_blocks]usize = [_]usize{0} ** maximum_blocks,
+            on_stack: [maximum_blocks]bool = [_]bool{false} ** maximum_blocks,
+            stack: [maximum_blocks]control_ir.BlockId = undefined,
+            stack_len: usize = 0,
+            next_index: usize = 0,
+            next_component: u16 = 0,
+        };
+
+        fn successors(block: control_ir.Block) Successors {
+            var result: Successors = .{};
+            switch (block.terminator) {
+                .jump => |edge| result.add(edge.target),
+                .branch => |branch| {
+                    result.add(branch.then_edge.target);
+                    result.add(branch.else_edge.target);
+                },
+                .@"suspend" => |suspension| {
+                    result.add(suspension.continuation.target);
+                    if (suspension.callee) |callee| result.add(callee.target);
+                },
+                .return_value, .return_to_caller, .fail, .fail_value => {},
+            }
+            return result;
+        }
+
+        fn strongConnect(
+            self: *@This(),
+            tarjan: *Tarjan,
+            program: control_ir.Program,
+            reachability: ReachabilityType,
+            value: control_ir.BlockId,
+        ) void {
+            const index: usize = @intCast(value);
+            tarjan.indices[index] = tarjan.next_index;
+            tarjan.lowlinks[index] = tarjan.next_index;
+            tarjan.next_index += 1;
+            tarjan.stack[tarjan.stack_len] = value;
+            tarjan.stack_len += 1;
+            tarjan.on_stack[index] = true;
+
+            const outgoing = successors(program.blocks[index]);
+            for (outgoing.values[0..outgoing.len]) |target| {
+                if (!reachability.contains(target)) continue;
+                const target_index: usize = @intCast(target);
+                if (tarjan.indices[target_index] == std.math.maxInt(usize)) {
+                    self.strongConnect(tarjan, program, reachability, target);
+                    tarjan.lowlinks[index] = @min(
+                        tarjan.lowlinks[index],
+                        tarjan.lowlinks[target_index],
+                    );
+                } else if (tarjan.on_stack[target_index]) {
+                    tarjan.lowlinks[index] = @min(
+                        tarjan.lowlinks[index],
+                        tarjan.indices[target_index],
+                    );
+                }
+            }
+
+            if (tarjan.lowlinks[index] != tarjan.indices[index]) return;
+            const component = tarjan.next_component;
+            tarjan.next_component += 1;
+            while (true) {
+                tarjan.stack_len -= 1;
+                const member = tarjan.stack[tarjan.stack_len];
+                tarjan.on_stack[@intCast(member)] = false;
+                self.components[@intCast(member)] = component;
+                self.component_sizes[@intCast(component)] += 1;
+                if (member == value) break;
+            }
+        }
+
+        fn analyze(
+            program: control_ir.Program,
+            reachability: ReachabilityType,
+        ) @This() {
+            var result: @This() = .{};
+            var tarjan: Tarjan = .{};
+            for (program.blocks) |block| {
+                if (!reachability.contains(block.id) or
+                    tarjan.indices[@intCast(block.id)] != std.math.maxInt(usize))
+                {
+                    continue;
+                }
+                result.strongConnect(&tarjan, program, reachability, block.id);
+            }
+            return result;
+        }
+
+        fn contains(
+            self: *const @This(),
+            source: control_ir.BlockId,
+            target: control_ir.BlockId,
+        ) bool {
+            const component = self.components[@intCast(source)];
+            if (component == unassigned or
+                component != self.components[@intCast(target)])
+            {
+                return false;
+            }
+            return source == target or self.component_sizes[@intCast(component)] > 1;
+        }
+    };
+    const Predecessors = struct {
+        const maximum_edges = maximum_blocks * 2;
+        starts: [maximum_blocks]usize = [_]usize{0} ** maximum_blocks,
+        counts: [maximum_blocks]usize = [_]usize{0} ** maximum_blocks,
+        sources: [maximum_edges]control_ir.BlockId = undefined,
+
+        const Successors = struct {
+            values: [2]control_ir.BlockId = undefined,
+            len: usize = 0,
+
+            fn add(self: *@This(), value: control_ir.BlockId) void {
+                for (self.values[0..self.len]) |existing| {
+                    if (existing == value) return;
+                }
+                self.values[self.len] = value;
+                self.len += 1;
+            }
+        };
+
+        fn successors(block: control_ir.Block) Successors {
+            var result: Successors = .{};
+            switch (block.terminator) {
+                .jump => |edge| result.add(edge.target),
+                .branch => |branch| {
+                    result.add(branch.then_edge.target);
+                    result.add(branch.else_edge.target);
+                },
+                .@"suspend" => |suspension| {
+                    result.add(suspension.continuation.target);
+                    if (suspension.callee) |callee| result.add(callee.target);
+                },
+                .return_value, .return_to_caller, .fail, .fail_value => {},
+            }
+            return result;
+        }
+
+        fn analyze(
+            program: control_ir.Program,
+            reachability: ReachabilityType,
+        ) @This() {
+            var result: @This() = .{};
+            for (program.blocks) |block| {
+                if (!reachability.contains(block.id)) continue;
+                const outgoing = successors(block);
+                for (outgoing.values[0..outgoing.len]) |target| {
+                    if (reachability.contains(target)) {
+                        result.counts[@intCast(target)] += 1;
+                    }
+                }
+            }
+            var next: usize = 0;
+            for (&result.starts, result.counts) |*start, count| {
+                start.* = next;
+                next += count;
+            }
+            if (next > maximum_edges) unreachable;
+            var cursors = result.starts;
+            for (program.blocks) |block| {
+                if (!reachability.contains(block.id)) continue;
+                const outgoing = successors(block);
+                for (outgoing.values[0..outgoing.len]) |target| {
+                    if (!reachability.contains(target)) continue;
+                    const index = cursors[@intCast(target)];
+                    result.sources[index] = block.id;
+                    cursors[@intCast(target)] += 1;
+                }
+            }
+            return result;
+        }
+
+        fn forTarget(
+            self: *const @This(),
+            target: control_ir.BlockId,
+        ) []const control_ir.BlockId {
+            const index: usize = @intCast(target);
+            return self.sources[self.starts[index] .. self.starts[index] + self.counts[index]];
+        }
+    };
     const CanonicalValues = struct {
         values: [maximum_values]control_ir.ValueId = undefined,
         present: [maximum_values]bool =
@@ -1204,7 +1405,7 @@ pub fn NormalForm(
         }
 
         fn ordinal(
-            self: @This(),
+            self: *const @This(),
             value: control_ir.ValueId,
         ) usize {
             const result = self.ordinals[@intCast(value)];
@@ -1216,7 +1417,7 @@ pub fn NormalForm(
         terms: [maximum_invariant_terms]InvariantTerm = undefined,
         len: usize = 0,
 
-        fn contains(self: @This(), term: InvariantTerm) bool {
+        fn contains(self: *const @This(), term: InvariantTerm) bool {
             for (self.terms[0..self.len]) |existing| {
                 if (existing.eql(term)) return true;
             }
@@ -1235,7 +1436,7 @@ pub fn NormalForm(
             self.len += 1;
         }
 
-        fn intersection(self: @This(), other: @This()) @This() {
+        fn intersection(self: *const @This(), other: *const @This()) @This() {
             if (comptime maximum_invariant_terms == 0) return .{};
             var result: @This() = .{};
             for (self.terms[0..self.len]) |term| {
@@ -1246,7 +1447,7 @@ pub fn NormalForm(
             return result;
         }
 
-        fn eql(self: @This(), other: @This()) bool {
+        fn eql(self: *const @This(), other: *const @This()) bool {
             if (self.len != other.len) return false;
             for (self.terms[0..self.len]) |term| {
                 if (!other.contains(term)) return false;
@@ -1255,7 +1456,7 @@ pub fn NormalForm(
         }
 
         fn termLessThan(
-            canonical_values: CanonicalValues,
+            canonical_values: *const CanonicalValues,
             left: InvariantTerm,
             right: InvariantTerm,
         ) bool {
@@ -1602,7 +1803,7 @@ pub fn NormalForm(
 
         fn canonicalize(
             self: *@This(),
-            canonical_values: CanonicalValues,
+            canonical_values: *const CanonicalValues,
         ) void {
             if (comptime maximum_invariant_terms == 0) return;
             var index: usize = 1;
@@ -1661,8 +1862,8 @@ pub fn NormalForm(
             program: control_ir.Program,
             source_block: control_ir.Block,
             edge: control_ir.Edge,
-            generated: GeneratedFacts,
-            target_live: Set,
+            generated: *const GeneratedFacts,
+            target_live: *const Set,
         ) Set {
             var required = Set.empty();
             for (generated.terms.terms[0..generated.direct_len]) |term| {
@@ -1798,8 +1999,8 @@ pub fn NormalForm(
             resume_target: ?control_ir.BlockId,
             environment_set: Set,
             invariants: FactSet,
-            canonical_values: CanonicalValues,
-            liveness: Liveness,
+            canonical_values: *const CanonicalValues,
+            liveness: *const Liveness,
         ) Error!u32 {
             var constructor: ConstructorType = .{
                 .id = @intCast(self.constructor_count),
@@ -1863,8 +2064,8 @@ pub fn NormalForm(
             }
             var environment_values: [@max(maximum_environment_fields, 1)]control_ir.ValueId = undefined;
             var environment_value_count: usize = 0;
-            for (required.values[0..required.len]) |value| {
-                if (!required.contains(value)) continue;
+            var required_values = required.iterator();
+            while (required_values.next()) |value| {
                 var activation_owned = false;
                 for (constructor.activationFields()) |field| {
                     if (field.value == value) {
@@ -2045,7 +2246,7 @@ pub fn NormalForm(
             program: control_ir.Program,
             source_block: control_ir.Block,
             edge: control_ir.Edge,
-            target_live: Set,
+            target_live: *const Set,
             retain_for_invariant: bool,
             value: control_ir.ValueId,
         ) Projection {
@@ -2087,7 +2288,7 @@ pub fn NormalForm(
             program: control_ir.Program,
             source_block: control_ir.Block,
             edge: control_ir.Edge,
-            target_live: Set,
+            target_live: *const Set,
             retain_for_invariant: bool,
             term: InvariantTerm,
             result: *FactSet,
@@ -3227,8 +3428,8 @@ pub fn NormalForm(
         ) Error!void {
             const original = environment.*;
             var representable: AnalysisFactSet = .{};
-            for (original.values[0..original.len]) |value| {
-                if (!original.contains(value)) continue;
+            var remaining_values = original.iterator();
+            while (remaining_values.next()) |value| {
                 switch (try program.valueType(value)) {
                     .scalar => |scalar| if (scalar == .boolean) {
                         var boolean_visited = Set.empty();
@@ -3265,8 +3466,8 @@ pub fn NormalForm(
                 try facts.insert(term);
             }
             var visited = Set.empty();
-            for (original.values[0..original.len]) |value| {
-                if (!original.contains(value)) continue;
+            var original_values = original.iterator();
+            while (original_values.next()) |value| {
                 var has_definition = false;
                 for (representable.terms[0..representable.len]) |term| {
                     if (term.definitionResult() == value) {
@@ -3291,7 +3492,7 @@ pub fn NormalForm(
             constant_values: []const ?InvariantValue,
             source_block: control_ir.Block,
             edge: control_ir.Edge,
-            target_live: Set,
+            target_live: *const Set,
             facts: *FactSet,
         ) Error!void {
             const target = program.blocks[@intCast(edge.target)];
@@ -3333,7 +3534,7 @@ pub fn NormalForm(
                         }
                         if (has_definition) {
                             var executable_visited = Set.empty();
-                            var retained = target_live;
+                            var retained = target_live.*;
                             try addInstructionDefinition(
                                 program,
                                 canonical_source,
@@ -3462,8 +3663,8 @@ pub fn NormalForm(
             for (result.terms.terms[0..result.direct_len]) |term| {
                 term.addRequired(&direct_values);
             }
-            for (direct_values.values[0..direct_values.len]) |value| {
-                if (!direct_values.contains(value)) continue;
+            var direct_value_iterator = direct_values.iterator();
+            while (direct_value_iterator.next()) |value| {
                 var definition_visited = Set.empty();
                 _ = try collectValueDefinition(
                     program,
@@ -3480,9 +3681,9 @@ pub fn NormalForm(
             program: control_ir.Program,
             source_block: control_ir.Block,
             edge: control_ir.Edge,
-            target_live: Set,
-            source_facts: FactSet,
-            generated: GeneratedFacts,
+            target_live: *const Set,
+            source_facts: *const FactSet,
+            generated: *const GeneratedFacts,
         ) Error!FactSet {
             var result: FactSet = .{};
             const definition_witnesses = definitionWitnesses(
@@ -3541,17 +3742,17 @@ pub fn NormalForm(
                 saw_predecessor.* = true;
                 return;
             }
-            next.* = next.intersection(candidate);
+            next.* = next.intersection(&candidate);
         }
 
         fn considerEdge(
             program: control_ir.Program,
             constant_values: []const ?InvariantValue,
             source_block: control_ir.Block,
-            source_facts: FactSet,
+            source_facts: *const FactSet,
             edge: control_ir.Edge,
-            target_live: Set,
-            generated: GeneratedFacts,
+            target_live: *const Set,
+            generated: *const GeneratedFacts,
             include_edge_definition: bool,
             target: control_ir.BlockId,
             next: *FactSet,
@@ -3582,21 +3783,22 @@ pub fn NormalForm(
         fn incomingFacts(
             program: control_ir.Program,
             constant_values: []const ?InvariantValue,
-            reachability: ReachabilityType,
-            liveness: Liveness,
-            current: [maximum_blocks]FactSet,
-            initialized: [maximum_blocks]bool,
+            cycle_edges: *const CycleEdges,
+            predecessors: *const Predecessors,
+            liveness: *const Liveness,
+            current: *const [maximum_blocks]FactSet,
+            initialized: *const [maximum_blocks]bool,
             target: control_ir.BlockId,
         ) Error!?FactSet {
             var next: FactSet = .{};
             var saw_predecessor = false;
-            for (program.blocks) |source_block| {
-                if (!reachability.contains(source_block.id) or
-                    !initialized[@intCast(source_block.id)])
-                {
+            const no_generated: GeneratedFacts = .{};
+            for (predecessors.forTarget(target)) |source_id| {
+                const source_block = program.blocks[@intCast(source_id)];
+                if (!initialized[@intCast(source_block.id)]) {
                     continue;
                 }
-                const source_facts = current[@intCast(source_block.id)];
+                const source_facts = &current[@intCast(source_block.id)];
                 switch (source_block.terminator) {
                     .jump => |edge| try considerEdge(
                         program,
@@ -3604,52 +3806,62 @@ pub fn NormalForm(
                         source_block,
                         source_facts,
                         edge,
-                        liveness.entry_live[@intCast(target)],
-                        .{},
-                        true,
+                        &liveness.entry_live[@intCast(target)],
+                        &no_generated,
+                        !cycle_edges.contains(source_block.id, edge.target),
                         target,
                         &next,
                         &saw_predecessor,
                     ),
                     .branch => |branch| {
-                        const then_facts = try branchFacts(
-                            program,
-                            constant_values,
-                            branch,
-                            true,
-                        );
-                        const else_facts = try branchFacts(
-                            program,
-                            constant_values,
-                            branch,
-                            false,
-                        );
-                        try considerEdge(
-                            program,
-                            constant_values,
-                            source_block,
-                            source_facts,
-                            branch.then_edge,
-                            liveness.entry_live[@intCast(target)],
-                            then_facts,
-                            true,
-                            target,
-                            &next,
-                            &saw_predecessor,
-                        );
-                        try considerEdge(
-                            program,
-                            constant_values,
-                            source_block,
-                            source_facts,
-                            branch.else_edge,
-                            liveness.entry_live[@intCast(target)],
-                            else_facts,
-                            true,
-                            target,
-                            &next,
-                            &saw_predecessor,
-                        );
+                        if (edgeTargets(branch.then_edge, target)) {
+                            const then_facts = try branchFacts(
+                                program,
+                                constant_values,
+                                branch,
+                                true,
+                            );
+                            try considerEdge(
+                                program,
+                                constant_values,
+                                source_block,
+                                source_facts,
+                                branch.then_edge,
+                                &liveness.entry_live[@intCast(target)],
+                                &then_facts,
+                                !cycle_edges.contains(
+                                    source_block.id,
+                                    branch.then_edge.target,
+                                ),
+                                target,
+                                &next,
+                                &saw_predecessor,
+                            );
+                        }
+                        if (edgeTargets(branch.else_edge, target)) {
+                            const else_facts = try branchFacts(
+                                program,
+                                constant_values,
+                                branch,
+                                false,
+                            );
+                            try considerEdge(
+                                program,
+                                constant_values,
+                                source_block,
+                                source_facts,
+                                branch.else_edge,
+                                &liveness.entry_live[@intCast(target)],
+                                &else_facts,
+                                !cycle_edges.contains(
+                                    source_block.id,
+                                    branch.else_edge.target,
+                                ),
+                                target,
+                                &next,
+                                &saw_predecessor,
+                            );
+                        }
                     },
                     .@"suspend" => |suspension| {
                         if (suspension.callee) |callee| {
@@ -3659,8 +3871,8 @@ pub fn NormalForm(
                                 source_block,
                                 source_facts,
                                 callee,
-                                liveness.entry_live[@intCast(target)],
-                                .{},
+                                &liveness.entry_live[@intCast(target)],
+                                &no_generated,
                                 false,
                                 target,
                                 &next,
@@ -3673,9 +3885,12 @@ pub fn NormalForm(
                             source_block,
                             source_facts,
                             suspension.continuation,
-                            liveness.entry_live[@intCast(target)],
-                            .{},
-                            true,
+                            &liveness.entry_live[@intCast(target)],
+                            &no_generated,
+                            !cycle_edges.contains(
+                                source_block.id,
+                                suspension.continuation.target,
+                            ),
                             target,
                             &next,
                             &saw_predecessor,
@@ -3691,7 +3906,9 @@ pub fn NormalForm(
             program: control_ir.Program,
             constant_values: []const ?InvariantValue,
             reachability: ReachabilityType,
-            liveness: Liveness,
+            cycle_edges: *const CycleEdges,
+            predecessors: *const Predecessors,
+            liveness: *const Liveness,
         ) Error![maximum_blocks]FactSet {
             var result = [_]FactSet{.{}} ** maximum_blocks;
             var initialized = [_]bool{false} ** maximum_blocks;
@@ -3752,15 +3969,16 @@ pub fn NormalForm(
                     const facts = try incomingFacts(
                         program,
                         constant_values,
-                        reachability,
+                        cycle_edges,
+                        predecessors,
                         liveness,
-                        result,
-                        initialized,
+                        &result,
+                        &initialized,
                         target,
                     ) orelse continue;
                     const target_index: usize = @intCast(target);
                     if (initialized[target_index] and
-                        result[target_index].eql(facts))
+                        result[target_index].eql(&facts))
                     {
                         continue;
                     }
@@ -3789,13 +4007,13 @@ pub fn NormalForm(
             result: *Self,
             program: control_ir.Program,
             constant_values: []const ?InvariantValue,
-            liveness: Liveness,
-            path_facts: [maximum_blocks]FactSet,
-            canonical_values: CanonicalValues,
+            liveness: *const Liveness,
+            path_facts: *const [maximum_blocks]FactSet,
+            canonical_values: *const CanonicalValues,
             source_block: control_ir.Block,
             edge: control_ir.Edge,
             incoming_edge_kind: IncomingEdgeKind,
-            generated: GeneratedFacts,
+            generated: *const GeneratedFacts,
         ) Error!void {
             const target_index: usize = @intCast(edge.target);
             const environment = liveness.entry_live[target_index];
@@ -3803,21 +4021,21 @@ pub fn NormalForm(
                 program,
                 source_block,
                 edge,
-                environment,
-                path_facts[@intCast(source_block.id)],
+                &environment,
+                &path_facts[@intCast(source_block.id)],
                 generated,
             );
+            const target = program.blocks[target_index];
             if (incoming_edge_kind != .call) {
                 try addTargetEdgeDefinitions(
                     program,
                     constant_values,
                     source_block,
                     edge,
-                    environment,
+                    &environment,
                     &facts,
                 );
             }
-            const target = program.blocks[target_index];
             const constructor_id = try result.appendConstructor(
                 program,
                 constant_values,
@@ -3865,18 +4083,23 @@ pub fn NormalForm(
             if (constant_values.len < program.value_types.len) {
                 return error.UnsupportedInvariantDefinition;
             }
+            const cycle_edges = CycleEdges.analyze(program, reachability);
+            const predecessors = Predecessors.analyze(program, reachability);
             const liveness = try Liveness.analyze(program);
             const path_facts = try analyzePathFacts(
                 program,
                 constant_values,
                 reachability,
-                liveness,
+                &cycle_edges,
+                &predecessors,
+                &liveness,
             );
             const canonical_values = CanonicalValues.analyze(
                 program,
                 reachability,
             );
             var result: Self = .{};
+            const no_generated: GeneratedFacts = .{};
             const entry_index: usize = @intCast(program.entry);
             _ = try result.appendConstructor(
                 program,
@@ -3887,8 +4110,8 @@ pub fn NormalForm(
                 program.entry,
                 liveness.entry_live[entry_index],
                 .{},
-                canonical_values,
-                liveness,
+                &canonical_values,
+                &liveness,
             );
 
             for (0..reachability.count) |dense_block_index| {
@@ -3902,48 +4125,50 @@ pub fn NormalForm(
                         &result,
                         program,
                         constant_values,
-                        liveness,
-                        path_facts,
-                        canonical_values,
+                        &liveness,
+                        &path_facts,
+                        &canonical_values,
                         block,
                         edge,
                         .jump,
-                        .{},
+                        &no_generated,
                     ),
                     .branch => |branch| {
-                        try appendIncomingConstructor(
-                            &result,
+                        const then_facts = try branchFacts(
                             program,
                             constant_values,
-                            liveness,
-                            path_facts,
-                            canonical_values,
-                            block,
-                            branch.then_edge,
-                            .branch_then,
-                            try branchFacts(
-                                program,
-                                constant_values,
-                                branch,
-                                true,
-                            ),
+                            branch,
+                            true,
                         );
                         try appendIncomingConstructor(
                             &result,
                             program,
                             constant_values,
-                            liveness,
-                            path_facts,
-                            canonical_values,
+                            &liveness,
+                            &path_facts,
+                            &canonical_values,
+                            block,
+                            branch.then_edge,
+                            .branch_then,
+                            &then_facts,
+                        );
+                        const else_facts = try branchFacts(
+                            program,
+                            constant_values,
+                            branch,
+                            false,
+                        );
+                        try appendIncomingConstructor(
+                            &result,
+                            program,
+                            constant_values,
+                            &liveness,
+                            &path_facts,
+                            &canonical_values,
                             block,
                             branch.else_edge,
                             .branch_else,
-                            try branchFacts(
-                                program,
-                                constant_values,
-                                branch,
-                                false,
-                            ),
+                            &else_facts,
                         );
                     },
                     .@"suspend" => |suspension| {
@@ -3952,13 +4177,13 @@ pub fn NormalForm(
                                 &result,
                                 program,
                                 constant_values,
-                                liveness,
-                                path_facts,
-                                canonical_values,
+                                &liveness,
+                                &path_facts,
+                                &canonical_values,
                                 block,
                                 callee,
                                 .call,
-                                .{},
+                                &no_generated,
                             );
                         }
                         const persists_continuation =
@@ -3969,13 +4194,13 @@ pub fn NormalForm(
                                 &result,
                                 program,
                                 constant_values,
-                                liveness,
-                                path_facts,
-                                canonical_values,
+                                &liveness,
+                                &path_facts,
+                                &canonical_values,
                                 block,
                                 suspension.continuation,
                                 .suspension_continuation,
-                                .{},
+                                &no_generated,
                             );
                         }
                         var environment = if (persists_continuation)
@@ -4010,9 +4235,9 @@ pub fn NormalForm(
                                 program,
                                 block,
                                 suspension.continuation,
-                                environment,
-                                path_facts[block_index],
-                                .{},
+                                &environment,
+                                &path_facts[block_index],
+                                &no_generated,
                             )
                         else
                             path_facts[block_index];
@@ -4022,7 +4247,7 @@ pub fn NormalForm(
                                 constant_values,
                                 block,
                                 suspension.continuation,
-                                environment,
+                                &environment,
                                 &suspension_facts,
                             );
                         }
@@ -4038,8 +4263,8 @@ pub fn NormalForm(
                             suspension.continuation.target,
                             environment,
                             suspension_facts,
-                            canonical_values,
-                            liveness,
+                            &canonical_values,
+                            &liveness,
                         );
                         if (persists_continuation) {
                             try result.appendEntryTransition(
@@ -5335,7 +5560,7 @@ test "RNF drops facts whose target parameter is rebound" {
             .target = 1,
             .arguments = &rebound_arguments,
         },
-        target_live,
+        &target_live,
         false,
         .{ .integer_zero = .{
             .value = 1,
@@ -5368,8 +5593,8 @@ test "RNF canonicalizes invariant conjunction order" {
     try right.insert(second);
     try right.insert(first);
 
-    left.canonicalize(canonical_values);
-    right.canonicalize(canonical_values);
+    left.canonicalize(&canonical_values);
+    right.canonicalize(&canonical_values);
     for (left.terms[0..left.len], right.terms[0..right.len]) |
         left_term,
         right_term,

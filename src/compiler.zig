@@ -776,6 +776,16 @@ fn SemanticProgram(comptime normalized: control_ir.Program) type {
     };
 }
 
+fn containsCallerFuel(program: control_ir.Program) bool {
+    for (program.blocks) |block| switch (block.terminator) {
+        .@"suspend" => |suspension| if (suspension.kind == .caller_fuel) {
+            return true;
+        },
+        else => {},
+    };
+    return false;
+}
+
 fn isVector(comptime T: type) bool {
     return portable_value.isVectorType(T);
 }
@@ -2515,49 +2525,64 @@ pub fn MachineV2LoweringFor(comptime Reified: type) type {
     const Body = Reified.Body;
     const limits = Reified.compiler_limits;
     const program = NormalizedProgram(Body, Body.control_ir).value;
-    const reachability = comptime control_ir.Reachability(
-        limits.maximum_blocks,
-    ).analyze(program) catch |err| @compileError(
-        "Boundary v2 reachability analysis failed: " ++ @errorName(err),
-    );
-    const semantic_canonicalization = comptime SemanticCanonicalization(
-        limits.maximum_values,
-        limits.maximum_blocks,
-    ).analyze(program, reachability);
-    const residual_effects = comptime analyzeResidualEffects(
-        Body,
-        program,
-        reachability,
-    );
-    const invariant_constants = comptime invariantConstantValues(
-        Body,
-        program,
-        limits.maximum_values,
-    );
-    const normal_form = comptime rnf.NormalForm(
-        limits.maximum_values,
-        limits.maximum_blocks,
-        limits.maximum_constructors,
-        limits.maximum_environment_fields,
-        limits.maximum_invariant_terms,
-    ).synthesizeReachableWithConstants(
-        program,
-        reachability,
-        &invariant_constants,
-    ) catch |err| @compileError(
-        "Boundary Machine v2 RNF synthesis failed: " ++ @errorName(err),
-    );
-    const generated_operation_count = comptime generatedReducerOperationCount(
-        program,
-        normal_form,
-        limits,
-    ) catch |err| @compileError(
-        "Boundary Machine v2 compiler blocked program: " ++ @errorName(err),
-    );
-    const initial_constructor_id = comptime initialConstructorId(
-        program,
-        normal_form,
-    );
+    const shares_reified_analysis = !containsCallerFuel(program);
+    const reachability = if (shares_reified_analysis)
+        Reified.reachability
+    else
+        comptime control_ir.Reachability(limits.maximum_blocks).analyze(
+            program,
+        ) catch |err| @compileError(
+            "Boundary v2 reachability analysis failed: " ++ @errorName(err),
+        );
+    const semantic_canonicalization = if (shares_reified_analysis)
+        Reified.semantic_canonicalization
+    else
+        comptime SemanticCanonicalization(
+            limits.maximum_values,
+            limits.maximum_blocks,
+        ).analyze(program, reachability);
+    const residual_effects = if (shares_reified_analysis)
+        Reified.residual_effects
+    else
+        comptime analyzeResidualEffects(Body, program, reachability);
+    const invariant_constants = if (shares_reified_analysis)
+        Reified.invariant_constants
+    else
+        comptime invariantConstantValues(
+            Body,
+            program,
+            limits.maximum_values,
+        );
+    const normal_form = if (shares_reified_analysis)
+        Reified.rnf_value
+    else
+        comptime rnf.NormalForm(
+            limits.maximum_values,
+            limits.maximum_blocks,
+            limits.maximum_constructors,
+            limits.maximum_environment_fields,
+            limits.maximum_invariant_terms,
+        ).synthesizeReachableWithConstants(
+            program,
+            reachability,
+            &invariant_constants,
+        ) catch |err| @compileError(
+            "Boundary Machine v2 RNF synthesis failed: " ++ @errorName(err),
+        );
+    const generated_operation_count = if (shares_reified_analysis)
+        Reified.generated_reducer_operation_count
+    else
+        comptime generatedReducerOperationCount(
+            program,
+            normal_form,
+            limits,
+        ) catch |err| @compileError(
+            "Boundary Machine v2 compiler blocked program: " ++ @errorName(err),
+        );
+    const initial_constructor_id = if (shares_reified_analysis)
+        Reified.initial_constructor_id
+    else
+        comptime initialConstructorId(program, normal_form);
     const effective_block_costs = comptime blk: {
         var costs: [program.blocks.len]u64 = undefined;
         for (program.blocks, 0..) |_, block_id| {

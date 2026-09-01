@@ -33,9 +33,10 @@ fn constructorFieldsEqual(
 /// Declare one typed Boundary source program with one Machine meaning.
 pub fn program(comptime label: []const u8, comptime Body: type) type {
     const Reified = compiler.ReifiedFor(label, Body);
-    const MachineV2Lowering = compiler.MachineV2LoweringFor(Reified);
-    const Definition = compiler.DirectDefinitionFor(MachineV2Lowering);
     return struct {
+        const MachineV2Lowering = compiler.MachineV2LoweringFor(Reified);
+        const Definition = compiler.DirectDefinitionFor(MachineV2Lowering);
+
         /// Diagnostic source label excluded from Machine semantic identity.
         pub const program_label = label;
         /// Private typed source/control program.
