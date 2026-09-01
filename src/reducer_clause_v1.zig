@@ -18,9 +18,15 @@ pub const Error = error{
     CapacityExceeded,
 };
 
+var uninitialized_slot_storage = [1]u8{0};
+
 pub const Slot = struct {
-    bytes: []const u8 = &.{},
-    initialized: bool = false,
+    bytes: []const u8 = uninitialized_slot_storage[0..],
+
+    pub fn isInitialized(self: *const @This()) bool {
+        return self.bytes.ptr != uninitialized_slot_storage[0..].ptr or
+            self.bytes.len != uninitialized_slot_storage.len;
+    }
 };
 
 /// Invocation-local operational capacity evidence. Semantic evaluation records
@@ -73,7 +79,7 @@ pub fn applyEdge(
         switch (edge[argument]) {
             0 => {
                 const source_value = readInt(u16, edge, argument + 2);
-                if (!source_slots[source_value].initialized) {
+                if (!source_slots[source_value].isInitialized()) {
                     return error.InvalidState;
                 }
                 slots[target_value] = source_slots[source_value];
@@ -81,7 +87,6 @@ pub fn applyEdge(
             1 => slots[target_value] = .{
                 .bytes = injected_value orelse
                     return error.UnsupportedOperation,
-                .initialized = true,
             },
             else => return error.UnsupportedOperation,
         }
@@ -158,8 +163,8 @@ pub fn validateStackPair(
             child_constructor,
             target_value,
         )) continue;
-        if (!parent_slots[source_value].initialized or
-            !child_slots[target_value].initialized or
+        if (!parent_slots[source_value].isInitialized() or
+            !child_slots[target_value].isInitialized() or
             !std.mem.eql(
                 u8,
                 parent_slots[source_value].bytes,
@@ -198,7 +203,7 @@ pub fn productConstructMatches(
             operand_bytes[index * 2 ..][0..2],
             .little,
         );
-        if (operand >= slots.len or !slots[operand].initialized) return false;
+        if (operand >= slots.len or !slots[operand].isInitialized()) return false;
         const end = std.math.add(
             usize,
             cursor,
@@ -254,14 +259,13 @@ pub fn evaluateClause(
             0 => blk: {
                 slots[result] = .{
                     .bytes = try constantBytes(image, immediate),
-                    .initialized = true,
                 };
                 break :blk null;
             },
             1 => blk: {
                 if (operand_count != 1) return error.InvalidImage;
                 const operand = readInt(u16, segment, cursor + 16);
-                if (!slots[operand].initialized) return error.InvalidBindings;
+                if (!slots[operand].isInitialized()) return error.InvalidBindings;
                 slots[result] = slots[operand];
                 break :blk null;
             },
@@ -302,7 +306,7 @@ pub fn evaluateClause(
         } },
         1 => blk: {
             const condition = readInt(u16, segment, payload);
-            if (!slots[condition].initialized or slots[condition].bytes.len != 1) {
+            if (!slots[condition].isInitialized() or slots[condition].bytes.len != 1) {
                 return error.InvalidBindings;
             }
             const then_edge = payload + 4;
@@ -316,7 +320,7 @@ pub fn evaluateClause(
             const suspension = try suspensionView(segment, cursor);
             break :blk switch (suspension) {
                 .effect => |effect| request: {
-                    if (!slots[effect.request_value].initialized) {
+                    if (!slots[effect.request_value].isInitialized()) {
                         return error.InvalidBindings;
                     }
                     const bytes = slots[effect.request_value].bytes;
@@ -336,7 +340,7 @@ pub fn evaluateClause(
         3 => blk: {
             if (segment[payload] == 0) break :blk .{ .completed = &.{} };
             const value = readInt(u16, segment, payload + 2);
-            if (!slots[value].initialized) return error.InvalidBindings;
+            if (!slots[value].isInitialized()) return error.InvalidBindings;
             const bytes = slots[value].bytes;
             try requireOutput(capacity, output_value.len, bytes.len);
             @memcpy(output_value[0..bytes.len], bytes);
@@ -344,7 +348,7 @@ pub fn evaluateClause(
         },
         4 => blk: {
             const value = readInt(u16, segment, payload);
-            if (!slots[value].initialized) return error.InvalidBindings;
+            if (!slots[value].isInitialized()) return error.InvalidBindings;
             break :blk .{ .return_to_caller = slots[value].bytes };
         },
         5 => blk: {
@@ -359,7 +363,7 @@ pub fn evaluateClause(
         },
         6 => blk: {
             const value = readInt(u16, segment, payload);
-            if (!slots[value].initialized) return error.InvalidBindings;
+            if (!slots[value].isInitialized()) return error.InvalidBindings;
             const bytes = slots[value].bytes;
             try requireOutput(capacity, output_value.len, bytes.len);
             @memcpy(output_value[0..bytes.len], bytes);
@@ -397,7 +401,7 @@ pub fn initializeZeroWidthSlots(
         const schema = image.catalogs.schemas.node(schema_id) catch
             return error.InvalidImage;
         if (schema.maximum_encoded_size == 0) {
-            slots[value] = .{ .bytes = &.{}, .initialized = true };
+            slots[value] = .{ .bytes = &.{} };
         }
     }
 }
@@ -438,7 +442,7 @@ pub fn bindInitialEnvironment(
     {
         return error.InvalidImage;
     }
-    slots[value] = .{ .bytes = initial_args, .initialized = true };
+    slots[value] = .{ .bytes = initial_args };
 }
 
 pub fn environmentEncodedLength(
@@ -479,7 +483,7 @@ pub fn environmentEncodedLengthU64(
             activation_slots[value]
         else
             slots[value];
-        if (!slot.initialized) return error.InvalidState;
+        if (!slot.isInitialized()) return error.InvalidState;
         length = std.math.add(u64, length, slot.bytes.len) catch
             return error.OutputCapacity;
         field_cursor += 8;
@@ -611,7 +615,6 @@ pub fn decodeEnvironmentSlots(
         ) catch return error.InvalidState;
         slots[value] = .{
             .bytes = environment[cursor .. cursor + consumed],
-            .initialized = true,
         };
         if (index < activation_count) {
             if (activation_slots) |activation| {
@@ -811,7 +814,7 @@ pub fn executeScalarOperation(
     if (ordinary_operand_count > operands.len) return error.InvalidImage;
     for (0..operand_count) |index| {
         const operand = readInt(u16, instruction, 16 + index * 2);
-        if (!slots[operand].initialized) return error.InvalidBindings;
+        if (!slots[operand].isInitialized()) return error.InvalidBindings;
         if (index < ordinary_operand_count) operands[index] = operand;
     }
     if (operation == 23) {
@@ -850,7 +853,6 @@ pub fn executeScalarOperation(
         };
         slots[result] = .{
             .bytes = try writeRaw(scratch, scratch_cursor, capacity, .bool, @intFromBool(value)),
-            .initialized = true,
         };
         return null;
     }
@@ -867,7 +869,6 @@ pub fn executeScalarOperation(
                 .bool,
                 @intFromBool(left.raw == 0),
             ),
-            .initialized = true,
         };
         return null;
     }
@@ -876,7 +877,6 @@ pub fn executeScalarOperation(
             return try instructionFailureTag(image, instruction, slots, "arithmetic_overflow");
         slots[result] = .{
             .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, converted),
-            .initialized = true,
         };
         return null;
     }
@@ -888,7 +888,6 @@ pub fn executeScalarOperation(
             return try instructionFailureTag(image, instruction, slots, "arithmetic_overflow");
         slots[result] = .{
             .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
-            .initialized = true,
         };
         return null;
     }
@@ -896,7 +895,6 @@ pub fn executeScalarOperation(
         const raw = (~left.raw) & integerMask(left.bits);
         slots[result] = .{
             .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
-            .initialized = true,
         };
         return null;
     }
@@ -914,7 +912,6 @@ pub fn executeScalarOperation(
                 .bool,
                 @intFromBool(relation),
             ),
-            .initialized = true,
         };
         return null;
     }
@@ -927,7 +924,6 @@ pub fn executeScalarOperation(
         } & integerMask(left.bits);
         slots[result] = .{
             .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
-            .initialized = true,
         };
         return null;
     }
@@ -937,7 +933,6 @@ pub fn executeScalarOperation(
     };
     slots[result] = .{
         .bytes = try writeRaw(scratch, scratch_cursor, capacity, result_kind, raw),
-        .initialized = true,
     };
     return null;
 }
@@ -963,7 +958,7 @@ pub fn executeCompositeOperation(
         var length: usize = 0;
         for (0..ordinary_operand_count) |index| {
             const operand = readInt(u16, instruction, 16 + index * 2);
-            if (!slots[operand].initialized) return error.InvalidBindings;
+            if (!slots[operand].isInitialized()) return error.InvalidBindings;
             length = std.math.add(
                 usize,
                 length,
@@ -980,14 +975,14 @@ pub fn executeCompositeOperation(
             );
             cursor += slots[operand].bytes.len;
         }
-        slots[result] = .{ .bytes = output, .initialized = true };
+        slots[result] = .{ .bytes = output };
         return null;
     }
     var operands: [3]u16 = undefined;
     if (ordinary_operand_count > operands.len) return error.InvalidImage;
     for (0..operand_count) |index| {
         const operand = readInt(u16, instruction, 16 + index * 2);
-        if (!slots[operand].initialized) return error.InvalidBindings;
+        if (!slots[operand].isInitialized()) return error.InvalidBindings;
         if (index < ordinary_operand_count) operands[index] = operand;
     }
     switch (operation) {
@@ -1000,7 +995,7 @@ pub fn executeCompositeOperation(
                 immediate,
                 workspace,
             );
-            slots[result] = .{ .bytes = field, .initialized = true };
+            slots[result] = .{ .bytes = field };
         },
         26 => {
             const product = slots[operands[0]].bytes;
@@ -1025,7 +1020,7 @@ pub fn executeCompositeOperation(
                 output[prefix_length + replacement.len ..],
                 product[prefix_length + field.len ..],
             );
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         27 => {
             const node = try valueNode(image, result);
@@ -1046,7 +1041,7 @@ pub fn executeCompositeOperation(
             );
             std.mem.writeInt(u32, output[0..4], tag, .little);
             @memcpy(output[4..], payload);
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         28, 29 => {
             const node = try valueNode(image, operands[0]);
@@ -1068,20 +1063,18 @@ pub fn executeCompositeOperation(
                         .bool,
                         @intFromBool(matches),
                     ),
-                    .initialized = true,
                 };
             } else {
                 if (!matches) return try instructionFailureTag(image, instruction, slots, "invalid_variant");
                 slots[result] = .{
                     .bytes = slots[operands[0]].bytes[4..],
-                    .initialized = true,
                 };
             }
         },
         30 => {
             const output = try allocateScratch(scratch, scratch_cursor, capacity, 1);
             output[0] = 0;
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         31 => {
             const payload = slots[operands[0]].bytes;
@@ -1093,7 +1086,7 @@ pub fn executeCompositeOperation(
             );
             output[0] = 1;
             @memcpy(output[1..], payload);
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         32 => {
             slots[result] = .{
@@ -1104,13 +1097,12 @@ pub fn executeCompositeOperation(
                     .bool,
                     @intFromBool(slots[operands[0]].bytes[0] == 1),
                 ),
-                .initialized = true,
             };
         },
         33, 41, 49 => {
             const output = try allocateScratch(scratch, scratch_cursor, capacity, 4);
             @memset(output, 0);
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         37 => {
             const vector = slots[operands[0]].bytes;
@@ -1129,7 +1121,7 @@ pub fn executeCompositeOperation(
             std.mem.writeInt(u32, output[0..4], length + 1, .little);
             @memcpy(output[4..vector.len], vector[4..]);
             @memcpy(output[vector.len..], element);
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         34, 53, 54 => {
             const length = readInt(u32, slots[operands[0]].bytes, 0);
@@ -1141,7 +1133,6 @@ pub fn executeCompositeOperation(
                     .u32,
                     length,
                 ),
-                .initialized = true,
             };
         },
         35 => {
@@ -1153,7 +1144,7 @@ pub fn executeCompositeOperation(
                 index,
                 workspace,
             ) catch return try instructionFailureTag(image, instruction, slots, "invalid_index");
-            slots[result] = .{ .bytes = element, .initialized = true };
+            slots[result] = .{ .bytes = element };
         },
         36 => {
             const vector = slots[operands[0]].bytes;
@@ -1179,7 +1170,7 @@ pub fn executeCompositeOperation(
                 output[prefix_length + replacement.len ..],
                 vector[prefix_length + element.len ..],
             );
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         38 => {
             const vector = slots[operands[0]].bytes;
@@ -1213,7 +1204,7 @@ pub fn executeCompositeOperation(
             @memcpy(output[4..prefix_length], vector[4..prefix_length]);
             output[prefix_length] = @intFromBool(popped != null);
             if (popped) |element| @memcpy(output[prefix_length + 1 ..], element);
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         39 => {
             const vector = slots[operands[0]].bytes;
@@ -1239,13 +1230,13 @@ pub fn executeCompositeOperation(
                 );
                 @memcpy(output, vector[0..prefix_length]);
                 std.mem.writeInt(u32, output[0..4], requested, .little);
-                slots[result] = .{ .bytes = output, .initialized = true };
+                slots[result] = .{ .bytes = output };
             }
         },
         40 => {
             const output = try allocateScratch(scratch, scratch_cursor, capacity, 4);
             @memset(output, 0);
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         42, 50 => {
             const destination = slots[operands[0]].bytes;
@@ -1276,7 +1267,7 @@ pub fn executeCompositeOperation(
                 output[4 + destination_length ..][0..suffix_length],
                 suffix[4..][0..suffix_length],
             );
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         43 => {
             const raw = readInt(u32, slots[operands[1]].bytes, 0);
@@ -1301,7 +1292,6 @@ pub fn executeCompositeOperation(
                     error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
-                .initialized = true,
             };
         },
         44, 45 => {
@@ -1335,7 +1325,6 @@ pub fn executeCompositeOperation(
                     error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
-                .initialized = true,
             };
         },
         46, 51 => {
@@ -1362,7 +1351,7 @@ pub fn executeCompositeOperation(
             );
             std.mem.writeInt(u32, output[0..4], @intCast(copied.len), .little);
             @memcpy(output[4..], copied);
-            slots[result] = .{ .bytes = output, .initialized = true };
+            slots[result] = .{ .bytes = output };
         },
         47, 52 => {
             const left = sequencePayload(slots[operands[0]].bytes);
@@ -1380,7 +1369,6 @@ pub fn executeCompositeOperation(
                     .i8,
                     @as(u8, @bitCast(ordered)),
                 ),
-                .initialized = true,
             };
         },
         48, 56 => {
@@ -1400,7 +1388,6 @@ pub fn executeCompositeOperation(
                     error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
-                .initialized = true,
             };
         },
         55 => {
@@ -1417,7 +1404,6 @@ pub fn executeCompositeOperation(
                     error.CapacityExceeded => return try instructionFailureTag(image, instruction, slots, "capacity_exceeded"),
                     else => return err,
                 },
-                .initialized = true,
             };
         },
         58 => {
@@ -1439,7 +1425,6 @@ pub fn executeCompositeOperation(
                     .u8,
                     text[index],
                 ),
-                .initialized = true,
             };
         },
         59 => {
@@ -1461,7 +1446,6 @@ pub fn executeCompositeOperation(
                     .u8,
                     bytes[index],
                 ),
-                .initialized = true,
             };
         },
         else => return error.UnsupportedOperation,
@@ -1809,7 +1793,7 @@ fn instructionFailureTag(
                 instruction,
                 16 + (@as(usize, base) + index) * 2,
             );
-            if (!slots[value].initialized or slots[value].bytes.len != 4) {
+            if (!slots[value].isInitialized() or slots[value].bytes.len != 4) {
                 return error.InvalidBindings;
             }
             return readInt(u32, slots[value].bytes, 0);
@@ -1882,7 +1866,7 @@ pub fn validatePathInvariantsTracked(
         const accepted = switch (tag) {
             0 => blk: {
                 const value = readInt(u16, constructor, payload);
-                break :blk slots[value].initialized and
+                break :blk slots[value].isInitialized() and
                     slots[value].bytes.len == 1 and
                     (slots[value].bytes[0] == 1) ==
                         (constructor[payload + 2] == 1);
@@ -2038,7 +2022,7 @@ pub fn validatePathInvariantsTracked(
             ),
             15 => blk: {
                 const value = readInt(u16, constructor, payload);
-                if (!slots[value].initialized) break :blk false;
+                if (!slots[value].isInitialized()) break :blk false;
                 var zero = true;
                 for (slots[value].bytes) |byte| zero = zero and byte == 0;
                 break :blk zero == (constructor[payload + 2] == 1);
@@ -2056,7 +2040,7 @@ pub fn validatePathInvariantsTracked(
             17 => blk: {
                 const left_id = readInt(u16, constructor, payload);
                 const right_id = readInt(u16, constructor, payload + 2);
-                if (!slots[left_id].initialized or !slots[right_id].initialized) {
+                if (!slots[left_id].isInitialized() or !slots[right_id].isInitialized()) {
                     break :blk false;
                 }
                 const left = decodeInteger(
@@ -2086,7 +2070,7 @@ pub fn validatePathInvariantsTracked(
             ),
             19 => blk: {
                 const value = readInt(u16, constructor, payload);
-                if (!slots[value].initialized) break :blk false;
+                if (!slots[value].isInitialized()) break :blk false;
                 const actual = algebraicCaseIndex(
                     image,
                     value,
@@ -2174,7 +2158,7 @@ fn validateComputedResultEncoded(
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!bool {
-    if (!slots[result].initialized or
+    if (!slots[result].isInitialized() or
         operand_bytes.len != @as(usize, operand_count) * 2)
     {
         return false;
@@ -2205,13 +2189,12 @@ fn validateComputedResultEncoded(
     const failure = if (operation == 0) blk: {
         slots[result] = .{
             .bytes = try constantBytes(image, immediate),
-            .initialized = true,
         };
         break :blk null;
     } else if (operation == 1) blk: {
         if (operand_count != 1) return false;
         const operand = readInt(u16, operand_bytes, 0);
-        if (operand >= slots.len or !slots[operand].initialized) return false;
+        if (operand >= slots.len or !slots[operand].isInitialized()) return false;
         slots[result] = slots[operand];
         break :blk null;
     } else if (operation <= 23 or operation == 57 or operation == 60)
@@ -2237,7 +2220,7 @@ fn validateComputedResultEncoded(
         )
     else
         return error.InvalidState;
-    return failure == null and slots[result].initialized and
+    return failure == null and slots[result].isInitialized() and
         std.mem.eql(u8, expected.bytes, slots[result].bytes);
 }
 
@@ -2248,7 +2231,7 @@ fn validateInvariantConstant(
     payload: u64,
     slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) Error!bool {
-    if (!slots[result].initialized) return false;
+    if (!slots[result].isInitialized()) return false;
     return switch (kind) {
         0 => slots[result].bytes.len == 1 and
             slots[result].bytes[0] == @as(u8, @intCast(payload)),
@@ -2299,4 +2282,12 @@ fn algebraicCaseIndex(
 
 fn readInt(comptime T: type, bytes: []const u8, offset: usize) T {
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
+}
+
+test "compact slots distinguish uninitialized from initialized empty values" {
+    try std.testing.expectEqual(@sizeOf([]const u8), @sizeOf(Slot));
+    var slot: Slot = .{};
+    try std.testing.expect(!slot.isInitialized());
+    slot.bytes = &.{};
+    try std.testing.expect(slot.isInitialized());
 }

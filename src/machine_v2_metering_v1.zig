@@ -199,7 +199,7 @@ pub fn preflightSegmentCost(
     }
     for (0..@as(u32, activation_count) + environment_count) |_| {
         const value = readInt(u16, constructor, environment_field_cursor);
-        if (!slots[value].initialized) return error.InvalidBindings;
+        if (!slots[value].isInitialized()) return error.InvalidBindings;
         const schema_id = readInt(
             u32,
             constructor,

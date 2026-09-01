@@ -1611,7 +1611,7 @@ fn pendingRequestParts(
         .effect => |effect| effect,
         else => return error.InvalidProcessState,
     };
-    if (!slots[effect.request_value].initialized) return error.InvalidProcessState;
+    if (!slots[effect.request_value].isInitialized()) return error.InvalidProcessState;
     return .{
         .site_ordinal = effect.site_ordinal,
         .payload = slots[effect.request_value].bytes,

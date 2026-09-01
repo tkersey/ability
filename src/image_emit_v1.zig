@@ -363,8 +363,17 @@ pub fn ProgramImage(
             @compileError("BPI1 failure variants exceed validator capacity");
         }
     }
+    const output_capacity: usize = if (@hasDecl(
+        Reified.Body,
+        "maximum_image_bytes",
+    )) Reified.Body.maximum_image_bytes else maximum_image_bytes;
+    comptime {
+        if (output_capacity == 0 or output_capacity > maximum_image_bytes) {
+            @compileError("BPI1 source image capacity exceeds the 16 MiB profile");
+        }
+    }
     const encoded = comptime blk: {
-        var storage: [maximum_image_bytes]u8 = undefined;
+        var storage: [output_capacity]u8 = undefined;
         const length = encodeProgramImage(Reified, &storage) catch |err| {
             @compileError(
                 "canonical BPI1 encoding failed: " ++ @errorName(err),
@@ -440,42 +449,6 @@ fn RuntimeSchemas(comptime Reified: type) type {
     const value_count = Reified.semantic_canonicalization.value_count;
     const function_count = Reified.semantic_canonicalization.function_count;
     const root_count = 3 + effect_count * 2 + value_count + function_count;
-    const RootTypes = comptime blk: {
-        var result: [root_count]type = undefined;
-        var index: usize = 0;
-        result[index] = Reified.Body.InitialArgs;
-        index += 1;
-        result[index] = Reified.Body.Result;
-        index += 1;
-        result[index] = Reified.Body.Failure;
-        index += 1;
-        for (0..effect_count) |ordinal| {
-            const Site = residualSite(Reified, ordinal);
-            result[index] = Site.Payload;
-            index += 1;
-            result[index] = Site.Resume;
-            index += 1;
-        }
-        for (0..value_count) |dense_value| {
-            const source_value = Reified.semantic_canonicalization
-                .value_dense_to_source[dense_value];
-            result[index] = Reified.portableType(
-                Reified.control.value_types[source_value],
-            );
-            index += 1;
-        }
-        for (0..function_count) |dense_function| {
-            const source_function = Reified.semantic_canonicalization
-                .function_dense_to_source[dense_function];
-            const result_type = if (Reified.control.functions.len == 0)
-                Reified.control.result_type
-            else
-                Reified.control.functions[source_function].result_type;
-            result[index] = Reified.portableType(result_type);
-            index += 1;
-        }
-        break :blk result;
-    };
     return struct {
         const Self = @This();
         pub const initial_args_root_index: usize = 0;
@@ -503,11 +476,108 @@ fn RuntimeSchemas(comptime Reified: type) type {
             };
             const count_offset = writer.cursor;
             try writer.append(u32, 0);
-            inline for (RootTypes, 0..) |Root, index| {
-                self.root_ids[index] = try self.intern(writer, Root);
+            var root_index: usize = 0;
+            self.root_ids[root_index] = try self.intern(
+                writer,
+                Reified.Body.InitialArgs,
+            );
+            root_index += 1;
+            self.root_ids[root_index] = try self.intern(
+                writer,
+                Reified.Body.Result,
+            );
+            root_index += 1;
+            self.root_ids[root_index] = try self.intern(
+                writer,
+                Reified.Body.Failure,
+            );
+            root_index += 1;
+            inline for (0..effect_count) |ordinal| {
+                const Site = residualSite(Reified, ordinal);
+                self.root_ids[root_index] = try self.intern(writer, Site.Payload);
+                root_index += 1;
+                self.root_ids[root_index] = try self.intern(writer, Site.Resume);
+                root_index += 1;
             }
+            var scalar_roots = [_]?u32{null} ** 10;
+            var schema_roots = [_]?u32{null} ** Reified.Body.schema_types.len;
+            inline for (0..value_count) |dense_value| {
+                const source_value = Reified.semantic_canonicalization
+                    .value_dense_to_source[dense_value];
+                self.root_ids[root_index] = switch (Reified.control.value_types[source_value]) {
+                    .scalar => |scalar| blk: {
+                        const scalar_index = @intFromEnum(scalar);
+                        if (scalar_roots[scalar_index]) |root| break :blk root;
+                        const root = try self.internScalar(writer, scalar);
+                        scalar_roots[scalar_index] = root;
+                        break :blk root;
+                    },
+                    .schema => |schema| blk: {
+                        if (schema_roots[schema]) |root| break :blk root;
+                        const root = try self.internSchema(writer, schema);
+                        schema_roots[schema] = root;
+                        break :blk root;
+                    },
+                };
+                root_index += 1;
+            }
+            inline for (0..function_count) |dense_function| {
+                const source_function = Reified.semantic_canonicalization
+                    .function_dense_to_source[dense_function];
+                const result_type = if (Reified.control.functions.len == 0)
+                    Reified.control.result_type
+                else
+                    Reified.control.functions[source_function].result_type;
+                self.root_ids[root_index] = switch (result_type) {
+                    .scalar => |scalar| blk: {
+                        const scalar_index = @intFromEnum(scalar);
+                        if (scalar_roots[scalar_index]) |root| break :blk root;
+                        const root = try self.internScalar(writer, scalar);
+                        scalar_roots[scalar_index] = root;
+                        break :blk root;
+                    },
+                    .schema => |schema| blk: {
+                        if (schema_roots[schema]) |root| break :blk root;
+                        const root = try self.internSchema(writer, schema);
+                        schema_roots[schema] = root;
+                        break :blk root;
+                    },
+                };
+                root_index += 1;
+            }
+            if (root_index != root_count) unreachable;
             writer.patch(u32, count_offset, self.node_count);
             return self;
+        }
+
+        fn internScalar(
+            self: *Self,
+            writer: *RuntimeWriter,
+            comptime scalar: anytype,
+        ) RuntimeError!u32 {
+            return self.intern(writer, switch (scalar) {
+                .unit => void,
+                .boolean => bool,
+                .i8 => i8,
+                .i16 => i16,
+                .i32 => i32,
+                .i64 => i64,
+                .u8 => u8,
+                .u16 => u16,
+                .u32 => u32,
+                .u64 => u64,
+            });
+        }
+
+        fn internSchema(
+            self: *Self,
+            writer: *RuntimeWriter,
+            comptime schema: u32,
+        ) RuntimeError!u32 {
+            inline for (Reified.Body.schema_types, 0..) |Schema, index| {
+                if (schema == index) return self.intern(writer, Schema);
+            }
+            unreachable;
         }
 
         fn intern(

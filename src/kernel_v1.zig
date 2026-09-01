@@ -660,7 +660,7 @@ fn currentValidated(
     };
     var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
-    if (!slots[effect.request_value].initialized) return error.InvalidState;
+    if (!slots[effect.request_value].isInitialized()) return error.InvalidState;
     if (output_payload.len < slots[effect.request_value].bytes.len) {
         return error.OutputCapacity;
     }
@@ -709,7 +709,7 @@ fn resumeValidated(
     };
     var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
-    if (!slots[effect.request_value].initialized) return error.InvalidState;
+    if (!slots[effect.request_value].isInitialized()) return error.InvalidState;
     const expected = try requestIdentity(
         image,
         state,

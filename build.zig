@@ -1627,6 +1627,7 @@ pub fn build(b: *std.Build) void {
     process_kernel_wasm_executable.entry = .disabled;
     process_kernel_wasm_executable.rdynamic = true;
     process_kernel_wasm_executable.export_memory = true;
+    process_kernel_wasm_executable.stack_size = 4 << 20;
     process_kernel_wasm_executable.max_memory = 256 << 20;
     const install_process_kernel = b.addInstallFileWithDir(
         process_kernel_wasm_executable.getEmittedBin(),
@@ -1769,6 +1770,7 @@ pub fn build(b: *std.Build) void {
     constrained_process_kernel.entry = .disabled;
     constrained_process_kernel.rdynamic = true;
     constrained_process_kernel.export_memory = true;
+    constrained_process_kernel.stack_size = 4 << 20;
     constrained_process_kernel.initial_memory = 8 << 20;
     constrained_process_kernel.max_memory = 32 << 20;
     const capacity_vector_module = b.createModule(.{
@@ -1888,6 +1890,7 @@ pub fn build(b: *std.Build) void {
     process_kernel_wasm_reproducible.entry = .disabled;
     process_kernel_wasm_reproducible.rdynamic = true;
     process_kernel_wasm_reproducible.export_memory = true;
+    process_kernel_wasm_reproducible.stack_size = 4 << 20;
     process_kernel_wasm_reproducible.max_memory = 256 << 20;
     const compare_process_kernel_wasm = b.addSystemCommand(&.{ "cmp", "-s" });
     compare_process_kernel_wasm.addFileArg(
