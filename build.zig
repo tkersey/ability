@@ -1154,6 +1154,7 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    compiler_capacity.addImport("image_v1", host_core.image_v1);
     const program_dynamic_fuel = programTestModule(
         b,
         host_core,

@@ -489,6 +489,9 @@ pub fn ValueSet(comptime maximum_values: usize) type {
         const Self = @This();
 
         bits: [maximum_values]bool = [_]bool{false} ** maximum_values,
+        listed: [maximum_values]bool = [_]bool{false} ** maximum_values,
+        values: [maximum_values]ValueId = undefined,
+        len: usize = 0,
 
         /// Construct an empty set.
         pub fn empty() Self {
@@ -500,6 +503,11 @@ pub fn ValueSet(comptime maximum_values: usize) type {
             const index: usize = @intCast(value);
             if (self.bits[index]) return false;
             self.bits[index] = true;
+            if (!self.listed[index]) {
+                self.listed[index] = true;
+                self.values[self.len] = value;
+                self.len += 1;
+            }
             return true;
         }
 
@@ -519,11 +527,9 @@ pub fn ValueSet(comptime maximum_values: usize) type {
         /// Merge another set, returning whether the receiver changed.
         pub fn merge(self: *Self, other: Self) bool {
             var changed = false;
-            for (&self.bits, other.bits) |*destination, source| {
-                if (source and !destination.*) {
-                    destination.* = true;
-                    changed = true;
-                }
+            for (other.values[0..other.len]) |value| {
+                if (!other.contains(value)) continue;
+                changed = self.insert(value) or changed;
             }
             return changed;
         }
@@ -536,8 +542,8 @@ pub fn ValueSet(comptime maximum_values: usize) type {
         /// Count contained values.
         pub fn count(self: Self) usize {
             var total: usize = 0;
-            for (self.bits) |present| {
-                if (present) total += 1;
+            for (self.values[0..self.len]) |value| {
+                if (self.contains(value)) total += 1;
             }
             return total;
         }

@@ -777,7 +777,7 @@ fn validateConstants(
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidConstant;
     const count = readInt(u32, bytes, 0);
-    if (count > 1024) return error.InvalidConstant;
+    if (count > maximum_catalog_entries) return error.InvalidConstant;
     var cursor: usize = 4;
     for (0..count) |index| {
         if (bytes.len - cursor < 8) return error.InvalidConstant;
@@ -972,7 +972,9 @@ fn validateValues(
 ) Error!Values {
     if (bytes.len < 4) return error.InvalidValue;
     const count = readInt(u32, bytes, 0);
-    if (count > 1024 or bytes.len != 4 + @as(usize, count) * 4) {
+    if (count > maximum_catalog_entries or
+        bytes.len != 4 + @as(usize, count) * 4)
+    {
         return error.InvalidValue;
     }
     for (0..count) |index| {

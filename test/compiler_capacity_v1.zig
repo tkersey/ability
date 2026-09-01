@@ -1,4 +1,5 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
@@ -133,7 +134,11 @@ test "compiler admits more than 1024 typed values" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 73), done.value().*);
-    try std.testing.expect(LargeValueProgram.image().bytes.len > 0);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(
+        &LargeValueProgram.image().bytes,
+        &workspace,
+    );
 }
 
 test "compiler admits more than 128 reachable blocks" {

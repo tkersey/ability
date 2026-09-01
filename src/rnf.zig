@@ -1845,18 +1845,10 @@ pub fn NormalForm(
                     }
                 } else return error.InvalidFunction;
                 const entry = program.blocks[@intCast(function_entry)];
-                for (canonical_values.values[0..canonical_values.len]) |value| {
+                for (entry.parameters) |value| {
                     if (!liveness.entry_live[@intCast(function_entry)].contains(value)) {
                         continue;
                     }
-                    var is_entry_parameter = false;
-                    for (entry.parameters) |parameter| {
-                        if (parameter == value) {
-                            is_entry_parameter = true;
-                            break;
-                        }
-                    }
-                    if (!is_entry_parameter) continue;
                     if (constructor.activation_len + 1 >=
                         maximum_environment_fields)
                     {
@@ -1869,7 +1861,9 @@ pub fn NormalForm(
                     constructor.activation_len += 1;
                 }
             }
-            for (canonical_values.values[0..canonical_values.len]) |value| {
+            var environment_values: [@max(maximum_environment_fields, 1)]control_ir.ValueId = undefined;
+            var environment_value_count: usize = 0;
+            for (required.values[0..required.len]) |value| {
                 if (!required.contains(value)) continue;
                 var activation_owned = false;
                 for (constructor.activationFields()) |field| {
@@ -1881,6 +1875,25 @@ pub fn NormalForm(
                 if (constructor.origin == .call_entry and activation_owned) {
                     continue;
                 }
+                if (environment_value_count == maximum_environment_fields) {
+                    return error.TooManyEnvironmentFields;
+                }
+                environment_values[environment_value_count] = value;
+                environment_value_count += 1;
+            }
+            var value_index: usize = 1;
+            while (value_index < environment_value_count) : (value_index += 1) {
+                const value = environment_values[value_index];
+                const ordinal = canonical_values.ordinal(value);
+                var insertion = value_index;
+                while (insertion > 0 and
+                    ordinal < canonical_values.ordinal(environment_values[insertion - 1])) : (insertion -= 1)
+                {
+                    environment_values[insertion] = environment_values[insertion - 1];
+                }
+                environment_values[insertion] = value;
+            }
+            for (environment_values[0..environment_value_count]) |value| {
                 if (comptime maximum_environment_fields == 0) {
                     return error.TooManyEnvironmentFields;
                 }

@@ -1793,6 +1793,36 @@ fn semanticHashValueType(
     semanticHashSchema(typeForValue(Body, value_type), hasher);
 }
 
+fn ValueTypeDigestCache(comptime Body: type) type {
+    const scalar_count = @typeInfo(control_ir.ScalarType).@"enum".fields.len;
+    return struct {
+        scalar: [scalar_count][32]u8,
+        schema: [Body.schema_types.len][32]u8,
+
+        fn init() @This() {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
+            var result: @This() = undefined;
+            inline for (@typeInfo(control_ir.ScalarType).@"enum".fields) |field| {
+                const scalar = @field(control_ir.ScalarType, field.name);
+                result.scalar[@intFromEnum(scalar)] = portable_value.schemaDigest(
+                    typeForValue(Body, .{ .scalar = scalar }),
+                );
+            }
+            inline for (Body.schema_types, 0..) |T, index| {
+                result.schema[index] = portable_value.schemaDigest(T);
+            }
+            return result;
+        }
+
+        fn digest(self: @This(), value_type: control_ir.ValueType) [32]u8 {
+            return switch (value_type) {
+                .scalar => |scalar| self.scalar[@intFromEnum(scalar)],
+                .schema => |schema| self.schema[schema],
+            };
+        }
+    };
+}
+
 fn semanticHashEdge(
     hasher: *SemanticHasher,
     edge: control_ir.Edge,
@@ -1863,11 +1893,11 @@ fn semanticHashInstruction(
 }
 
 fn semanticHashTerminator(
-    comptime Body: type,
     hasher: *SemanticHasher,
     terminator: control_ir.Terminator,
     comptime residual_effects: anytype,
     canonical: anytype,
+    value_type_digests: anytype,
 ) void {
     semanticHashU8(
         hasher,
@@ -1915,7 +1945,7 @@ fn semanticHashTerminator(
             );
             semanticHashBool(hasher, suspension.resume_type != null);
             if (suspension.resume_type) |resume_type| {
-                semanticHashValueType(Body, hasher, resume_type);
+                hasher.update(&value_type_digests.digest(resume_type));
             }
         },
         .return_value => |maybe_value| {
@@ -2161,6 +2191,7 @@ fn transitionDigest(
     comptime machine_v2_metering: bool,
 ) [32]u8 {
     var hasher = SemanticHasher.init(.{});
+    const value_type_digests = comptime ValueTypeDigestCache(Body).init();
     if (machine_v2_metering) {
         semanticHashBytes(&hasher, "boundary-rnf-compiler-semantics-v4");
         semanticHashBytes(
@@ -2199,14 +2230,10 @@ fn transitionDigest(
         const source_value = canonical.value_dense_to_source[
             dense_value_index
         ];
-        semanticHashValueType(
-            Body,
-            &hasher,
-            program.value_types[source_value],
-        );
+        hasher.update(&value_type_digests.digest(program.value_types[source_value]));
     }
     semanticHashU16(&hasher, canonical.blockId(program.entry));
-    semanticHashValueType(Body, &hasher, program.result_type);
+    hasher.update(&value_type_digests.digest(program.result_type));
     semanticHashU32(&hasher, @intCast(canonical.function_count));
     for (0..canonical.function_count) |dense_function_index| {
         const source_function = canonical.function_dense_to_source[
@@ -2215,7 +2242,7 @@ fn transitionDigest(
         const function = program.function(source_function) catch unreachable;
         semanticHashU16(&hasher, @intCast(dense_function_index));
         semanticHashU16(&hasher, canonical.blockId(function.entry));
-        semanticHashValueType(Body, &hasher, function.result_type);
+        hasher.update(&value_type_digests.digest(function.result_type));
     }
     semanticHashU32(&hasher, @intCast(reachability.count));
     for (0..canonical.block_count) |dense_block_index| {
@@ -2242,11 +2269,11 @@ fn transitionDigest(
             );
         }
         semanticHashTerminator(
-            Body,
             &hasher,
             block.terminator,
             residual_effects,
             canonical,
+            value_type_digests,
         );
         if (machine_v2_metering) {
             const block_cost: u64 = if (comptime hasDeclSafe(Body, "block_costs"))
@@ -2286,7 +2313,7 @@ fn transitionDigest(
         );
         for (constructor.activationFields()) |field| {
             semanticHashU16(&hasher, canonical.valueId(field.value));
-            semanticHashValueType(Body, &hasher, field.value_type);
+            hasher.update(&value_type_digests.digest(field.value_type));
         }
         semanticHashU32(
             &hasher,
@@ -2294,7 +2321,7 @@ fn transitionDigest(
         );
         for (constructor.environmentFields()) |field| {
             semanticHashU16(&hasher, canonical.valueId(field.value));
-            semanticHashValueType(Body, &hasher, field.value_type);
+            hasher.update(&value_type_digests.digest(field.value_type));
         }
         semanticHashU32(
             &hasher,
