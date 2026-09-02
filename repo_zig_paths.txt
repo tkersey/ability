@@ -27,6 +27,7 @@ src/reducer_clause_v1.zig
 src/reified_program_v1.zig
 src/rnf.zig
 src/root.zig
+tools/inspect_boundary_image_economy.zig
 test/authored_failure_v2_fixture.zig
 test/bytes_byte_at_fixture.zig
 test/compile_fail/authored_instruction_failure_operand.zig

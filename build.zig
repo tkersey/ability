@@ -890,6 +890,11 @@ pub fn build(b: *std.Build) void {
             );
         }
     }
+    const economy_image_path = b.option(
+        []const u8,
+        "image",
+        "Path to the validated BPI1 inspected by inspect-boundary-image-economy.",
+    );
     const core = addCoreModules(b, target, optimize);
     const host_core = addCoreModules(b, b.graph.host, optimize);
 
@@ -912,6 +917,24 @@ pub fn build(b: *std.Build) void {
         .root_module = boundary,
     });
     b.installArtifact(library);
+
+    const economy_inspector_module = b.createModule(.{
+        .root_source_file = b.path("tools/inspect_boundary_image_economy.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    economy_inspector_module.addImport("image_v1", host_core.image_v1);
+    const economy_inspector = b.addExecutable(.{
+        .name = "inspect-boundary-image-economy",
+        .root_module = economy_inspector_module,
+    });
+    const run_economy_inspector = b.addRunArtifact(economy_inspector);
+    if (economy_image_path) |path| run_economy_inspector.addArg(path);
+    const inspect_economy_step = b.step(
+        "inspect-boundary-image-economy",
+        "Inspect one validated BPI1 and emit deterministic economy JSON.",
+    );
+    inspect_economy_step.dependOn(&run_economy_inspector.step);
 
     const one_effect_module = b.createModule(.{
         .root_source_file = b.path("examples/one_effect.zig"),
@@ -2101,6 +2124,16 @@ pub fn build(b: *std.Build) void {
     const one_effect_image = run_one_effect_image.captureStdOut(.{
         .basename = "one-effect.boundary-program-image",
     });
+    const economy_inspector_test = b.addSystemCommand(&.{
+        "node",
+        "test/image_economy_inspector.test.mjs",
+    });
+    economy_inspector_test.addArtifactArg(economy_inspector);
+    economy_inspector_test.addFileArg(one_effect_image);
+    economy_inspector_test.addFileInput(
+        b.path("test/image_economy_inspector.test.mjs"),
+    );
+    image_step.dependOn(&economy_inspector_test.step);
     const one_effect_profile_module = b.createModule(.{
         .root_source_file = b.path("test/emit_one_effect_profile.zig"),
         .target = b.graph.host,
