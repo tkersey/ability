@@ -1344,6 +1344,15 @@ pub fn build(b: *std.Build) void {
         "recursion_fixture",
         process_recursion_fixture,
     );
+    const compiler_capacity = programTestModule(
+        b,
+        host_core,
+        "test/compiler_capacity_v1.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -1502,6 +1511,7 @@ pub fn build(b: *std.Build) void {
     );
     addTestArtifact(b, control_step, core.control_ir);
     addTestArtifact(b, control_step, core.rnf);
+    addTestArtifact(b, control_step, compiler_capacity);
     addTestArtifact(b, control_step, constructor_invariants);
     addTestArtifact(b, control_step, machine_yield);
     addTestArtifact(b, control_step, program_dead_control);

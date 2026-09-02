@@ -29,6 +29,7 @@ src/rnf.zig
 src/root.zig
 test/authored_failure_v2_fixture.zig
 test/bytes_byte_at_fixture.zig
+test/compiler_capacity_v1.zig
 test/compile_fail/authored_instruction_failure_operand.zig
 test/compile_fail/dead_control_malformed_constant.zig
 test/compile_fail/dead_control_schema_reference.zig

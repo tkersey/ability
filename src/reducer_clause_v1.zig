@@ -55,7 +55,7 @@ pub fn applyEdge(
     target_segment: []const u8,
     edge: []const u8,
     injected_value: ?[]const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     const argument_count = readInt(u16, edge, 2);
     if (argument_count != readInt(u16, target_segment, 10)) {
@@ -105,10 +105,10 @@ fn constructorRetainsValue(constructor: []const u8, value: u16) bool {
 pub fn validateStackPair(
     image: anytype,
     parent_constructor: []const u8,
-    parent_slots: *const [1024]Slot,
+    parent_slots: *const [image_v1.maximum_catalog_entries]Slot,
     child_constructor: []const u8,
     child_activation_entry: ?u32,
-    child_slots: *const [1024]Slot,
+    child_slots: *const [image_v1.maximum_catalog_entries]Slot,
     expected_call_entry_constructor: u32,
 ) Error!void {
     if (parent_constructor.len < 24 or
@@ -188,7 +188,7 @@ pub fn productConstructMatches(
     expected: []const u8,
     operand_bytes: []const u8,
     operand_count: u16,
-    slots: *const [1024]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) bool {
     if (operand_bytes.len != @as(usize, operand_count) * 2) return false;
     var cursor: usize = 0;
@@ -231,7 +231,7 @@ pub const ClauseOutcome = union(enum) {
 pub fn evaluateClause(
     image: image_v1.ValidatedImage,
     segment_id: u16,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     output_value: []u8,
     scratch: []u8,
     workspace: *image_v1.ValidationWorkspace,
@@ -389,7 +389,7 @@ fn requireScratch(
 
 pub fn initializeZeroWidthSlots(
     image: anytype,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     for (0..image.catalogs.value_count) |value| {
         const schema_id = image.catalogs.valueSchemaId(@intCast(value)) catch
@@ -411,8 +411,8 @@ pub fn bindInitialEnvironment(
     image: anytype,
     constructor: []const u8,
     initial_args: []const u8,
-    slots: *[1024]Slot,
-    activation_slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     try initializeZeroWidthSlots(image, slots);
@@ -444,8 +444,8 @@ pub fn bindInitialEnvironment(
 pub fn environmentEncodedLength(
     constructor: []const u8,
     activation_entry: ?u32,
-    activation_slots: *const [1024]Slot,
-    slots: *const [1024]Slot,
+    activation_slots: *const [image_v1.maximum_catalog_entries]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) Error!usize {
     return std.math.cast(
         usize,
@@ -461,8 +461,8 @@ pub fn environmentEncodedLength(
 pub fn environmentEncodedLengthU64(
     constructor: []const u8,
     activation_entry: ?u32,
-    activation_slots: *const [1024]Slot,
-    slots: *const [1024]Slot,
+    activation_slots: *const [image_v1.maximum_catalog_entries]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) Error!u64 {
     const flags = readInt(u16, constructor, 10);
     var length: u64 = if (flags & 1 != 0) blk: {
@@ -492,8 +492,8 @@ pub fn environmentEncodedLengthU64(
 pub fn encodeEnvironmentSlots(
     constructor: []const u8,
     activation_entry: ?u32,
-    activation_slots: *const [1024]Slot,
-    slots: *const [1024]Slot,
+    activation_slots: *const [image_v1.maximum_catalog_entries]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
     output: []u8,
 ) Error![]const u8 {
     const required = try environmentEncodedLength(
@@ -532,8 +532,8 @@ pub fn loadEnvironmentSlots(
     image: anytype,
     constructor: []const u8,
     environment: []const u8,
-    slots: *[1024]Slot,
-    activation_slots: ?*[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: ?*[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
     return loadEnvironmentSlotsTracked(
@@ -551,8 +551,8 @@ pub fn loadEnvironmentSlotsTracked(
     image: anytype,
     constructor: []const u8,
     environment: []const u8,
-    slots: *[1024]Slot,
-    activation_slots: ?*[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: ?*[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!LoadedEnvironment {
@@ -581,8 +581,8 @@ pub fn decodeEnvironmentSlots(
     image: anytype,
     constructor: []const u8,
     environment: []const u8,
-    slots: *[1024]Slot,
-    activation_slots: ?*[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: ?*[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
     try initializeZeroWidthSlots(image, slots);
@@ -796,7 +796,7 @@ pub fn executeScalarOperation(
     image: anytype,
     instruction: []const u8,
     result: u16,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     scratch: []u8,
     scratch_cursor: *usize,
     capacity: ?*CapacityTracker,
@@ -941,7 +941,7 @@ pub fn executeCompositeOperation(
     image: anytype,
     instruction: []const u8,
     result: u16,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     scratch: []u8,
     scratch_cursor: *usize,
     workspace: *image_v1.ValidationWorkspace,
@@ -1778,7 +1778,7 @@ pub fn integerMask(bits: u8) u64 {
 fn instructionFailureTag(
     image: anytype,
     instruction: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     name: []const u8,
 ) Error!u32 {
     const operation = std.enums.fromInt(
@@ -1846,7 +1846,7 @@ pub fn failureTag(image: anytype, name: []const u8) Error!u32 {
 pub fn validatePathInvariants(
     image: anytype,
     constructor: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     return validatePathInvariantsTracked(
@@ -1861,7 +1861,7 @@ pub fn validatePathInvariants(
 pub fn validatePathInvariantsTracked(
     image: anytype,
     constructor: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!void {
@@ -2131,7 +2131,7 @@ fn validateComputedResult(
     operation: u16,
     immediate: u32,
     operands: []const u16,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!bool {
@@ -2165,7 +2165,7 @@ fn validateComputedResultEncoded(
     immediate: u32,
     operand_bytes: []const u8,
     operand_count: u16,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!bool {
@@ -2241,7 +2241,7 @@ fn validateInvariantConstant(
     result: u16,
     kind: u8,
     payload: u64,
-    slots: *const [1024]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) Error!bool {
     if (!slots[result].initialized) return false;
     return switch (kind) {

@@ -9,8 +9,8 @@ const rnf = @import("rnf");
 const std = @import("std");
 
 const implementation_limits: control_ir.CompilerLimits = .{
-    .maximum_values = 1024,
-    .maximum_blocks = 128,
+    .maximum_values = 1280,
+    .maximum_blocks = 192,
     .maximum_constructors = 256,
     .maximum_environment_fields = 128,
     .maximum_invariant_terms = 128,
@@ -646,8 +646,10 @@ fn NormalizedProgram(
     comptime Body: type,
     comptime source: control_ir.Program,
 ) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
     return struct {
         const callee_arguments = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result: [source.blocks.len][1]control_ir.EdgeArgument =
                 undefined;
             for (source.blocks, 0..) |block, block_index| {
@@ -668,6 +670,7 @@ fn NormalizedProgram(
         };
 
         const blocks = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result: [source.blocks.len]control_ir.Block = undefined;
             for (source.blocks, 0..) |block, block_index| {
                 result[block_index] = block;
@@ -699,6 +702,7 @@ fn NormalizedProgram(
         };
 
         const instruction_definitions = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result = [_]?control_ir.Instruction{null} **
                 source.value_types.len;
             for (blocks) |block| {
@@ -725,8 +729,10 @@ fn NormalizedProgram(
 /// Every checkpoint continuation is already an ordinary semantic edge; the
 /// bounded v2 scheduler retains the original checkpointed projection below.
 fn SemanticProgram(comptime normalized: control_ir.Program) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
     return struct {
         const blocks = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result: [normalized.blocks.len]control_ir.Block = undefined;
             for (normalized.blocks, 0..) |block, block_index| {
                 result[block_index] = block;
@@ -745,6 +751,7 @@ fn SemanticProgram(comptime normalized: control_ir.Program) type {
         };
 
         const instruction_definitions = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result = [_]?control_ir.Instruction{null} **
                 normalized.value_types.len;
             for (blocks) |block| {
