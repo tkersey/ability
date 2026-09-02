@@ -414,7 +414,7 @@ fn addZigPathCoverageGuard(b: *std.Build) *std.Build.Step {
         \\set -eu
         \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
         \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
-        \\{ printf '%s\n' build.zig; find src examples test -type f -name '*.zig'; } | sort > "$tmp.actual"
+        \\{ printf '%s\n' build.zig; find src examples test tools -type f -name '*.zig'; } | sort > "$tmp.actual"
         \\sort repo_zig_paths.txt > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
