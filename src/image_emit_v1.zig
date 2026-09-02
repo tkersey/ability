@@ -465,8 +465,9 @@ fn RuntimeSchemas(comptime Reified: type) type {
         buckets: [schema_bucket_count]?u32,
         node_count: usize,
 
-        fn build(writer: *RuntimeWriter) RuntimeError!Self {
-            var self: Self = .{
+        fn build(self: *Self, writer: *RuntimeWriter) RuntimeError!void {
+            @setEvalBranchQuota(100_000_000);
+            self.* = .{
                 .root_ids = undefined,
                 .offsets = undefined,
                 .lengths = undefined,
@@ -547,7 +548,7 @@ fn RuntimeSchemas(comptime Reified: type) type {
             }
             if (root_index != root_count) unreachable;
             writer.patch(u32, count_offset, self.node_count);
-            return self;
+            return;
         }
 
         fn internScalar(
@@ -574,6 +575,7 @@ fn RuntimeSchemas(comptime Reified: type) type {
             writer: *RuntimeWriter,
             comptime schema: u32,
         ) RuntimeError!u32 {
+            @setEvalBranchQuota(100_000_000);
             inline for (Reified.Body.schema_types, 0..) |Schema, index| {
                 if (schema == index) return self.intern(writer, Schema);
             }
@@ -585,6 +587,7 @@ fn RuntimeSchemas(comptime Reified: type) type {
             writer: *RuntimeWriter,
             comptime T: type,
         ) RuntimeError!u32 {
+            @setEvalBranchQuota(100_000_000);
             comptime portable_value.assertPortable(T);
             if (comptime portable_value.isVectorType(T)) {
                 const child = try self.intern(writer, T.ElementType);
@@ -713,6 +716,7 @@ fn RuntimeSchemas(comptime Reified: type) type {
             self: *const Self,
             comptime value_type: anytype,
         ) u32 {
+            @setEvalBranchQuota(100_000_000);
             inline for (0..value_count) |dense_value| {
                 const source_value = Reified.semantic_canonicalization
                     .value_dense_to_source[dense_value];
@@ -735,10 +739,12 @@ fn RuntimeConstants(comptime Reified: type) type {
         source_to_canonical: [source_count]?u32,
 
         fn build(
+            self: *Self,
             schemas_state: *const RuntimeSchemas(Reified),
             writer: *RuntimeWriter,
-        ) RuntimeError!Self {
-            var self: Self = .{
+        ) RuntimeError!void {
+            @setEvalBranchQuota(100_000_000);
+            self.* = .{
                 .source_to_canonical = [_]?u32{null} ** source_count,
             };
             var offsets: [Reified.compiler_limits.maximum_values]u32 = undefined;
@@ -799,7 +805,7 @@ fn RuntimeConstants(comptime Reified: type) type {
                 }
             }
             writer.patch(u32, count_offset, count);
-            return self;
+            return;
         }
     };
 }
@@ -819,9 +825,25 @@ fn EncodedPortableValue(comptime T: type, comptime value: T) type {
 
 /// Encode the canonical BPI1 into caller-owned storage without materializing
 /// any complete BPI section as a comptime byte array.
+pub fn ProgramEncodingWorkspace(comptime Reified: type) type {
+    return struct {
+        schemas: RuntimeSchemas(Reified),
+        constants: RuntimeConstants(Reified),
+    };
+}
+
 pub fn encodeProgramImage(
     comptime Reified: type,
     output: []u8,
+) RuntimeError!usize {
+    var workspace: ProgramEncodingWorkspace(Reified) = undefined;
+    return encodeProgramImageWithWorkspace(Reified, output, &workspace);
+}
+
+pub fn encodeProgramImageWithWorkspace(
+    comptime Reified: type,
+    output: []u8,
+    workspace: *ProgramEncodingWorkspace(Reified),
 ) RuntimeError!usize {
     @setEvalBranchQuota(100_000_000);
     const maximum_single_value_bytes = comptime runtimeMaximumSingleValueBytes(Reified);
@@ -839,12 +861,13 @@ pub fn encodeProgramImage(
     lengths[0] = 28;
 
     offsets[1] = writer.cursor;
-    var schemas = try RuntimeSchemas(Reified).build(&writer);
+    try workspace.schemas.build(&writer);
+    const schemas = &workspace.schemas;
     lengths[1] = writer.cursor - offsets[1];
     if (lengths[1] > maximum_bytes) return error.SectionCapacity;
     writeProgramRootsRuntime(
         Reified,
-        &schemas,
+        schemas,
         output[@intCast(offsets[0])..][0..28],
     );
 
@@ -853,29 +876,30 @@ pub fn encodeProgramImage(
     lengths[2] = writer.cursor - offsets[2];
 
     offsets[3] = writer.cursor;
-    var constants = try RuntimeConstants(Reified).build(&schemas, &writer);
+    try workspace.constants.build(schemas, &writer);
+    const constants = &workspace.constants;
     lengths[3] = writer.cursor - offsets[3];
     if (lengths[3] > maximum_bytes) return error.SectionCapacity;
 
     offsets[4] = writer.cursor;
-    try writeProgramEffectsRuntime(Reified, &schemas, &writer);
+    try writeProgramEffectsRuntime(Reified, schemas, &writer);
     lengths[4] = writer.cursor - offsets[4];
 
     offsets[5] = writer.cursor;
-    try writeProgramValuesRuntime(Reified, &schemas, &writer);
+    try writeProgramValuesRuntime(Reified, schemas, &writer);
     lengths[5] = writer.cursor - offsets[5];
 
     offsets[6] = writer.cursor;
-    try writeProgramFunctionsRuntime(Reified, &schemas, &writer);
+    try writeProgramFunctionsRuntime(Reified, schemas, &writer);
     lengths[6] = writer.cursor - offsets[6];
 
     offsets[7] = writer.cursor;
-    try writeProgramSegmentsRuntime(Reified, &schemas, &constants, &writer);
+    try writeProgramSegmentsRuntime(Reified, schemas, constants, &writer);
     lengths[7] = writer.cursor - offsets[7];
     if (lengths[7] > maximum_bytes) return error.SectionCapacity;
 
     offsets[8] = writer.cursor;
-    try writeProgramConstructorsRuntime(Reified, &schemas, &writer);
+    try writeProgramConstructorsRuntime(Reified, schemas, &writer);
     lengths[8] = writer.cursor - offsets[8];
     if (lengths[8] > maximum_bytes) return error.SectionCapacity;
 
@@ -974,6 +998,7 @@ fn writeProgramFailuresRuntime(
     comptime Reified: type,
     writer: *RuntimeWriter,
 ) RuntimeError!void {
+    @setEvalBranchQuota(100_000_000);
     const fields = std.meta.fields(Reified.Body.Failure);
     if (!failureCatalogAdmitted(fields.len)) return error.CatalogLimit;
     try writer.append(u32, fields.len);
@@ -989,6 +1014,7 @@ fn writeProgramEffectsRuntime(
     schemas: *const RuntimeSchemas(Reified),
     writer: *RuntimeWriter,
 ) RuntimeError!void {
+    @setEvalBranchQuota(100_000_000);
     const count = Reified.residual_effects.residual_count;
     try writer.append(u32, count);
     inline for (0..count) |ordinal| {
@@ -1023,6 +1049,7 @@ fn writeProgramValuesRuntime(
     schemas: *const RuntimeSchemas(Reified),
     writer: *RuntimeWriter,
 ) RuntimeError!void {
+    @setEvalBranchQuota(100_000_000);
     const count = Reified.semantic_canonicalization.value_count;
     try writer.append(u32, count);
     inline for (0..count) |dense_value| {
@@ -1040,6 +1067,7 @@ fn writeProgramFunctionsRuntime(
     schemas: *const RuntimeSchemas(Reified),
     writer: *RuntimeWriter,
 ) RuntimeError!void {
+    @setEvalBranchQuota(100_000_000);
     const count = Reified.semantic_canonicalization.function_count;
     try writer.append(u32, count);
     inline for (0..count) |dense_function| {
@@ -1067,6 +1095,7 @@ fn writeProgramTransitionsRuntime(
     comptime Reified: type,
     writer: *RuntimeWriter,
 ) RuntimeError!void {
+    @setEvalBranchQuota(100_000_000);
     const count = Reified.rnf_value.entry_transition_count;
     const Record = struct {
         source: u16,
@@ -1198,6 +1227,7 @@ fn writeProgramConstructorsRuntime(
     schemas: *const RuntimeSchemas(Reified),
     writer: *RuntimeWriter,
 ) RuntimeError!void {
+    @setEvalBranchQuota(100_000_000);
     try writer.append(u32, Reified.rnf_value.constructor_count);
     inline for (0..Reified.rnf_value.constructor_count) |constructor_index| {
         const constructor = comptime Reified.rnf_value.constructors[constructor_index];
@@ -1286,6 +1316,7 @@ fn writeProgramSegmentsRuntime(
     constants: *const RuntimeConstants(Reified),
     writer: *RuntimeWriter,
 ) RuntimeError!void {
+    @setEvalBranchQuota(100_000_000);
     try writer.append(u32, Reified.semantic_canonicalization.block_count);
     inline for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
         const source_block_id = Reified.semantic_canonicalization

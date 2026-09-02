@@ -375,6 +375,14 @@ test "canonical encoder fills an exact buffer with duplicate schema roots" {
     try std.testing.expectEqualSlices(u8, &Image.bytes, output[0..length]);
 }
 
+test "Program runtime encoder is byte-identical to Program.image" {
+    var output: [Image.bytes.len]u8 = undefined;
+    var workspace: Program.ImageEncodingWorkspace = undefined;
+    const length = try Program.encodeImage(&output, &workspace);
+    try std.testing.expectEqual(Image.bytes.len, length);
+    try std.testing.expectEqualSlices(u8, &Image.bytes, output[0..length]);
+}
+
 test "non-unit root result rejects valueless completion" {
     var malformed = Image.bytes;
     const envelope = try image_v1.validateEnvelope(&malformed);

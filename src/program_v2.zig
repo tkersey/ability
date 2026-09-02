@@ -93,6 +93,24 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
             };
         }
 
+        pub const ImageEncodingWorkspace =
+            image_emit_v1.ProgramEncodingWorkspace(Reified);
+
+        /// Encode the same canonical BPI1 into caller-owned runtime storage.
+        /// This avoids materializing complete image sections as comptime byte
+        /// arrays while preserving `image()` byte identity.
+        pub fn encodeImage(
+            output: []u8,
+            workspace: *ImageEncodingWorkspace,
+        ) image_emit_v1.RuntimeError!usize {
+            @setEvalBranchQuota(100_000_000);
+            return image_emit_v1.encodeProgramImageWithWorkspace(
+                Reified,
+                output,
+                workspace,
+            );
+        }
+
         /// Materialize the bounded Machine ABI v2 policy separately from BPI1.
         pub fn machineV2Profile(comptime options: machine.Options) type {
             const DirectMachine = compileV2(options);
