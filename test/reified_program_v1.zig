@@ -409,7 +409,7 @@ test "direct unmetered clause and BPI1 evaluator have one transition meaning" {
     const image = try image_v1.validateImage(&Image.bytes, &workspace);
     var args: [4]u8 = undefined;
     std.mem.writeInt(u32, &args, 77, .little);
-    var slots = [_]reducer_clause_v1.Slot{.{}} ** 1024;
+    var slots = [_]reducer_clause_v1.Slot{.{}} ** image_v1.maximum_catalog_entries;
     slots[0] = .{ .bytes = &args, .initialized = true };
     var output: [4]u8 = undefined;
     var scratch: [8192]u8 = undefined;
