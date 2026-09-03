@@ -120,8 +120,10 @@ pub fn validate(
             return error.InvalidProfile,
     ) catch return error.InvalidProfile;
     if (bytes.len != expected_length or segment_count == 0 or
-        segment_count > 128 or constructor_count > 256 or
-        transition_count > 1024 or bpi_constructor_count > 256 or
+        segment_count > image_v1.maximum_segment_entries or
+        constructor_count > image_v1.maximum_constructor_entries or
+        transition_count > image_v1.maximum_transition_entries or
+        bpi_constructor_count > image_v1.maximum_constructor_entries or
         std.mem.readInt(u32, bytes[128..132], .little) == 0 or
         std.mem.readInt(u32, bytes[132..136], .little) < 76 or
         std.mem.readInt(u64, bytes[144..152], .little) != 16 or

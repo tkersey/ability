@@ -722,6 +722,7 @@ fn addCoreModules(
         .optimize = optimize,
     });
     compiler.addImport("control_ir", control_ir);
+    compiler.addImport("image_v1", image_v1);
     compiler.addImport("machine", machine);
     compiler.addImport("machine_v2_metering_v1", machine_v2_metering_v1);
     compiler.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
@@ -975,12 +976,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     text_byte_at_fixture.addImport("boundary", host_boundary);
+    text_byte_at_fixture.addImport("machine", host_core.machine);
     const bytes_byte_at_fixture = b.createModule(.{
         .root_source_file = b.path("test/bytes_byte_at_fixture.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
     bytes_byte_at_fixture.addImport("boundary", host_boundary);
+    bytes_byte_at_fixture.addImport("machine", host_core.machine);
     reification_operations_fixture.addImport(
         "authored_failure_v2_fixture",
         authored_failure_v2_fixture,
@@ -1353,6 +1356,9 @@ pub fn build(b: *std.Build) void {
         false,
         false,
     );
+    compiler_capacity.addImport("image_v1", host_core.image_v1);
+    compiler_capacity.addImport("kernel_v1", host_core.kernel_v1);
+    compiler_capacity.addImport("machine", host_core.machine);
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -2689,8 +2695,20 @@ pub fn build(b: *std.Build) void {
             "Body.Failure must be an exhaustive enum",
         },
         .{
+            "test/compile_fail/image_constant_catalog_limit.zig",
+            "canonical BPI1 encoding failed: CatalogLimit",
+        },
+        .{
+            "test/compile_fail/image_effect_catalog_limit.zig",
+            "BPI1 effect catalog exceeds validator capacity",
+        },
+        .{
             "test/compile_fail/image_failure_variant_limit.zig",
             "BPI1 failure variants exceed validator capacity",
+        },
+        .{
+            "test/compile_fail/image_function_catalog_limit.zig",
+            "BPI1 function catalog exceeds validator capacity",
         },
         .{
             "test/compile_fail/image_schema_member_limit.zig",

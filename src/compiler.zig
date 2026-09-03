@@ -1,4 +1,5 @@
 const control_ir = @import("control_ir");
+const image_v1 = @import("image_v1");
 const machine = @import("machine");
 const machine_v2_metering_v1 = @import("machine_v2_metering_v1");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
@@ -2403,11 +2404,19 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         limits.maximum_values,
         limits.maximum_blocks,
     ).analyze(program, reachability);
+    if (semantic_canonicalization.function_count >
+        image_v1.maximum_function_entries)
+    {
+        @compileError("BPI1 function catalog exceeds validator capacity");
+    }
     const residual_effects = comptime analyzeResidualEffects(
         Body,
         program,
         reachability,
     );
+    if (residual_effects.residual_count > image_v1.maximum_effect_entries) {
+        @compileError("BPI1 effect catalog exceeds validator capacity");
+    }
     const invariant_constants = comptime invariantConstantValues(
         Body,
         program,

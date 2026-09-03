@@ -12,8 +12,12 @@ pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
 pub const maximum_catalog_entries: u32 = 1280;
+pub const maximum_constant_entries: u32 = 1024;
+pub const maximum_effect_entries: u32 = 128;
+pub const maximum_function_entries: u32 = 128;
 pub const maximum_segment_entries: u32 = 192;
 pub const maximum_constructor_entries: u32 = 256;
+pub const maximum_transition_entries: u32 = 1024;
 pub const segment_prefix_length: u32 = 16;
 pub const header_length: u32 = fixed_prefix_length +
     section_count * section_descriptor_length;
@@ -777,7 +781,7 @@ fn validateConstants(
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidConstant;
     const count = readInt(u32, bytes, 0);
-    if (count > 1024) return error.InvalidConstant;
+    if (count > maximum_constant_entries) return error.InvalidConstant;
     var cursor: usize = 4;
     for (0..count) |index| {
         if (bytes.len - cursor < 8) return error.InvalidConstant;
@@ -825,7 +829,7 @@ fn validateEffects(
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidEffect;
     const count = readInt(u32, bytes, 0);
-    if (count > 128) return error.InvalidEffect;
+    if (count > maximum_effect_entries) return error.InvalidEffect;
     var cursor: usize = 4;
     for (0..count) |ordinal| {
         if (bytes.len - cursor < 84) return error.InvalidEffect;
@@ -1027,7 +1031,9 @@ fn validateFunctions(
 ) Error!u32 {
     if (bytes.len < 4) return error.InvalidFunction;
     const count = readInt(u32, bytes, 0);
-    if (count == 0 or count > 128) return error.InvalidFunction;
+    if (count == 0 or count > maximum_function_entries) {
+        return error.InvalidFunction;
+    }
     const records_length = std.math.mul(usize, count, 8) catch
         return error.InvalidFunction;
     const expected_length = std.math.add(usize, 4, records_length) catch
@@ -1047,8 +1053,8 @@ fn validateFunctions(
 }
 
 fn validateCatalogUse(catalogs: Catalogs, segment_count: u32) Error!void {
-    var function_seen = [_]bool{false} ** 128;
-    var effect_used = [_]bool{false} ** 128;
+    var function_seen = [_]bool{false} ** maximum_function_entries;
+    var effect_used = [_]bool{false} ** maximum_effect_entries;
     var next_function: u32 = 0;
     const segments = catalogs.envelope.section(.segments);
     var segment_cursor: usize = 4;
@@ -2893,7 +2899,7 @@ fn validateTransitionShape(catalogs: Catalogs) Error!u32 {
     const bytes = catalogs.envelope.section(.entry_transitions);
     if (bytes.len < 4) return error.InvalidTransition;
     const count = readInt(u32, bytes, 0);
-    if (count > 1024) return error.InvalidTransition;
+    if (count > maximum_transition_entries) return error.InvalidTransition;
     const records_length = std.math.mul(usize, count, 12) catch
         return error.InvalidTransition;
     const expected_length = std.math.add(usize, 4, records_length) catch

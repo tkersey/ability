@@ -1,4 +1,7 @@
 const cir = @import("control_ir");
+const image_v1 = @import("image_v1");
+const kernel_v1 = @import("kernel_v1");
+const machine = @import("machine");
 const program_v2 = @import("program_v2");
 const std = @import("std");
 
@@ -117,6 +120,11 @@ const LargeBlockProgram = program_v2.program(
     "compiler-capacity-blocks-v1",
     LargeBlockBody,
 );
+const large_block_options: machine.Options = .{
+    .maximum_frames = 2,
+    .maximum_state_bytes = 1024,
+    .maximum_machine_fuel = 4096,
+};
 
 test "compiler admits 1200 typed values" {
     const Machine = LargeValueProgram.compile(.{
@@ -137,11 +145,7 @@ test "compiler admits 1200 typed values" {
 }
 
 test "compiler admits 180 reachable blocks" {
-    const Machine = LargeBlockProgram.compile(.{
-        .maximum_frames = 2,
-        .maximum_state_bytes = 1024,
-        .maximum_machine_fuel = 4096,
-    });
+    const Machine = LargeBlockProgram.compile(large_block_options);
     const state = try Machine.initialState(std.testing.allocator, 91);
     defer Machine.deinitState(state);
     var fuel: u64 = 4096;
@@ -152,4 +156,44 @@ test "compiler admits 180 reachable blocks" {
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 91), done.value().*);
     try std.testing.expect(LargeBlockProgram.image().bytes.len > 0);
+}
+
+test "fixed Machine-v2 kernel admits 180 reachable blocks" {
+    const Image = LargeBlockProgram.image();
+    const Profile = LargeBlockProgram.machineV2Profile(large_block_options);
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const envelope = try image_v1.validateImage(&Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(
+        envelope,
+        &Profile.bytes,
+        &workspace,
+    );
+    var input: [4]u8 = undefined;
+    std.mem.writeInt(u32, &input, 91, .little);
+    var state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        image,
+        &input,
+        &state,
+        &invariant_scratch,
+        &workspace,
+    );
+    var fuel: u64 = 4096;
+    var next_state: [4096]u8 = undefined;
+    var output: [4096]u8 = undefined;
+    var scratch: [256 * 1024]u8 = undefined;
+    const done = switch (try kernel_v1.step(
+        image,
+        state[0..state_length],
+        &fuel,
+        &next_state,
+        &output,
+        &scratch,
+        &workspace,
+    )) {
+        .done => |value| value,
+        else => return error.UnexpectedOutcome,
+    };
+    try std.testing.expectEqual(@as(u32, 91), std.mem.readInt(u32, done[0..4], .little));
 }

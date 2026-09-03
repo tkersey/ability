@@ -20,6 +20,7 @@
         "scripts",
         "src",
         "test",
+        "tools",
     },
     .fingerprint = 0x3e7e02526825577e,
 }

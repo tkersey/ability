@@ -717,6 +717,9 @@ fn RuntimeConstants(comptime Reified: type) type {
                     if (canonical_id) |id| {
                         self.source_to_canonical[constant_index] = id;
                     } else {
+                        if (count == image_v1.maximum_constant_entries) {
+                            return error.CatalogLimit;
+                        }
                         try writer.append(u32, schema_id);
                         try writer.append(u32, value_length);
                         offsets[count] = @intCast(writer.cursor);

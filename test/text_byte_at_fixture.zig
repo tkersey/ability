@@ -1,4 +1,5 @@
 const boundary = @import("boundary");
+const machine = @import("machine");
 
 pub const Text = boundary.Text(8);
 
@@ -106,11 +107,13 @@ const Body = struct {
 
 pub const Program = boundary.program("text-byte-at-v1", Body);
 pub const Image = Program.image();
-pub const Machine = Program.compile(.{
+const options: machine.Options = .{
     .maximum_frames = 2,
     .maximum_state_bytes = 1024,
     .maximum_machine_fuel = 32,
-});
+};
+pub const Machine = Program.compile(options);
+pub const Profile = Program.machineV2Profile(options);
 
 pub fn input(index: u32) Input {
     return .{
