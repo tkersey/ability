@@ -155,6 +155,10 @@ test "compiler admits 180 reachable blocks" {
     };
     defer done.deinit();
     try std.testing.expectEqual(@as(u32, 91), done.value().*);
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v1,
+        LargeBlockProgram.image().evaluator_semantics_version,
+    );
     try std.testing.expect(LargeBlockProgram.image().bytes.len > 0);
 }
 

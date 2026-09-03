@@ -19,6 +19,15 @@ Version 3 retains version-2 authored-failure semantics and does not change the
 BPI1 container, Process State, or Process ABI. Programs that do not reach the
 new operation retain their prior evaluator version and byte-identical images.
 
+Evaluator semantics and fixed-kernel capacity are independent. A program using
+1,025–1,280 canonical values or 129–192 reachable segments may retain evaluator
+semantics version 1 or 2 because its instruction meaning has not changed, but a
+Boundary 1.7 kernel will reject that larger catalog. Hosts pinning the 1.7
+kernel must upgrade to the Boundary 1.8 kernel before executing an image that
+crosses either released capacity frontier, even when the image uses no
+version-3 operation. Capacity alone does not introduce another evaluator
+semantics version.
+
 The compiler-only RNF invariant-term ceiling is 128. This bounds compile-time
 proof synthesis for deeply staged first-order programs; it is not a runtime,
 State, or process-lifetime limit.

@@ -1820,6 +1820,18 @@ fn semanticHashConstantAt(
     semanticHashBytes(hasher, encoded[0..length]);
 }
 
+fn constantSemanticDigest(
+    comptime Body: type,
+    comptime index: usize,
+) [32]u8 {
+    var hasher = SemanticHasher.init(.{});
+    semanticHashBytes(&hasher, "boundary-canonical-constant-v1");
+    semanticHashConstantAt(Body, &hasher, index);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
 fn semanticHashInstruction(
     comptime Body: type,
     hasher: *SemanticHasher,
@@ -2359,6 +2371,59 @@ fn evaluatorSemanticsVersion(
     return result;
 }
 
+fn validateConstantCatalog(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime reachability: anytype,
+) void {
+    if (!hasDeclSafe(Body, "constants")) return;
+    if (Body.constants.len <= image_v1.maximum_constant_entries) return;
+    var reference_count: usize = 0;
+    inline for (program.blocks) |block| {
+        if (!reachability.contains(block.id)) continue;
+        inline for (block.instructions) |instruction| {
+            switch (instruction.operation) {
+                .constant => reference_count += 1,
+                else => {},
+            }
+        }
+    }
+    if (reference_count <= image_v1.maximum_constant_entries) return;
+
+    const bucket_count: usize = image_v1.maximum_constant_entries * 2;
+    var canonical_digests: [image_v1.maximum_constant_entries][32]u8 =
+        undefined;
+    var buckets = [_]?u32{null} ** bucket_count;
+    var count: usize = 0;
+    inline for (program.blocks) |block| {
+        if (!reachability.contains(block.id)) continue;
+        inline for (block.instructions) |instruction| {
+            const constant_index = switch (instruction.operation) {
+                .constant => |index| index,
+                else => continue,
+            };
+            const digest = constantSemanticDigest(Body, constant_index);
+            var bucket: usize = @intCast(
+                std.mem.readInt(u64, digest[0..8], .little) &
+                    (bucket_count - 1),
+            );
+            while (buckets[bucket]) |existing| {
+                if (std.mem.eql(u8, &canonical_digests[existing], &digest)) {
+                    break;
+                }
+                bucket = (bucket + 1) & (bucket_count - 1);
+            }
+            if (buckets[bucket] != null) continue;
+            if (count == image_v1.maximum_constant_entries) {
+                @compileError("BPI1 constant catalog exceeds validator capacity");
+            }
+            canonical_digests[count] = digest;
+            buckets[bucket] = @intCast(count);
+            count += 1;
+        }
+    }
+}
+
 fn initialConstructorId(
     comptime program: control_ir.Program,
     comptime normal_form: anytype,
@@ -2404,6 +2469,7 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         limits.maximum_values,
         limits.maximum_blocks,
     ).analyze(program, reachability);
+    comptime validateConstantCatalog(Body, program, reachability);
     if (semantic_canonicalization.function_count >
         image_v1.maximum_function_entries)
     {

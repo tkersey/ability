@@ -2696,7 +2696,7 @@ pub fn build(b: *std.Build) void {
         },
         .{
             "test/compile_fail/image_constant_catalog_limit.zig",
-            "canonical BPI1 encoding failed: CatalogLimit",
+            "BPI1 constant catalog exceeds validator capacity",
         },
         .{
             "test/compile_fail/image_effect_catalog_limit.zig",
