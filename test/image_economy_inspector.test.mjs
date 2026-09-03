@@ -24,6 +24,8 @@ assert.equal(report.sections.segments.records, 2);
 assert.equal(report.sections.constructors.records, 3);
 assert.equal(report.largestSegments.length, 2);
 assert.equal(report.largestConstructors.length, 3);
+assert.equal(report.framingByteEstimate, 461);
+assert.equal(report.semanticPayloadByteEstimate, 279);
 assert(!first.includes("boundary.example.lookup.v1"));
 
 const temporary = mkdtempSync(join(tmpdir(), "boundary-image-economy-"));

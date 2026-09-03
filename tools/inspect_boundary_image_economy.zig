@@ -1,4 +1,5 @@
 const image_v1 = @import("image_v1");
+const program_semantics_v1 = @import("program_semantics_v1");
 const std = @import("std");
 
 const maximum_image_bytes = 64 * 1024 * 1024;
@@ -227,6 +228,7 @@ fn inspectSegments(
             counts.framing_bytes += 5;
             cursor += length;
         }
+        counts.framing_bytes += try inspectTerminatorFraming(record, cursor);
         counts.framing_bytes += 12;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(record, &digest, .{});
@@ -243,6 +245,105 @@ fn inspectSegments(
         counts.operands += operand_count;
         counts.parameters += parameter_count;
     }
+}
+
+fn inspectTerminatorFraming(record: []const u8, start: usize) !u64 {
+    const end = start + readInt(u32, record, start);
+    var cursor = start + 8;
+    var framing: u64 = 7;
+    const kind = std.enums.fromInt(
+        program_semantics_v1.WireTerminator,
+        record[start + 4],
+    ) orelse return error.InvalidTerminator;
+    switch (kind) {
+        .jump => framing += inspectEdgeFraming(record, &cursor),
+        .branch => {
+            framing += 2;
+            cursor += 4;
+            framing += inspectEdgeFraming(record, &cursor);
+            framing += inspectEdgeFraming(record, &cursor);
+        },
+        .@"suspend" => {
+            const request_count = readInt(u16, record, cursor + 10);
+            framing += 8;
+            cursor += 12 + @as(usize, request_count) * @sizeOf(u16);
+            const callee_present = record[cursor];
+            cursor += 4;
+            if (callee_present == 1) {
+                framing += inspectEdgeFraming(record, &cursor);
+            }
+            framing += inspectEdgeFraming(record, &cursor);
+            cursor += @sizeOf(u32);
+        },
+        .return_value => {
+            framing += 1;
+            cursor += 4;
+        },
+        .return_to_caller, .fail_value => {
+            framing += 2;
+            cursor += 4;
+        },
+        .fail => cursor += 4,
+    }
+    if (cursor != end) return error.InvalidTerminator;
+    return framing;
+}
+
+fn inspectEdgeFraming(record: []const u8, cursor: *usize) u64 {
+    const argument_count = readInt(u16, record, cursor.* + 2);
+    cursor.* += 4 + @as(usize, argument_count) * 4;
+    return 2 + argument_count;
+}
+
+test "terminator framing covers every wire variant" {
+    var record = [_]u8{0} ** 32;
+
+    setTerminatorHeader(&record, 16, .jump);
+    std.mem.writeInt(u16, record[10..12], 1, .little);
+    try std.testing.expectEqual(
+        @as(u64, 10),
+        try inspectTerminatorFraming(record[0..16], 0),
+    );
+
+    record = [_]u8{0} ** 32;
+    setTerminatorHeader(&record, 20, .branch);
+    try std.testing.expectEqual(
+        @as(u64, 13),
+        try inspectTerminatorFraming(record[0..20], 0),
+    );
+
+    record = [_]u8{0} ** 32;
+    setTerminatorHeader(&record, 32, .@"suspend");
+    record[8] = @intFromEnum(
+        program_semantics_v1.WireSuspension.explicit_yield,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 17),
+        try inspectTerminatorFraming(&record, 0),
+    );
+
+    inline for (.{
+        .{ program_semantics_v1.WireTerminator.return_value, 8 },
+        .{ program_semantics_v1.WireTerminator.return_to_caller, 9 },
+        .{ program_semantics_v1.WireTerminator.fail, 7 },
+        .{ program_semantics_v1.WireTerminator.fail_value, 9 },
+    }) |case| {
+        record = [_]u8{0} ** 32;
+        setTerminatorHeader(&record, 12, case[0]);
+        try std.testing.expectEqual(
+            @as(u64, case[1]),
+            try inspectTerminatorFraming(record[0..12], 0),
+        );
+    }
+}
+
+fn setTerminatorHeader(
+    record: []u8,
+    length: u32,
+    kind: program_semantics_v1.WireTerminator,
+) void {
+    std.mem.writeInt(u32, record[0..4], length, .little);
+    record[4] = @intFromEnum(kind);
 }
 
 fn inspectConstructors(

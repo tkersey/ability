@@ -925,6 +925,10 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
     });
     economy_inspector_module.addImport("image_v1", host_core.image_v1);
+    economy_inspector_module.addImport(
+        "program_semantics_v1",
+        host_core.program_semantics_v1,
+    );
     const economy_inspector = b.addExecutable(.{
         .name = "inspect-boundary-image-economy",
         .root_module = economy_inspector_module,
@@ -1480,6 +1484,7 @@ pub fn build(b: *std.Build) void {
     addTestArtifact(b, image_step, host_core.dynamic_value_v1);
     addTestArtifact(b, image_step, host_core.image_emit_v1);
     addTestArtifact(b, image_step, image_test);
+    addTestArtifact(b, image_step, economy_inspector_module);
 
     const process_step = b.step(
         "check-boundary-process-v1",
