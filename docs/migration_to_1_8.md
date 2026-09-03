@@ -28,6 +28,11 @@ crosses either released capacity frontier, even when the image uses no
 version-3 operation. Capacity alone does not introduce another evaluator
 semantics version.
 
+The BPI1 schema catalog remains independently bounded at 1,024 structurally
+interned nodes. The 1,280-value frontier does not raise that limit: many values
+normally share one portable schema. Schema emission and image validation
+enforce the same bound.
+
 The compiler-only RNF invariant-term ceiling is 128. This bounds compile-time
 proof synthesis for deeply staged first-order programs; it is not a runtime,
 State, or process-lifetime limit.

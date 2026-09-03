@@ -12,6 +12,7 @@ pub const fixed_prefix_length: u32 = 76;
 pub const section_count: u32 = 10;
 pub const section_descriptor_length: u32 = 24;
 pub const maximum_catalog_entries: u32 = 1280;
+pub const maximum_schema_entries: u32 = 1024;
 pub const maximum_constant_entries: u32 = 1024;
 pub const maximum_effect_entries: u32 = 128;
 pub const maximum_function_entries: u32 = 128;
@@ -105,7 +106,7 @@ pub const ValidatedEnvelope = struct {
 };
 
 pub const ValidationWorkspace = struct {
-    schema_nodes: [maximum_catalog_entries]dynamic_value_v1.NodeIndex = undefined,
+    schema_nodes: [maximum_schema_entries]dynamic_value_v1.NodeIndex = undefined,
     value_tasks: [2048]dynamic_value_v1.ValueTask = undefined,
     schema_hash_tasks: [8192]dynamic_value_v1.SchemaHashTask = undefined,
     invariant_instruction: [16 + 2 * 1024]u8 = undefined,
