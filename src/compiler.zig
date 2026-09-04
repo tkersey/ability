@@ -1,4 +1,5 @@
 const control_ir = @import("control_ir");
+const image_v1 = @import("image_v1");
 const machine = @import("machine");
 const machine_v2_metering_v1 = @import("machine_v2_metering_v1");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
@@ -9,11 +10,11 @@ const rnf = @import("rnf");
 const std = @import("std");
 
 const implementation_limits: control_ir.CompilerLimits = .{
-    .maximum_values = 1024,
-    .maximum_blocks = 128,
+    .maximum_values = 1280,
+    .maximum_blocks = 192,
     .maximum_constructors = 256,
     .maximum_environment_fields = 128,
-    .maximum_invariant_terms = 64,
+    .maximum_invariant_terms = 128,
     .maximum_generated_operations = 32_768,
 };
 const compiler_evaluation_branch_quota = 500_000_000;
@@ -294,6 +295,7 @@ fn addSegmentEdgeValues(
 fn segmentStoreType(
     comptime Body: type,
     comptime program: control_ir.Program,
+    comptime normal_form: anytype,
     comptime constructor: anytype,
     comptime canonical: anytype,
 ) type {
@@ -343,6 +345,25 @@ fn segmentStoreType(
             included[@intCast(value)] = true;
         },
     }
+    inline for (normal_form.entryTransitionSlice()) |transition| {
+        if (transition.source_block != block.id) continue;
+        const target = normal_form.constructors[transition.constructor_id];
+        inline for (target.environmentFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+        inline for (target.activationFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+    }
+    inline for (normal_form.constructorSlice()) |target| {
+        if (target.source_block != block.id) continue;
+        inline for (target.environmentFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+        inline for (target.activationFields()) |field| {
+            included[@intCast(field.value)] = true;
+        }
+    }
 
     var fields: [canonical.value_count]rnf.EnvironmentField = undefined;
     var field_count: usize = 0;
@@ -376,6 +397,7 @@ fn maximumSegmentStoreSize(
             @sizeOf(segmentStoreType(
                 Body,
                 program,
+                normal_form,
                 constructor,
                 canonical,
             )),
@@ -625,8 +647,10 @@ fn NormalizedProgram(
     comptime Body: type,
     comptime source: control_ir.Program,
 ) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
     return struct {
         const callee_arguments = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result: [source.blocks.len][1]control_ir.EdgeArgument =
                 undefined;
             for (source.blocks, 0..) |block, block_index| {
@@ -647,6 +671,7 @@ fn NormalizedProgram(
         };
 
         const blocks = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result: [source.blocks.len]control_ir.Block = undefined;
             for (source.blocks, 0..) |block, block_index| {
                 result[block_index] = block;
@@ -678,6 +703,7 @@ fn NormalizedProgram(
         };
 
         const instruction_definitions = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result = [_]?control_ir.Instruction{null} **
                 source.value_types.len;
             for (blocks) |block| {
@@ -704,8 +730,10 @@ fn NormalizedProgram(
 /// Every checkpoint continuation is already an ordinary semantic edge; the
 /// bounded v2 scheduler retains the original checkpointed projection below.
 fn SemanticProgram(comptime normalized: control_ir.Program) type {
+    @setEvalBranchQuota(compiler_evaluation_branch_quota);
     return struct {
         const blocks = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result: [normalized.blocks.len]control_ir.Block = undefined;
             for (normalized.blocks, 0..) |block, block_index| {
                 result[block_index] = block;
@@ -724,6 +752,7 @@ fn SemanticProgram(comptime normalized: control_ir.Program) type {
         };
 
         const instruction_definitions = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
             var result = [_]?control_ir.Instruction{null} **
                 normalized.value_types.len;
             for (blocks) |block| {
@@ -1261,6 +1290,24 @@ fn validateInstruction(
                 @compileError("text_length requires Text -> u32");
             }
         },
+        .text_byte_at => {
+            requireOperandCount(instruction, 2);
+            if (!isText(operandType(Body, program, instruction, 0)) or
+                operandType(Body, program, instruction, 1) != u32 or
+                Result != u8)
+            {
+                @compileError("text_byte_at requires Text, u32 -> u8");
+            }
+        },
+        .bytes_byte_at => {
+            requireOperandCount(instruction, 2);
+            if (!isBytes(operandType(Body, program, instruction, 0)) or
+                operandType(Body, program, instruction, 1) != u32 or
+                Result != u8)
+            {
+                @compileError("bytes_byte_at requires Bytes, u32 -> u8");
+            }
+        },
         .text_append => {
             requireOperandCount(instruction, 2);
             const Destination = operandType(Body, program, instruction, 0);
@@ -1771,6 +1818,18 @@ fn semanticHashConstantAt(
         &encoded,
     ) catch unreachable;
     semanticHashBytes(hasher, encoded[0..length]);
+}
+
+fn constantSemanticDigest(
+    comptime Body: type,
+    comptime index: usize,
+) [32]u8 {
+    var hasher = SemanticHasher.init(.{});
+    semanticHashBytes(&hasher, "boundary-canonical-constant-v1");
+    semanticHashConstantAt(Body, &hasher, index);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
 }
 
 fn semanticHashInstruction(
@@ -2297,16 +2356,72 @@ fn evaluatorSemanticsVersion(
     comptime program: control_ir.Program,
     comptime reachability: anytype,
 ) u16 {
+    var result: u16 = 1;
     for (program.blocks) |block| {
         if (!reachability.contains(block.id)) continue;
         for (block.instructions) |instruction| {
+            if (instruction.operation == .text_byte_at or
+                instruction.operation == .bytes_byte_at) return 3;
             if (program_semantics_v1.usesAuthoredFailures(
                 instruction.operation,
                 instruction.operands.len,
-            )) return 2;
+            )) result = 2;
         }
     }
-    return 1;
+    return result;
+}
+
+fn validateConstantCatalog(
+    comptime Body: type,
+    comptime program: control_ir.Program,
+    comptime reachability: anytype,
+) void {
+    if (!hasDeclSafe(Body, "constants")) return;
+    if (Body.constants.len <= image_v1.maximum_constant_entries) return;
+    var reference_count: usize = 0;
+    inline for (program.blocks) |block| {
+        if (!reachability.contains(block.id)) continue;
+        inline for (block.instructions) |instruction| {
+            switch (instruction.operation) {
+                .constant => reference_count += 1,
+                else => {},
+            }
+        }
+    }
+    if (reference_count <= image_v1.maximum_constant_entries) return;
+
+    const bucket_count: usize = image_v1.maximum_constant_entries * 2;
+    var canonical_digests: [image_v1.maximum_constant_entries][32]u8 =
+        undefined;
+    var buckets = [_]?u32{null} ** bucket_count;
+    var count: usize = 0;
+    inline for (program.blocks) |block| {
+        if (!reachability.contains(block.id)) continue;
+        inline for (block.instructions) |instruction| {
+            const constant_index = switch (instruction.operation) {
+                .constant => |index| index,
+                else => continue,
+            };
+            const digest = constantSemanticDigest(Body, constant_index);
+            var bucket: usize = @intCast(
+                std.mem.readInt(u64, digest[0..8], .little) &
+                    (bucket_count - 1),
+            );
+            while (buckets[bucket]) |existing| {
+                if (std.mem.eql(u8, &canonical_digests[existing], &digest)) {
+                    break;
+                }
+                bucket = (bucket + 1) & (bucket_count - 1);
+            }
+            if (buckets[bucket] != null) continue;
+            if (count == image_v1.maximum_constant_entries) {
+                @compileError("BPI1 constant catalog exceeds validator capacity");
+            }
+            canonical_digests[count] = digest;
+            buckets[bucket] = @intCast(count);
+            count += 1;
+        }
+    }
 }
 
 fn initialConstructorId(
@@ -2354,11 +2469,20 @@ pub fn ReifiedFor(comptime label: []const u8, comptime Body: type) type {
         limits.maximum_values,
         limits.maximum_blocks,
     ).analyze(program, reachability);
+    comptime validateConstantCatalog(Body, program, reachability);
+    if (semantic_canonicalization.function_count >
+        image_v1.maximum_function_entries)
+    {
+        @compileError("BPI1 function catalog exceeds validator capacity");
+    }
     const residual_effects = comptime analyzeResidualEffects(
         Body,
         program,
         reachability,
     );
+    if (residual_effects.residual_count > image_v1.maximum_effect_entries) {
+        @compileError("BPI1 effect catalog exceeds validator capacity");
+    }
     const invariant_constants = comptime invariantConstantValues(
         Body,
         program,
@@ -2693,6 +2817,7 @@ pub fn DirectDefinitionFor(comptime Input: type) type {
             return segmentStoreType(
                 Body,
                 program,
+                normal_form,
                 normal_form.constructors[constructor_id],
                 semantic_canonicalization,
             );

@@ -667,16 +667,16 @@ const FrameAdmission = struct {
 
 const FrameSequenceAdmission = struct {
     constructor: []const u8,
-    slots: [1024]Slot,
-    activation_slots: [1024]Slot,
+    slots: [image_v1.maximum_catalog_entries]Slot,
+    activation_slots: [image_v1.maximum_catalog_entries]Slot,
     loaded: LoadedEnvironment,
 };
 
 const AdmittedState = struct {
     state: process_state_v1.StateView,
     constructor: []const u8,
-    slots: [1024]Slot,
-    activation_slots: [1024]Slot,
+    slots: [image_v1.maximum_catalog_entries]Slot,
+    activation_slots: [image_v1.maximum_catalog_entries]Slot,
     loaded: LoadedEnvironment,
 };
 
@@ -868,8 +868,8 @@ pub const testing = if (@import("builtin").is_test) struct {
         workspace.invariant_result = invariant_scratch;
         defer workspace.invariant_result = prior_invariant_result;
         const image = try image_v1.validateImage(image_bytes, workspace);
-        var slots = [_]Slot{.{}} ** 1024;
-        var activation_slots = [_]Slot{.{}} ** 1024;
+        var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+        var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
         _ = try admitFrame(
             image,
             frame,
@@ -1120,8 +1120,8 @@ fn initialState(
         image,
         image.catalogs.initial_constructor_id,
     );
-    var slots = [_]Slot{.{}} ** 1024;
-    var activation_slots = [_]Slot{.{}} ** 1024;
+    var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+    var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     reducer_clause_v1.bindInitialEnvironment(
         image,
         constructor,
@@ -1359,8 +1359,8 @@ fn callState(
     source_segment_id: u16,
     callee: []const u8,
     activation_entry: ?u32,
-    activation_slots: *const [1024]Slot,
-    slots: *[1024]Slot,
+    activation_slots: *const [image_v1.maximum_catalog_entries]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
     capacity: *CapacityTracker,
@@ -1437,7 +1437,7 @@ fn applyValueEdge(
     constructor: []const u8,
     target_segment: []const u8,
     edge: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     return applyEdge(constructor, target_segment, edge, null, slots);
 }
@@ -1447,7 +1447,7 @@ fn applyResumeEdge(
     target_segment: []const u8,
     edge: []const u8,
     resume_value: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     return applyEdge(
         constructor,
@@ -1463,7 +1463,7 @@ fn applyEdge(
     target_segment: []const u8,
     edge: []const u8,
     injected_value: ?[]const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     reducer_clause_v1.applyEdge(
         constructor,
@@ -1494,8 +1494,8 @@ fn returnToCaller(
     if (parent_constructor[8] != 4 or parent_constructor[9] != 2) {
         return error.InvalidProcessState;
     }
-    var slots = [_]Slot{.{}} ** 1024;
-    var activation_slots = [_]Slot{.{}} ** 1024;
+    var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+    var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     const loaded = try decodeEnvironment(
         image,
         parent_constructor,
@@ -1598,7 +1598,7 @@ const PendingRequestParts = struct {
 fn pendingRequestParts(
     image: image_v1.ValidatedImage,
     constructor: []const u8,
-    slots: *const [1024]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) Error!PendingRequestParts {
     const segment_id = readInt(u16, constructor, 12);
     const segment = try image_v1.evaluatorSegmentRecord(image, segment_id);
@@ -1780,8 +1780,8 @@ fn transitionState(
     edge_kind: u8,
     edge: []const u8,
     activation_entry: ?u32,
-    activation_slots: *const [1024]Slot,
-    slots: *[1024]Slot,
+    activation_slots: *const [image_v1.maximum_catalog_entries]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     buffers: Buffers,
     workspace: *image_v1.ValidationWorkspace,
     capacity: *CapacityTracker,
@@ -1909,13 +1909,13 @@ fn admitProducedSuffix(
     var suffix_index: usize = 0;
     var saw_frame = false;
     var previous_constructor: []const u8 = &.{};
-    var previous_slots = [_]Slot{.{}} ** 1024;
-    var previous_activation_slots = [_]Slot{.{}} ** 1024;
+    var previous_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+    var previous_activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     var previous_loaded: LoadedEnvironment = .{ .activation_entry = null };
     while (try iterator.next()) |frame| : (frame_index += 1) {
         if (first_changed != 0 and frame_index + 1 == first_changed) {
-            var slots = [_]Slot{.{}} ** 1024;
-            var activation_slots = [_]Slot{.{}} ** 1024;
+            var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+            var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
             const projected = try projectFrame(
                 image,
                 frame,
@@ -1931,8 +1931,8 @@ fn admitProducedSuffix(
             continue;
         }
         if (frame_index < first_changed) continue;
-        var slots = [_]Slot{.{}} ** 1024;
-        var activation_slots = [_]Slot{.{}} ** 1024;
+        var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+        var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
         const admitted = try admitFrame(
             image,
             frame,
@@ -2018,12 +2018,12 @@ fn admitFrameSequence(
     var index: u64 = 0;
     var saw_frame = false;
     var previous_constructor: []const u8 = &.{};
-    var previous_slots = [_]Slot{.{}} ** 1024;
-    var previous_activation_slots = [_]Slot{.{}} ** 1024;
+    var previous_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+    var previous_activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     var previous_loaded: LoadedEnvironment = .{ .activation_entry = null };
     while (try iterator.next()) |frame| : (index += 1) {
-        var slots = [_]Slot{.{}} ** 1024;
-        var activation_slots = [_]Slot{.{}} ** 1024;
+        var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+        var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
         const admitted = try admitFrame(
             image,
             frame,
@@ -2071,8 +2071,8 @@ fn admitFrameSequence(
 fn admitFrame(
     image: image_v1.ValidatedImage,
     frame: process_state_v1.Frame,
-    slots: *[1024]Slot,
-    activation_slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!FrameAdmission {
@@ -2101,8 +2101,8 @@ fn admitFrame(
 fn projectFrame(
     image: image_v1.ValidatedImage,
     frame: process_state_v1.Frame,
-    slots: *[1024]Slot,
-    activation_slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!FrameAdmission {
     if (frame.constructor_id >= image.constructor_count) {
@@ -2129,10 +2129,10 @@ fn projectFrame(
 fn validateStackPair(
     image: image_v1.ValidatedImage,
     parent_constructor: []const u8,
-    parent_slots: *const [1024]Slot,
+    parent_slots: *const [image_v1.maximum_catalog_entries]Slot,
     child_constructor: []const u8,
     child_activation_entry: ?u32,
-    child_slots: *const [1024]Slot,
+    child_slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     const parent_segment_id = readInt(u16, parent_constructor, 12);
     const parent_segment = try image_v1.evaluatorSegmentRecord(
@@ -2165,8 +2165,8 @@ fn loadEnvironment(
     image: image_v1.ValidatedImage,
     constructor: []const u8,
     environment: []const u8,
-    slots: *[1024]Slot,
-    activation_slots: ?*[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: ?*[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
     capacity: ?*CapacityTracker,
 ) Error!LoadedEnvironment {
@@ -2198,8 +2198,8 @@ fn decodeEnvironment(
     image: image_v1.ValidatedImage,
     constructor: []const u8,
     environment: []const u8,
-    slots: *[1024]Slot,
-    activation_slots: ?*[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: ?*[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!LoadedEnvironment {
     const loaded = reducer_clause_v1.decodeEnvironmentSlots(
@@ -2220,8 +2220,8 @@ fn decodeEnvironment(
 fn encodeEnvironment(
     constructor: []const u8,
     activation_entry: ?u32,
-    activation_slots: *const [1024]Slot,
-    slots: *const [1024]Slot,
+    activation_slots: *const [image_v1.maximum_catalog_entries]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
     output: []u8,
     arena: CapacityArenaId,
     capacity: *CapacityTracker,

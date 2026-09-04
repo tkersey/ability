@@ -41,6 +41,13 @@ constant definition and selects the exact authored failure returned by that
 instruction. Images without reachable authored-failure operands remain version
 1, so all existing canonical BPI1 bytes are unchanged.
 
+Evaluator semantics version 3 retains version-2 failure operands and admits
+wire operations 58 and 59: `text_byte_at` and `bytes_byte_at`. They project one
+byte from validated Text UTF-8 or arbitrary canonical Bytes and fail through
+`invalid_index`. The compiler emits version 3 only when either operation is
+reachable, and validators reject them under earlier evaluator versions or a
+version-3 image that does not use one.
+
 Validation checks the complete structure, dynamic values, graph references,
 constructor laws, effect/schema/program-transition digests, scratch requirements,
 and exact canonical re-encoding before execution. Image validity never grants

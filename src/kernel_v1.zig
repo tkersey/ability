@@ -426,8 +426,8 @@ fn initialValidated(
         image,
         image.profile.initial_constructor_id,
     ) catch return error.InvalidImage;
-    var slots = [_]Slot{.{}} ** 1024;
-    var activation_slots = [_]Slot{.{}} ** 1024;
+    var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+    var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     reducer_clause_v1.bindInitialEnvironment(
         image,
         constructor,
@@ -507,7 +507,7 @@ fn validateStateValidated(
     var cursor: usize = state_header_length;
     var top_kind: u8 = 0;
     var previous_constructor: []const u8 = &.{};
-    var previous_slots = [_]Slot{.{}} ** 1024;
+    var previous_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     for (0..frame_count) |frame_index| {
         const constructor_id = readInt(u32, state, cursor);
         const environment_length = readInt(u32, state, cursor + 4);
@@ -515,8 +515,8 @@ fn validateStateValidated(
         const environment_end = cursor + environment_length;
         const constructor = try constructorRecord(image, constructor_id);
         top_kind = constructor[8];
-        var slots = [_]Slot{.{}} ** 1024;
-        var activation_slots = [_]Slot{.{}} ** 1024;
+        var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
+        var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
         const loaded = validateEnvironment(
             image,
             constructor,
@@ -608,10 +608,10 @@ fn validateStateEnvelope(
 fn validateStackPair(
     image: ValidatedProgram,
     parent_constructor: []const u8,
-    parent_slots: *const [1024]Slot,
+    parent_slots: *const [image_v1.maximum_catalog_entries]Slot,
     child_constructor: []const u8,
     child_activation_entry: ?u32,
-    child_slots: *const [1024]Slot,
+    child_slots: *const [image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     const parent_segment_id = readInt(u16, parent_constructor, 12);
     const parent_segment = try segmentRecord(image, parent_segment_id);
@@ -658,7 +658,7 @@ fn currentValidated(
         .effect => |effect| effect,
         else => return error.InvalidState,
     };
-    var slots = [_]Slot{.{}} ** 1024;
+    var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     if (!slots[effect.request_value].initialized) return error.InvalidState;
     if (output_payload.len < slots[effect.request_value].bytes.len) {
@@ -707,7 +707,7 @@ fn resumeValidated(
         .effect => |effect| effect,
         else => return error.InvalidState,
     };
-    var slots = [_]Slot{.{}} ** 1024;
+    var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     if (!slots[effect.request_value].initialized) return error.InvalidState;
     const expected = try requestIdentity(
@@ -886,7 +886,7 @@ const SegmentPreflight = struct {
     segment_id: u16,
     cumulative: u64,
     cost: u64,
-    slots: [1024]Slot,
+    slots: [image_v1.maximum_catalog_entries]Slot,
 };
 
 fn preflightCurrentSegment(
@@ -903,7 +903,7 @@ fn preflightCurrentSegment(
     const segment = try segmentRecord(image, segment_id);
     const minimum_cost = image.profile.segmentCost(segment_id) catch
         return error.InvalidImage;
-    var slots = [_]Slot{.{}} ** 1024;
+    var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     try loadTopEnvironment(image, state, constructor, &slots, workspace);
     const top_offset = try topFrameOffset(state);
     const environment_length = readInt(u32, state, top_offset + 4);
@@ -1206,7 +1206,7 @@ fn transitionState(
     source_segment: u16,
     edge_kind: u8,
     edge: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     cumulative_fuel: u64,
     output: []u8,
     workspace: *image_v1.ValidationWorkspace,
@@ -1243,7 +1243,7 @@ fn encodeTopFrame(
     image: ValidatedProgram,
     state: []const u8,
     constructor_id: u32,
-    slots: *const [1024]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
     sequence: u64,
     cumulative_fuel: u64,
     output: []u8,
@@ -1268,7 +1268,7 @@ fn encodeTopFrame(
         activation_entry = readInt(u32, current_environment, 0);
     }
     const activation_count = readInt(u16, constructor, 16);
-    var activation_slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     if (activation_count != 0) {
         try loadActivationSlots(
             image,
@@ -1379,7 +1379,7 @@ fn applyValueEdge(
     edge: []const u8,
     target_segment: u16,
     target_constructor: u32,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     const target = try segmentRecord(image, target_segment);
     const constructor = try constructorRecord(image, target_constructor);
@@ -1396,7 +1396,7 @@ fn appendFrame(
     image: ValidatedProgram,
     parent: []const u8,
     constructor_id: u32,
-    slots: *const [1024]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
     output: []u8,
 ) Error![]const u8 {
     const frame_count = readInt(u32, parent, 60);
@@ -1461,7 +1461,7 @@ fn returnToCaller(
     if (parent_constructor[8] != 4 or parent_constructor[9] != 2) {
         return error.InvalidState;
     }
-    var slots = [_]Slot{.{}} ** 1024;
+    var slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     try loadFrameEnvironment(
         image,
         state,
@@ -1645,7 +1645,7 @@ fn replaceFrameAndTruncate(
     frame_offset: usize,
     frame_count: u32,
     constructor_id: u32,
-    slots: *const [1024]Slot,
+    slots: *const [image_v1.maximum_catalog_entries]Slot,
     cumulative_fuel: u64,
     output: []u8,
     workspace: *image_v1.ValidationWorkspace,
@@ -1667,7 +1667,7 @@ fn replaceFrameAndTruncate(
         activation_entry = readInt(u32, current_environment, 0);
     }
     const activation_count = readInt(u16, constructor, 16);
-    var activation_slots = [_]Slot{.{}} ** 1024;
+    var activation_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     if (activation_count != 0) {
         try loadActivationSlots(
             image,
@@ -1724,7 +1724,7 @@ fn loadTopEnvironment(
     image: ValidatedProgram,
     state: []const u8,
     constructor: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     return loadFrameEnvironment(
@@ -1739,7 +1739,7 @@ fn loadTopEnvironment(
 
 fn initializeZeroWidthSlots(
     image: ValidatedProgram,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
 ) Error!void {
     reducer_clause_v1.initializeZeroWidthSlots(
         programView(image),
@@ -1752,7 +1752,7 @@ fn loadFrameEnvironment(
     state: []const u8,
     frame_offset: usize,
     constructor: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     const environment_length = readInt(u32, state, frame_offset + 4);
@@ -1775,12 +1775,12 @@ fn loadActivationSlots(
     state: []const u8,
     frame_offset: usize,
     constructor: []const u8,
-    slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!void {
     const environment_length = readInt(u32, state, frame_offset + 4);
     const environment = state[frame_offset + 8 ..][0..environment_length];
-    var current_slots = [_]Slot{.{}} ** 1024;
+    var current_slots = [_]Slot{.{}} ** image_v1.maximum_catalog_entries;
     _ = reducer_clause_v1.decodeEnvironmentSlots(
         image,
         constructor,
@@ -1838,8 +1838,8 @@ fn validateEnvironment(
     image: anytype,
     constructor: []const u8,
     environment: []const u8,
-    slots: *[1024]Slot,
-    activation_slots: *[1024]Slot,
+    slots: *[image_v1.maximum_catalog_entries]Slot,
+    activation_slots: *[image_v1.maximum_catalog_entries]Slot,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!reducer_clause_v1.LoadedEnvironment {
     const loaded = try reducer_clause_v1.loadEnvironmentSlots(

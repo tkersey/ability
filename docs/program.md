@@ -37,6 +37,15 @@ exhaustive enum value to its canonical unsigned tag without relying on the
 enum's backing integer type. This is the boundary-owned lowering for persisted
 or wire-visible enum discriminants; consumers do not need a parallel tag table.
 
+`text_byte_at` projects one code unit from Text's canonical UTF-8 encoding.
+The operation takes a `u32` byte index, returns `u8`, and uses the standard
+`invalid_index` failure role. It exposes no pointer, storage slack, or mutable
+view. Reachable use emits evaluator semantics version 3.
+
+`bytes_byte_at` applies the same checked byte-index law to canonical Bytes. It
+preserves arbitrary payload bytes, including malformed UTF-8, and likewise
+uses `invalid_index` without exposing spare storage.
+
 Failures have two source forms. `.fail = tag` retains the compile-time failure
 tag used by existing programs. `.fail_value = value_id` returns the exact
 runtime value at that id and is admitted only when its type is exactly
@@ -48,6 +57,11 @@ operand per Boundary-defined failure role after its ordinary operands. This
 selects the exact authored Failure returned by that instruction and emits
 evaluator semantics version 2. Ordinary instructions retain the version-1
 role-name behavior.
+
+Evaluator semantics version 3 retains version-2 authored failures and admits
+the generic byte-projection operations. Images without a reachable version-3
+operation remain version 1 or 2, so their canonical bytes and transition
+identities do not change.
 
 Authored Failure operands have type `Body.Failure`, are defined by canonical
 constant instructions, and appear in Boundary-defined role order. Boundary

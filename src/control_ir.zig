@@ -143,6 +143,10 @@ pub const InstructionOperation = union(enum) {
     bytes_join,
     /// Project an exhaustive portable enum to its canonical u32 tag.
     enum_to_u32,
+    /// Project one canonical UTF-8 code unit from bounded Text.
+    text_byte_at,
+    /// Project one byte from canonical bounded Bytes.
+    bytes_byte_at,
 };
 
 /// One explicit typed Control IR value definition.
@@ -170,6 +174,8 @@ pub fn authoredFailureOperandCount(operation: InstructionOperation) usize {
         .sum_extract,
         .vector_get,
         .vector_set,
+        .text_byte_at,
+        .bytes_byte_at,
         .vector_push,
         .text_append,
         .text_append_unsigned,
@@ -741,6 +747,8 @@ pub fn validate(
                 .vector_get,
                 .vector_push,
                 .vector_truncate,
+                .text_byte_at,
+                .bytes_byte_at,
                 .text_append,
                 .text_append_scalar,
                 .text_append_unsigned,

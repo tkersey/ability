@@ -28,6 +28,7 @@ src/reified_program_v1.zig
 src/rnf.zig
 src/root.zig
 test/authored_failure_v2_fixture.zig
+test/bytes_byte_at_fixture.zig
 test/compile_fail/authored_instruction_failure_operand.zig
 test/compile_fail/dead_control_malformed_constant.zig
 test/compile_fail/dead_control_schema_reference.zig
@@ -43,7 +44,10 @@ test/compile_fail/effect_site_ordinal_mismatch.zig
 test/compile_fail/forged_portable_container_marker.zig
 test/compile_fail/generated_container_product_access.zig
 test/compile_fail/generated_reducer_limit.zig
+test/compile_fail/image_constant_catalog_limit.zig
+test/compile_fail/image_effect_catalog_limit.zig
 test/compile_fail/image_failure_variant_limit.zig
+test/compile_fail/image_function_catalog_limit.zig
 test/compile_fail/image_schema_member_limit.zig
 test/compile_fail/machine_state_below_entry_environment.zig
 test/compile_fail/missing_arithmetic_failure.zig
@@ -56,6 +60,7 @@ test/compile_fail/portable_sentinel_array.zig
 test/compile_fail/portable_usize.zig
 test/compile_fail/undersized_machine_state.zig
 test/compile_fail/vector_uninhabited_element.zig
+test/compiler_capacity_v1.zig
 test/effectful_decision_loop.zig
 test/emit_one_effect_image.zig
 test/emit_one_effect_profile.zig
@@ -94,3 +99,5 @@ test/reified_program_v1.zig
 test/research_digest_v2.zig
 test/run_machine_native.zig
 test/single_reducer.zig
+test/text_byte_at_fixture.zig
+tools/inspect_boundary_image_economy.zig

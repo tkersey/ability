@@ -5,9 +5,11 @@ arguments or canonical `ABL_PST1` Process State. The `advance` method on a
 `boundary.process_v1.CapacityStorage(...)` validates those bytes and evaluates
 exactly one finite BPI1 reducer segment.
 
-The Process kernel accepts BPI1 evaluator semantics versions 1 and 2. Version
-2 adds instruction-local authored-failure operands without changing the BPI1
-container, State format, Process ABI, or any version-1 image bytes.
+The Process kernel accepts BPI1 evaluator semantics versions 1, 2, and 3.
+Version 2 adds instruction-local authored-failure operands. Version 3 adds the
+generic `text_byte_at` and `bytes_byte_at` operations over canonical sequence
+payloads while retaining version-2 failure selection. Neither changes the BPI1
+container, State format, Process ABI, or any earlier image bytes.
 
 The Process ABI evaluates arbitrary BPI1 programs. It contains no Agent, World,
 host, model, prompt, skill, tool, or capability semantics. A frontend may

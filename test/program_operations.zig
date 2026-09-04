@@ -1,4 +1,5 @@
 const authored_failure = @import("authored_failure_v2_fixture");
+const bytes_byte_at = @import("bytes_byte_at_fixture");
 const cir = @import("control_ir");
 const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
@@ -6,6 +7,7 @@ const machine = @import("machine");
 const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const std = @import("std");
+const text_byte_at = @import("text_byte_at_fixture");
 
 const Title = portable_value.Text(16);
 const Digest = portable_value.Text(32);
@@ -361,6 +363,181 @@ test "evaluator semantics v2 requires an authored failure operand" {
     var workspace: image_v1.ValidationWorkspace = .{};
     try std.testing.expectError(
         error.InvalidFailureMap,
+        image_v1.validateImage(&promoted, &workspace),
+    );
+}
+
+test "evaluator semantics v3 projects canonical Text bytes" {
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v3,
+        text_byte_at.Image.evaluator_semantics_version,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(&text_byte_at.Image.bytes, &workspace);
+
+    inline for (.{
+        .{ @as(u32, 0), @as(u8, 0xc3) },
+        .{ @as(u32, 1), @as(u8, 0xa9) },
+        .{ @as(u32, 2), @as(u8, '"') },
+    }) |case| {
+        const state = try text_byte_at.Machine.initialState(
+            std.testing.allocator,
+            text_byte_at.input(case[0]),
+        );
+        defer text_byte_at.Machine.deinitState(state);
+        var fuel: u64 = 32;
+        const done = switch (try text_byte_at.Machine.step(state, &fuel)) {
+            .done => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer done.deinit();
+        try std.testing.expectEqual(case[1], done.value().*);
+    }
+}
+
+test "evaluator semantics v3 projects arbitrary canonical Bytes" {
+    try std.testing.expectEqual(
+        image_v1.evaluator_semantics_v3,
+        bytes_byte_at.Image.evaluator_semantics_version,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    _ = try image_v1.validateImage(&bytes_byte_at.Image.bytes, &workspace);
+
+    inline for (.{
+        .{ @as(u32, 0), @as(u8, 0xff) },
+        .{ @as(u32, 1), @as(u8, 0x00) },
+        .{ @as(u32, 2), @as(u8, 0x80) },
+    }) |case| {
+        const state = try bytes_byte_at.Machine.initialState(
+            std.testing.allocator,
+            bytes_byte_at.input(case[0]),
+        );
+        defer bytes_byte_at.Machine.deinitState(state);
+        var fuel: u64 = 32;
+        const done = switch (try bytes_byte_at.Machine.step(state, &fuel)) {
+            .done => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer done.deinit();
+        try std.testing.expectEqual(case[1], done.value().*);
+    }
+}
+
+fn expectKernelByte(
+    comptime Fixture: type,
+    input: Fixture.Input,
+    expected: u8,
+) !void {
+    var workspace: image_v1.ValidationWorkspace = .{};
+    const envelope = try image_v1.validateImage(&Fixture.Image.bytes, &workspace);
+    const image = try kernel_v1.bindMachineV2(
+        envelope,
+        &Fixture.Profile.bytes,
+        &workspace,
+    );
+    var input_bytes: [portable_value.maximumEncodedSize(Fixture.Input)]u8 = undefined;
+    const input_length = try portable_value.encode(
+        Fixture.Input,
+        input,
+        &input_bytes,
+    );
+    var state: [4096]u8 = undefined;
+    var invariant_scratch: [4096]u8 = undefined;
+    const state_length = try kernel_v1.initial(
+        image,
+        input_bytes[0..input_length],
+        &state,
+        &invariant_scratch,
+        &workspace,
+    );
+    var fuel: u64 = 32;
+    var next_state: [4096]u8 = undefined;
+    var output: [4096]u8 = undefined;
+    var scratch: [64 * 1024]u8 = undefined;
+    const done = switch (try kernel_v1.step(
+        image,
+        state[0..state_length],
+        &fuel,
+        &next_state,
+        &output,
+        &scratch,
+        &workspace,
+    )) {
+        .done => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(expected, try portable_value.decodeExact(u8, done));
+}
+
+test "fixed Machine-v2 kernel executes evaluator-v3 byte projections" {
+    try expectKernelByte(text_byte_at, text_byte_at.input(1), 0xa9);
+    try expectKernelByte(bytes_byte_at, bytes_byte_at.input(2), 0x80);
+}
+
+test "evaluator semantics v3 rejects an invalid Bytes index" {
+    const state = try bytes_byte_at.Machine.initialState(
+        std.testing.allocator,
+        bytes_byte_at.input(3),
+    );
+    defer bytes_byte_at.Machine.deinitState(state);
+    var fuel: u64 = 32;
+    switch (try bytes_byte_at.Machine.step(state, &fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |value| try std.testing.expectEqual(
+                bytes_byte_at.Failure.bad_index,
+                value,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "evaluator semantics v3 returns the authored invalid-index failure" {
+    const state = try text_byte_at.Machine.initialState(
+        std.testing.allocator,
+        text_byte_at.input(3),
+    );
+    defer text_byte_at.Machine.deinitState(state);
+    var fuel: u64 = 32;
+    switch (try text_byte_at.Machine.step(state, &fuel)) {
+        .failed => |failure| switch (failure) {
+            .authored => |value| try std.testing.expectEqual(
+                text_byte_at.Failure.bad_index,
+                value,
+            ),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "evaluator semantics v2 rejects the v3 Text operation" {
+    var downgraded = text_byte_at.Image.bytes;
+    std.mem.writeInt(
+        u16,
+        downgraded[10..12],
+        image_v1.evaluator_semantics_v2,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidInstruction,
+        image_v1.validateImage(&downgraded, &workspace),
+    );
+}
+
+test "evaluator semantics v3 requires a v3 operation" {
+    var promoted = PureImage.bytes;
+    std.mem.writeInt(
+        u16,
+        promoted[10..12],
+        image_v1.evaluator_semantics_v3,
+        .little,
+    );
+    var workspace: image_v1.ValidationWorkspace = .{};
+    try std.testing.expectError(
+        error.InvalidInstruction,
         image_v1.validateImage(&promoted, &workspace),
     );
 }

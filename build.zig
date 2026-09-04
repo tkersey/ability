@@ -414,7 +414,7 @@ fn addZigPathCoverageGuard(b: *std.Build) *std.Build.Step {
         \\set -eu
         \\tmp="${TMPDIR:-/tmp}/boundary-zig-paths-$$"
         \\trap 'rm -f "$tmp.actual" "$tmp.expected"' EXIT
-        \\{ printf '%s\n' build.zig; find src examples test -type f -name '*.zig'; } | sort > "$tmp.actual"
+        \\{ printf '%s\n' build.zig; find src examples test tools -type f -name '*.zig'; } | sort > "$tmp.actual"
         \\sort repo_zig_paths.txt > "$tmp.expected"
         \\diff -u "$tmp.expected" "$tmp.actual"
     });
@@ -722,6 +722,7 @@ fn addCoreModules(
         .optimize = optimize,
     });
     compiler.addImport("control_ir", control_ir);
+    compiler.addImport("image_v1", image_v1);
     compiler.addImport("machine", machine);
     compiler.addImport("machine_v2_metering_v1", machine_v2_metering_v1);
     compiler.addImport("machine_v2_profile_v1", machine_v2_profile_v1);
@@ -890,6 +891,11 @@ pub fn build(b: *std.Build) void {
             );
         }
     }
+    const economy_image_path = b.option(
+        []const u8,
+        "image",
+        "Path to the validated BPI1 inspected by inspect-boundary-image-economy.",
+    );
     const core = addCoreModules(b, target, optimize);
     const host_core = addCoreModules(b, b.graph.host, optimize);
 
@@ -912,6 +918,28 @@ pub fn build(b: *std.Build) void {
         .root_module = boundary,
     });
     b.installArtifact(library);
+
+    const economy_inspector_module = b.createModule(.{
+        .root_source_file = b.path("tools/inspect_boundary_image_economy.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    economy_inspector_module.addImport("image_v1", host_core.image_v1);
+    economy_inspector_module.addImport(
+        "program_semantics_v1",
+        host_core.program_semantics_v1,
+    );
+    const economy_inspector = b.addExecutable(.{
+        .name = "inspect-boundary-image-economy",
+        .root_module = economy_inspector_module,
+    });
+    const run_economy_inspector = b.addRunArtifact(economy_inspector);
+    if (economy_image_path) |path| run_economy_inspector.addArg(path);
+    const inspect_economy_step = b.step(
+        "inspect-boundary-image-economy",
+        "Inspect one validated BPI1 and emit deterministic economy JSON.",
+    );
+    inspect_economy_step.dependOn(&run_economy_inspector.step);
 
     const one_effect_module = b.createModule(.{
         .root_source_file = b.path("examples/one_effect.zig"),
@@ -946,6 +974,20 @@ pub fn build(b: *std.Build) void {
         host_core.portable_value,
     );
     authored_failure_v2_fixture.addImport("program_v2", host_core.program_v2);
+    const text_byte_at_fixture = b.createModule(.{
+        .root_source_file = b.path("test/text_byte_at_fixture.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    text_byte_at_fixture.addImport("boundary", host_boundary);
+    text_byte_at_fixture.addImport("machine", host_core.machine);
+    const bytes_byte_at_fixture = b.createModule(.{
+        .root_source_file = b.path("test/bytes_byte_at_fixture.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    bytes_byte_at_fixture.addImport("boundary", host_boundary);
+    bytes_byte_at_fixture.addImport("machine", host_core.machine);
     reification_operations_fixture.addImport(
         "authored_failure_v2_fixture",
         authored_failure_v2_fixture,
@@ -1085,6 +1127,8 @@ pub fn build(b: *std.Build) void {
         "authored_failure_v2_fixture",
         authored_failure_v2_fixture,
     );
+    program_operations.addImport("text_byte_at_fixture", text_byte_at_fixture);
+    program_operations.addImport("bytes_byte_at_fixture", bytes_byte_at_fixture);
     const integer_boolean_operations = programTestModule(
         b,
         host_core,
@@ -1307,6 +1351,18 @@ pub fn build(b: *std.Build) void {
         "recursion_fixture",
         process_recursion_fixture,
     );
+    const compiler_capacity = programTestModule(
+        b,
+        host_core,
+        "test/compiler_capacity_v1.zig",
+        b.graph.host,
+        optimize,
+        false,
+        false,
+    );
+    compiler_capacity.addImport("image_v1", host_core.image_v1);
+    compiler_capacity.addImport("kernel_v1", host_core.kernel_v1);
+    compiler_capacity.addImport("machine", host_core.machine);
     const constructor_invariants = programTestModule(
         b,
         host_core,
@@ -1428,6 +1484,7 @@ pub fn build(b: *std.Build) void {
     addTestArtifact(b, image_step, host_core.dynamic_value_v1);
     addTestArtifact(b, image_step, host_core.image_emit_v1);
     addTestArtifact(b, image_step, image_test);
+    addTestArtifact(b, image_step, economy_inspector_module);
 
     const process_step = b.step(
         "check-boundary-process-v1",
@@ -1465,6 +1522,7 @@ pub fn build(b: *std.Build) void {
     );
     addTestArtifact(b, control_step, core.control_ir);
     addTestArtifact(b, control_step, core.rnf);
+    addTestArtifact(b, control_step, compiler_capacity);
     addTestArtifact(b, control_step, constructor_invariants);
     addTestArtifact(b, control_step, machine_yield);
     addTestArtifact(b, control_step, program_dead_control);
@@ -1629,6 +1687,14 @@ pub fn build(b: *std.Build) void {
     process_kernel_vector_module.addImport(
         "authored_failure_v2_fixture",
         authored_failure_v2_fixture,
+    );
+    process_kernel_vector_module.addImport(
+        "text_byte_at_fixture",
+        text_byte_at_fixture,
+    );
+    process_kernel_vector_module.addImport(
+        "bytes_byte_at_fixture",
+        bytes_byte_at_fixture,
     );
     const process_kernel_vector_executable = b.addExecutable(.{
         .name = "boundary-process-kernel-vector",
@@ -2079,6 +2145,16 @@ pub fn build(b: *std.Build) void {
     const one_effect_image = run_one_effect_image.captureStdOut(.{
         .basename = "one-effect.boundary-program-image",
     });
+    const economy_inspector_test = b.addSystemCommand(&.{
+        "node",
+        "test/image_economy_inspector.test.mjs",
+    });
+    economy_inspector_test.addArtifactArg(economy_inspector);
+    economy_inspector_test.addFileArg(one_effect_image);
+    economy_inspector_test.addFileInput(
+        b.path("test/image_economy_inspector.test.mjs"),
+    );
+    image_step.dependOn(&economy_inspector_test.step);
     const one_effect_profile_module = b.createModule(.{
         .root_source_file = b.path("test/emit_one_effect_profile.zig"),
         .target = b.graph.host,
@@ -2624,8 +2700,20 @@ pub fn build(b: *std.Build) void {
             "Body.Failure must be an exhaustive enum",
         },
         .{
+            "test/compile_fail/image_constant_catalog_limit.zig",
+            "BPI1 constant catalog exceeds validator capacity",
+        },
+        .{
+            "test/compile_fail/image_effect_catalog_limit.zig",
+            "BPI1 effect catalog exceeds validator capacity",
+        },
+        .{
             "test/compile_fail/image_failure_variant_limit.zig",
             "BPI1 failure variants exceed validator capacity",
+        },
+        .{
+            "test/compile_fail/image_function_catalog_limit.zig",
+            "BPI1 function catalog exceeds validator capacity",
         },
         .{
             "test/compile_fail/image_schema_member_limit.zig",

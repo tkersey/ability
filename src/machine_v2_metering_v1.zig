@@ -150,6 +150,8 @@ pub fn resultEncodedBytes(
         .bytes_length,
         .text_compare,
         .bytes_compare,
+        .text_byte_at,
+        .bytes_byte_at,
         => maximum,
     };
 }
@@ -176,12 +178,12 @@ pub fn preflightSegmentCost(
     segment: []const u8,
     constructor: []const u8,
     environment: []const u8,
-    slots: *const [1024]reducer_clause_v1.Slot,
+    slots: *const [image_v1.maximum_catalog_entries]reducer_clause_v1.Slot,
     base_cost: u64,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!u64 {
-    var sizes = [_]usize{0} ** 1024;
-    var initially_available = [_]bool{false} ** 1024;
+    var sizes = [_]usize{0} ** image_v1.maximum_catalog_entries;
+    var initially_available = [_]bool{false} ** image_v1.maximum_catalog_entries;
     var cost = base_cost;
     const activation_count = readInt(u16, constructor, 16);
     const environment_count = readInt(u16, constructor, 18);
@@ -277,16 +279,16 @@ fn preflightResultSize(
     operation: u16,
     result: u16,
     operand_bytes: []const u8,
-    slots: *const [1024]reducer_clause_v1.Slot,
-    sizes: *const [1024]usize,
-    initially_available: *const [1024]bool,
+    slots: *const [image_v1.maximum_catalog_entries]reducer_clause_v1.Slot,
+    sizes: *const [image_v1.maximum_catalog_entries]usize,
+    initially_available: *const [image_v1.maximum_catalog_entries]bool,
     workspace: *image_v1.ValidationWorkspace,
 ) Error!usize {
     const result_node = reducer_clause_v1.valueNode(image, result) catch
         return error.InvalidImage;
     const maximum: usize = @intCast(result_node.maximum_encoded_size);
     const size = struct {
-        fn get(bytes: []const u8, index: usize, values: *const [1024]usize) usize {
+        fn get(bytes: []const u8, index: usize, values: *const [image_v1.maximum_catalog_entries]usize) usize {
             return values[readInt(u16, bytes, index * 2)];
         }
     }.get;
@@ -296,7 +298,18 @@ fn preflightResultSize(
             readInt(u32, segment, instruction_offset + 12),
         ) catch return error.InvalidImage).len,
         1 => size(operand_bytes, 0, sizes),
-        2...22, 28, 32, 34, 47, 52, 53, 54, 57 => maximum,
+        2...22,
+        28,
+        32,
+        34,
+        47,
+        52,
+        53,
+        54,
+        57,
+        @intFromEnum(program_semantics_v1.WireOperation.text_byte_at),
+        @intFromEnum(program_semantics_v1.WireOperation.bytes_byte_at),
+        => maximum,
         40 => 4,
         23 => @max(size(operand_bytes, 1, sizes), size(operand_bytes, 2, sizes)),
         24 => blk: {
@@ -391,9 +404,9 @@ fn preflightProductFieldSize(
     instruction_offset: usize,
     product_value: u16,
     field_index: u32,
-    slots: *const [1024]reducer_clause_v1.Slot,
-    sizes: *const [1024]usize,
-    initially_available: *const [1024]bool,
+    slots: *const [image_v1.maximum_catalog_entries]reducer_clause_v1.Slot,
+    sizes: *const [image_v1.maximum_catalog_entries]usize,
+    initially_available: *const [image_v1.maximum_catalog_entries]bool,
     workspace: *image_v1.ValidationWorkspace,
 ) ?usize {
     var current_value = product_value;

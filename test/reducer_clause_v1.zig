@@ -52,7 +52,7 @@ test "product construction streams more operands than the value catalog" {
     std.mem.writeInt(u16, instruction[6..8], 24, .little);
     std.mem.writeInt(u16, instruction[8..10], 1, .little);
     std.mem.writeInt(u16, instruction[10..12], operand_count, .little);
-    var slots = [_]clause.Slot{.{}} ** 1024;
+    var slots = [_]clause.Slot{.{}} ** image_v1.maximum_catalog_entries;
     slots[0] = .{ .bytes = &.{7}, .initialized = true };
     var scratch: [operand_count]u8 = undefined;
     var scratch_cursor: usize = 0;

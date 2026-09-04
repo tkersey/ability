@@ -4,8 +4,11 @@ const portable_value = @import("portable_value");
 const program_semantics_v1 = @import("program_semantics_v1");
 const std = @import("std");
 
-const maximum_nodes = 1024;
-const schema_bucket_count = maximum_nodes * 2;
+const maximum_nodes = image_v1.maximum_schema_entries;
+const schema_bucket_count = std.math.ceilPowerOfTwoAssert(
+    usize,
+    maximum_nodes * 2,
+);
 const maximum_bytes = 1 << 20;
 const maximum_image_bytes = 16 << 20;
 
@@ -717,6 +720,9 @@ fn RuntimeConstants(comptime Reified: type) type {
                     if (canonical_id) |id| {
                         self.source_to_canonical[constant_index] = id;
                     } else {
+                        if (count == image_v1.maximum_constant_entries) {
+                            return error.CatalogLimit;
+                        }
                         try writer.append(u32, schema_id);
                         try writer.append(u32, value_length);
                         offsets[count] = @intCast(writer.cursor);
@@ -1726,6 +1732,19 @@ test "schema emission is postorder, structurally interned, and nominally neutral
     try std.testing.expectEqual(.u32, (try table.node(0)).kind);
     try std.testing.expectEqual(.product, (try table.node(1)).kind);
     try std.testing.expectEqual(.text, (try table.node(2)).kind);
+}
+
+test "schema emitter and validator share one capacity" {
+    try std.testing.expectEqual(
+        image_v1.maximum_schema_entries,
+        maximum_nodes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, image_v1.maximum_schema_entries),
+        @typeInfo(@FieldType(image_v1.ValidationWorkspace, "schema_nodes"))
+            .array.len,
+    );
+    try std.testing.expect(std.math.isPowerOfTwo(schema_bucket_count));
 }
 
 test "typed canonical encoding validates through emitted dynamic schemas" {
