@@ -32,6 +32,14 @@ bytecode. Its blocks define typed values, explicit edges, effects, helper calls,
 returns, and failures. Compilation validates the definition before RNF
 synthesis.
 
+`Program.image()` materializes canonical BPI1 bytes at comptime. Build tools
+can instead call `Program.encodeImage(output, workspace)` at runtime, using a
+caller-owned byte buffer and `Program.ImageEncodingWorkspace`. Both paths use
+the same encoder and produce identical bytes. Successful encoding returns the
+written prefix length; on error, discard the output prefix. The workspace may
+be reused after either success or failure and does not need initialization.
+Large tools should allocate the output and workspace outside the stack.
+
 The portable instruction set includes `enum_to_u32`, which projects an
 exhaustive enum value to its canonical unsigned tag without relying on the
 enum's backing integer type. This is the boundary-owned lowering for persisted

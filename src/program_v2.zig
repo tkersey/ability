@@ -33,9 +33,9 @@ fn constructorFieldsEqual(
 /// Declare one typed Boundary source program with one Machine meaning.
 pub fn program(comptime label: []const u8, comptime Body: type) type {
     const Reified = compiler.ReifiedFor(label, Body);
-    const MachineV2Lowering = compiler.MachineV2LoweringFor(Reified);
-    const Definition = compiler.DirectDefinitionFor(MachineV2Lowering);
     return struct {
+        const MachineV2Lowering = compiler.MachineV2LoweringFor(Reified);
+        const Definition = compiler.DirectDefinitionFor(MachineV2Lowering);
         /// Diagnostic source label excluded from Machine semantic identity.
         pub const program_label = label;
         /// Private typed source/control program.
@@ -90,6 +90,17 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
                 pub const maximum_single_value_bytes =
                     Emitted.maximum_single_value_bytes;
             };
+        }
+
+        pub const ImageEncodingWorkspace =
+            image_emit_v1.ProgramEncodingWorkspace(Reified);
+
+        /// Encode the same canonical BPI1 into caller-owned runtime storage.
+        pub fn encodeImage(
+            output: []u8,
+            workspace: *ImageEncodingWorkspace,
+        ) image_emit_v1.RuntimeError!usize {
+            return image_emit_v1.encodeProgramImageWithWorkspace(Reified, output, workspace);
         }
 
         /// Materialize the bounded Machine ABI v2 policy separately from BPI1.
