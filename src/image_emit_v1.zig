@@ -1165,7 +1165,7 @@ fn writeProgramConstructorsRuntime(
         try writer.append(u16, constructor.environment_len);
         try writer.append(u16, constructor.invariant_len);
         try writer.append(u16, 0);
-        inline for (0..constructor.activation_len) |field_index| {
+        for (0..constructor.activation_len) |field_index| {
             const field = constructor.activation[field_index];
             try appendEnvironmentFieldRuntime(
                 Reified,
@@ -1174,7 +1174,7 @@ fn writeProgramConstructorsRuntime(
                 writer,
             );
         }
-        inline for (0..constructor.environment_len) |field_index| {
+        for (0..constructor.environment_len) |field_index| {
             const field = constructor.environment[field_index];
             try appendEnvironmentFieldRuntime(
                 Reified,
@@ -1198,7 +1198,7 @@ fn writeProgramConstructorsRuntime(
 fn appendEnvironmentFieldRuntime(
     comptime Reified: type,
     schemas: *const RuntimeSchemas(Reified),
-    comptime field: anytype,
+    field: anytype,
     writer: *RuntimeWriter,
 ) RuntimeError!void {
     const dense_value = Reified.semantic_canonicalization.valueId(field.value);
