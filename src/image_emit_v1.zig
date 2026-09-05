@@ -316,8 +316,23 @@ pub fn SchemaSet(comptime RootTypes: anytype) type {
 
 fn maximumSchemaNodeEncodedSize(comptime T: type) usize {
     return struct {
-        const value = uncachedMaximumSchemaNodeEncodedSize(T);
+        const value = blk: {
+            @setEvalBranchQuota(100_000_000);
+            break :blk uncachedMaximumSchemaNodeEncodedSize(T);
+        };
     }.value;
+}
+
+test "cached schema sizes retain the image encoder evaluation quota" {
+    const Fixture = struct {
+        fn Product(comptime depth: usize) type {
+            if (depth == 0) return u8;
+            const Child = Product(depth - 1);
+            return struct { left: Child, right: Child };
+        }
+    };
+    const maximum = comptime maximumSchemaNodeEncodedSize(Fixture.Product(14));
+    try std.testing.expectEqual(@as(usize, 1 << 14), maximum);
 }
 
 fn uncachedMaximumSchemaNodeEncodedSize(comptime T: type) usize {
