@@ -33,6 +33,10 @@ fn constructorFieldsEqual(
 /// Declare one typed Boundary source program with one Machine meaning.
 pub fn program(comptime label: []const u8, comptime Body: type) type {
     const Reified = compiler.ReifiedFor(label, Body);
+    const image_byte_limit: ?usize = if (@hasDecl(Body, "maximum_image_bytes"))
+        Body.maximum_image_bytes
+    else
+        null;
     return struct {
         const MachineV2Lowering = compiler.MachineV2LoweringFor(Reified);
         const Definition = compiler.DirectDefinitionFor(MachineV2Lowering);
@@ -76,6 +80,11 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
         /// Emit the profile-independent canonical Boundary Program Image.
         pub fn image() type {
             const Emitted = image_emit_v1.ProgramImage(Reified);
+            if (image_byte_limit) |limit| {
+                if (Emitted.byte_length > limit) {
+                    @compileError("Boundary Program image exceeds maximum_image_bytes");
+                }
+            }
             return struct {
                 pub const format_version = Emitted.format_version;
                 pub const evaluator_semantics_version =
@@ -100,7 +109,15 @@ pub fn program(comptime label: []const u8, comptime Body: type) type {
             output: []u8,
             workspace: *ImageEncodingWorkspace,
         ) image_emit_v1.RuntimeError!usize {
-            return image_emit_v1.encodeProgramImageWithWorkspace(Reified, output, workspace);
+            const bounded_output = if (image_byte_limit) |limit|
+                output[0..@min(output.len, limit)]
+            else
+                output;
+            return image_emit_v1.encodeProgramImageWithWorkspace(
+                Reified,
+                bounded_output,
+                workspace,
+            );
         }
 
         /// Materialize the bounded Machine ABI v2 policy separately from BPI1.

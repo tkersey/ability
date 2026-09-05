@@ -2722,6 +2722,10 @@ pub fn build(b: *std.Build) void {
             "BPI1 schema members exceed validator capacity",
         },
         .{
+            "test/compile_fail/image_source_byte_limit.zig",
+            "Boundary Program image exceeds maximum_image_bytes",
+        },
+        .{
             "test/compile_fail/oversized_machine_state.zig",
             "Boundary Machine maximum_state_bytes must fit canonical u32 and one canonical frame",
         },

@@ -58,6 +58,44 @@ const Body = struct {
 };
 
 const Program = program_v2.program("typed-lookup", Body);
+
+fn ImageBoundBody(comptime capacity: usize) type {
+    return struct {
+        pub const InitialArgs = Body.InitialArgs;
+        pub const Result = Body.Result;
+        pub const Failure = Body.Failure;
+        pub const contract_bytes = Body.contract_bytes;
+        pub const effect_sites = Body.effect_sites;
+        pub const schema_types = Body.schema_types;
+        pub const control_ir = Body.control_ir;
+        pub const maximum_image_bytes = capacity;
+    };
+}
+
+test "image byte admission belongs to both canonical emission paths" {
+    const expected = Program.image().bytes;
+    inline for (.{ 0, 1, expected.len - 1, expected.len, expected.len + 16 }) |limit| {
+        const Limited = program_v2.program("typed-lookup", ImageBoundBody(limit));
+        const workspace = try std.testing.allocator.create(Limited.ImageEncodingWorkspace);
+        defer std.testing.allocator.destroy(workspace);
+        var output: [expected.len + 32]u8 = @splat(0xaa);
+        if (comptime limit < expected.len) {
+            try std.testing.expectError(error.OutputCapacity, Limited.encodeImage(&output, workspace));
+            for (output[limit..]) |byte| try std.testing.expectEqual(@as(u8, 0xaa), byte);
+        } else {
+            try std.testing.expectEqualSlices(u8, &expected, &Limited.image().bytes);
+            try std.testing.expectError(
+                error.OutputCapacity,
+                Limited.encodeImage(output[0 .. expected.len - 1], workspace),
+            );
+            const length = try Limited.encodeImage(&output, workspace);
+            try std.testing.expectEqual(expected.len, length);
+            try std.testing.expectEqualSlices(u8, &expected, output[0..length]);
+            for (output[length..]) |byte| try std.testing.expectEqual(@as(u8, 0xaa), byte);
+        }
+    }
+}
+
 const CompiledMachine = Program.compile(.{
     .maximum_frames = 4,
     .maximum_state_bytes = 4096,
