@@ -21,6 +21,7 @@ const Machine = Program.compile(.{
 - a tuple of structured `schema_types`;
 - optional canonical constants in a heterogeneous tuple or homogeneous array;
 - optional bounded `compiler_limits`;
+- optional `maximum_image_bytes`, a physical image-emission capacity;
 - one typed `control_ir`.
 
 The source label is diagnostic. Executable semantics, portable schemas, RNF
@@ -39,6 +40,13 @@ the same encoder and produce identical bytes. Successful encoding returns the
 written prefix length; on error, discard the output prefix. The workspace may
 be reused after either success or failure and does not need initialization.
 Large tools should allocate the output and workspace outside the stack.
+
+When `Body.maximum_image_bytes` is declared, both emission paths enforce it.
+`image()` reports a compile error for an oversized image; `encodeImage()` returns
+`error.OutputCapacity` even when the caller supplies a larger buffer, and never
+writes beyond the declared capacity. The limit is checked when emitting an image,
+not when declaring the Program type. It does not alter successful image bytes,
+transition identity, or direct Machine ABI v2 specialization.
 
 The portable instruction set includes `enum_to_u32`, which projects an
 exhaustive enum value to its canonical unsigned tag without relying on the

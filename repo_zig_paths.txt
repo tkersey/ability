@@ -49,6 +49,7 @@ test/compile_fail/image_effect_catalog_limit.zig
 test/compile_fail/image_failure_variant_limit.zig
 test/compile_fail/image_function_catalog_limit.zig
 test/compile_fail/image_schema_member_limit.zig
+test/compile_fail/image_source_byte_limit.zig
 test/compile_fail/machine_state_below_entry_environment.zig
 test/compile_fail/missing_arithmetic_failure.zig
 test/compile_fail/non_enum_failure_tagged_union.zig
