@@ -5,6 +5,7 @@ const image_v1 = @import("image_v1");
 const kernel_v1 = @import("kernel_v1");
 const machine = @import("machine");
 const machine_v2_profile_v1 = @import("machine_v2_profile_v1");
+const portable_value = @import("portable_value");
 const program_v2 = @import("program_v2");
 const reducer_clause_v1 = @import("reducer_clause_v1");
 const std = @import("std");
@@ -388,6 +389,79 @@ test "Program runtime encoder is byte-identical to Program.image" {
     );
     const repeated_length = try Program.encodeImage(&output, &workspace);
     try std.testing.expectEqualSlices(u8, &Image.bytes, output[0..repeated_length]);
+}
+
+fn ConstantEncodingFixture(comptime Value: type, comptime value: Value) type {
+    const ConstantBody = struct {
+        pub const InitialArgs = void;
+        pub const Result = Value;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{Value};
+        pub const constants = .{value};
+        pub const control_ir: cir.Program = .{
+            .label = "large-constant-encoding",
+            .value_types = &.{.{ .schema = 0 }},
+            .blocks = &.{.{
+                .id = 0,
+                .instructions = &.{.{
+                    .kind = .constant,
+                    .operation = .{ .constant = 0 },
+                    .result = 0,
+                }},
+                .terminator = .{ .return_value = 0 },
+            }},
+            .entry = 0,
+            .result_type = .{ .schema = 0 },
+        };
+    };
+    const ConstantProgram = program_v2.program("large-constant-encoding", ConstantBody);
+    return struct {
+        const Expected = ConstantProgram.image();
+        var output: [Expected.bytes.len]u8 = undefined;
+        var workspace: ConstantProgram.ImageEncodingWorkspace = undefined;
+
+        fn expectParity() !void {
+            const length = try ConstantProgram.encodeImage(&output, &workspace);
+            try std.testing.expectEqualSlices(u8, &Expected.bytes, output[0..length]);
+        }
+    };
+}
+
+test "runtime image encoding does not stack-copy large constant carriers" {
+    const Bytes = portable_value.Bytes(16 << 20);
+    try ConstantEncodingFixture(Bytes, Bytes.empty()).expectParity();
+    try ConstantEncodingFixture(?[10 * 1024 * 1024]u8, null).expectParity();
+}
+
+fn NestedProduct(comptime depth: usize) type {
+    if (depth == 0) return u8;
+    const Child = NestedProduct(depth - 1);
+    return struct { left: Child, right: Child };
+}
+
+test "cached schema digests retain the compiler evaluation quota" {
+    const Value = NestedProduct(11);
+    const NestedBody = struct {
+        pub const InitialArgs = Value;
+        pub const Result = Value;
+        pub const Failure = enum { rejected };
+        pub const effect_sites = .{};
+        pub const schema_types = .{Value};
+        pub const control_ir: cir.Program = .{
+            .label = "nested-product-identity",
+            .value_types = &.{.{ .schema = 0 }},
+            .blocks = &.{.{
+                .id = 0,
+                .parameters = &.{0},
+                .terminator = .{ .return_value = 0 },
+            }},
+            .entry = 0,
+            .result_type = .{ .schema = 0 },
+        };
+    };
+    const Nested = program_v2.program("nested-product-identity", NestedBody);
+    try std.testing.expectEqual(@as(usize, 32), Nested.program_transition_digest.len);
 }
 
 test "non-unit root result rejects valueless completion" {

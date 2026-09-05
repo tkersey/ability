@@ -99,6 +99,9 @@ try {
   fs.writeFileSync(pure, "pub const Pure = void;\n");
   const executor = path.join(temporary, "proof-executor.mjs");
   fs.writeFileSync(executor, "export const proof = true;\n");
+  const packageManifest = path.join(temporary, "build.zig.zon");
+  const manifestBytes = '.{\n    .version = "9.8.7",\n}\n';
+  fs.writeFileSync(packageManifest, manifestBytes);
   const proofPath = path.join(temporary, "boundary-reification-v1-proof.json");
   const proofArgs = [
     proofScript,
@@ -118,6 +121,7 @@ try {
     "--receipt-sources",
     pure,
     executor,
+    packageManifest,
   ];
   const proof = JSON.parse(childProcess.execFileSync(
     process.execPath,
@@ -307,13 +311,14 @@ try {
     artifact,
     pure,
     executor,
+    packageManifest,
     generated,
     proofPath,
   ];
   const receipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
   if (
-    receipt.boundary_version !== "1.8.0" ||
-    receipt.kernel_release_version !== "1.8.0" ||
+    receipt.boundary_version !== "9.8.7" ||
+    receipt.kernel_release_version !== "9.8.7" ||
     receipt.image_profile_invariance_passed !== true ||
     receipt.baseline_digest_count !== 10 ||
     receipt.canonical_image_fixture_count !== 2 ||
@@ -322,6 +327,18 @@ try {
   ) {
     throw new Error("receipt did not derive claims from the executed proof stamp");
   }
+
+  fs.writeFileSync(packageManifest, manifestBytes.replace("9.8.7", "9.8.8"));
+  const staleVersionProof = childProcess.spawnSync(process.execPath, args, { encoding: "utf8" });
+  if (staleVersionProof.status === 0) throw new Error("post-proof package version change was accepted");
+  const updatedProof = childProcess.execFileSync(process.execPath, proofArgs, { encoding: "utf8" });
+  fs.writeFileSync(proofPath, updatedProof);
+  const updatedReceipt = JSON.parse(childProcess.execFileSync(process.execPath, args, { encoding: "utf8" }));
+  if (updatedReceipt.boundary_version !== "9.8.8" || updatedReceipt.kernel_release_version !== "9.8.8") {
+    throw new Error("receipt did not follow the proved package version");
+  }
+  fs.writeFileSync(packageManifest, manifestBytes);
+  fs.writeFileSync(proofPath, JSON.stringify(proof));
 
   const replacementKernel = path.join(temporary, "replacement-kernel.bin");
   fs.writeFileSync(replacementKernel, "replacement");

@@ -1742,7 +1742,10 @@ fn semanticHashBytes(hasher: *SemanticHasher, value: []const u8) void {
 
 fn CachedSchemaDigest(comptime T: type) type {
     return struct {
-        const value = portable_value.schemaDigest(T);
+        const value = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
+            break :blk portable_value.schemaDigest(T);
+        };
     };
 }
 

@@ -672,28 +672,9 @@ fn RuntimeConstants(comptime Reified: type) type {
         Reified.Body.constants.len
     else
         0;
-    const scratch_bytes = comptime blk: {
-        var maximum: usize = 0;
-        for (0..Reified.semantic_canonicalization.block_count) |dense_block| {
-            const source_block = Reified.semantic_canonicalization
-                .block_dense_to_source[dense_block];
-            for (Reified.control.blocks[source_block].instructions) |instruction| {
-                const index = switch (instruction.operation) {
-                    .constant => |index| index,
-                    else => continue,
-                };
-                const value = Reified.Body.constants[index];
-                const length = portable_value.encodedSize(@TypeOf(value), value) catch |err|
-                    @compileError("invalid canonical constant: " ++ @errorName(err));
-                maximum = @max(maximum, @min(length, maximum_bytes));
-            }
-        }
-        break :blk maximum;
-    };
     return struct {
         const Self = @This();
         source_to_canonical: [source_count]?u32,
-        scratch: [scratch_bytes]u8,
 
         fn build(
             self: *Self,
@@ -703,7 +684,6 @@ fn RuntimeConstants(comptime Reified: type) type {
             @setEvalBranchQuota(100_000_000);
             self.* = .{
                 .source_to_canonical = [_]?u32{null} ** source_count,
-                .scratch = undefined,
             };
             var offsets: [Reified.compiler_limits.maximum_values]u32 = undefined;
             var lengths: [Reified.compiler_limits.maximum_values]u32 = undefined;
@@ -722,18 +702,15 @@ fn RuntimeConstants(comptime Reified: type) type {
                     };
                     const value = Reified.Body.constants[constant_index];
                     const Value = @TypeOf(value);
-                    const value_length = portable_value.encode(Value, value, &self.scratch) catch |err|
-                        switch (err) {
-                            error.CapacityExceeded => return error.SectionCapacity,
-                            else => unreachable, // The same immutable value was validated above.
-                        };
+                    const Canonical = EncodedPortableValue(Value, value);
+                    const value_length = Canonical.bytes.len;
                     const dense_value = Reified.semantic_canonicalization.valueId(
                         instruction.result,
                     );
                     const schema_id = schemas_state.root_ids[
                         RuntimeSchemas(Reified).value_root_start + dense_value
                     ];
-                    const canonical = self.scratch[0..value_length];
+                    const canonical = &Canonical.bytes;
                     var canonical_id: ?u32 = null;
                     for (0..count) |existing| {
                         if (schemas[existing] != schema_id or
@@ -770,6 +747,21 @@ fn RuntimeConstants(comptime Reified: type) type {
             }
             writer.patch(u32, count_offset, count);
         }
+    };
+}
+
+// Constants are immutable program data. Materialize their logical bytes once;
+// passing their potentially much larger carriers by value at runtime uses stack.
+fn EncodedPortableValue(comptime T: type, comptime value: T) type {
+    const length = portable_value.encodedSize(T, value) catch unreachable;
+    const encoded = comptime blk: {
+        var bytes: [length]u8 = undefined;
+        const written = portable_value.encode(T, value, &bytes) catch unreachable;
+        if (written != length) @compileError("portable value encoded length drifted");
+        break :blk bytes;
+    };
+    return struct {
+        pub const bytes = encoded;
     };
 }
 
