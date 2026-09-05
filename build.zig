@@ -483,6 +483,7 @@ fn addReificationReceiptSources(
         if (source_path.len != 0) command.addFileArg(b.path(source_path));
     }
     inline for (.{
+        "build.zig.zon",
         "repo_zig_paths.txt",
         "conformance/reification-v1/baseline.lock.json",
         "conformance/reification-v1/baseline/vectors.json",
@@ -1230,6 +1231,7 @@ pub fn build(b: *std.Build) void {
         false,
     );
     reified_program_test.addImport("compiler", host_core.compiler);
+    reified_program_test.addImport("portable_value", host_core.portable_value);
     reified_program_test.addImport("image_emit_v1", host_core.image_emit_v1);
     reified_program_test.addImport("image_v1", host_core.image_v1);
     reified_program_test.addImport("kernel_v1", host_core.kernel_v1);

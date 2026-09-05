@@ -95,12 +95,14 @@ comptime {
     if (!@hasDecl(Program, "compile") or
         !@hasDecl(Program, "compileV2") or
         !@hasDecl(Program, "image") or
+        !@hasDecl(Program, "encodeImage") or
+        !@hasDecl(Program, "ImageEncodingWorkspace") or
         !@hasDecl(Program, "machineV2Profile") or
         !@hasDecl(Program, "kernelMachineV2") or
         @hasDecl(Program, "kernelMachine") or
-        functionDeclarationCount(Program) != 5)
+        functionDeclarationCount(Program) != 6)
     {
-        @compileError("Boundary Program exposes a competing compilation route");
+        @compileError("Boundary Program public operation inventory drifted");
     }
     for (.{
         "component",

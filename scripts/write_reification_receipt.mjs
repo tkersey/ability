@@ -45,6 +45,13 @@ const receiptSourceSha256 = Object.fromEntries(
 if (!isDeepStrictEqual(proofStamp.receipt_source_sha256, receiptSourceSha256)) {
   throw new Error("receipt sources are not bound to the executed proof stamp");
 }
+const manifests = receiptSourcePaths.filter((source) => path.basename(source) === "build.zig.zon");
+if (manifests.length !== 1) throw new Error("missing unique package manifest");
+const versions = [...fs.readFileSync(manifests[0], "utf8").matchAll(
+  /^\s*\.version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?)"\s*,/gm,
+)];
+if (versions.length !== 1) throw new Error("missing unique package version");
+const packageVersion = versions[0][1];
 const releaseAssetSha256 = {
   one_effect_image: digest(oneEffectPath),
   portable_values_image: digest(portableValuesPath),
@@ -65,8 +72,8 @@ const proofCount = (name) => {
 };
 const receipt = {
   format: "boundary-reification-receipt/v1",
-  boundary_version: "1.8.0",
-  kernel_release_version: "1.8.0",
+  boundary_version: packageVersion,
+  kernel_release_version: packageVersion,
   zig_version: "0.16.0",
   image_format: "BPI1",
   image_magic: "ABL_BPI1",

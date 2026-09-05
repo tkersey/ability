@@ -1740,9 +1740,17 @@ fn semanticHashBytes(hasher: *SemanticHasher, value: []const u8) void {
     hasher.update(value);
 }
 
+fn CachedSchemaDigest(comptime T: type) type {
+    return struct {
+        const value = blk: {
+            @setEvalBranchQuota(compiler_evaluation_branch_quota);
+            break :blk portable_value.schemaDigest(T);
+        };
+    };
+}
+
 fn semanticHashSchema(comptime T: type, hasher: *SemanticHasher) void {
-    const digest = portable_value.schemaDigest(T);
-    hasher.update(&digest);
+    hasher.update(&CachedSchemaDigest(T).value);
 }
 
 fn effectSiteContractDigest(
