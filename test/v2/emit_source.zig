@@ -36,6 +36,8 @@ pub fn main(init: std.process.Init) !void {
         26 => boundary.source.examples.boundedValues(&builder),
         27 => boundary.source.examples.scalarContracts(&builder),
         28 => boundary.source.examples.ownership(&builder),
+        29 => boundary.source.examples.shallowResumptions(&builder),
+        30 => boundary.source.examples.shallowInjection(&builder),
         else => @compileError("unknown source example"),
     };
     var buffer: [4096]u8 = undefined;

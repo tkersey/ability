@@ -59,6 +59,82 @@ fn covers(handler: p.Handler, effect: p.Id) bool {
     return false;
 }
 
+fn continuationEffect(image: p.Program, handler: p.Handler, effect: p.Id, escapes: bool) a.Error!void {
+    for (handler.clauses) |clause| {
+        const signature = try resumption(image, clause.resumption);
+        if (handler.mode == .shallow or escapes) try subset(&.{effect}, signature.effects);
+        if (handler.mode == .shallow and escapes) try subset(&.{effect}, signature.escaping);
+    }
+}
+
+fn deepHandlerEffects(image: p.Program, handler: p.Handler) a.Error!void {
+    if (handler.mode != .deep) return;
+    for (handler.clauses) |clause|
+        try subset(handler.effects, (try resumption(image, clause.resumption)).effects);
+}
+
+pub fn slotSchema(block: p.Block, slot: p.Id) a.Error!p.Id {
+    if (slot < block.parameters.len) return block.parameters[@intCast(slot)];
+    const index = slot - block.parameters.len;
+    if (index >= block.instructions.len) return error.InvalidReference;
+    return block.instructions[@intCast(index)].result_type;
+}
+
+/// Effects admitted while producing the result awaited by a saved call edge.
+pub fn invocationEffect(
+    image: p.Program,
+    block: p.Block,
+    facts: effect_scope.Facts,
+    effect: p.Id,
+) a.Error!bool {
+    return switch (block.terminator) {
+        .call => |v| containsEffect(image.functions[@intCast(v.function)].effects, effect),
+        .apply => |v| containsEffect(
+            (try computation(image, try slotSchema(block, v.computation))).effects,
+            effect,
+        ),
+        .handle => |v| blk: {
+            const handler = image.handlers[@intCast(v.handler)];
+            const body = try computation(image, try slotSchema(block, v.body));
+            break :blk containsEffect(handler.effects, effect) or
+                (containsEffect(body.effects, effect) and
+                    !effect_scope.discharged(image, facts, handler, body, effect));
+        },
+        inline .resume_value, .resume_computation => |v| containsEffect(
+            (try resumption(image, try slotSchema(block, v.resumption))).effects,
+            effect,
+        ),
+        .resume_with => |v| blk: {
+            const signature = try resumption(image, try slotSchema(block, v.resumption));
+            const handler = image.handlers[@intCast(v.handler)];
+            break :blk containsEffect(handler.effects, effect) or
+                (containsEffect(signature.effects, effect) and
+                    (!covers(handler, effect) or containsEffect(signature.escaping, effect)));
+        },
+        .perform => |v| containsEffect(image.effects[@intCast(v.effect)].use_site_effects, effect),
+        .with_region => |v| containsEffect(
+            (try computation(image, try slotSchema(block, v.body))).effects,
+            effect,
+        ),
+        .protect => |v| containsEffect(
+            (try computation(image, try slotSchema(block, v.body))).effects,
+            effect,
+        ) or containsEffect(
+            (try computation(image, try slotSchema(block, v.cleanup))).effects,
+            effect,
+        ),
+        .dispose => |v| containsEffect(
+            (try resumption(image, try slotSchema(block, v.owned))).effects,
+            effect,
+        ),
+        else => false,
+    };
+}
+
+pub fn containsEffect(row_: []const p.Id, effect: p.Id) bool {
+    return std.mem.indexOfScalar(p.Id, row_, effect) != null;
+}
+
 fn capturedRegion(image: p.Program, effects: []const p.Id, region: p.Id) a.Error!void {
     for (effects) |effect| for (image.handlers) |handler| for (handler.clauses) |clause| {
         if (clause.effect != effect or clause.direct) continue;
@@ -258,17 +334,13 @@ pub fn terminator(image: p.Program, block: p.Block, slots: []const p.Id, effect_
             for (body.parameters[0..handler.clauses.len], handler.clauses) |schema, clause| try capability(image, schema, clause.effect);
             try a.arguments(slots, handle.arguments, body.parameters[handler.clauses.len..]);
             try a.arguments(slots, handle.state, handler.state);
-            for (body.effects) |effect| if (!effect_scope.discharged(image, effect_facts, handler, body, effect)) try subset(&.{effect}, function.effects);
-            try subset(handler.effects, function.effects);
-            for (handler.clauses) |clause| {
-                const resuming = try resumption(image, clause.resumption);
-                for (body.effects) |effect| {
-                    const caught = effect_scope.discharged(image, effect_facts, handler, body, effect);
-                    if (handler.mode == .shallow or !caught) try subset(&.{effect}, resuming.effects);
-                    if (handler.mode == .shallow and !caught) try subset(&.{effect}, resuming.escaping);
-                }
-                if (handler.mode == .deep) try subset(handler.effects, resuming.effects);
+            for (body.effects) |effect| {
+                const escapes = !effect_scope.discharged(image, effect_facts, handler, body, effect);
+                if (escapes) try subset(&.{effect}, function.effects);
+                try continuationEffect(image, handler, effect, escapes);
             }
+            try subset(handler.effects, function.effects);
+            try deepHandlerEffects(image, handler);
             try a.edge(image, block.function, slots, handle.next, handler.answer);
         },
         .resume_value => |resuming| {
@@ -283,8 +355,14 @@ pub fn terminator(image: p.Program, block: p.Block, slots: []const p.Id, effect_
             const successor = image.handlers[@intCast(resuming.handler)];
             if (successor.input != signature.answer or successor.clauses.len != signature.handled.len) return error.TypeMismatch;
             for (successor.clauses, signature.handled) |clause, id| if (clause.effect != id) return error.InvalidEffect;
-            for (signature.effects) |effect| if (!covers(successor, effect) or std.mem.indexOfScalar(p.Id, signature.escaping, effect) != null) try subset(&.{effect}, function.effects);
+            for (signature.effects) |effect| {
+                const escapes = !covers(successor, effect) or
+                    std.mem.indexOfScalar(p.Id, signature.escaping, effect) != null;
+                if (escapes) try subset(&.{effect}, function.effects);
+                try continuationEffect(image, successor, effect, escapes);
+            }
             try subset(successor.effects, function.effects);
+            try deepHandlerEffects(image, successor);
             try a.arguments(slots, resuming.state, successor.state);
             try a.edge(image, block.function, slots, resuming.next, successor.answer);
         },

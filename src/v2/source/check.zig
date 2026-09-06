@@ -138,7 +138,11 @@ pub fn analyzeDiagnosed(allocator: std.mem.Allocator, source: ast.Module, diagno
             .unpack_product => |unpack| blk: {
                 const shape = source.schemas[@intCast(source.values[@intCast(unpack.value)].schema)];
                 if (shape != .product or shape.product.len != unpack.variables.len) return error.TypeMismatch;
-                for (unpack.variables, shape.product) |variable, schema| if (source.variables[@intCast(variable)] != schema) return error.TypeMismatch;
+                for (unpack.variables, shape.product, 0..) |variable, schema, index| {
+                    if (std.mem.indexOfScalar(p.Id, unpack.variables[0..index], variable) != null)
+                        return error.InvalidSource;
+                    if (source.variables[@intCast(variable)] != schema) return error.TypeMismatch;
+                }
                 break :blk facts.results[@intCast(unpack.body)];
             },
         };

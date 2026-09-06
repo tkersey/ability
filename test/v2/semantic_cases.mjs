@@ -3,13 +3,13 @@
 export const programNames = ['lexical','deep','recursive','choices-all','choices-first','generator',
   'state-local','state-shared','resource-scalar','resource-pair','answers','scoped-reader','writer-raise',
   'scheduler','queens-dfs','queens-bfs','cell-order','nested','shallow','injection','indexed','abort-custody',
-  'unwind','reentrant','cloned','clause-abort','bounded-values','scalar-contracts','ownership'];
+  'unwind','reentrant','cloned','clause-abort','bounded-values','scalar-contracts','ownership','shallow-resumptions','shallow-injection'];
 const scalar=(value)=>{const bytes=Buffer.alloc(8);bytes.writeBigUInt64LE(BigInt(value));return [...bytes];};
 export const cases=[];
 function add(name,program,initial=[],responses=[],cancellations=[]) { cases.push({name,program,initial,responses,cancellations}); }
 for(const name of ['deep','choices-all','choices-first','state-local','state-shared','answers','writer-raise','cell-order','nested','bounded-values']) add(name,name);
 add('lexical','lexical',scalar(40)); add('recursive-10000','recursive',scalar(10000));
-for(const name of ['shallow','injection']) for(const input of [0,1]) add(`${name}-${input}`,name,[input]);
+for(const name of ['shallow','injection','shallow-injection']) for(const input of [0,1]) add(`${name}-${input}`,name,[input]);
 for(const name of ['generator','scheduler','reentrant','cloned','ownership']) add(name,name,[],name==='generator'?[[]]:[]);
 for(const name of ['resource-scalar','resource-pair']) {
   add(name,name,[],[scalar(41),[],[]]);
@@ -23,3 +23,4 @@ add('clause-abort','clause-abort',[],[[]]);
 for(const name of ['queens-dfs','queens-bfs']) add(name,name,[],[scalar(201),[],[],scalar(202),[],[]]);
 for(const primary of [0,1]) for(const cancel of [false,true]) add(`unwind-${primary}-${cancel?'cancel':'continue'}`,'unwind',[primary],[[],[]],cancel?[{at:0,reason:'stop',preservesRequest:true},{at:0,reason:'later',preservesRequest:true}]:[]);
 for(let index=0;index<19;index++) add(`scalar-contract-${index}`,'scalar-contracts',[index]);
+add('shallow-resumptions','shallow-resumptions');

@@ -510,10 +510,58 @@ pub const Flow = struct {
         }
     }
 
+    fn childPath(self: Flow, path: usize, step: Step) ?usize {
+        if (path == 0) return 0;
+        const selected = self.paths.items[path - 1];
+        return if (std.meta.eql(selected.step, step)) selected.tail else null;
+    }
+
+    fn sequenceInstruction(
+        self: *Flow,
+        pending: *std.ArrayList(Trace),
+        trace: Trace,
+        op: p.Instruction,
+    ) a.Error!void {
+        const sequence = op.operands[0];
+        switch (op.opcode) {
+            .sequence_concat, .sequence_take => {
+                try self.push(pending, trace.block, sequence, trace.path);
+                if (op.opcode == .sequence_concat)
+                    try self.push(pending, trace.block, op.operands[1], trace.path);
+            },
+            .sequence_append, .sequence_set => {
+                const element = self.childPath(trace.path, .element) orelse return;
+                try self.push(pending, trace.block, sequence, trace.path);
+                const added = op.operands[if (op.opcode == .sequence_append) 1 else 2];
+                try self.push(pending, trace.block, added, element);
+            },
+            .sequence_pop => {
+                const present = self.childPath(trace.path, .{ .field = 1 }) orelse return;
+                if (self.childPath(present, .{ .field = 0 })) |element|
+                    try self.push(pending, trace.block, sequence, try self.prepend(.element, element));
+                if (self.childPath(present, .{ .field = 1 })) |rest| {
+                    if (self.childPath(rest, .element)) |element|
+                        try self.push(pending, trace.block, sequence, try self.prepend(.element, element));
+                }
+            },
+            .sequence_pop_last => {
+                if (self.childPath(trace.path, .{ .field = 0 })) |rest|
+                    try self.push(pending, trace.block, sequence, rest);
+                if (self.childPath(trace.path, .{ .field = 1 })) |optional| {
+                    if (self.childPath(optional, .{ .field = 1 })) |element|
+                        try self.push(pending, trace.block, sequence, try self.prepend(.element, element));
+                }
+            },
+            else => return error.InvalidProgram,
+        }
+    }
+
     fn instruction(self: *Flow, pending: *std.ArrayList(Trace), trace: Trace, op: p.Instruction) a.Error!void {
         const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
         switch (op.opcode) {
             .move => try self.push(pending, trace.block, op.operands[0], trace.path),
+            .select => for (op.operands[1..]) |slot|
+                try self.push(pending, trace.block, slot, trace.path),
             .product => {
                 if (path) |selected| {
                     if (selected.step == .field and selected.step.field < op.operands.len) try self.push(pending, trace.block, op.operands[@intCast(selected.step.field)], selected.tail);
@@ -544,7 +592,13 @@ pub const Flow = struct {
             .package => if (path) |selected| {
                 if (selected.step == .package_token) try self.push(pending, trace.block, op.operands[0], selected.tail);
             } else try self.push(pending, trace.block, op.operands[0], 0),
-            .sequence_append, .sequence_concat, .sequence_pop, .sequence_set, .sequence_take, .sequence_pop_last, .select => for (op.operands) |slot| try self.push(pending, trace.block, slot, 0),
+            .sequence_append,
+            .sequence_concat,
+            .sequence_pop,
+            .sequence_set,
+            .sequence_take,
+            .sequence_pop_last,
+            => try self.sequenceInstruction(pending, trace, op),
             .constant, .integer_add, .integer_sub, .integer_mul, .integer_div, .integer_rem, .integer_bit_not, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .integer_convert, .enum_tag, .equal, .less, .boolean_not, .variant_tag, .sequence_length, .cell_set, .resource_pack, .resource_unpack, .blob_length, .blob_concat, .blob_slice, .blob_compare, .blob_byte, .text_scalar, .text_integer, .blob_from_byte => {}, // Scalar results and owned resources with exportable representations have no borrows.
         }
     }

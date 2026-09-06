@@ -487,7 +487,18 @@ export function execute(source, initial, responses = [], cancellations = []) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const sources = await Promise.all(process.argv.slice(2).map(async (path) => JSON.parse(await readFile(path, "utf8"))));
-  assert.equal(sources.length, 29);
+  assert.equal(sources.length, 31);
+  for (const injected of [0, 1]) {
+    const result = execute(sources[30], [injected]);
+    assert.equal(result.kind, "Completed");
+    assert.deepEqual(result.trace, []);
+    assert.deepEqual(result.value, [injected ? 209 : 109, 0, 0, 0, 0, 0, 0, 0]);
+  }
+  const shallowResumptions = execute(sources[29], []);
+  assert.equal(shallowResumptions.kind, "Completed");
+  assert.deepEqual(shallowResumptions.trace, []);
+  assert.deepEqual(shallowResumptions.value,
+    [99, 99, 99, 99, 42, 42, 42, 42].flatMap(value => [value, 0, 0, 0, 0, 0, 0, 0]));
   const ownership = execute(sources[28], []);
   assert.equal(ownership.kind, "Completed");
   assert.deepEqual(ownership.value, [1, 0, 0, 0, 0, 0, 0, 0]);
@@ -632,5 +643,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const roles = ["arithmetic_overflow", "division_by_zero", "capacity_exceeded", "invalid_utf8", "invalid_index", "invalid_variant"];
     assert.deepEqual(result.value, failed ? [roles.indexOf(expected)] : scalar(expected), `scalar-contracts ${index}`);
   }
-  console.log("independent source oracle: 29 compiled source fixtures and cancellation/cleanup scenarios passed");
+  console.log("independent source oracle: 31 compiled source fixtures and cancellation/cleanup scenarios passed");
 }

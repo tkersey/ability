@@ -16,7 +16,7 @@ embedded in BPI2.
 Build and use the command:
 
 ```sh
-zig build build-bpi1-lift -Dv2=true
+zig build build-bpi1-lift
 zig-out/bin/bpi1-lift < application.bpi1 > application.bpi2
 zig-out/bin/bpi1-lift --value application.bpi1 to-v2 initial < initial.v1 > initial.v2
 ```

@@ -175,7 +175,14 @@ fn remap(comptime T: type, value: T, nodes: []const u64, blobs: []const u64, all
     };
 }
 
-pub fn encodedLength(state: g.State) Error!usize {
+/// Exact output size for the same logical records passed to encode.
+pub fn encodedLength(allocator: std.mem.Allocator, state: g.State) Error!usize {
+    var normalized = try canonicalize(allocator, state);
+    defer normalized.deinit();
+    return canonicalLength(normalized.state);
+}
+
+fn canonicalLength(state: g.State) Error!usize {
     var writer: wire.Writer = .{};
     try record.write(g.State, state, &writer);
     return std.math.add(usize, writer.position, wire.header_length) catch error.InvalidLength;
@@ -205,7 +212,7 @@ pub const Emission = struct {
 pub fn emit(allocator: std.mem.Allocator, state: g.State, output: std.mem.Allocator, statistics: ?*Statistics) Error!Emission {
     var normalized = try canonicalizeMeasured(allocator, state, statistics);
     errdefer normalized.deinit();
-    const bytes = try output.alloc(u8, try encodedLength(normalized.state));
+    const bytes = try output.alloc(u8, try canonicalLength(normalized.state));
     errdefer output.free(bytes);
     _ = try encodeCanonical(normalized.state, bytes);
     return .{ .normalized = normalized, .bytes = bytes };
@@ -213,7 +220,7 @@ pub fn emit(allocator: std.mem.Allocator, state: g.State, output: std.mem.Alloca
 
 /// Encodes a canonical logical graph. Full program-relative admission is separate.
 fn encodeCanonical(state: g.State, output: []u8) Error![]const u8 {
-    const length = try encodedLength(state);
+    const length = try canonicalLength(state);
     if (output.len < length) return error.Capacity;
     var writer: wire.Writer = .{ .output = output[0..length] };
     try writer.put(wire.magic(.pst));
@@ -275,6 +282,41 @@ test "graph decoding rejects unreachable garbage instead of dropping it" {
     var output: [256]u8 = undefined;
     const bytes = try encodeCanonical(state, &output);
     try std.testing.expectError(error.NonCanonical, decodeGraph(std.testing.allocator, bytes));
+}
+
+test "caller-owned sizing includes canonical reference widths" {
+    const allocator = std.testing.allocator;
+    var nodes: [130]g.Node = undefined;
+    for (&nodes) |*node| node.* = .{ .environment = .{ .values = &.{}, .tail = null } };
+    var aliases: [100]g.Value = undefined;
+    @memset(&aliases, .{ .schema = 0, .body = .{ .reference = .{ .id = 0 } } });
+    nodes[nodes.len - 1].environment.values = &aliases;
+    var roots: [nodes.len - 1]g.OwnedRef = undefined;
+    for (&roots, 1..) |*root, id| root.* = .{ .node = .{ .id = id } };
+    const state: g.State = .{
+        .program_identity = .{0} ** 32,
+        .status = .active,
+        .roots = .{ .detached = &roots },
+        .nodes = &nodes,
+    };
+    const Measure = struct {
+        fn run(storage: std.mem.Allocator, input: g.State) !void {
+            try std.testing.expectEqual(@as(usize, 982), try encodedLength(storage, input));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Measure.run, .{state});
+    const length = try encodedLength(allocator, state);
+    try std.testing.expect(length > try canonicalLength(state));
+    const output = try allocator.alloc(u8, length);
+    defer allocator.free(output);
+    @memset(output, 0xaa);
+    try std.testing.expectError(error.Capacity, encode(allocator, state, output[0 .. length - 1]));
+    try std.testing.expect(std.mem.allEqual(u8, output, 0xaa));
+    const bytes = try encode(allocator, state, output);
+    try std.testing.expectEqual(length, bytes.len);
+    var decoded = try decodeGraph(allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqual(length, try encodedLength(allocator, decoded.state));
 }
 
 fn detachedAllocationCase(allocator: std.mem.Allocator) !void {

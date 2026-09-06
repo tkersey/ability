@@ -3,6 +3,39 @@ const source = @import("../source.zig");
 const examples = @import("examples.zig");
 const data = @import("boundary_data_v2");
 
+test "product destructuring requires distinct simultaneous variable binders" {
+    for (0..4) |duplicate| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const integer = try b.scalar(u64);
+        const product = try b.schema(.{ .product = &.{ integer, integer, integer } });
+        var variables = [_]data.program.Id{
+            try b.variable(integer), try b.variable(integer), try b.variable(integer),
+        };
+        if (duplicate < 3) {
+            const pairs = [_][2]usize{ .{ 0, 1 }, .{ 1, 2 }, .{ 0, 2 } };
+            variables[pairs[duplicate][1]] = variables[pairs[duplicate][0]];
+        }
+        const values = try b.primitive(product, .product, &.{
+            try b.constant(u64, 1), try b.constant(u64, 2), try b.constant(u64, 3),
+        }, 0);
+        const main = try b.declare(&.{}, integer, &.{}, &.{});
+        try b.define(main, try b.term(.{ .unpack_product = .{
+            .value = values,
+            .variables = &variables,
+            .body = try b.pure(try b.reference(variables[2])),
+        } }));
+        const module = b.module(main, unit);
+        if (duplicate < 3) {
+            try std.testing.expectError(error.InvalidSource, source.lower(std.testing.allocator, module));
+        } else {
+            var compiled = try source.lower(std.testing.allocator, module);
+            defer compiled.deinit();
+        }
+    }
+}
+
 test "a nested suspension package retains implicit handler and region borrows" {
     const gen = @import("../library/generator.zig");
     for (0..5) |form| {
@@ -684,8 +717,69 @@ test "escaping choice captures own even a region with no live cells" {
     }
 }
 
+fn projectionPayload(b: *source.Builder, schema: data.program.Id, value: data.program.Id) !data.program.Id {
+    return b.value(.{ .schema = schema, .expression = .{ .primitive = .{
+        .opcode = .variant_payload,
+        .operands = &.{value},
+        .immediate = 1,
+        .failures = &.{.{
+            .kind = .invalid_variant,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
+    } } });
+}
+
+fn aggregateProjection(
+    b: *source.Builder,
+    pair: data.program.Id,
+    fresh: data.program.Id,
+    older: data.program.Id,
+    form: usize,
+) !data.program.Id {
+    const value = try b.primitive(pair, .product, &.{ fresh, older }, 0);
+    if (form == 0)
+        return b.primitive(pair, .select, &.{ try b.constant(bool, true), value, value }, 0);
+    const unit = try b.scalar(void);
+    const sequence = try b.schema(.{ .seq = pair });
+    const optional = try b.schema(.{ .sum = &.{ unit, pair } });
+    const values = try b.primitive(sequence, .sequence, &.{value}, 0);
+    const zero = try b.constant(u64, 0);
+    const transformed = switch (form) {
+        1 => try b.primitive(sequence, .sequence_concat, &.{ values, values }, 0),
+        2 => blk: {
+            const empty = try b.primitive(sequence, .sequence, &.{}, 0);
+            break :blk try b.primitive(sequence, .sequence_append, &.{ empty, value }, 0);
+        },
+        3 => try b.primitive(sequence, .sequence_take, &.{ values, try b.constant(u64, 1) }, 0),
+        4 => try b.value(.{ .schema = sequence, .expression = .{ .primitive = .{
+            .opcode = .sequence_set,
+            .operands = &.{ values, zero, value },
+            .failures = &.{.{
+                .kind = .invalid_index,
+                .value = try b.failureLiteral(try b.constant(void, {})),
+            }},
+        } } }),
+        5 => {
+            const parts = try b.schema(.{ .product = &.{ pair, sequence } });
+            const result = try b.schema(.{ .sum = &.{ unit, parts } });
+            const popped = try b.primitive(result, .sequence_pop, &.{values}, 0);
+            const present = try projectionPayload(b, parts, popped);
+            return b.primitive(pair, .field, &.{present}, 0);
+        },
+        else => {
+            const parts = try b.schema(.{ .product = &.{ sequence, optional } });
+            const popped = try b.primitive(parts, .sequence_pop_last, &.{values}, 0);
+            const last = try b.primitive(optional, .field, &.{popped}, 1);
+            return projectionPayload(b, pair, last);
+        },
+    };
+    const found = try b.primitive(optional, .sequence_get, &.{ transformed, zero }, 0);
+    return projectionPayload(b, pair, found);
+}
+
 test "handler return distinguishes fresh capabilities from older same-family values" {
-    for (0..8) |form| {
+    var rejected_valid = false;
+    for (0..22) |form| {
         var b = source.Builder.init(std.testing.allocator);
         defer b.deinit();
         const unit = try b.scalar(void);
@@ -715,11 +809,15 @@ test "handler return distinguishes fresh capabilities from older same-family val
                 try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
                 break :blk try b.term(.{ .call = .{ .function = identity, .arguments = &.{selected} } });
             },
-            else => blk: {
+            3 => blk: {
                 const items = try b.primitive(sequence, .sequence, &.{selected}, 0);
                 const found = try b.primitive(optional, .sequence_get, &.{ items, try b.constant(u64, 0) }, 0);
                 const extracted = try b.value(.{ .schema = cap, .expression = .{ .primitive = .{ .opcode = .variant_payload, .operands = &.{found}, .immediate = 1, .failures = &.{.{ .kind = .invalid_variant, .value = try b.failureLiteral(try b.constant(void, {})) }} } } });
                 break :blk try b.pure(extracted);
+            },
+            else => blk: {
+                const value = try aggregateProjection(&b, pair, fresh, older, form / 2 - 4);
+                break :blk try b.pure(try b.primitive(cap, .field, &.{value}, form % 2));
             },
         };
         try b.define(inner, returned);
@@ -735,8 +833,13 @@ test "handler return distinguishes fresh capabilities from older same-family val
         const module = b.module(main, unit);
         var diagnostic: source.Diagnostic = .{};
         if (form % 2 == 1) {
-            var compiled = try source.lower(std.testing.allocator, module);
-            defer compiled.deinit();
+            if (source.lower(std.testing.allocator, module)) |result| {
+                var compiled = result;
+                compiled.deinit();
+            } else |err| {
+                std.debug.print("valid capability projection {d}: {s}\n", .{ form, @errorName(err) });
+                rejected_valid = true;
+            }
         } else if (source.lowerObserved(std.testing.allocator, module, .{ .diagnostic = &diagnostic })) |result| {
             var unexpected = result;
             unexpected.deinit();
@@ -749,6 +852,7 @@ test "handler return distinguishes fresh capabilities from older same-family val
             try std.testing.expect(diagnostic.target.handler != null);
         }
     }
+    try std.testing.expect(!rejected_valid);
 }
 
 test "a nested handler cannot leave its fresh capability in an older cell" {
@@ -801,4 +905,64 @@ test "a nested handler cannot leave its fresh capability in an older cell" {
             return error.ExpectedCapabilityStoreRejection;
         } else |err| try std.testing.expectEqual(error.InvalidOwnership, err);
     }
+}
+
+fn successorRowExample(b: *source.Builder, comptime correct: bool, comptime initial_successor: bool) !source.Module {
+    const unit = try b.scalar(void);
+    const handled = try b.effect(.{ .identity = "review/successor-A", .payload = unit, .result = unit, .external = false });
+    const residual = try b.effect(.{ .identity = "review/successor-B", .payload = unit, .result = unit, .external = true });
+    const cap = try b.schema(.{ .internal = .{ .capability = handled } });
+    const before = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = handled,
+        .input = unit,
+        .answer = unit,
+        .mode = .shallow,
+        .use = .linear,
+        .handled = &.{handled},
+        .effects = &.{ handled, residual },
+        .escaping = &.{residual},
+        .capture_bound = &.{ unit, cap },
+    } } });
+    const after = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = handled,
+        .input = unit,
+        .answer = unit,
+        .mode = .deep,
+        .use = .linear,
+        .handled = &.{handled},
+        .effects = if (correct) &.{residual} else &.{},
+        .capture_bound = &.{ unit, cap },
+    } } });
+    const returns = try b.declare(&.{unit}, unit, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+    const successor_clause = try b.declare(&.{ unit, after }, unit, if (correct) &.{residual} else &.{}, &.{});
+    try b.define(successor_clause, try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(successor_clause, 1)), .argument = try b.constant(void, {}) } }));
+    const successor = try b.handler(.{ .mode = .deep, .input = unit, .answer = unit, .effects = if (correct) &.{residual} else &.{}, .return_function = returns, .clauses = &.{.{ .effect = handled, .function = successor_clause, .resumption = after }} });
+    const first_clause = try b.declare(&.{ unit, before }, unit, &.{residual}, &.{});
+    try b.define(first_clause, try b.term(.{ .resume_with = .{ .resumption = try b.reference(b.parameter(first_clause, 1)), .argument = try b.constant(void, {}), .handler = successor } }));
+    const initial = try b.handler(.{ .mode = .shallow, .input = unit, .answer = unit, .effects = &.{residual}, .return_function = returns, .clauses = &.{.{ .effect = handled, .function = first_clause, .resumption = before }} });
+    const body = try b.declare(&.{cap}, unit, &.{ handled, residual }, &.{});
+    const operation = try b.term(.{ .perform = .{ .effect = handled, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } });
+    const final = try b.term(.{ .perform = .{ .effect = residual, .payload = try b.constant(void, {}) } });
+    const first_result = try b.variable(unit);
+    const second_result = try b.variable(unit);
+    try b.define(body, try b.bind(first_result, operation, try b.bind(second_result, operation, final)));
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{ handled, residual } } } });
+    const entry = try b.declare(&.{}, unit, &.{residual}, &.{});
+    try b.define(entry, try b.term(.{ .handle = .{ .handler = if (initial_successor) successor else initial, .body = try b.lambda(body, body_type) } }));
+    return b.module(entry, unit);
+}
+
+test "initial and successor installations preserve resumption effect bounds" {
+    inline for (.{ false, true }) |complete| inline for (.{ false, true }) |initial| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const module = try successorRowExample(&b, complete, initial);
+        if (complete) {
+            var compiled = try source.lower(std.testing.allocator, module);
+            defer compiled.deinit();
+        } else {
+            try std.testing.expectError(error.InvalidEffect, source.lower(std.testing.allocator, module));
+        }
+    };
 }

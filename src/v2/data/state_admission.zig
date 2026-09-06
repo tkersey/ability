@@ -9,6 +9,7 @@ const image = @import("image.zig");
 const contracts = @import("contracts.zig");
 const traits = @import("traits.zig");
 const borrows = @import("borrow_flow.zig");
+const state_effects = @import("state_effects.zig");
 pub const Error = image.Error || error{ InvalidState, InvalidScope };
 
 pub fn node(state: g.State, reference: g.NodeRef) Error!g.Node {
@@ -71,6 +72,8 @@ pub fn validate(allocator: std.mem.Allocator, program: p.Program, state: g.State
         .environments = try temporary.alloc(usize, state.nodes.len),
         .region_owners = try temporary.alloc(usize, state.nodes.len),
         .loan_resources = try temporary.alloc(?g.NodeRef, state.nodes.len),
+        .captured_delimiters = try temporary.alloc(?p.Id, state.nodes.len),
+        .frame_children = try temporary.alloc(?g.NodeRef, state.nodes.len),
         .enter = try temporary.alloc(usize, state.nodes.len),
         .leave = try temporary.alloc(usize, state.nodes.len),
     };
@@ -79,6 +82,8 @@ pub fn validate(allocator: std.mem.Allocator, program: p.Program, state: g.State
     @memset(context.environments, 0);
     @memset(context.region_owners, 0);
     @memset(context.loan_resources, null);
+    @memset(context.captured_delimiters, null);
+    @memset(context.frame_children, null);
     if (state.roots.detached.len != 0) return error.InvalidState;
     switch (state.status) {
         .active, .yielded => {
@@ -98,13 +103,19 @@ pub fn validate(allocator: std.mem.Allocator, program: p.Program, state: g.State
             if (try node(state, state.roots.current.?) != .unwind) return error.InvalidState;
         },
     }
-    try context.custodian(state.roots.current);
+    try context.custodian(state.roots.current, null);
     // Count custody before following captures, so shared forged control rejects in O(N).
-    for (state.nodes) |record| {
-        try context.custodian(frameParent(record));
+    for (state.nodes, 0..) |record, id| {
+        try context.custodian(frameParent(record), .{ .id = id });
         switch (record) {
-            .one_shot, .multi_template => |v| try context.custodian(v.capture),
-            .pending => |v| try context.custodian(v.continuation),
+            .one_shot, .multi_template => |v| {
+                try context.custodian(v.capture, .{ .id = id });
+                if (try node(state, v.delimiter) != .attachment) return error.InvalidState;
+                const captured = &context.captured_delimiters[@intCast(v.delimiter.id)];
+                if (captured.* != null) return error.InvalidOwnership;
+                captured.* = v.schema;
+            },
+            .pending => |v| try context.custodian(v.continuation, .{ .id = id }),
             .computation => |v| {
                 if (v.environment.id >= state.nodes.len) return error.InvalidReference;
                 context.environments[@intCast(v.environment.id)] += 1;
@@ -132,11 +143,26 @@ pub fn validate(allocator: std.mem.Allocator, program: p.Program, state: g.State
     for (state.nodes, context.region_owners) |record, count| if (record == .region and count != 1) return error.InvalidOwnership;
     try context.frameForest();
     try context.exits();
+    context.effect_check = try state_effects.Check.init(
+        temporary,
+        program,
+        state,
+        context.captured_delimiters,
+        context.frame_children,
+        context.enter,
+        context.leave,
+    );
     for (state.blobs) |blob| try a.value(temporary, program.schemas, context.facts, .{ .schema = blob.schema, .bytes = blob.bytes });
     var pending_count: usize = 0;
     for (state.nodes, 0..) |record, id| {
         try context.checkRecord(record, id);
         if (record == .pending) pending_count += 1;
+    }
+    // Frame custody prevents a dormant capture from sharing the live control
+    // spine. Every suspended delimiter must belong to one such capture.
+    for (state.nodes, context.captured_delimiters) |record, captured| {
+        if (record == .attachment and record.attachment.phase == .suspended and captured == null)
+            return error.InvalidState;
     }
     if (pending_count != @as(usize, if (state.roots.pending != null) 1 else 0)) return error.InvalidState;
     try context.valueScopes();
@@ -166,6 +192,9 @@ const Context = struct {
     environments: []usize,
     region_owners: []usize,
     loan_resources: []?g.NodeRef,
+    captured_delimiters: []?p.Id,
+    frame_children: []?g.NodeRef,
+    effect_check: ?state_effects.Check = null,
     enter: []usize,
     leave: []usize,
 
@@ -197,11 +226,12 @@ const Context = struct {
         if (self.state.roots.exit != null and self.state.status != .unwinding and running == 0) return error.InvalidState;
     }
 
-    fn custodian(self: *Context, reference: ?g.NodeRef) Error!void {
+    fn custodian(self: *Context, reference: ?g.NodeRef, child: ?g.NodeRef) Error!void {
         if (reference) |ref| {
             if (!isFrame(try node(self.state, ref))) return error.InvalidState;
             self.custody[@intCast(ref.id)] += 1;
             if (self.custody[@intCast(ref.id)] > 1) return error.InvalidOwnership;
+            self.frame_children[@intCast(ref.id)] = child;
         }
     }
 
@@ -334,10 +364,7 @@ const Context = struct {
     }
 
     fn slotType(_: Context, block: p.Block, slot: p.Id) Error!p.Id {
-        if (slot < block.parameters.len) return block.parameters[@intCast(slot)];
-        const index = slot - block.parameters.len;
-        if (index >= block.instructions.len) return error.InvalidReference;
-        return block.instructions[@intCast(index)].result_type;
+        return contracts.slotSchema(block, slot);
     }
 
     fn checkParent(self: Context, reference: ?g.NodeRef, result_type: p.Id) Error!void {
@@ -457,6 +484,10 @@ const Context = struct {
                 const block = self.program.blocks[@intCast(control.block)];
                 try self.values(control.arguments, block.parameters);
                 try self.checkParent(control.parent, self.program.functions[@intCast(block.function)].result);
+                try self.effect_check.?.requireEffects(
+                    control.parent,
+                    self.program.functions[@intCast(block.function)].effects,
+                );
                 try self.evidence(control.evidence);
                 if (control.evidence) |evidence_ref| try self.containsScope(control.parent, evidence_ref);
                 try self.region(control.region);
@@ -483,6 +514,10 @@ const Context = struct {
                     }
                 }
                 try self.checkParent(saved.parent, self.program.functions[@intCast(source.function)].result);
+                try self.effect_check.?.requireEffects(
+                    saved.parent,
+                    self.program.functions[@intCast(source.function)].effects,
+                );
                 try self.evidence(saved.evidence);
                 if (saved.evidence) |evidence_ref| try self.containsScope(saved.parent, evidence_ref);
                 try self.region(saved.region);
@@ -504,6 +539,7 @@ const Context = struct {
                 if (attachment.phase == .active) if (attachment.outer) |outer| try self.containsScope(attachment.return_to, outer);
                 if (!std.meta.eql(attachment.region, activation.handler.region)) return error.InvalidScope;
                 if (attachment.phase == .active) try self.regionContext(attachment.region, attachment.return_to);
+                try self.effect_check.?.attachment(.{ .id = id });
             },
             .environment => |environment| {
                 if (environment.tail != null) return error.InvalidState;
