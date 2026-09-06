@@ -1,12 +1,20 @@
 // Deterministic release containers and inert source provenance. No evaluator.
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, lstat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 export const json = (value) => Buffer.from(JSON.stringify(value, null, 2) + '\n');
+function sourceGit(root) {
+  const cwd = realpathSync(root);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
+  const git = (...args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env, maxBuffer: 64 << 20 });
+  if (realpathSync(git('rev-parse', '--show-toplevel').toString().trim()) !== cwd) throw new Error('source must select the repository root');
+  return git;
+}
 export function safeName(name) {
   if (typeof name !== 'string' || !/^[A-Za-z0-9_.\-/]+$/.test(name) || name.startsWith('/') || name.split('/').some((part)=>!part || part === '.' || part === '..')) throw new Error(`unsafe asset name: ${name}`);
   return name;
@@ -83,7 +91,7 @@ export function readBundle(manifest,bytes) {
   return result;
 }
 export async function sourceIdentity(root) {
-  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:16<<20}).trim();
+  const readGit=sourceGit(root), git=(...args)=>readGit(...args).toString().trim();
   const head=git('rev-parse','HEAD'), tree=git('rev-parse','HEAD^{tree}');
   const dirty=git('status','--porcelain','--untracked-files=all').length!==0;
   const names=git('ls-files','--cached','--others','--exclude-standard','-z').split('\0').filter((name)=>name&&name!=='.learnings.jsonl'&&!name.startsWith('.ledger/'));

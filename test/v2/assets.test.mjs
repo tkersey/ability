@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { tarGzip, readTarGzip, indexedBundle, readBundle, writeAssets, verifyAssets } from '../../tools/v2/assets.mjs';
+import { execFileSync } from 'node:child_process';
+import { tarGzip, readTarGzip, indexedBundle, readBundle, writeAssets, verifyAssets, sourceIdentity } from '../../tools/v2/assets.mjs';
 
 const files = [{ name: 'z/data.bin', bytes: Buffer.from([0, 255]) }, { name: 'a/run', bytes: Buffer.from('hello'), executable: true }];
 function repairChecksum(bytes) {
@@ -73,5 +74,30 @@ test('outer asset admission rejects inventory or content changes before consumer
     await assert.rejects(verifyAssets(directory, ['first.bin', 'absent.bin']), /inventory/);
     await writeFile(join(directory, 'first.bin'), Buffer.from([1, 2, 4]));
     await assert.rejects(verifyAssets(directory, ['first.bin']), /digest/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('source identity belongs to the selected repository and immutable commit', async () => {
+  const cache = resolve(import.meta.dirname, '../../.cache/v2/assets-tests');
+  await mkdir(cache, { recursive: true });
+  const directory = await mkdtemp(join(cache, 'source-'));
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=Source test', '-c', 'user.email=source@example.invalid', '-c', 'core.hooksPath=/dev/null', ...args], { cwd: directory }).toString().trim();
+  try {
+    git('init', '--quiet');
+    await mkdir(join(directory, 'src'));
+    await writeFile(join(directory, 'src/example.txt'), 'old contents');
+    git('add', 'src'); git('commit', '--quiet', '--no-gpg-sign', '-m', 'old');
+    const old = git('rev-parse', 'HEAD');
+    await writeFile(join(directory, 'src/example.txt'), 'current contents');
+    git('add', 'src'); git('commit', '--quiet', '--no-gpg-sign', '-m', 'current');
+    const actual = await sourceIdentity(directory);
+    git('replace', actual.git.head, old);
+    assert.deepEqual(await sourceIdentity(directory), actual);
+    const saved = process.env.GIT_DIR;
+    try {
+      process.env.GIT_DIR = join(directory, 'absent.git');
+      assert.deepEqual(await sourceIdentity(directory), actual);
+      await assert.rejects(sourceIdentity(join(directory, 'src')), /repository root/);
+    } finally { if (saved === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved; }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
