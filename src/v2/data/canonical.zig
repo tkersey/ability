@@ -172,6 +172,11 @@ const Visitor = struct {
         }
         return output orelse values;
     }
+    fn set(self: *Visitor, kind: Kind, values: []const p.Id) Error![]const p.Id {
+        const output = try self.ids(kind, values);
+        if (!self.scanning) std.mem.sort(p.Id, @constCast(output), {}, std.sort.asc(p.Id));
+        return output;
+    }
     fn row(self: *Visitor, values: []const p.Id) Error![]const p.Id {
         if (self.scanning) {
             const ordered = try self.scratch.dupe(p.Id, values);
@@ -183,14 +188,10 @@ const Visitor = struct {
             _ = try self.ids(.effect, ordered);
             return values;
         }
-        const output = @constCast(try self.ids(.effect, values));
-        std.mem.sort(p.Id, output, {}, std.sort.asc(p.Id));
-        return output;
+        return self.set(.effect, values);
     }
     fn regions(self: *Visitor, values: []const p.Id) Error![]const p.Id {
-        const output = try self.ids(.region, values);
-        if (!self.scanning) std.mem.sort(p.Id, @constCast(output), {}, std.sort.asc(p.Id));
-        return output;
+        return self.set(.region, values);
     }
     fn optional(self: *Visitor, kind: Kind, value: ?p.Id) Error!?p.Id {
         return if (value) |old| try self.id(kind, old) else null;
@@ -323,7 +324,7 @@ const Visitor = struct {
         return .{ .fields = try self.ids(.schema, value.fields), .owned_regions = try self.regions(value.owned_regions), .borrowed_regions = try self.regions(value.borrowed_regions), .use = value.use };
     }
     fn resource(self: *Visitor, value: p.Resource) Error!p.Resource {
-        return .{ .representation = try self.id(.schema, value.representation), .introducers = try self.ids(.function, value.introducers), .eliminators = try self.ids(.function, value.eliminators) };
+        return .{ .representation = try self.id(.schema, value.representation), .introducers = try self.set(.function, value.introducers), .eliminators = try self.set(.function, value.eliminators) };
     }
     fn constructor(self: *Visitor, value: p.Constructor) Error!p.Constructor {
         return .{ .function = try self.id(.function, value.function), .capture = try self.id(.capture, value.capture), .schema = try self.id(.schema, value.schema) };

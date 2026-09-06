@@ -3,6 +3,114 @@ const source = @import("../source.zig");
 const examples = @import("examples.zig");
 const data = @import("boundary_data_v2");
 
+test "a nested suspension package retains implicit handler and region borrows" {
+    const gen = @import("../library/generator.zig");
+    for (0..5) |form| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const r = b.region();
+        const region = try b.schema(.{ .internal = .{ .region = r } });
+        const uses_region = form == 2 or form == 4;
+        const regions: []const data.program.Id = if (uses_region) &.{r} else &.{};
+        const generator = try gen.define(&b, "implicit-package-borrow", unit, &.{unit}, &.{}, .{ .effects = &.{} });
+        const yielded_body = try b.declare(&.{generator.capability}, unit, &.{generator.effect}, &.{});
+        try b.define(yielded_body, try b.term(.{ .perform = .{ .effect = generator.effect, .capability = try b.reference(b.parameter(yielded_body, 0)), .payload = try b.constant(void, {}) } }));
+        const yielded_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{generator.capability}, .result = unit, .effects = &.{generator.effect} } } });
+        const installed = try b.term(.{ .handle = .{ .handler = generator.handler, .body = try b.lambda(yielded_body, yielded_type) } });
+        const consume = try b.declare(&.{generator.answer}, unit, &.{}, &.{});
+        const done = try b.variable(unit);
+        const yielded = try b.variable(generator.yielded);
+        const payload = try b.variable(unit);
+        const package = try b.variable(generator.package);
+        const unpack = try b.term(.{ .unpack_product = .{ .value = try b.reference(yielded), .variables = &.{ payload, package }, .body = try gen.close(&b, generator, try b.reference(package)) } });
+        try b.define(consume, try b.term(.{ .match_sum = .{ .value = try b.reference(b.parameter(consume, 0)), .cases = &.{ .{ .variable = done, .body = try b.pure(try b.constant(void, {})) }, .{ .variable = yielded, .body = unpack } } } }));
+        const inside_result = if (form >= 3) unit else generator.answer;
+        const scope = try b.declare(if (uses_region) &.{region} else &.{}, inside_result, &.{}, regions);
+        const result = try b.variable(generator.answer);
+        const close = try b.term(.{ .call = .{ .function = consume, .arguments = &.{try b.reference(result)} } });
+        try b.define(scope, if (form >= 3) try b.bind(result, installed, close) else installed);
+        const scope_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = if (uses_region) &.{region} else &.{}, .result = inside_result, .regions = regions } } });
+        const main = try b.declare(&.{}, unit, &.{}, &.{});
+        const wrapped = if (form == 0) installed else if (uses_region) try b.term(.{ .with_region = .{ .region = r, .body = try b.lambda(scope, scope_type) } }) else blk: {
+            const returns = try b.declare(&.{inside_result}, inside_result, &.{}, &.{});
+            try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+            const handler = try b.handler(.{ .mode = .deep, .input = inside_result, .answer = inside_result, .return_function = returns, .clauses = &.{} });
+            break :blk try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(scope, scope_type) } });
+        };
+        try b.define(main, if (form >= 3) wrapped else try b.bind(result, wrapped, close));
+        if (source.lower(std.testing.allocator, b.module(main, unit))) |result_program| {
+            var compiled = result_program;
+            defer compiled.deinit();
+            if (form == 1 or form == 2) return error.ExpectedImplicitBorrowRejection;
+        } else |err| {
+            if (form != 1 and form != 2) return err;
+            try std.testing.expectEqual(error.InvalidOwnership, err);
+        }
+    }
+}
+
+test "clause and return writes retain the lifetime of actual handler state" {
+    for (0..4) |form| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const r = b.region();
+        const region = try b.schema(.{ .internal = .{ .region = r } });
+        const effect = try b.effect(.{ .identity = "state-borrow-owner", .payload = unit, .result = unit, .external = false });
+        const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+        const cell = try b.schema(.{ .internal = .{ .cell = .{ .element = cap, .region = r } } });
+        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = effect, .input = unit, .answer = unit, .capture_bound = &.{ unit, cap, cell }, .owned_regions = &.{r}, .handled = &.{effect}, .mode = .deep, .use = .linear } } });
+        const returns = try b.declare(&.{unit}, unit, &.{}, &.{});
+        try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+        const clause = try b.declare(&.{ unit, token }, unit, &.{}, &.{});
+        try b.define(clause, try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(void, {}) } }));
+        const outer_handler = try b.handler(.{ .mode = .deep, .input = unit, .answer = unit, .return_function = returns, .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }} });
+        const write_effect = try b.effect(.{ .identity = "state-borrow-write", .payload = cap, .result = unit, .external = false });
+        const write_cap = try b.schema(.{ .internal = .{ .capability = write_effect } });
+        const write_token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = write_effect, .input = unit, .answer = unit, .capture_bound = &.{ unit, cap, cell, write_cap }, .handled = &.{write_effect}, .mode = .deep, .use = .linear } } });
+        const input = if (form < 2) unit else cap;
+        const write_returns = try b.declare(&.{ cell, input }, unit, &.{}, &.{r});
+        try b.define(write_returns, try b.pure(if (form < 2) try b.constant(void, {}) else try b.primitive(unit, .cell_set, &.{ try b.reference(b.parameter(write_returns, 0)), try b.reference(b.parameter(write_returns, 1)) }, 0)));
+        const write_clause = try b.declare(&.{ cell, cap, write_token }, unit, &.{}, &.{r});
+        const write = try b.pure(try b.primitive(unit, .cell_set, &.{ try b.reference(b.parameter(write_clause, 0)), try b.reference(b.parameter(write_clause, 1)) }, 0));
+        const resumed = try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(write_clause, 2)), .argument = try b.constant(void, {}) } });
+        try b.define(write_clause, try b.bind(try b.variable(unit), write, resumed));
+        const write_handler = try b.handler(.{ .mode = .deep, .input = input, .answer = unit, .return_function = write_returns, .clauses = &.{.{ .effect = write_effect, .function = write_clause, .resumption = write_token }}, .state = &.{cell} });
+        const middle = try b.declare(&.{ cap, cap, cell }, unit, &.{}, &.{r});
+        const selected = try b.reference(b.parameter(middle, if (form % 2 == 0) 0 else 1));
+        const body = try b.declare(&.{write_cap}, input, if (form < 2) &.{write_effect} else &.{}, &.{r});
+        try b.define(body, if (form < 2) try b.term(.{ .perform = .{ .effect = write_effect, .capability = try b.reference(b.parameter(body, 0)), .payload = selected } }) else try b.pure(selected));
+        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{write_cap}, .result = input, .effects = if (form < 2) &.{write_effect} else &.{}, .capture_bound = &.{cap}, .regions = &.{r} } } });
+        try b.define(middle, try b.term(.{ .handle = .{ .handler = write_handler, .body = try b.lambda(body, body_type), .state = &.{try b.reference(b.parameter(middle, 2))} } }));
+        const middle_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ cap, cap, cell }, .result = unit, .regions = &.{r} } } });
+        const outer = try b.declare(&.{cap}, unit, &.{effect}, &.{});
+        const scope = try b.declare(&.{region}, unit, &.{effect}, &.{r});
+        const older = try b.reference(b.parameter(outer, 0));
+        const allocated = try b.variable(cell);
+        const installation = try b.term(.{ .handle = .{ .handler = outer_handler, .body = try b.lambda(middle, middle_type), .arguments = &.{ older, try b.reference(allocated) } } });
+        const use = try b.term(.{ .perform = .{ .effect = effect, .capability = try b.primitive(cap, .cell_get, &.{try b.reference(allocated)}, 0), .payload = try b.constant(void, {}) } });
+        const allocation = try b.pure(try b.primitive(cell, .cell_new, &.{ try b.reference(b.parameter(scope, 0)), older }, 0));
+        try b.define(scope, try b.bind(allocated, allocation, try b.bind(try b.variable(unit), installation, use)));
+        const scope_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{region}, .result = unit, .effects = &.{effect}, .capture_bound = &.{cap}, .regions = &.{r} } } });
+        try b.define(outer, try b.term(.{ .with_region = .{ .region = r, .body = try b.lambda(scope, scope_type) } }));
+        const outer_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{effect} } } });
+        const main = try b.declare(&.{}, unit, &.{}, &.{});
+        try b.define(main, try b.term(.{ .handle = .{ .handler = outer_handler, .body = try b.lambda(outer, outer_type) } }));
+        if (source.lower(std.testing.allocator, b.module(main, unit))) |result_program| {
+            var compiled = result_program;
+            defer compiled.deinit();
+            if (form % 2 == 0) return error.ExpectedHandlerStateBorrowRejection;
+        } else |err| {
+            if (form % 2 == 1) {
+                std.debug.print("handler state form {d}: {any}\n", .{ form, err });
+                return err;
+            }
+            try std.testing.expectEqual(error.InvalidOwnership, err);
+        }
+    }
+}
+
 test "actual handler installation sites share executable definitions" {
     var functions: ?usize = null;
     var clause_instructions: ?usize = null;
@@ -444,5 +552,253 @@ test "unbound handler captures identify the return or operation clause" {
         try std.testing.expectEqual(function, diagnostic.function.?);
         try std.testing.expectEqual(free, diagnostic.variable.?);
         try std.testing.expectEqual(b.functions.items[@intCast(function)].body.?, diagnostic.term.?);
+    }
+}
+
+test "resource authority sets survive every three-function root permutation" {
+    const p = data.program;
+    for ([_]u3{ 3, 5, 6, 7 }) |mask| for (0..3) |entry| {
+        if (mask & (@as(u3, 1) << @intCast(entry)) == 0) continue;
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const integer = try b.scalar(u64);
+        const resource = try b.resource(integer);
+        var functions: [3]p.Id = undefined;
+        var authorities: std.ArrayList(p.Id) = .empty;
+        for (&functions, 0..) |*function, index| {
+            function.* = try b.declare(&.{}, integer, &.{}, &.{});
+            if (mask & (@as(u3, 1) << @intCast(index)) != 0) try authorities.append(b.allocator(), function.*);
+        }
+        try b.resourceAuthority(resource, authorities.items, authorities.items);
+        for (functions, 0..) |function, index| {
+            const value = try b.constant(u64, index);
+            const body = if (mask & (@as(u3, 1) << @intCast(index)) != 0) blk: {
+                const wrapped = try b.primitive(resource, .resource_pack, &.{value}, 0);
+                break :blk try b.primitive(integer, .resource_unpack, &.{wrapped}, 0);
+            } else value;
+            try b.define(function, try b.pure(body));
+        }
+        var compiled = try source.lower(std.testing.allocator, b.module(functions[entry], integer));
+        defer compiled.deinit();
+        try data.canonical.require(std.testing.allocator, compiled.program);
+        const admitted = compiled.program.scopes.resources[0];
+        try std.testing.expectEqual(@as(usize, @popCount(mask)), admitted.introducers.len);
+        try std.testing.expectEqualSlices(p.Id, admitted.introducers, admitted.eliminators);
+    };
+}
+
+test "definitely failing bind retains an unused owned function argument" {
+    for (0..4) |form| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const integer = try b.scalar(u64);
+        const resource = try b.resource(integer);
+        const factory = try b.declare(&.{}, resource, &.{}, &.{});
+        try b.resourceAuthority(resource, &.{factory}, &.{});
+        try b.define(factory, try b.pure(try b.primitive(resource, .resource_pack, &.{try b.constant(u64, 41)}, 0)));
+        const helper = try b.declare(&.{resource}, unit, &.{}, &.{});
+        const failed = try b.term(.{ .fail = try b.constant(u64, 9) });
+        const left = switch (form) {
+            0 => failed,
+            1 => try b.term(.{ .yield_then = failed }),
+            2 => try b.term(.{ .conditional = .{ .condition = try b.constant(bool, true), .when_true = failed, .when_false = failed } }),
+            else => try b.pure(try b.constant(void, {})),
+        };
+        try b.define(helper, try b.bind(try b.variable(unit), left, try b.pure(try b.constant(void, {}))));
+        const main = try b.declare(&.{}, unit, &.{}, &.{});
+        const owned = try b.variable(resource);
+        const acquired = try b.term(.{ .call = .{ .function = factory, .arguments = &.{} } });
+        const called = try b.term(.{ .call = .{ .function = helper, .arguments = &.{try b.reference(owned)} } });
+        try b.define(main, try b.bind(owned, acquired, called));
+        const module = b.module(main, integer);
+        if (form == 3) {
+            try std.testing.expectError(error.InvalidOwnership, source.lower(std.testing.allocator, module));
+        } else {
+            var compiled = try source.lower(std.testing.allocator, module);
+            defer compiled.deinit();
+        }
+    }
+}
+
+test "choice returns borrowed cells to a caller inside their live region" {
+    const choice = @import("../library/choice.zig");
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const boolean = try b.scalar(bool);
+    const integer = try b.scalar(u64);
+    const r = b.region();
+    const region = try b.schema(.{ .internal = .{ .region = r } });
+    const cell = try b.schema(.{ .internal = .{ .cell = .{ .element = integer, .region = r } } });
+    const sequence = try b.schema(.{ .seq = cell });
+    const c = try choice.family(&b, "borrowed-choice");
+    const all = try choice.allScoped(&b, c, cell, &.{ unit, boolean, cell, sequence, c.capability }, .{ .effects = &.{} }, &.{}, &.{r});
+    const body = try b.declare(&.{ c.capability, cell }, cell, &.{c.effect}, &.{r});
+    const choose = try b.term(.{ .perform = .{ .effect = c.effect, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } });
+    try b.define(body, try b.bind(try b.variable(boolean), choose, try b.pure(try b.reference(b.parameter(body, 1)))));
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ c.capability, cell }, .result = cell, .effects = &.{c.effect}, .regions = &.{r} } } });
+    const scope = try b.declare(&.{region}, integer, &.{}, &.{r});
+    const allocated = try b.variable(cell);
+    const results = try b.variable(sequence);
+    const install = try b.term(.{ .handle = .{ .handler = all.handler, .body = try b.lambda(body, body_type), .arguments = &.{try b.reference(allocated)} } });
+    const count = try b.pure(try b.primitive(integer, .sequence_length, &.{try b.reference(results)}, 0));
+    const allocation = try b.pure(try b.primitive(cell, .cell_new, &.{ try b.reference(b.parameter(scope, 0)), try b.constant(u64, 42) }, 0));
+    try b.define(scope, try b.bind(allocated, allocation, try b.bind(results, install, count)));
+    const scope_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{region}, .result = integer, .regions = &.{r} } } });
+    const main = try b.declare(&.{}, integer, &.{}, &.{});
+    try b.define(main, try b.term(.{ .with_region = .{ .region = r, .body = try b.lambda(scope, scope_type) } }));
+    var compiled = try source.lower(std.testing.allocator, b.module(main, unit));
+    defer compiled.deinit();
+    try data.canonical.require(std.testing.allocator, compiled.program);
+}
+
+test "escaping choice captures own even a region with no live cells" {
+    const choice = @import("../library/choice.zig");
+    inline for (.{ false, true }) |bounded| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const boolean = try b.scalar(bool);
+        const r = b.region();
+        const region = try b.schema(.{ .internal = .{ .region = r } });
+        const c = try choice.family(&b, "empty-region-choice");
+        const all = try choice.allScoped(&b, c, boolean, &.{ boolean, c.capability }, .{ .effects = &.{} }, if (bounded) &.{r} else &.{}, &.{});
+        const body = try b.declare(&.{c.capability}, boolean, &.{c.effect}, &.{});
+        const inside = try b.declare(&.{region}, boolean, &.{c.effect}, &.{r});
+        try b.define(inside, try b.term(.{ .perform = .{ .effect = c.effect, .capability = try b.reference(b.parameter(body, 0)), .payload = try b.constant(void, {}) } }));
+        const inside_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{region}, .result = boolean, .effects = &.{c.effect}, .capture_bound = &.{c.capability}, .regions = &.{r} } } });
+        try b.define(body, try b.term(.{ .with_region = .{ .region = r, .body = try b.lambda(inside, inside_type) } }));
+        const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{c.capability}, .result = boolean, .effects = &.{c.effect} } } });
+        const main = try b.declare(&.{}, all.answer, &.{}, &.{});
+        try b.define(main, try b.term(.{ .handle = .{ .handler = all.handler, .body = try b.lambda(body, body_type) } }));
+        const module = b.module(main, unit);
+        if (bounded) {
+            var compiled = try source.lower(std.testing.allocator, module);
+            defer compiled.deinit();
+        } else if (source.lower(std.testing.allocator, module)) |result| {
+            var unexpected = result;
+            unexpected.deinit();
+            return error.ExpectedCaptureRejection;
+        } else |err| try std.testing.expectEqual(error.InvalidOwnership, err);
+    }
+}
+
+test "handler return distinguishes fresh capabilities from older same-family values" {
+    for (0..8) |form| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const effect = try b.effect(.{ .identity = "capability-return", .payload = unit, .result = unit, .external = false });
+        const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+        const pair = try b.schema(.{ .product = &.{ cap, cap } });
+        const sequence = try b.schema(.{ .seq = cap });
+        const optional = try b.schema(.{ .sum = &.{ unit, cap } });
+        var handlers: [2]data.program.Id = undefined;
+        for (&handlers, [_]data.program.Id{ unit, cap }) |*handler, result| {
+            const returns = try b.declare(&.{result}, result, &.{}, &.{});
+            try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+            const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = effect, .input = unit, .answer = result, .capture_bound = &.{ unit, cap }, .handled = &.{effect}, .mode = .deep, .use = .linear } } });
+            const clause = try b.declare(&.{ unit, token }, result, &.{}, &.{});
+            try b.define(clause, try b.term(.{ .fail = try b.constant(void, {}) }));
+            handler.* = try b.handler(.{ .mode = .deep, .input = result, .answer = result, .return_function = returns, .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }} });
+        }
+        const inner = try b.declare(&.{ cap, cap }, cap, &.{}, &.{});
+        const fresh = try b.reference(b.parameter(inner, 0));
+        const older = try b.reference(b.parameter(inner, 1));
+        const selected = if (form % 2 == 0) fresh else older;
+        const returned = switch (form / 2) {
+            0 => try b.pure(selected),
+            1 => try b.pure(try b.primitive(cap, .field, &.{try b.primitive(pair, .product, &.{ fresh, older }, 0)}, form % 2)),
+            2 => blk: {
+                const identity = try b.declare(&.{cap}, cap, &.{}, &.{});
+                try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
+                break :blk try b.term(.{ .call = .{ .function = identity, .arguments = &.{selected} } });
+            },
+            else => blk: {
+                const items = try b.primitive(sequence, .sequence, &.{selected}, 0);
+                const found = try b.primitive(optional, .sequence_get, &.{ items, try b.constant(u64, 0) }, 0);
+                const extracted = try b.value(.{ .schema = cap, .expression = .{ .primitive = .{ .opcode = .variant_payload, .operands = &.{found}, .immediate = 1, .failures = &.{.{ .kind = .invalid_variant, .value = try b.failureLiteral(try b.constant(void, {})) }} } } });
+                break :blk try b.pure(extracted);
+            },
+        };
+        try b.define(inner, returned);
+        const inner_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ cap, cap }, .result = cap } } });
+        const outer = try b.declare(&.{cap}, unit, &.{effect}, &.{});
+        const answer = try b.variable(cap);
+        const installed = try b.term(.{ .handle = .{ .handler = handlers[1], .body = try b.lambda(inner, inner_type), .arguments = &.{try b.reference(b.parameter(outer, 0))} } });
+        const use = try b.term(.{ .perform = .{ .effect = effect, .capability = try b.reference(answer), .payload = try b.constant(void, {}) } });
+        try b.define(outer, try b.bind(answer, installed, use));
+        const outer_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{effect} } } });
+        const main = try b.declare(&.{}, unit, &.{}, &.{});
+        try b.define(main, try b.term(.{ .handle = .{ .handler = handlers[0], .body = try b.lambda(outer, outer_type) } }));
+        const module = b.module(main, unit);
+        var diagnostic: source.Diagnostic = .{};
+        if (form % 2 == 1) {
+            var compiled = try source.lower(std.testing.allocator, module);
+            defer compiled.deinit();
+        } else if (source.lowerObserved(std.testing.allocator, module, .{ .diagnostic = &diagnostic })) |result| {
+            var unexpected = result;
+            unexpected.deinit();
+            return error.ExpectedCapabilityEscapeRejection;
+        } else |err| {
+            try std.testing.expectEqual(error.InvalidOwnership, err);
+            try std.testing.expectEqual(.target_check, diagnostic.phase);
+            try std.testing.expect(diagnostic.target.block != null);
+            try std.testing.expect(diagnostic.target.callee != null);
+            try std.testing.expect(diagnostic.target.handler != null);
+        }
+    }
+}
+
+test "a nested handler cannot leave its fresh capability in an older cell" {
+    for (0..4) |form| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const r = b.region();
+        const region = try b.schema(.{ .internal = .{ .region = r } });
+        const effect = try b.effect(.{ .identity = "stored-capability", .payload = unit, .result = unit, .external = false });
+        const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+        const cell = try b.schema(.{ .internal = .{ .cell = .{ .element = cap, .region = r } } });
+        const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = effect, .input = unit, .answer = unit, .capture_bound = &.{ unit, cap, cell }, .handled = &.{effect}, .mode = .deep, .use = .linear, .owned_regions = &.{r} } } });
+        const returns = try b.declare(&.{unit}, unit, &.{}, &.{});
+        try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+        const clause = try b.declare(&.{ unit, token }, unit, &.{}, &.{});
+        try b.define(clause, try b.term(.{ .fail = try b.constant(void, {}) }));
+        const handler = try b.handler(.{ .mode = .deep, .input = unit, .answer = unit, .return_function = returns, .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }} });
+        const inner = try b.declare(&.{ cap, cap, cell }, unit, &.{}, &.{r});
+        const stored = try b.reference(b.parameter(inner, if (form % 2 == 0) 0 else 1));
+        const target = try b.reference(b.parameter(inner, 2));
+        const write = if (form < 2) try b.pure(try b.primitive(unit, .cell_set, &.{ target, stored }, 0)) else blk: {
+            const helper = try b.declare(&.{ cell, cap }, unit, &.{}, &.{r});
+            try b.define(helper, try b.pure(try b.primitive(unit, .cell_set, &.{ try b.reference(b.parameter(helper, 0)), try b.reference(b.parameter(helper, 1)) }, 0)));
+            break :blk try b.term(.{ .call = .{ .function = helper, .arguments = &.{ target, stored } } });
+        };
+        try b.define(inner, write);
+        const inner_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{ cap, cap, cell }, .result = unit, .regions = &.{r} } } });
+        const outer = try b.declare(&.{cap}, unit, &.{effect}, &.{});
+        const scope = try b.declare(&.{region}, unit, &.{effect}, &.{r});
+        const older = try b.reference(b.parameter(outer, 0));
+        const allocated = try b.variable(cell);
+        const installed = try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(inner, inner_type), .arguments = &.{ older, try b.reference(allocated) } } });
+        const read = try b.primitive(cap, .cell_get, &.{try b.reference(allocated)}, 0);
+        const use = try b.term(.{ .perform = .{ .effect = effect, .capability = read, .payload = try b.constant(void, {}) } });
+        const allocation = try b.pure(try b.primitive(cell, .cell_new, &.{ try b.reference(b.parameter(scope, 0)), older }, 0));
+        try b.define(scope, try b.bind(allocated, allocation, try b.bind(try b.variable(unit), installed, use)));
+        const scope_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{region}, .result = unit, .effects = &.{effect}, .capture_bound = &.{cap}, .regions = &.{r} } } });
+        try b.define(outer, try b.term(.{ .with_region = .{ .region = r, .body = try b.lambda(scope, scope_type) } }));
+        const outer_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = unit, .effects = &.{effect} } } });
+        const main = try b.declare(&.{}, unit, &.{}, &.{});
+        try b.define(main, try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(outer, outer_type) } }));
+        const module = b.module(main, unit);
+        if (form % 2 == 1) {
+            var compiled = try source.lower(std.testing.allocator, module);
+            defer compiled.deinit();
+        } else if (source.lower(std.testing.allocator, module)) |result| {
+            var unexpected = result;
+            unexpected.deinit();
+            return error.ExpectedCapabilityStoreRejection;
+        } else |err| try std.testing.expectEqual(error.InvalidOwnership, err);
     }
 }

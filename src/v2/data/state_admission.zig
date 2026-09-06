@@ -8,6 +8,7 @@ const scalar = @import("scalar.zig");
 const image = @import("image.zig");
 const contracts = @import("contracts.zig");
 const traits = @import("traits.zig");
+const borrows = @import("borrow_flow.zig");
 pub const Error = image.Error || error{ InvalidState, InvalidScope };
 
 pub fn node(state: g.State, reference: g.NodeRef) Error!g.Node {
@@ -694,6 +695,223 @@ const Context = struct {
         return record == .computation or record == .environment or record == .aggregate or record == .package;
     }
 
+    const BorrowContext = struct { frame: ?g.NodeRef = null, region: ?g.NodeRef = null, frame_present: bool = true, region_present: bool = true };
+    const Projection = union(enum) { value: g.Value, borrow: BorrowContext };
+    const ProjectionTask = union(enum) {
+        value: struct { value: g.Value, path: usize },
+        source: struct { frame: g.NodeRef, source: borrows.Source },
+        delivered: struct { frame: g.NodeRef, path: usize },
+    };
+
+    fn projected(self: Context, flow: *borrows.Flow, children: []const ?g.NodeRef, first: ProjectionTask) Error![]const Projection {
+        var pending: std.ArrayList(ProjectionTask) = .empty;
+        var result: std.ArrayList(Projection) = .empty;
+        var delivered: std.AutoHashMapUnmanaged(struct { id: p.Id, path: usize }, void) = .empty;
+        var seen_values: std.AutoHashMapUnmanaged(struct { id: p.Id, path: usize }, void) = .empty;
+        try pending.append(self.allocator, first);
+        while (pending.pop()) |task| switch (task) {
+            .value => |selected| {
+                if (selected.path == 0) {
+                    try result.append(self.allocator, .{ .value = selected.value });
+                    continue;
+                }
+                const ref = switch (selected.value.body) {
+                    .reference => |ref| ref,
+                    .owned => |ref| ref.node,
+                    else => continue,
+                };
+                if ((try seen_values.getOrPut(self.allocator, .{ .id = ref.id, .path = selected.path })).found_existing) continue;
+                const record = try node(self.state, ref);
+                const path = flow.paths.items[selected.path - 1];
+                switch (path.step) {
+                    .field => |field| {
+                        if (record != .aggregate) continue;
+                        const shape = self.program.schemas[@intCast(selected.value.schema)];
+                        if (shape == .sum) {
+                            if (record.aggregate.tag != field) continue;
+                            try pending.append(self.allocator, .{ .value = .{ .value = record.aggregate.fields[0], .path = path.tail } });
+                        } else if (field < record.aggregate.fields.len) try pending.append(self.allocator, .{ .value = .{ .value = record.aggregate.fields[@intCast(field)], .path = path.tail } });
+                    },
+                    .element => if (record == .aggregate) {
+                        for (record.aggregate.fields) |value_item| try pending.append(self.allocator, .{ .value = .{ .value = value_item, .path = path.tail } });
+                    },
+                    .environment => |environment| if (record == .computation and record.computation.constructor == environment.constructor) {
+                        const fields = (try node(self.state, record.computation.environment)).environment.values;
+                        try pending.append(self.allocator, .{ .value = .{ .value = fields[@intCast(environment.field)], .path = path.tail } });
+                    },
+                    .handler_state => |state| if (record == .attachment) {
+                        const handler = (try node(self.state, record.attachment.handler)).handler;
+                        if (handler.definition == state.handler) try pending.append(self.allocator, .{ .value = .{ .value = handler.state[@intCast(state.field)], .path = path.tail } });
+                    },
+                    .cell_content => if (record == .cell) {
+                        try pending.append(self.allocator, .{ .value = .{ .value = record.cell.value.?, .path = path.tail } });
+                    },
+                    .package_token => if (record == .package) {
+                        try pending.append(self.allocator, .{ .value = .{ .value = record.package.continuation, .path = path.tail } });
+                    },
+                    .use_site => |site| switch (record) {
+                        .one_shot, .multi_template => |token| try pending.append(self.allocator, .{ .value = .{ .value = token.use_site_capabilities[@intCast(site.index)], .path = path.tail } }),
+                        else => {},
+                    },
+                    .outer => if (record == .attachment) {
+                        const activation = (try node(self.state, record.attachment.handler)).handler;
+                        try result.append(self.allocator, .{ .borrow = .{ .frame = record.attachment.outer, .region = activation.region } });
+                    },
+                    .resumed => switch (record) {
+                        .one_shot, .multi_template => |token| {
+                            const saved = (try node(self.state, token.capture.?)).continuation;
+                            try result.append(self.allocator, .{ .borrow = .{ .frame = saved.evidence, .region = saved.region } });
+                        },
+                        .attachment => |attachment| try result.append(self.allocator, .{ .borrow = .{ .frame = ref, .region = attachment.region } }),
+                        else => {},
+                    },
+                }
+            },
+            .source => |selected| {
+                const record = try node(self.state, selected.frame);
+                if (selected.source.ambient) |ambient| {
+                    const context: BorrowContext = switch (record) {
+                        .control => |v| .{ .frame = v.evidence, .region = v.region },
+                        .continuation => |v| .{ .frame = v.evidence, .region = v.region },
+                        .attachment => |v| blk: {
+                            const handler = (try node(self.state, v.handler)).handler;
+                            break :blk .{ .frame = handler.evidence, .region = handler.region };
+                        },
+                        else => return error.InvalidState,
+                    };
+                    try result.append(self.allocator, .{ .borrow = if (ambient == .evidence) .{ .frame = context.frame, .region_present = false } else .{ .region = context.region, .frame_present = false } });
+                    continue;
+                }
+                const parameter: usize = @intCast(selected.source.parameter);
+                const value_item: ?g.Value = switch (record) {
+                    .control => |v| v.arguments[parameter],
+                    .continuation => |v| v.arguments[parameter],
+                    .attachment => |v| blk: {
+                        const handler = (try node(self.state, v.handler)).handler;
+                        break :blk if (parameter < handler.state.len) handler.state[parameter] else null;
+                    },
+                    else => return error.InvalidState,
+                };
+                if (value_item) |argument| try pending.append(self.allocator, .{ .value = .{ .value = argument, .path = selected.source.path } }) else try pending.append(self.allocator, .{ .delivered = .{ .frame = selected.frame, .path = selected.source.path } });
+            },
+            .delivered => |selected| {
+                if ((try delivered.getOrPut(self.allocator, .{ .id = selected.frame.id, .path = selected.path })).found_existing) continue;
+                const child = children[@intCast(selected.frame.id)] orelse return error.InvalidState;
+                const record = try node(self.state, child);
+                const start: ?p.Id = switch (record) {
+                    .control => |v| v.block,
+                    .continuation => |v| next(self.program.blocks[@intCast(v.source_block)].terminator).?.block,
+                    .attachment => |v| blk: {
+                        const handler = (try node(self.state, v.handler)).handler;
+                        break :blk self.program.functions[@intCast(self.program.handlers[@intCast(handler.definition)].return_function)].entry;
+                    },
+                    .region_scope, .protection, .injection => blk: {
+                        try pending.append(self.allocator, .{ .delivered = .{ .frame = child, .path = selected.path } });
+                        break :blk null;
+                    },
+                    .cleanup_return => |v| blk: {
+                        const exit = (try node(self.state, v.exit)).exit;
+                        if (exit.reason == .normal) try pending.append(self.allocator, .{ .value = .{ .value = exit.reason.normal, .path = selected.path } });
+                        break :blk null;
+                    },
+                    // Resumed operation inputs and cleanup/disposal results are
+                    // exportable. A dormant token has no hidden native input.
+                    .one_shot, .multi_template, .pending, .disposal_return, .unwind => null,
+                    else => return error.InvalidState,
+                };
+                if (start) |block| for (try flow.returnedAt(block, selected.path)) |source| try pending.append(self.allocator, .{ .source = .{ .frame = child, .source = source } });
+            },
+        };
+        return result.items;
+    }
+
+    fn useProjection(self: Context, contexts: []UseScope, projected_value: Projection, use: UseScope) Error!void {
+        switch (projected_value) {
+            .value => |value_item| try self.useValue(contexts, value_item, use),
+            .borrow => |context| {
+                try self.within(context.frame, use.frame);
+                try self.within(context.region, use.region);
+            },
+        }
+    }
+
+    fn ownerScope(self: Context, projected_owner: Projection, kind: borrows.Bound, region_frames: []const ?g.NodeRef) Error!?UseScope {
+        if (projected_owner == .borrow) {
+            const context = projected_owner.borrow;
+            return .{ .frame = if (context.frame_present) self.bound(context.frame) else .{}, .region = if (context.region_present) self.bound(context.region) else .{} };
+        }
+        const ref = switch (projected_owner.value.body) {
+            .reference => |ref| ref,
+            .owned => |ref| ref.node,
+            else => return null,
+        };
+        const record = try node(self.state, ref);
+        switch (kind) {
+            .region => {
+                const region_ref = switch (record) {
+                    .region => ref,
+                    .cell => |v| v.region,
+                    .borrow => |v| v.region,
+                    else => return null,
+                };
+                return .{ .frame = self.bound(region_frames[@intCast(region_ref.id)]), .region = self.bound(region_ref) };
+            },
+            .clause, .capture => {
+                const delimiter = switch (record) {
+                    .attachment => record.attachment,
+                    .one_shot, .multi_template => |v| (try node(self.state, v.delimiter)).attachment,
+                    .package => |v| return self.ownerScope(.{ .value = v.continuation }, kind, region_frames),
+                    else => return null,
+                };
+                const activation = (try node(self.state, delimiter.handler)).handler;
+                return .{ .frame = self.bound(if (kind == .clause and delimiter.phase == .active) delimiter.return_to else delimiter.outer), .region = self.bound(activation.region) };
+            },
+        }
+    }
+
+    fn futureScopes(self: *Context, contexts: []UseScope, region_frames: []const ?g.NodeRef) Error!void {
+        var flow = try borrows.Flow.init(self.allocator, self.program, self.facts.exportable);
+        const children = try self.allocator.alloc(?g.NodeRef, self.state.nodes.len);
+        @memset(children, null);
+        for (self.state.nodes, 0..) |record, id| {
+            if (frameParent(record)) |parent| children[@intCast(parent.id)] = .{ .id = id };
+            switch (record) {
+                .one_shot, .multi_template => |v| if (v.capture) |captured| {
+                    children[@intCast(captured.id)] = .{ .id = id };
+                },
+                .pending => |v| children[@intCast(v.continuation.id)] = .{ .id = id },
+                else => {},
+            }
+        }
+        for (self.state.nodes, 0..) |record, id| {
+            const frame: g.NodeRef = .{ .id = id };
+            const start: ?p.Id = switch (record) {
+                .control => |v| v.block,
+                .continuation => |v| next(self.program.blocks[@intCast(v.source_block)].terminator).?.block,
+                .attachment => |v| blk: {
+                    const handler = (try node(self.state, v.handler)).handler;
+                    break :blk self.program.functions[@intCast(self.program.handlers[@intCast(handler.definition)].return_function)].entry;
+                },
+                else => null,
+            };
+            if (start) |block| for (try flow.required(block)) |constraint| {
+                const owners = try self.projected(&flow, children, .{ .source = .{ .frame = frame, .source = constraint.owner } });
+                const values_to_use = try self.projected(&flow, children, .{ .source = .{ .frame = frame, .source = constraint.value } });
+                for (owners) |owner| if (try self.ownerScope(owner, constraint.bound, region_frames)) |use| for (values_to_use) |value_item| try self.useProjection(contexts, value_item, use);
+            };
+            const outside: ?UseScope = switch (record) {
+                .attachment => |v| blk: {
+                    const handler = (try node(self.state, v.handler)).handler;
+                    break :blk .{ .frame = self.bound(if (v.phase == .active) v.return_to else v.outer), .region = self.bound(handler.region) };
+                },
+                .region_scope => |v| .{ .frame = self.bound(v.return_to), .region = self.bound((try node(self.state, v.region)).region.outer) },
+                .protection => |v| if (v.loan != null) .{ .frame = self.bound(v.return_to), .region = self.bound(v.region) } else null,
+                else => null,
+            };
+            if (outside) |use| for (try self.projected(&flow, children, .{ .delivered = .{ .frame = frame, .path = 0 } })) |value_item| try self.useProjection(contexts, value_item, use);
+        }
+    }
+
     /// Propagate all use contexts through the immutable holder DAG once. Mutable
     /// cells and dormant captures introduce their own scope boundary, so legal
     /// continuation/cell cycles do not become recursive validation calls.
@@ -749,6 +967,7 @@ const Context = struct {
             },
             else => {},
         };
+        try self.futureScopes(contexts, region_frames);
         var pending: std.ArrayList(usize) = .empty;
         var expected: usize = 0;
         for (self.state.nodes, indegrees, 0..) |record, incoming, id| if (holder(record)) {

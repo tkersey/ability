@@ -28,7 +28,7 @@ fn interpret(builder: *source.Builder, choice: Family, element: p.Id, captures: 
     const boolean = try builder.scalar(bool);
     const answer = try builder.schema(.{ .seq = element });
     const resumption = try builder.schema(.{ .internal = .{ .resumption = .{ .effect = choice.effect, .input = boolean, .answer = answer, .effects = residual.effects, .capture_bound = captures, .handled = &.{choice.effect}, .mode = .deep, .use = .multi, .owned_regions = owned_regions } } });
-    const returns = try builder.declare(&.{element}, answer, &.{}, &.{});
+    const returns = try builder.declare(&.{element}, answer, &.{}, borrowed_regions);
     const clause = try builder.declare(&.{ unit, resumption }, answer, residual.effects, borrowed_regions);
     const item = try builder.reference(builder.parameter(returns, 0));
     try builder.define(returns, try builder.pure(try builder.value(.{ .schema = answer, .expression = .{ .primitive = .{ .opcode = .sequence, .operands = &.{item} } } })));

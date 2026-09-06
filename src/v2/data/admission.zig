@@ -251,8 +251,8 @@ pub fn programDiagnosed(allocator: std.mem.Allocator, image: p.Program, diagnost
         if (effect.identity.len == 0 or !std.unicode.utf8ValidateSlice(effect.identity)) return error.InvalidEffect;
         _ = try schemaAt(image.schemas, effect.payload);
         _ = try schemaAt(image.schemas, effect.result);
-        if (effect.external and (!facts.exportable[@intCast(effect.payload)] or
-            !facts.exportable[@intCast(effect.result)] or effect.bodies.len != 0)) return error.InvalidEffect;
+        if (!facts.exportable[@intCast(effect.result)]) return error.InvalidEffect;
+        if (effect.external and (!facts.exportable[@intCast(effect.payload)] or effect.bodies.len != 0)) return error.InvalidEffect;
         for (effect.use_site_effects) |id| if (id >= image.effects.len) return error.InvalidEffect;
     }
     for (image.functions, 0..) |function, index| {
@@ -270,6 +270,7 @@ pub fn programDiagnosed(allocator: std.mem.Allocator, image: p.Program, diagnost
         try validateBlock(scratch, image, block, use_facts, effect_facts, diagnostic);
     }
     try @import("region_admission.zig").validateDiagnosed(scratch, image, diagnostic);
+    try @import("borrow_flow.zig").validate(scratch, image, facts.exportable, diagnostic);
     if (diagnostic) |d| d.* = .{};
 }
 

@@ -59,6 +59,14 @@ fn covers(handler: p.Handler, effect: p.Id) bool {
     return false;
 }
 
+fn capturedRegion(image: p.Program, effects: []const p.Id, region: p.Id) a.Error!void {
+    for (effects) |effect| for (image.handlers) |handler| for (handler.clauses) |clause| {
+        if (clause.effect != effect or clause.direct) continue;
+        const signature = try resumption(image, clause.resumption);
+        if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region) == null) return error.InvalidOwnership;
+    };
+}
+
 pub fn validate(allocator: std.mem.Allocator, image: p.Program) a.Error!traits.Facts {
     return validateDiagnosed(allocator, image, null);
 }
@@ -206,6 +214,7 @@ pub fn terminator(image: p.Program, block: p.Block, slots: []const p.Id, effect_
                 const borrowed = image.schemas[@intCast(body.parameters[0])];
                 if (borrowed != .internal or borrowed.internal != .borrowed or borrowed.internal.borrowed.value != resource or borrowed.internal.borrowed.region != region) return error.TypeMismatch;
                 for (body.regions) |needed| if (needed != region) try subset(&.{needed}, function.regions);
+                try capturedRegion(image, body.effects, region);
             } else {
                 if (protection.loan_region != null) return error.InvalidOwnership;
                 try subset(body.regions, function.regions);
@@ -298,6 +307,9 @@ pub fn terminator(image: p.Program, block: p.Block, slots: []const p.Id, effect_
             for (body.regions) |id| if (id != scope.region) try subset(&.{id}, function.regions);
             try a.arguments(slots, scope.arguments, body.parameters[1..]);
             try subset(body.effects, function.effects);
+            // The region frame is captured even when no live slot refers to it.
+            // Effects handled inside the body have already left its escaping row.
+            try capturedRegion(image, body.effects, scope.region);
             try a.edge(image, block.function, slots, scope.next, body.result);
         },
         else => return error.UnsupportedInstruction,

@@ -92,7 +92,7 @@ pub fn analyzeDiagnosed(allocator: std.mem.Allocator, source: ast.Module, diagno
             .value => |value_id| source.values[@intCast(value_id)].schema,
             .bind => |bind| blk: {
                 _ = try compatible(facts.results[@intCast(bind.value)], source.variables[@intCast(bind.variable)]);
-                break :blk facts.results[@intCast(bind.next)];
+                break :blk if (facts.results[@intCast(bind.value)] == null) null else facts.results[@intCast(bind.next)];
             },
             .conditional => |conditional| blk: {
                 if (source.schemas[@intCast(source.values[@intCast(conditional.condition)].schema)] != .boolean) return error.TypeMismatch;

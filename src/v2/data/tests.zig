@@ -17,6 +17,15 @@ pub const example: p.Program = .{
     }},
 };
 
+test "internal operation resumption values remain first-order" {
+    var program = example;
+    program.schemas = &.{ .u64, .{ .internal = .{ .capability = 0 } } };
+    program.effects = &.{.{ .identity = "internal-result", .payload = 0, .result = 1, .external = false }};
+    try std.testing.expectError(error.InvalidEffect, admission.program(std.testing.allocator, program));
+    program.effects = &.{.{ .identity = "internal-result", .payload = 1, .result = 0, .external = false }};
+    try admission.program(std.testing.allocator, program);
+}
+
 test "BPI2 roundtrip owns decoded data and leaves the source independent" {
     var buffer: [1024]u8 = undefined;
     const bytes = try image.encode(std.testing.allocator, example, &buffer);

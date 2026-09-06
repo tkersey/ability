@@ -93,6 +93,13 @@ shallow=1. These describe checked interfaces, not authority to assert
 CopySafe, DropSafe, or CloneSafe: admission derives those properties and checks
 all uses and captures.
 
+Admission derives the borrow dependencies and lifetime requirements of code
+inputs through calls, projections, stored values, and scoped control. A fresh
+capability cannot leave its handler; suspension packages retain the enclosing
+handler evidence and regions even when their explicit environments are empty.
+Clause and return writes use the state of the selected attachment. These are
+derived checks, with no additional wire fields or trusted source annotations.
+
 ### Schemas
 
 | Tag | Schema | Fields |
@@ -157,6 +164,10 @@ their order is preserved because executable parameters align with that order.
 Capture fields, state fields, product fields, parameters, and operands are also
 ordered. Effect identities are nonempty UTF-8. Distinct nominal effects can use
 the same text; text equality does not select an activation.
+
+Every effect result (the value supplied on resumption) is first-order and
+exportable. External payloads are also exportable; internal scoped operations
+can carry their checked internal payloads and computation arguments.
 
 ### Instructions
 
@@ -358,6 +369,11 @@ State has no self-hash, cached request, generation counter, or execution fuel.
 capability attachments, regions, complete-graph ownership, clone restrictions,
 cleanup states, and the single pending position. A graph checksum is never
 evidence of those properties or of historical reachability.
+
+Restored block arguments and saved continuations must also satisfy the code's
+derived borrow requirements at their actual owners and outward return contexts.
+Substituting a younger capability of the same effect family cannot grant it an
+older lifetime. Projection through a helper result preserves field selection.
 
 ## Schema descriptors, ERQ2, and ERS2
 
