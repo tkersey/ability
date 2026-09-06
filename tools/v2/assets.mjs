@@ -86,7 +86,7 @@ export async function sourceIdentity(root) {
   const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:16<<20}).trim();
   const head=git('rev-parse','HEAD'), tree=git('rev-parse','HEAD^{tree}');
   const dirty=git('status','--porcelain','--untracked-files=all').length!==0;
-  const names=git('ls-files','--cached','--others','--exclude-standard','-z').split('\0').filter((name)=>name&&!name.startsWith('.ledger/'));
+  const names=git('ls-files','--cached','--others','--exclude-standard','-z').split('\0').filter((name)=>name&&name!=='.learnings.jsonl'&&!name.startsWith('.ledger/'));
   const files=[];
   for(const name of [...new Set(names)].sort()) {
     const path=join(root,safeName(name));
@@ -95,7 +95,7 @@ export async function sourceIdentity(root) {
     if(!metadata.isFile())throw new Error(`source must be a regular file: ${name}`);
     files.push({name,sha256:sha256(await readFile(path))});
   }
-  return {git:{head,tree,dirty},filesSha256:sha256(json(files)),fileScope:'Git tracked and nonignored untracked regular files, excluding .ledger',files};
+  return {git:{head,tree,dirty},filesSha256:sha256(json(files)),fileScope:'Git tracked and nonignored untracked regular files, excluding .ledger and retired .learnings.jsonl evidence stores',files};
 }
 export async function writeAssets(directory, entries) {
   await mkdir(directory,{recursive:true});
