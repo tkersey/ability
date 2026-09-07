@@ -495,7 +495,7 @@ export function execute(source, initial, responses = [], cancellations = []) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const sources = await Promise.all(process.argv.slice(2).map(async (path) => JSON.parse(await readFile(path, "utf8"))));
-  assert.equal(sources.length, 35);
+  assert.equal(sources.length, 36);
   for (const index of [31, 32]) {
     assert.deepEqual(execute(sources[index], []), { kind: "Completed", trace: [], value: [7, 0, 0, 0, 0, 0, 0, 0] });
   }
@@ -640,6 +640,20 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       { kind: "Requested", identity: "example/outer-cleanup", payload: [1, ...scalar(primary ? 9 : 7), ...reason, 2, ...scalar(7), ...scalar(8)] },
     ]);
   }
+  for (const primary of [0, 1]) for (const cancel of [false, true]) {
+    const result = execute(sources[35], [primary], [[], []], cancel ? [{ at: 0, reason: "stop" }, { at: 2, reason: "later" }] : []);
+    assert.equal(result.kind, "Failed");
+    assert.deepEqual(result.value, scalar(primary ? 9 : 7));
+    assert.deepEqual(result.cleanupFailures, [scalar(7), scalar(8)]);
+    assert.equal(result.cancellation, cancel ? "stop" : undefined);
+    const reason = cancel ? [1, 0, 4, ...new TextEncoder().encode("stop")] : [0];
+    assert.deepEqual(result.trace, [
+      { kind: "Yielded" },
+      { kind: "Requested", identity: "example/middle-cleanup", payload: [1, ...scalar(primary ? 9 : 7), 0, 1, ...scalar(7)] },
+      { kind: "Yielded" },
+      { kind: "Requested", identity: "example/outer-cleanup", payload: [1, ...scalar(primary ? 9 : 7), ...reason, 2, ...scalar(7), ...scalar(8)] },
+    ]);
+  }
   for (const index of [23, 24]) {
     const reentry = execute(sources[index], []);
     assert.equal(reentry.kind, "Completed");
@@ -659,5 +673,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const roles = ["arithmetic_overflow", "division_by_zero", "capacity_exceeded", "invalid_utf8", "invalid_index", "invalid_variant"];
     assert.deepEqual(result.value, failed ? [roles.indexOf(expected)] : scalar(expected), `scalar-contracts ${index}`);
   }
-  console.log("independent source oracle: 35 compiled source fixtures and cancellation/cleanup scenarios passed");
+  console.log("independent source oracle: 36 compiled source fixtures and cancellation/cleanup scenarios passed");
 }

@@ -45,23 +45,11 @@ const bundle=indexedBundle(entries);
 const manifest={format:'boundary-v2-semantic-fixtures/v1',boundaryVersion:version,profile:1,
   binary:'boundary-v2-semantic-fixtures.bin',binarySha256:sha256(bundle.bytes),programs,cases:scripts,negatives,files:bundle.files};
 const manifestBytes=json(manifest);
-const examplesBuild=`const std = @import("std");
-pub fn build(b: *std.Build) void {
- const boundary = b.dependency("boundary", .{ .target = b.graph.host, .optimize = .ReleaseSafe }).module("boundary");
- const options = b.addOptions();
- options.addOption(usize, "example", b.option(usize, "example", "Example ordinal listed in README") orelse 1);
- options.addOption(bool, "source", b.option(bool, "source", "Emit source terms instead of BPI2") orelse false);
- const module = b.createModule(.{ .root_source_file = b.path("main.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "boundary", .module = boundary }} });
- module.addOptions("source_options", options);
- const executable = b.addExecutable(.{ .name = "compile-example", .root_module = module });
- b.step("emit", "Compile a checked public example").dependOn(&b.addRunArtifact(executable).step);
-}
-`;
 const examplesReadme=`# Boundary ${version} portable examples\n\nUnpack the matching Boundary compiler source into a sibling directory named\n\`boundary\`. This package contains source, BPI2, canonical InitialArgs and typed\nresponse scripts; it contains no interpreter or effect relay.\n\nRun \`zig build emit -Dexample=14 > queens.bpi2\` to compile the public four-queens\nDFS source. \`-Dsource=true\` emits its independent source terms.\n\nThe source program ordinals are:\n\n${programNames.map((name,index)=>`${index}. ${name}`).join('\n')}\n\n\`fixtures.json\` names each program, initial argument file and sequence of\ncanonical typed result files. Its expected traces come from Boundary's independent\nsource oracle. Cancellations refer to observable positions in those traces,\nnot future request identities. The matching binary release asset concatenates\nthe same named files using the offsets and digests in this manifest.\n\nRun BPI2 with World 5. Encode each typed result against the actual returned ERQ2;\nretain PST2 to transfer an invocation. A cancellation during cleanup may rebind\nERQ2 without repeating the environmental operation.\n`;
 const archiveEntries=[...entries,{name:'fixtures.json',bytes:manifestBytes},{name:'README.md',bytes:Buffer.from(examplesReadme)},
   {name:'LICENSE',bytes:await readFile(join(root,'LICENSE'))},{name:'main.zig',bytes:await readFile(join(root,'test/v2/emit_source.zig'))},
-  {name:'build.zig',bytes:Buffer.from(examplesBuild)},
-  {name:'build.zig.zon',bytes:Buffer.from('.{ .name = .boundary_examples, .fingerprint = 0xc9b64b032c7d3f74, .version = "0.0.0", .dependencies = .{ .boundary = .{ .path = "../boundary" } }, .paths = .{ "build.zig", "build.zig.zon", "main.zig" } }\n')}];
+  {name:'build.zig',bytes:await readFile(join(root,'tools/v2/examples/build.zig'))},
+  {name:'build.zig.zon',bytes:await readFile(join(root,'tools/v2/examples/build.zig.zon'))}];
 const archive=tarGzip(archiveEntries);
 assert.deepEqual(readTarGzip(archive).map(({name,bytes})=>({name,sha256:sha256(bytes)})),archiveEntries.map(({name,bytes})=>({name,sha256:sha256(bytes)})).sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0));
 const assets=[{name:'boundary-v2-semantic-fixtures.json',bytes:manifestBytes},{name:'boundary-v2-semantic-fixtures.bin',bytes:bundle.bytes},

@@ -302,7 +302,7 @@ test "deep bind and value syntax lower with bounded host stack and shared pure s
 }
 
 test "source bind lowers non-tail handlers and mutually recursive functions" {
-    inline for (.{ examples.deep, examples.recursive, examples.generator, examples.stateLocal, examples.stateShared, examples.resourceScalar, examples.resourcePair, examples.answers, examples.scopedReader, examples.writerRaise, examples.schedulerFifo, examples.queensDfs, examples.queensBfs, examples.cellOrder, examples.nested, examples.shallow, examples.injection, examples.indexed, examples.abortCustody, examples.unwind, examples.reentrant, examples.cloned, examples.clauseAbort }) |example| {
+    inline for (.{ examples.deep, examples.recursive, examples.generator, examples.stateLocal, examples.stateShared, examples.resourceScalar, examples.resourcePair, examples.answers, examples.scopedReader, examples.writerRaise, examples.schedulerFifo, examples.queensDfs, examples.queensBfs, examples.cellOrder, examples.nested, examples.shallow, examples.injection, examples.indexed, examples.abortCustody, examples.unwind, examples.yieldingCleanup, examples.reentrant, examples.cloned, examples.clauseAbort }) |example| {
         var builder = source.Builder.init(std.testing.allocator);
         defer builder.deinit();
         var compiled = try source.lower(std.testing.allocator, try example(&builder));

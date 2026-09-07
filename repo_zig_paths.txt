@@ -92,3 +92,4 @@ test/v2/emit_source.zig
 test/v2/oracle_scopes.zig
 tools/v2/bpi1_lift.zig
 tools/v2/bpi2_inspect.zig
+tools/v2/examples/build.zig

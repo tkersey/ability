@@ -42,6 +42,7 @@ pub fn main(init: std.process.Init) !void {
         32 => boundary.source.examples.protectOperandOrder(&builder),
         33 => boundary.source.examples.successorState(&builder),
         34 => boundary.source.examples.clausePayload(&builder),
+        35 => boundary.source.examples.yieldingCleanup(&builder),
         else => @compileError("unknown source example"),
     };
     var buffer: [4096]u8 = undefined;
