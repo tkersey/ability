@@ -756,6 +756,50 @@ const Context = struct {
         delivered: struct { frame: g.NodeRef, path: usize },
     };
 
+    fn projectSource(
+        self: Context,
+        pending: *std.ArrayList(ProjectionTask),
+        result: *std.ArrayList(Projection),
+        frame: g.NodeRef,
+        source: borrows.Source,
+    ) Error!void {
+        const record = try node(self.state, frame);
+        if (source.ambient) |ambient| {
+            const context: BorrowContext = switch (record) {
+                .control => |v| .{ .frame = v.evidence, .region = v.region },
+                .continuation => |v| .{ .frame = v.evidence, .region = v.region },
+                .attachment => |v| blk: {
+                    const handler = (try node(self.state, v.handler)).handler;
+                    break :blk .{ .frame = handler.evidence, .region = handler.region };
+                },
+                else => return error.InvalidState,
+            };
+            try result.append(self.allocator, .{ .borrow = context.selected(ambient) });
+            return;
+        }
+        const parameter: usize = @intCast(source.parameter);
+        const value_item: ?g.Value = switch (record) {
+            .control => |v| v.arguments[parameter],
+            .continuation => |v| v.arguments[parameter],
+            .attachment => |v| blk: {
+                const handler = (try node(self.state, v.handler)).handler;
+                break :blk if (parameter < handler.state.len) handler.state[parameter] else null;
+            },
+            else => return error.InvalidState,
+        };
+        if (value_item) |argument| {
+            try pending.append(self.allocator, .{ .value = .{
+                .value = argument,
+                .path = source.path,
+            } });
+        } else {
+            try pending.append(self.allocator, .{ .delivered = .{
+                .frame = frame,
+                .path = source.path,
+            } });
+        }
+    }
+
     fn projected(self: Context, flow: *borrows.Flow, children: []const ?g.NodeRef, first: ProjectionTask) Error![]const Projection {
         var pending: std.ArrayList(ProjectionTask) = .empty;
         var result: std.ArrayList(Projection) = .empty;
@@ -796,6 +840,21 @@ const Context = struct {
                         const handler = (try node(self.state, record.attachment.handler)).handler;
                         if (handler.definition == state.handler) try pending.append(self.allocator, .{ .value = .{ .value = handler.state[@intCast(state.field)], .path = path.tail } });
                     },
+                    .body_result => |schema| {
+                        const delimiter = switch (record) {
+                            .one_shot, .multi_template => |token| token.delimiter,
+                            .attachment => ref,
+                            else => continue,
+                        };
+                        const attachment = (try node(self.state, delimiter)).attachment;
+                        const handler = (try node(self.state, attachment.handler)).handler;
+                        if (self.program.handlers[@intCast(handler.definition)].input == schema) {
+                            try pending.append(self.allocator, .{ .delivered = .{
+                                .frame = delimiter,
+                                .path = path.tail,
+                            } });
+                        }
+                    },
                     .cell_content => if (record == .cell) {
                         try pending.append(self.allocator, .{ .value = .{ .value = record.cell.value.?, .path = path.tail } });
                     },
@@ -825,33 +884,12 @@ const Context = struct {
                     },
                 }
             },
-            .source => |selected| {
-                const record = try node(self.state, selected.frame);
-                if (selected.source.ambient) |ambient| {
-                    const context: BorrowContext = switch (record) {
-                        .control => |v| .{ .frame = v.evidence, .region = v.region },
-                        .continuation => |v| .{ .frame = v.evidence, .region = v.region },
-                        .attachment => |v| blk: {
-                            const handler = (try node(self.state, v.handler)).handler;
-                            break :blk .{ .frame = handler.evidence, .region = handler.region };
-                        },
-                        else => return error.InvalidState,
-                    };
-                    try result.append(self.allocator, .{ .borrow = context.selected(ambient) });
-                    continue;
-                }
-                const parameter: usize = @intCast(selected.source.parameter);
-                const value_item: ?g.Value = switch (record) {
-                    .control => |v| v.arguments[parameter],
-                    .continuation => |v| v.arguments[parameter],
-                    .attachment => |v| blk: {
-                        const handler = (try node(self.state, v.handler)).handler;
-                        break :blk if (parameter < handler.state.len) handler.state[parameter] else null;
-                    },
-                    else => return error.InvalidState,
-                };
-                if (value_item) |argument| try pending.append(self.allocator, .{ .value = .{ .value = argument, .path = selected.source.path } }) else try pending.append(self.allocator, .{ .delivered = .{ .frame = selected.frame, .path = selected.source.path } });
-            },
+            .source => |selected| try self.projectSource(
+                &pending,
+                &result,
+                selected.frame,
+                selected.source,
+            ),
             .delivered => |selected| {
                 if ((try delivered.getOrPut(self.allocator, .{ .id = selected.frame.id, .path = selected.path })).found_existing) continue;
                 const child = children[@intCast(selected.frame.id)] orelse return error.InvalidState;

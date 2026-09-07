@@ -356,8 +356,14 @@ export function execute(source, initial, responses = [], cancellations = []) {
       const node = normalize(computation), definition = source.handlers[activation.definition];
       if (node.kind === "value") return call(definition.return_function, activation.env, [...activation.state, node.value]);
       if (node.kind !== "request" && node.kind !== "yield") return node;
-      if (node.kind === "yield") return { ...node, reenter: (replacement) => handle(node.reenter(replacement), activation) };
-      if (node.capability !== activation.token) return { ...node, reenter: (replacement) => handle(node.reenter(replacement), activation) };
+      const abandon = (exit) => handle(
+        node.abandon ? node.abandon(exit) : abrupt(exit), activation,
+      );
+      if (node.kind === "yield" || node.capability !== activation.token) {
+        return {
+          ...node, reenter: (replacement) => handle(node.reenter(replacement), activation), abandon,
+        };
+      }
       const clause = definition.clauses.find((clause) => clause.effect === node.effect);
       if (!clause) throw new Error("unknown oracle operation clause");
       const signature = source.schemas[clause.resumption].internal.resumption;
@@ -384,7 +390,7 @@ export function execute(source, initial, responses = [], cancellations = []) {
           abandon(exit) {
             if (consumed) throw new Error("oracle one-shot reused");
             consumed = true;
-            return node.abandon ? node.abandon(exit) : abrupt(exit);
+            return abandon(exit);
           },
           toMulti() {
             if (reusable || consumed) throw new Error("oracle conversion requires an owned one-shot");

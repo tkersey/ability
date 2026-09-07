@@ -130,6 +130,8 @@ pub fn build(b: *std.Build) void {
     oracle.has_side_effects = true;
     const semantics = b.step("check-v2-semantics", "Check higher-order source semantics without World");
     semantics.dependOn(&oracle.step);
+    semantics.dependOn(&oracleScopeChecks(b, boundary, optimize).step);
+    semantics.dependOn(&borrowReturnChecks(b, boundary, optimize).step);
     semantics.dependOn(&b.addRunArtifact(authoring).step);
     const formal = b.addSystemCommand(&.{ "lake", "build" });
     formal.setCwd(b.path("semantics/v2"));
@@ -174,4 +176,42 @@ pub fn build(b: *std.Build) void {
     release.step.dependOn(source_fixtures);
     release.has_side_effects = true;
     b.step("emit-boundary-v2-release", "Emit deterministic compiler/data assets without publishing").dependOn(&release.step);
+}
+
+fn oracleScopeChecks(
+    b: *std.Build,
+    boundary: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Run {
+    const emitter = b.addExecutable(.{
+        .name = "oracle-scopes",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/v2/oracle_scopes.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "boundary", .module = boundary }},
+        }),
+    });
+    const check = b.addSystemCommand(&.{"node"});
+    check.addFileArg(b.path("test/v2/oracle_scopes.mjs"));
+    check.addFileArg(b.addRunArtifact(emitter).captureStdOut(.{}));
+    check.has_side_effects = true;
+    return check;
+}
+
+fn borrowReturnChecks(
+    b: *std.Build,
+    boundary: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Run {
+    const tests = b.addExecutable(.{
+        .name = "borrow-returns",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/v2/borrow_returns.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "boundary", .module = boundary }},
+        }),
+    });
+    return b.addRunArtifact(tests);
 }

@@ -8,11 +8,28 @@ const p = @import("program.zig");
 const a = @import("admission.zig");
 const contracts = @import("contracts.zig");
 
-pub const Step = union(enum) { field: p.Id, element, environment: struct { constructor: p.Id, field: p.Id }, handler_state: struct { handler: p.Id, field: p.Id }, use_site: struct { index: p.Id, schema: p.Id }, cell_content, package_token, outer: ?Ambient, resumed: ?Ambient };
+pub const Step = union(enum) {
+    field: p.Id,
+    element,
+    environment: struct { constructor: p.Id, field: p.Id },
+    handler_state: struct { handler: p.Id, field: p.Id },
+    use_site: struct { index: p.Id, schema: p.Id },
+    cell_content,
+    package_token,
+    outer: ?Ambient,
+    resumed: ?Ambient,
+    body_result: p.Id,
+};
 const Path = struct { step: Step, tail: usize };
 pub const Ambient = enum { evidence, region };
 pub const Source = struct { parameter: p.Id = 0, path: usize = 0, ambient: ?Ambient = null };
-const Trace = struct { block: p.Id, slot: p.Id = 0, path: usize = 0, ambient: ?Ambient = null };
+const Trace = struct {
+    block: p.Id,
+    slot: p.Id = 0,
+    path: usize = 0,
+    ambient: ?Ambient = null,
+    body_result: bool = false,
+};
 const Incoming = struct { block: p.Id, edge: ?p.Edge = null, variant: ?usize = null };
 const Query = struct { start: p.Id, path: usize, target: ?Trace = null, writes: ?p.Id = null, sources: std.ArrayList(Source) = .empty };
 pub const Bound = enum { region, clause, capture };
@@ -136,6 +153,12 @@ pub const Flow = struct {
             },
             .outer => if (shape == .internal and shape.internal == .capability) schema else null,
             .resumed => if (shape == .internal and (shape.internal == .capability or shape.internal == .resumption)) schema else null,
+            .body_result => |result| if (shape == .internal) switch (shape.internal) {
+                .capability => result,
+                .resumption => |signature| if (signature.mode == .shallow and
+                    signature.answer == result) result else null,
+                else => null,
+            } else null,
         };
     }
 
@@ -260,6 +283,12 @@ pub const Flow = struct {
             const argument = source.parameter - handler.state.len;
             if (argument == 0) return Mapped.one(.{ .block = binding.block, .slot = op.payload, .path = source.path });
             if (argument <= op.bodies.len) return Mapped.one(.{ .block = binding.block, .slot = op.bodies[@intCast(argument - 1)], .path = source.path });
+            if (source.path != 0 and self.paths.items[source.path - 1].step == .body_result)
+                return Mapped.one(.{
+                    .block = binding.block,
+                    .slot = op.capability.?,
+                    .path = source.path,
+                });
             if (source.path != 0 and self.paths.items[source.path - 1].step == .use_site) {
                 const path = self.paths.items[source.path - 1];
                 return Mapped.one(.{ .block = binding.block, .slot = op.use_site_capabilities[@intCast(path.step.use_site.index)], .path = path.tail });
@@ -285,6 +314,15 @@ pub const Flow = struct {
                 if (path.step == .handler_state) {
                     if (binding.handler != path.step.handler_state.handler) return .{};
                     return Mapped.one(.{ .block = binding.block, .slot = binding.state[@intCast(path.step.handler_state.field)], .path = path.tail });
+                }
+                if (path.step == .body_result and binding.fresh == .evidence) {
+                    const handler = self.program.handlers[@intCast(binding.handler.?)];
+                    if (handler.input != path.step.body_result) return .{};
+                    return Mapped.one(.{
+                        .block = binding.block,
+                        .path = path.tail,
+                        .body_result = true,
+                    });
                 }
             }
             return .{ .fresh = binding.fresh orelse return self.rejected(binding) };
@@ -355,33 +393,61 @@ pub const Flow = struct {
         for (self.program.constructors, 0..) |constructor, id| if (constructor.schema == schema) try self.transferRequirements(index, self.bodyBinding(block, computation_slot, arguments, supplied, id));
     }
 
+    fn returnInput(
+        self: *Flow,
+        pending: *std.ArrayList(Trace),
+        block: p.Id,
+        source: Source,
+    ) a.Error!void {
+        const term = self.program.blocks[@intCast(block)].terminator;
+        const state = switch (term) {
+            inline .handle, .resume_with => |v| v.state,
+            else => return error.InvalidProgram,
+        };
+        if (source.ambient) |ambient| {
+            return self.pushTrace(pending, .{ .block = block, .ambient = ambient });
+        }
+        if (source.parameter < state.len) {
+            return self.push(pending, block, state[@intCast(source.parameter)], source.path);
+        }
+        switch (term) {
+            .handle => |v| try self.body(
+                pending,
+                block,
+                v.body,
+                v.arguments,
+                self.program.handlers[@intCast(v.handler)].clauses.len,
+                source.path,
+            ),
+            .resume_with => |v| {
+                // Operation inputs are exportable. Project the captured body's
+                // result, retaining its selectors rather than its whole context.
+                const schema = self.program.handlers[@intCast(v.handler)].input;
+                const path = try self.prepend(.{ .body_result = schema }, source.path);
+                try self.push(pending, block, v.resumption, path);
+            },
+            else => return error.InvalidProgram,
+        }
+    }
+
     fn returnInputs(self: *Flow, start: p.Id, block: p.Id, source: Source) a.Error!std.ArrayList(Source) {
-        const v = self.program.blocks[@intCast(block)].terminator.handle;
+        var pending: std.ArrayList(Trace) = .empty;
+        defer pending.deinit(self.allocator);
+        try self.returnInput(&pending, block, source);
         var result: std.ArrayList(Source) = .empty;
-        if (source.ambient != null or source.parameter < v.state.len) {
-            const trace: Trace = if (source.ambient) |ambient| .{ .block = block, .ambient = ambient } else .{ .block = block, .slot = v.state[@intCast(source.parameter)], .path = source.path };
+        for (pending.items) |trace| {
             const query_id = try self.origin(start, trace);
             try result.appendSlice(self.allocator, self.queries.items[query_id].sources.items);
-        } else for (self.program.constructors, 0..) |constructor, id| {
-            if (constructor.schema != self.slotType(block, v.body)) continue;
-            const query_id = try self.query(self.program.functions[@intCast(constructor.function)].entry, source.path);
-            const sources = try self.allocator.dupe(Source, self.queries.items[query_id].sources.items);
-            defer self.allocator.free(sources);
-            const binding = self.bodyBinding(block, v.body, v.arguments, self.program.handlers[@intCast(v.handler)].clauses.len, id);
-            for (sources) |input| {
-                const mapped = try self.mapInput(binding, input);
-                if (mapped.fresh != null) return self.rejected(binding);
-                for (mapped.items[0..mapped.len]) |trace| {
-                    const origin_id = try self.origin(start, trace);
-                    try result.appendSlice(self.allocator, self.queries.items[origin_id].sources.items);
-                }
-            }
         }
         return result;
     }
 
     fn returnRequirements(self: *Flow, index: usize, block: p.Id) a.Error!void {
-        const handler = self.program.handlers[@intCast(self.program.blocks[@intCast(block)].terminator.handle.handler)];
+        const handler_id = switch (self.program.blocks[@intCast(block)].terminator) {
+            inline .handle, .resume_with => |v| v.handler,
+            else => return error.InvalidProgram,
+        };
+        const handler = self.program.handlers[@intCast(handler_id)];
         const query_id = try self.requirementsQuery(self.program.functions[@intCast(handler.return_function)].entry);
         const constraints = try self.allocator.dupe(Constraint, self.requirements.items[query_id].constraints.items);
         defer self.allocator.free(constraints);
@@ -432,6 +498,7 @@ pub const Flow = struct {
                 .resume_with => |v| {
                     try self.relation(index, id, v.argument, v.resumption, .capture);
                     for (v.state) |slot| try self.relation(index, id, slot, v.resumption, .capture);
+                    try self.returnRequirements(index, id);
                 },
                 .resume_computation => |v| {
                     try self.relation(index, id, v.computation, v.resumption, .capture);
@@ -457,7 +524,8 @@ pub const Flow = struct {
     }
 
     fn pushTrace(self: *Flow, pending: *std.ArrayList(Trace), trace: Trace) a.Error!void {
-        if (trace.ambient != null) return pending.append(self.allocator, trace);
+        if (trace.ambient != null or trace.body_result)
+            return pending.append(self.allocator, trace);
         try self.push(pending, trace.block, trace.slot, trace.path);
     }
 
@@ -512,6 +580,20 @@ pub const Flow = struct {
         } else for (self.program.blocks, 0..) |block, id| if (live[id] and block.terminator == .return_value) try self.push(&pending, id, block.terminator.return_value, query_path);
         while (pending.pop()) |trace| {
             if ((try visited.getOrPut(allocator, trace)).found_existing) continue;
+            if (trace.body_result) {
+                const term = self.program.blocks[@intCast(trace.block)].terminator;
+                if (term != .handle) return error.InvalidProgram;
+                const v = term.handle;
+                try self.body(
+                    &pending,
+                    trace.block,
+                    v.body,
+                    v.arguments,
+                    self.program.handlers[@intCast(v.handler)].clauses.len,
+                    trace.path,
+                );
+                continue;
+            }
             if (trace.ambient) |ambient| {
                 try self.addSource(query_index, .{ .ambient = ambient });
                 continue;
@@ -683,9 +765,7 @@ pub const Flow = struct {
                 const index = try self.writeQuery(self.program.functions[@intCast(handler.return_function)].entry, schema, path);
                 const sources = try self.allocator.dupe(Source, self.queries.items[index].sources.items);
                 defer self.allocator.free(sources);
-                for (sources) |source| {
-                    if (source.ambient) |ambient| try self.pushTrace(pending, .{ .block = block, .ambient = ambient }) else if (source.parameter < v.state.len) try self.push(pending, block, v.state[@intCast(source.parameter)], source.path) else try self.body(pending, block, v.body, v.arguments, handler.clauses.len, source.path);
-                }
+                for (sources) |source| try self.returnInput(pending, block, source);
             },
             .perform, .forward => |v| if (v.capability != null) {
                 for (self.program.handlers, 0..) |handler, handler_id| for (handler.clauses) |clause| if (clause.effect == v.effect) {
@@ -731,9 +811,7 @@ pub const Flow = struct {
                 const returns = try self.query(self.program.functions[@intCast(handler.return_function)].entry, path);
                 const sources = try self.allocator.dupe(Source, self.queries.items[returns].sources.items);
                 defer self.allocator.free(sources);
-                for (sources) |source| {
-                    if (source.ambient) |ambient| try self.pushTrace(pending, .{ .block = block, .ambient = ambient }) else if (source.parameter < v.state.len) try self.push(pending, block, v.state[@intCast(source.parameter)], source.path) else try self.body(pending, block, v.body, v.arguments, handler.clauses.len, source.path);
-                }
+                for (sources) |source| try self.returnInput(pending, block, source);
                 // A clause can return state or a borrow arriving from the body's
                 // older inputs. Fresh body capabilities are checked separately.
                 for (handler.clauses) |clause| {
