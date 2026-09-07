@@ -38,6 +38,10 @@ pub fn main(init: std.process.Init) !void {
         28 => boundary.source.examples.ownership(&builder),
         29 => boundary.source.examples.shallowResumptions(&builder),
         30 => boundary.source.examples.shallowInjection(&builder),
+        31 => boundary.source.examples.handleOperandOrder(&builder),
+        32 => boundary.source.examples.protectOperandOrder(&builder),
+        33 => boundary.source.examples.successorState(&builder),
+        34 => boundary.source.examples.clausePayload(&builder),
         else => @compileError("unknown source example"),
     };
     var buffer: [4096]u8 = undefined;

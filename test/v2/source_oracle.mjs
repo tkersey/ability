@@ -418,8 +418,9 @@ export function execute(source, initial, responses = [], cancellations = []) {
         case "apply": return value(expression.computation, env)(values(expression.arguments));
         case "perform": return { kind: "request", effect: expression.effect, capability: expression.capability === null ? null : value(expression.capability, env), payload: value(expression.payload, env), bodies: values(expression.bodies), capabilities: values(expression.use_site_capabilities), reenter: (replacement) => replacement };
         case "handle": {
+          const body = value(expression.body, env), args = values(expression.arguments);
           const definition = source.handlers[expression.handler], activation = { definition: expression.handler, state: values(expression.state), env, token: {} };
-          return handle(value(expression.body, env)([...definition.clauses.map(() => activation.token), ...values(expression.arguments)]), activation);
+          return handle(body([...definition.clauses.map(() => activation.token), ...args]), activation);
         }
         case "resume_value": return value(expression.resumption, env).enter(pure(value(expression.argument, env)));
         case "resume_with": return value(expression.resumption, env).enter(pure(value(expression.argument, env)), { definition: expression.handler, state: values(expression.state), env });
@@ -427,9 +428,10 @@ export function execute(source, initial, responses = [], cancellations = []) {
         case "with_region": { const region = { cells: new Set() }; return inRegion(value(expression.body, env)([region, ...values(expression.arguments)]), region); }
         case "protect": {
           const body = value(expression.body, env), cleanup = value(expression.cleanup, env);
-          if (expression.resource === null) return protect(body(values(expression.arguments)), cleanup);
+          const args = values(expression.arguments);
+          if (expression.resource === null) return protect(body(args), cleanup);
           const resource = value(expression.resource, env), loan = { active: true };
-          return protect(body([{ resource, loan }, ...values(expression.arguments)]), (args) => { loan.active = false; return cleanup([...args, resource]); });
+          return protect(body([{ resource, loan }, ...args]), (exit) => { loan.active = false; return cleanup([...exit, resource]); });
         }
         case "dispose": return value(expression, env).close();
         case "fail": return { kind: "failure", value: value(expression, env) };
@@ -487,7 +489,15 @@ export function execute(source, initial, responses = [], cancellations = []) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const sources = await Promise.all(process.argv.slice(2).map(async (path) => JSON.parse(await readFile(path, "utf8"))));
-  assert.equal(sources.length, 31);
+  assert.equal(sources.length, 35);
+  for (const index of [31, 32]) {
+    assert.deepEqual(execute(sources[index], []), { kind: "Completed", trace: [], value: [7, 0, 0, 0, 0, 0, 0, 0] });
+  }
+  assert.deepEqual(execute(sources[33], []), {
+    kind: "Completed", trace: [{ kind: "Yielded" }],
+    value: [42, 0, 0, 0, 0, 0, 0, 0, 37, 0, 0, 0, 0, 0, 0, 0],
+  });
+  assert.deepEqual(execute(sources[34], []), { kind: "Completed", trace: [{ kind: "Yielded" }], value: [] });
   for (const injected of [0, 1]) {
     const result = execute(sources[30], [injected]);
     assert.equal(result.kind, "Completed");
@@ -643,5 +653,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const roles = ["arithmetic_overflow", "division_by_zero", "capacity_exceeded", "invalid_utf8", "invalid_index", "invalid_variant"];
     assert.deepEqual(result.value, failed ? [roles.indexOf(expected)] : scalar(expected), `scalar-contracts ${index}`);
   }
-  console.log("independent source oracle: 31 compiled source fixtures and cancellation/cleanup scenarios passed");
+  console.log("independent source oracle: 35 compiled source fixtures and cancellation/cleanup scenarios passed");
 }

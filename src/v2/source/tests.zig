@@ -3,6 +3,39 @@ const source = @import("../source.zig");
 const examples = @import("examples.zig");
 const data = @import("boundary_data_v2");
 
+test "operation clauses accept older capability payloads and reject their own attachment" {
+    inline for (.{ false, true }) |older| inline for (.{ false, true }) |helper| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const module = try @import("clause_payload_example.zig").variant(&b, older, helper);
+        var diagnostic: source.Diagnostic = .{};
+        if (source.lowerObserved(std.testing.allocator, module, .{ .diagnostic = &diagnostic })) |result| {
+            var compiled = result;
+            defer compiled.deinit();
+            try std.testing.expect(older);
+        } else |err| {
+            try std.testing.expect(!older);
+            try std.testing.expectEqual(error.InvalidOwnership, err);
+            try std.testing.expectEqual(.target_check, diagnostic.phase);
+            try std.testing.expect(diagnostic.target.handler != null);
+        }
+    };
+}
+
+test "shallow successor state preserves independent capability and region lifetimes" {
+    inline for (.{ false, true }) |capability| inline for (.{ false, true }) |cell| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const module = try @import("successor_state_example.zig").variant(&b, capability, cell);
+        var diagnostic: source.Diagnostic = .{};
+        var compiled = source.lowerObserved(std.testing.allocator, module, .{ .diagnostic = &diagnostic }) catch |err| {
+            std.debug.print("successor capability={any}, cell={any}: {any}\n", .{ capability, cell, diagnostic });
+            return err;
+        };
+        defer compiled.deinit();
+    };
+}
+
 test "product destructuring requires distinct simultaneous variable binders" {
     for (0..4) |duplicate| {
         var b = source.Builder.init(std.testing.allocator);

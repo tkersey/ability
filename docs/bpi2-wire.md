@@ -99,6 +99,11 @@ capability cannot leave its handler; suspension packages retain the enclosing
 handler evidence and regions even when their explicit environments are empty.
 Clause and return writes use the state of the selected attachment. These are
 derived checks, with no additional wire fields or trusted source annotations.
+Capabilities depend on evidence ancestry; regions, cells, and resource loans
+depend on region ancestry. Suspensions retain both components. Calls and
+use-site injection preserve the selected component of an implicit context.
+An operation clause uses the context outside its selected delimiter: its own
+capability cannot enter as payload, while an older live capability can.
 
 ### Schemas
 

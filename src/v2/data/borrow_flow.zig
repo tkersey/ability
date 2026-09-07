@@ -8,7 +8,7 @@ const p = @import("program.zig");
 const a = @import("admission.zig");
 const contracts = @import("contracts.zig");
 
-pub const Step = union(enum) { field: p.Id, element, environment: struct { constructor: p.Id, field: p.Id }, handler_state: struct { handler: p.Id, field: p.Id }, use_site: struct { index: p.Id, schema: p.Id }, cell_content, package_token, outer, resumed };
+pub const Step = union(enum) { field: p.Id, element, environment: struct { constructor: p.Id, field: p.Id }, handler_state: struct { handler: p.Id, field: p.Id }, use_site: struct { index: p.Id, schema: p.Id }, cell_content, package_token, outer: ?Ambient, resumed: ?Ambient };
 const Path = struct { step: Step, tail: usize };
 pub const Ambient = enum { evidence, region };
 pub const Source = struct { parameter: p.Id = 0, path: usize = 0, ambient: ?Ambient = null };
@@ -32,13 +32,14 @@ const Binding = struct {
     resumed: ?p.Id = null,
 };
 const Mapped = struct {
-    fresh: bool = false,
+    fresh: ?Ambient = null,
     items: [2]Trace = undefined,
     len: usize = 0,
     fn one(trace: Trace) Mapped {
         return .{ .items = .{ trace, undefined }, .len = 1 };
     }
-    fn ambient(block: p.Id) Mapped {
+    fn ambient(block: p.Id, component: ?Ambient) Mapped {
+        if (component) |selected| return one(.{ .block = block, .ambient = selected });
         return .{ .items = .{ .{ .block = block, .ambient = .evidence }, .{ .block = block, .ambient = .region } }, .len = 2 };
     }
 };
@@ -90,7 +91,7 @@ pub const Flow = struct {
     }
 
     fn prepend(self: *Flow, step: Step, tail: usize) a.Error!usize {
-        if (step == .outer and tail != 0 and self.paths.items[tail - 1].step == .outer) return tail;
+        if (step == .outer and tail != 0 and std.meta.eql(self.paths.items[tail - 1].step, step)) return tail;
         for (self.paths.items, 0..) |path, index| if (path.tail == tail and std.meta.eql(path.step, step)) return index + 1;
         try self.paths.append(self.allocator, .{ .step = step, .tail = tail });
         return self.paths.items.len;
@@ -248,9 +249,9 @@ pub const Flow = struct {
 
     fn mapInput(self: *Flow, binding: Binding, source: Source) a.Error!Mapped {
         if (source.ambient) |ambient| {
-            if (binding.resumed) |token| return Mapped.one(.{ .block = binding.block, .slot = token, .path = try self.prepend(.resumed, 0) });
-            if (binding.operation) |op| return Mapped.one(.{ .block = binding.block, .slot = op.capability.?, .path = try self.prepend(.outer, 0) });
-            if (binding.fresh == ambient) return .{ .fresh = true };
+            if (binding.resumed) |token| return Mapped.one(.{ .block = binding.block, .slot = token, .path = try self.prepend(.{ .resumed = ambient }, 0) });
+            if (binding.operation) |op| return Mapped.one(.{ .block = binding.block, .slot = op.capability.?, .path = try self.prepend(.{ .outer = ambient }, 0) });
+            if (binding.fresh == ambient) return .{ .fresh = ambient };
             return Mapped.one(.{ .block = binding.block, .ambient = ambient });
         }
         if (binding.operation) |op| {
@@ -264,7 +265,7 @@ pub const Flow = struct {
                 return Mapped.one(.{ .block = binding.block, .slot = op.use_site_capabilities[@intCast(path.step.use_site.index)], .path = path.tail });
             }
             if (source.path != 0 and self.paths.items[source.path - 1].step == .resumed) return Mapped.one(.{ .block = binding.block, .slot = op.capability.?, .path = source.path });
-            return Mapped.one(.{ .block = binding.block, .slot = op.capability.?, .path = try self.prepend(.outer, 0) });
+            return Mapped.one(.{ .block = binding.block, .slot = op.capability.?, .path = try self.prepend(.{ .outer = null }, 0) });
         }
         const captures = if (binding.constructor) |id| self.program.scopes.captures[@intCast(self.program.constructors[@intCast(id)].capture)].fields.len else 0;
         if (source.parameter < captures) return Mapped.one(.{ .block = binding.block, .slot = binding.computation_slot.?, .path = try self.prepend(.{ .environment = .{ .constructor = binding.constructor.?, .field = source.parameter } }, source.path) });
@@ -272,13 +273,21 @@ pub const Flow = struct {
         if (source.parameter < captures + binding.supplied) {
             if (source.path != 0) {
                 const path = self.paths.items[source.path - 1];
-                if (path.step == .outer) return Mapped.ambient(binding.block);
+                if (path.step == .outer) return Mapped.ambient(binding.block, path.step.outer);
+                if (path.step == .resumed and binding.fresh == .evidence) {
+                    if (path.step.resumed == .region) return Mapped.ambient(binding.block, .region);
+                    if (path.step.resumed == null) {
+                        var context = Mapped.ambient(binding.block, .region);
+                        context.fresh = .evidence;
+                        return context;
+                    }
+                }
                 if (path.step == .handler_state) {
                     if (binding.handler != path.step.handler_state.handler) return .{};
                     return Mapped.one(.{ .block = binding.block, .slot = binding.state[@intCast(path.step.handler_state.field)], .path = path.tail });
                 }
             }
-            return .{ .fresh = true };
+            return .{ .fresh = binding.fresh orelse return self.rejected(binding) };
         }
         return Mapped.one(.{ .block = binding.block, .slot = binding.arguments[@intCast(source.parameter - captures - binding.supplied)], .path = source.path });
     }
@@ -290,10 +299,15 @@ pub const Flow = struct {
         const start = self.requirements.items[index].start;
         for (pairs) |pair| {
             const values = try self.mapInput(binding, pair.value);
-            const owners = try self.mapInput(binding, pair.owner);
-            if (values.fresh) {
-                if (owners.fresh and pair.bound == .region) continue;
-                if (owners.len != 0) return self.rejected(binding);
+            const owners = try self.mapOwner(binding, pair.owner, pair.bound);
+            if (values.fresh) |component| {
+                // Capabilities need evidence ancestry; region references need
+                // region ancestry. A constraint on the other component cannot
+                // make a fresh value escape its owner.
+                for (owners.items[0..owners.len]) |owner| {
+                    if (self.selectedComponent(owner)) |selected| if (selected != component) continue;
+                    return self.rejected(binding);
+                }
             }
             for (values.items[0..values.len]) |value_trace| for (owners.items[0..owners.len]) |owner_trace| {
                 const v = try self.origin(start, value_trace);
@@ -301,6 +315,29 @@ pub const Flow = struct {
                 for (self.queries.items[v].sources.items) |value| for (self.queries.items[o].sources.items) |owner| try self.addConstraint(index, value, owner, pair.bound);
             };
         }
+    }
+
+    fn mapOwner(self: *Flow, binding: Binding, source: Source, bound: Bound) a.Error!Mapped {
+        const mapped = try self.mapInput(binding, source);
+        // A clause executes outside the capability's delimiter. Explicit
+        // ambient/resumed projections already denote a context; a newly bound
+        // capability value still needs this owner projection before comparison.
+        if (bound == .clause and mapped.fresh == .evidence and source.ambient == null and source.path == 0)
+            return Mapped.ambient(binding.block, null);
+        return mapped;
+    }
+
+    fn selectedComponent(self: Flow, trace: Trace) ?Ambient {
+        if (trace.ambient) |selected| return selected;
+        var cursor = trace.path;
+        while (cursor != 0) {
+            const path = self.paths.items[cursor - 1];
+            switch (path.step) {
+                .outer, .resumed => |selected| return selected,
+                else => cursor = path.tail,
+            }
+        }
+        return null;
     }
 
     fn bodyBinding(self: Flow, block: p.Id, computation_slot: p.Id, arguments: []const p.Id, supplied: usize, id: p.Id) Binding {
@@ -333,7 +370,7 @@ pub const Flow = struct {
             const binding = self.bodyBinding(block, v.body, v.arguments, self.program.handlers[@intCast(v.handler)].clauses.len, id);
             for (sources) |input| {
                 const mapped = try self.mapInput(binding, input);
-                if (mapped.fresh) return self.rejected(binding);
+                if (mapped.fresh != null) return self.rejected(binding);
                 for (mapped.items[0..mapped.len]) |trace| {
                     const origin_id = try self.origin(start, trace);
                     try result.appendSlice(self.allocator, self.queries.items[origin_id].sources.items);
@@ -429,7 +466,7 @@ pub const Flow = struct {
         defer self.allocator.free(sources);
         for (sources) |source| {
             const mapped = try self.mapInput(binding, source);
-            if (mapped.fresh) return self.rejected(binding);
+            if (mapped.fresh != null) return self.rejected(binding);
             for (mapped.items[0..mapped.len]) |trace| try self.pushTrace(pending, trace);
         }
     }
@@ -734,7 +771,7 @@ pub const Flow = struct {
             .perform, .forward => |v| {
                 // Keep all incoming borrows for internal result schemas. External
                 // results are exportable and are removed by push's schema check.
-                if (v.capability) |slot| try self.push(pending, block, slot, try self.prepend(.outer, 0));
+                if (v.capability) |slot| try self.push(pending, block, slot, try self.prepend(.{ .outer = null }, 0));
                 try self.push(pending, block, v.payload, 0);
                 for (v.bodies) |slot| try self.push(pending, block, slot, 0);
                 for (v.use_site_capabilities) |slot| try self.push(pending, block, slot, 0);
@@ -762,7 +799,7 @@ pub fn validate(allocator: std.mem.Allocator, program: p.Program, exportable: []
             const returned = try flow.returned(start);
             const binding = flow.bodyBinding(block_id, body_slot, arguments, supplied, id);
             for (returned) |source| {
-                if ((try flow.mapInput(binding, source)).fresh) {
+                if ((try flow.mapInput(binding, source)).fresh != null) {
                     return flow.rejected(binding);
                 }
             }

@@ -731,7 +731,21 @@ const Context = struct {
         return record == .computation or record == .environment or record == .aggregate or record == .package;
     }
 
-    const BorrowContext = struct { frame: ?g.NodeRef = null, region: ?g.NodeRef = null, frame_present: bool = true, region_present: bool = true };
+    const BorrowContext = struct {
+        frame: ?g.NodeRef = null,
+        region: ?g.NodeRef = null,
+        frame_present: bool = true,
+        region_present: bool = true,
+
+        fn selected(self: BorrowContext, component: ?borrows.Ambient) BorrowContext {
+            return .{
+                .frame = if (component == .region) null else self.frame,
+                .region = if (component == .evidence) null else self.region,
+                .frame_present = component != .region and self.frame_present,
+                .region_present = component != .evidence and self.region_present,
+            };
+        }
+    };
     const Projection = union(enum) { value: g.Value, borrow: BorrowContext };
     const ProjectionTask = union(enum) {
         value: struct { value: g.Value, path: usize },
@@ -789,16 +803,21 @@ const Context = struct {
                         .one_shot, .multi_template => |token| try pending.append(self.allocator, .{ .value = .{ .value = token.use_site_capabilities[@intCast(site.index)], .path = path.tail } }),
                         else => {},
                     },
-                    .outer => if (record == .attachment) {
+                    .outer => |component| if (record == .attachment) {
                         const activation = (try node(self.state, record.attachment.handler)).handler;
-                        try result.append(self.allocator, .{ .borrow = .{ .frame = record.attachment.outer, .region = activation.region } });
+                        const context: BorrowContext = .{ .frame = record.attachment.outer, .region = activation.region };
+                        try result.append(self.allocator, .{ .borrow = context.selected(component) });
                     },
-                    .resumed => switch (record) {
+                    .resumed => |component| switch (record) {
                         .one_shot, .multi_template => |token| {
                             const saved = (try node(self.state, token.capture.?)).continuation;
-                            try result.append(self.allocator, .{ .borrow = .{ .frame = saved.evidence, .region = saved.region } });
+                            const context: BorrowContext = .{ .frame = saved.evidence, .region = saved.region };
+                            try result.append(self.allocator, .{ .borrow = context.selected(component) });
                         },
-                        .attachment => |attachment| try result.append(self.allocator, .{ .borrow = .{ .frame = ref, .region = attachment.region } }),
+                        .attachment => |attachment| {
+                            const context: BorrowContext = .{ .frame = ref, .region = attachment.region };
+                            try result.append(self.allocator, .{ .borrow = context.selected(component) });
+                        },
                         else => {},
                     },
                 }
@@ -815,7 +834,7 @@ const Context = struct {
                         },
                         else => return error.InvalidState,
                     };
-                    try result.append(self.allocator, .{ .borrow = if (ambient == .evidence) .{ .frame = context.frame, .region_present = false } else .{ .region = context.region, .frame_present = false } });
+                    try result.append(self.allocator, .{ .borrow = context.selected(ambient) });
                     continue;
                 }
                 const parameter: usize = @intCast(selected.source.parameter);

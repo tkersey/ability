@@ -3,7 +3,8 @@
 export const programNames = ['lexical','deep','recursive','choices-all','choices-first','generator',
   'state-local','state-shared','resource-scalar','resource-pair','answers','scoped-reader','writer-raise',
   'scheduler','queens-dfs','queens-bfs','cell-order','nested','shallow','injection','indexed','abort-custody',
-  'unwind','reentrant','cloned','clause-abort','bounded-values','scalar-contracts','ownership','shallow-resumptions','shallow-injection'];
+  'unwind','reentrant','cloned','clause-abort','bounded-values','scalar-contracts','ownership','shallow-resumptions','shallow-injection',
+  'handle-operand-order','protect-operand-order','successor-state','clause-payload'];
 const scalar=(value)=>{const bytes=Buffer.alloc(8);bytes.writeBigUInt64LE(BigInt(value));return [...bytes];};
 export const cases=[];
 function add(name,program,initial=[],responses=[],cancellations=[]) { cases.push({name,program,initial,responses,cancellations}); }
@@ -24,3 +25,4 @@ for(const name of ['queens-dfs','queens-bfs']) add(name,name,[],[scalar(201),[],
 for(const primary of [0,1]) for(const cancel of [false,true]) add(`unwind-${primary}-${cancel?'cancel':'continue'}`,'unwind',[primary],[[],[]],cancel?[{at:0,reason:'stop',preservesRequest:true},{at:0,reason:'later',preservesRequest:true}]:[]);
 for(let index=0;index<19;index++) add(`scalar-contract-${index}`,'scalar-contracts',[index]);
 add('shallow-resumptions','shallow-resumptions');
+for (const name of ['handle-operand-order','protect-operand-order','successor-state','clause-payload']) add(name,name);

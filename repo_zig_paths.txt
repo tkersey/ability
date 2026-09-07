@@ -59,6 +59,9 @@ src/v2/source/diagnostic.zig
 src/v2/source/direct.zig
 src/v2/source/economy_examples.zig
 src/v2/source/examples.zig
+src/v2/source/clause_payload_example.zig
+src/v2/source/operand_order_example.zig
+src/v2/source/successor_state_example.zig
 src/v2/source/generator_example.zig
 src/v2/source/indexed_example.zig
 src/v2/source/injection_example.zig
