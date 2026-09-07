@@ -580,7 +580,10 @@ const Context = struct {
                 if (source.terminator != .with_region or source.terminator.with_region.region != region_node.region.descriptor) return error.InvalidState;
                 try self.checkParent(scope.return_to, try self.expectedResult(source));
                 const after = try node(self.state, scope.return_to orelse return error.InvalidState);
-                if (after != .continuation or !std.meta.eql(after.continuation.region, region_node.region.outer)) return error.InvalidScope;
+                if (after != .continuation or
+                    after.continuation.source_block != scope.source_block or
+                    !std.meta.eql(after.continuation.region, region_node.region.outer))
+                    return error.InvalidScope;
             },
             .cell => |cell| {
                 const shape = try a.schemaAt(self.program.schemas, cell.schema);

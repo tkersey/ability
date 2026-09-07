@@ -331,6 +331,10 @@ typed result holes. Its `source_block` identifies the terminator supplying that
 edge. Exit `stop` is a borrowed destination; the unwind/cleanup position owns
 the active frames.
 
+A region-scope frame and its saved return continuation identify the same
+`with_region` source block. State admission enforces this binding together with
+the result type and outer region when checking the saved invocation's effects.
+
 | Node tag | Name | Fields, in order |
 | --- | --- | --- |
 | 0 | control | Control. |
