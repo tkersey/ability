@@ -3,6 +3,38 @@ const source = @import("../source.zig");
 const examples = @import("examples.zig");
 const data = @import("boundary_data_v2");
 
+test "borrowed operands preserve evaluated consumption and owned temporary failure custody" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    var compiled = try source.lower(std.testing.allocator, try examples.borrowOperands(&b));
+    defer compiled.deinit();
+    try data.admission.program(std.testing.allocator, compiled.program);
+    try data.canonical.require(std.testing.allocator, compiled.program);
+}
+
+test "failure custody does not permit repeated consumption inside a borrowed operand" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const module = try examples.borrowOperands(&b);
+    var changed = false;
+    for (b.values.items) |*value| {
+        if (value.expression != .primitive) continue;
+        const primitive = &value.expression.primitive;
+        if (primitive.opcode != .sequence or primitive.operands.len != 1) continue;
+        const operand = primitive.operands[0];
+        const schema = b.values.items[@intCast(operand)].schema;
+        if (b.schemas.items[@intCast(schema)] != .internal) continue;
+        primitive.operands = try b.allocator().dupe(data.program.Id, &.{ operand, operand });
+        changed = true;
+        break;
+    }
+    try std.testing.expect(changed);
+    try std.testing.expectError(error.InvalidOwnership, source.lower(
+        std.testing.allocator,
+        b.module(module.entry, module.failure),
+    ));
+}
+
 test "operation clauses accept older capability payloads and reject their own attachment" {
     inline for (.{ false, true }) |older| inline for (.{ false, true }) |helper| {
         var b = source.Builder.init(std.testing.allocator);

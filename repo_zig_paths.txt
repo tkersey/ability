@@ -49,6 +49,7 @@ src/v2/root.zig
 src/v2/source.zig
 src/v2/source/abort_example.zig
 src/v2/source/answer_example.zig
+src/v2/source/borrow_operand_example.zig
 src/v2/source/ast.zig
 src/v2/source/cell_order_example.zig
 src/v2/source/check.zig

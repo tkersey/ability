@@ -16,6 +16,15 @@ pub fn block(allocator: std.mem.Allocator, image: p.Program, code: p.Block, slot
             d.instruction = instruction_index;
             d.terminator = null;
         }
+        if (instruction.opcode.borrowsOperands()) {
+            for (instruction.operands) |operand| try check.borrow(operand);
+            if (instruction.opcode == .sequence_get) {
+                const source = image.schemas[@intCast(slots[@intCast(instruction.operands[0])])];
+                const element = try @import("aggregate_admission.zig").element(source);
+                if (!facts.copy[@intCast(element)]) return error.InvalidOwnership;
+            }
+            continue;
+        }
         switch (instruction.opcode) {
             .select => {
                 if (!facts.drop[@intCast(instruction.result_type)]) return error.InvalidOwnership;
@@ -25,14 +34,6 @@ pub fn block(allocator: std.mem.Allocator, image: p.Program, code: p.Block, slot
                 const element = try @import("aggregate_admission.zig").element(image.schemas[@intCast(instruction.result_type)]);
                 if (!facts.drop[@intCast(element)]) return error.InvalidOwnership;
                 for (instruction.operands) |operand| try check.consume(operand);
-            },
-            .variant_tag, .sequence_length, .sequence_get => {
-                for (instruction.operands) |operand| try check.borrow(operand);
-                if (instruction.opcode == .sequence_get) {
-                    const source = image.schemas[@intCast(slots[@intCast(instruction.operands[0])])];
-                    const element = try @import("aggregate_admission.zig").element(source);
-                    if (!facts.copy[@intCast(element)]) return error.InvalidOwnership;
-                }
             },
             .field => {
                 const fields = image.schemas[@intCast(slots[@intCast(instruction.operands[0])])].product;

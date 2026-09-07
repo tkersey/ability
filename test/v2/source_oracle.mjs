@@ -495,7 +495,16 @@ export function execute(source, initial, responses = [], cancellations = []) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const sources = await Promise.all(process.argv.slice(2).map(async (path) => JSON.parse(await readFile(path, "utf8"))));
-  assert.equal(sources.length, 36);
+  assert.equal(sources.length, 37);
+  for (let index = 0; index < 20; index++) {
+    const populated = index % 2 === 1, owned = index >= 12;
+    const result = execute(sources[36], [index]);
+    const failed = owned || !populated;
+    assert.equal(result.kind, failed ? "Failed" : "Completed");
+    assert.deepEqual(result.value,
+      [owned ? (populated ? 8 : 9) : (populated ? 7 : 8), 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(result.trace, failed ? [{ kind: "Yielded" }] : []);
+  }
   for (const index of [31, 32]) {
     assert.deepEqual(execute(sources[index], []), { kind: "Completed", trace: [], value: [7, 0, 0, 0, 0, 0, 0, 0] });
   }
@@ -673,5 +682,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const roles = ["arithmetic_overflow", "division_by_zero", "capacity_exceeded", "invalid_utf8", "invalid_index", "invalid_variant"];
     assert.deepEqual(result.value, failed ? [roles.indexOf(expected)] : scalar(expected), `scalar-contracts ${index}`);
   }
-  console.log("independent source oracle: 36 compiled source fixtures and cancellation/cleanup scenarios passed");
+  console.log("independent source oracle: 37 compiled source fixtures and cancellation/cleanup scenarios passed");
 }

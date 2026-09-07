@@ -137,6 +137,13 @@ pub const Opcode = enum(u8) {
     blob_from_byte = 45,
     sequence_pop_last = 46,
     select = 47,
+
+    pub fn borrowsOperands(self: Opcode) bool {
+        return switch (self) {
+            .variant_tag, .sequence_length, .sequence_get => true,
+            else => false,
+        };
+    }
 };
 
 pub const Fault = enum(u8) { arithmetic_overflow = 0, division_by_zero = 1, capacity_exceeded = 2, invalid_utf8 = 3, invalid_index = 4, invalid_variant = 5 };

@@ -12,7 +12,7 @@ const Block = struct { id: p.Id, variables: []const p.Id };
 const Continuation = struct { block: Block, result: p.Id };
 const ConstructorKey = struct { function: p.Id, schema: p.Id };
 const BlockKey = struct { expression: p.Id, next: p.Id, result: p.Id, bindings: []const p.Id };
-const RetainedKey = struct { block: p.Id, variable: p.Id };
+const RetainedKey = struct { block: p.Id, schema: p.Id };
 const none = std.math.maxInt(p.Id);
 // Source names are local to a lexical scope. Only the current term's free
 // bindings enter its cache key; closed shared syntax keeps one lowered body.
@@ -124,7 +124,8 @@ pub fn lowerObserved(allocator: std.mem.Allocator, source: ast.Module, options: 
         var parameters: check.Set = .empty;
         try parameters.appendSlice(storage, compiler.facts.functions[id].items);
         try parameters.appendSlice(storage, function.parameters);
-        if (source_facts.results[@intCast(function.body.?)] == null) body = try code.retain(body, parameters.items, &.{});
+        if (source_facts.results[@intCast(function.body.?)] == null)
+            body = try code.retain(body, parameters.items);
         const entry = if (std.mem.eql(p.Id, parameters.items, body.variables)) body else blk: {
             var block = try code.start(parameters.items);
             break :blk try block.finish(.{ .jump = try block.edge(body, null, null) });
@@ -255,24 +256,32 @@ const Function = struct {
     id: p.Id,
     memo: std.HashMapUnmanaged(BlockKey, Block, BlockContext, 80) = .empty,
     returns: ?Continuation = null,
-    retained: std.AutoHashMapUnmanaged(RetainedKey, Block) = .empty,
+    retained: std.AutoHashMapUnmanaged(RetainedKey, p.Id) = .empty,
 
-    fn retain(self: *Function, original: Block, variables: []const p.Id, consumed: []const p.Id) Error!Block {
+    fn retainBlock(self: *Function, block: p.Id, schema: p.Id) Error!p.Id {
+        const key: RetainedKey = .{ .block = block, .schema = schema };
+        if (self.retained.get(key)) |present| return present;
+        const compiler = self.compiler;
+        const retained = try @import("retain.zig").forFailure(
+            compiler.allocator,
+            &compiler.blocks,
+            block,
+            schema,
+        );
+        try self.retained.put(compiler.allocator, key, retained);
+        return retained;
+    }
+    fn retain(self: *Function, original: Block, variables: []const p.Id) Error!Block {
         var result = original;
         for (variables) |variable| {
             const compiler = self.compiler;
             const schema = compiler.variables.items[@intCast(variable)];
-            if (compiler.traits.drop[@intCast(schema)] or std.mem.indexOfScalar(p.Id, result.variables, variable) != null or std.mem.indexOfScalar(p.Id, consumed, variable) != null) continue;
-            const key: RetainedKey = .{ .block = result.id, .variable = variable };
-            if (self.retained.get(key)) |present| {
-                result = present;
-                continue;
-            }
+            if (compiler.traits.drop[@intCast(schema)] or
+                std.mem.indexOfScalar(p.Id, result.variables, variable) != null) continue;
             const all = try compiler.allocator.alloc(p.Id, result.variables.len + 1);
             @memcpy(all[0..result.variables.len], result.variables);
             all[result.variables.len] = variable;
-            result = .{ .id = try @import("retain.zig").forFailure(compiler.allocator, &compiler.blocks, result.id, schema), .variables = all };
-            try self.retained.put(compiler.allocator, key, result);
+            result = .{ .id = try self.retainBlock(result.id, schema), .variables = all };
         }
         return result;
     }
@@ -283,7 +292,7 @@ const Function = struct {
         const bound: Environment = .{ .names = &.{binding.variable}, .bindings = ids };
         const rest = try self.resolved(try request.under(compiler, binding.next, bound));
         return if (compiler.facts.results[@intCast(binding.next)] == null)
-            self.retain(rest, ids, &.{})
+            self.retain(rest, ids)
         else
             rest;
     }
@@ -441,17 +450,19 @@ const Function = struct {
     fn lowerConditional(self: *Function, block: *BuildBlock, request: Request) Error!Block {
         const compiler = self.compiler;
         const conditional = compiler.source.terms[@intCast(request.id)].conditional;
-        var left = try self.resolved(try request.under(compiler, conditional.when_true, .{}));
-        var right = try self.resolved(try request.under(compiler, conditional.when_false, .{}));
-        const consumed = try self.consumedVariables(conditional.condition, request.environment);
+        const left = try self.resolved(try request.under(compiler, conditional.when_true, .{}));
+        const right = try self.resolved(try request.under(compiler, conditional.when_false, .{}));
+        const condition = try block.value(conditional.condition);
+        var when_true = try block.edge(left, null, null);
+        var when_false = try block.edge(right, null, null);
         if (compiler.facts.results[@intCast(conditional.when_true)] == null)
-            left = try self.retain(left, block.variables, consumed);
+            when_true = try block.retainEdge(when_true, condition);
         if (compiler.facts.results[@intCast(conditional.when_false)] == null)
-            right = try self.retain(right, block.variables, consumed);
+            when_false = try block.retainEdge(when_false, condition);
         return block.finish(.{ .branch = .{
-            .condition = try block.value(conditional.condition),
-            .when_true = try block.edge(left, null, null),
-            .when_false = try block.edge(right, null, null),
+            .condition = condition,
+            .when_true = when_true,
+            .when_false = when_false,
         } });
     }
     fn lowerMatch(self: *Function, block: *BuildBlock, request: Request) Error!Block {
@@ -459,18 +470,19 @@ const Function = struct {
         const match = compiler.source.terms[@intCast(request.id)].match_sum;
         const ids = compiler.binders[@intCast(request.id)];
         const cases = try compiler.allocator.alloc(p.Edge, match.cases.len);
-        const consumed = try self.consumedVariables(match.value, request.environment);
+        const value = try block.value(match.value);
         for (cases, match.cases, ids) |*edge, case, binding| {
             const bound: Environment = .{ .names = &.{case.variable}, .bindings = &.{binding} };
             var target = try self.resolved(try request.under(compiler, case.body, bound));
             if (compiler.facts.results[@intCast(case.body)] == null) {
-                target = try self.retain(target, block.variables, consumed);
-                target = try self.retain(target, &.{binding}, &.{});
+                target = try self.retain(target, &.{binding});
             }
             edge.* = try block.edge(target, binding, null);
+            if (compiler.facts.results[@intCast(case.body)] == null)
+                edge.* = try block.retainEdge(edge.*, value);
         }
         return block.finish(.{ .switch_variant = .{
-            .value = try block.value(match.value),
+            .value = value,
             .cases = cases,
         } });
     }
@@ -481,7 +493,7 @@ const Function = struct {
         const bound: Environment = .{ .names = unpack.variables, .bindings = ids };
         var rest = try self.resolved(try request.under(compiler, unpack.body, bound));
         if (compiler.facts.results[@intCast(unpack.body)] == null)
-            rest = try self.retain(rest, ids, &.{});
+            rest = try self.retain(rest, ids);
         var variables: check.Set = .empty;
         try variables.appendSlice(compiler.allocator, ids);
         _ = try check.merge(compiler.allocator, &variables, rest.variables, ids);
@@ -525,31 +537,6 @@ const Function = struct {
             .owned = try block.value(value),
             .next = try block.edge(target, null, null),
         } });
-    }
-    fn consumedVariables(
-        self: *Function,
-        value: p.Id,
-        environment: Environment,
-    ) Error![]const p.Id {
-        const compiler = self.compiler;
-        var pending: std.ArrayList(p.Id) = .empty;
-        var variables: check.Set = .empty;
-        var visited: std.AutoHashMapUnmanaged(p.Id, void) = .empty;
-        try pending.append(compiler.allocator, value);
-        while (pending.pop()) |id| {
-            if ((try visited.getOrPut(compiler.allocator, id)).found_existing) continue;
-            switch (compiler.source.values[@intCast(id)].expression) {
-                .variable => |variable| _ = try check.add(compiler.allocator, &variables, variable),
-                .lambda => |function| _ = try check.merge(compiler.allocator, &variables, compiler.facts.functions[@intCast(function)].items, &.{}),
-                .literal => {},
-                .primitive => |primitive| switch (primitive.opcode) {
-                    .variant_tag, .sequence_length, .sequence_get => {},
-                    else => try pending.appendSlice(compiler.allocator, primitive.operands),
-                },
-            }
-        }
-        for (variables.items) |*variable| variable.* = try environment.resolve(variable.*);
-        return variables.items;
     }
 };
 
@@ -631,6 +618,38 @@ const BuildBlock = struct {
         const arguments = try self.function.compiler.allocator.alloc(p.Argument, target.variables.len);
         for (arguments, target.variables) |*argument, variable_id| argument.* = if (result_variable != null and variable_id == result_variable.?) (if (result_slot) |slot| .{ .slot = slot } else .returned) else .{ .slot = try self.variable(variable_id) };
         return .{ .block = target.id, .arguments = arguments };
+    }
+    fn retainEdge(self: BuildBlock, original: p.Edge, consumed: p.Id) Error!p.Edge {
+        const compiler = self.function.compiler;
+        const used = try compiler.allocator.alloc(bool, self.variables.len + self.instructions.items.len);
+        @memset(used, false);
+        for (self.instructions.items, 0..) |operation, index| {
+            if (operation.opcode.borrowsOperands()) continue;
+            for (operation.operands) |operand| {
+                std.debug.assert(operand < self.variables.len + index);
+                used[@intCast(operand)] = true;
+            }
+        }
+        std.debug.assert(consumed < used.len);
+        used[@intCast(consumed)] = true;
+        var arguments: std.ArrayList(p.Argument) = .empty;
+        try arguments.appendSlice(compiler.allocator, original.arguments);
+        for (original.arguments) |argument| if (argument == .slot) {
+            used[@intCast(argument.slot)] = true;
+        };
+        var target = original.block;
+        for (used, 0..) |transferred, slot| {
+            if (transferred) continue;
+            const schema = if (slot < self.variables.len)
+                compiler.variables.items[@intCast(self.variables[slot])]
+            else
+                self.instructions.items[slot - self.variables.len].result_type;
+            if (compiler.traits.drop[@intCast(schema)]) continue;
+            std.debug.assert(!compiler.traits.copy[@intCast(schema)]);
+            target = try self.function.retainBlock(target, schema);
+            try arguments.append(compiler.allocator, .{ .slot = slot });
+        }
+        return .{ .block = target, .arguments = arguments.items };
     }
     fn finish(self: *BuildBlock, terminator: p.Terminator) Error!Block {
         const compiler = self.function.compiler;

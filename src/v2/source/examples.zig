@@ -21,6 +21,7 @@ pub const writerRaise = @import("writer_raise_example.zig").build;
 pub const schedulerFifo = @import("scheduler_example.zig").build;
 pub const scalarContracts = @import("scalar_contract_example.zig").build;
 pub const yieldingCleanup = @import("unwind_example.zig").yielding;
+pub const borrowOperands = @import("borrow_operand_example.zig").build;
 
 pub fn boundedValues(builder: *source.Builder) Error!source.ast.Module {
     const byte = try builder.scalar(u8);

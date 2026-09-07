@@ -4,7 +4,7 @@ export const programNames = ['lexical','deep','recursive','choices-all','choices
   'state-local','state-shared','resource-scalar','resource-pair','answers','scoped-reader','writer-raise',
   'scheduler','queens-dfs','queens-bfs','cell-order','nested','shallow','injection','indexed','abort-custody',
   'unwind','reentrant','cloned','clause-abort','bounded-values','scalar-contracts','ownership','shallow-resumptions','shallow-injection',
-  'handle-operand-order','protect-operand-order','successor-state','clause-payload','yielding-cleanup'];
+  'handle-operand-order','protect-operand-order','successor-state','clause-payload','yielding-cleanup','borrow-operands'];
 const scalar=(value)=>{const bytes=Buffer.alloc(8);bytes.writeBigUInt64LE(BigInt(value));return [...bytes];};
 export const cases=[];
 function add(name,program,initial=[],responses=[],cancellations=[]) { cases.push({name,program,initial,responses,cancellations}); }
@@ -27,3 +27,4 @@ for(const primary of [0,1]) for(const cancel of [false,true]) add(`yielding-clea
 for(let index=0;index<19;index++) add(`scalar-contract-${index}`,'scalar-contracts',[index]);
 add('shallow-resumptions','shallow-resumptions');
 for (const name of ['handle-operand-order','protect-operand-order','successor-state','clause-payload']) add(name,name);
+for(let index=0;index<20;index++) add(`borrow-operands-${index}`,'borrow-operands',[index]);
