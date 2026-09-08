@@ -61,13 +61,17 @@ const Environment = struct {
         }
         var ordering: check.Set = .empty;
         var depths: std.ArrayList(usize) = .empty;
+        var owns_binding = false;
         for (bound.bindings) |binding| {
-            if (!compiler.traits.drop[@intCast(compiler.variables.items[@intCast(binding)])]) {
+            const schema = compiler.variables.items[@intCast(binding)];
+            owns_binding = owns_binding or !compiler.traits.copy[@intCast(schema)];
+            if (!compiler.traits.drop[@intCast(schema)]) {
                 try ordering.append(allocator, binding);
                 try depths.append(allocator, self.depth + 1);
             }
         }
-        const depth = self.depth + @intFromBool(ordering.items.len != 0);
+        // An affine value still creates an owned scope even when it may be dropped.
+        const depth = self.depth + @intFromBool(owns_binding);
         for (self.ordering) |binding| {
             if (std.mem.indexOfScalar(p.Id, ordering.items, binding) == null) {
                 try ordering.append(allocator, binding);

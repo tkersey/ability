@@ -15,6 +15,8 @@ const Kind = enum {
     region_arguments,
     same_scope_instruction,
     returned_instruction,
+    affine_scope,
+    reusable_scope,
 };
 pub const count = std.enums.values(Kind).len;
 
@@ -36,6 +38,7 @@ pub fn build(b: *source.Builder, fixtures: Fixtures, index: usize) source.Error!
         },
         .capture_order => try capture(b, fixtures, first, second, failed),
         .apply_computation => try computation(b, fixtures, second, failed),
+        .affine_scope, .reusable_scope => try markerScope(b, fixtures, kind, second, failed),
         else => try arguments(b, fixtures, kind, first, failed),
     };
     try b.define(helper, body);
@@ -55,6 +58,25 @@ pub fn build(b: *source.Builder, fixtures: Fixtures, index: usize) source.Error!
     } });
     try b.define(entry, try b.bind(older, first_call, try b.bind(younger, second_call, call)));
     return entry;
+}
+
+fn markerScope(
+    b: *source.Builder,
+    f: Fixtures,
+    kind: Kind,
+    second: p.Id,
+    failed: p.Id,
+) source.Error!p.Id {
+    const unit = try b.scalar(void);
+    const function = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(function, try b.pure(try b.constant(void, {})));
+    const signature = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = unit,
+        .use = if (kind == .affine_scope) .affine else .reusable,
+    } } });
+    const body = try instruction(b, f, .same_scope_instruction, second, second, failed);
+    return b.bind(try b.variable(signature), try b.pure(try b.lambda(function, signature)), body);
 }
 
 fn overflow(b: *source.Builder, left: p.Id) source.Error!p.Id {

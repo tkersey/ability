@@ -614,6 +614,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   for (const [mode, order] of [
     [0, [1, 2]], [1, [2, 1]], [2, [1, 2]], [3, [1, 2]], [4, [2, 1]],
     [5, [1, 2]], [6, [1, 2]], [7, [2, 1]], [8, [2, 1]],
+    [9, [2, 1]], [10, [1, 2]],
   ]) {
     const result = execute(sources[36], [42 + mode], [[], []]);
     assert.equal(result.kind, "Failed");

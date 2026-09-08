@@ -29,4 +29,4 @@ add('shallow-resumptions','shallow-resumptions');
 for (const name of ['handle-operand-order','protect-operand-order','successor-state','clause-payload']) add(name,name);
 for(let index=0;index<32;index++) add(`borrow-operands-${index}`,'borrow-operands',[index]);
 for(let index=32;index<42;index++) add(`custody-order-${index-32}`,'borrow-operands',[index],[[],[]]);
-for(let index=42;index<51;index++) add(`operand-failure-${index-42}`,'borrow-operands',[index],[[],[]]);
+for(let index=42;index<53;index++) add(`operand-failure-${index-42}`,'borrow-operands',[index],[[],[]]);

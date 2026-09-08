@@ -47,6 +47,8 @@ lexical order: inner scopes first, then active owners in creation order within
 each scope. Closure captures use ascending source-variable order. The compiler
 preserves this order through ordinary block parameters, including owned
 temporaries created by instructions.
+An affine value is owned even when it permits implicit dropping; binding it
+establishes an inner ownership scope just as binding a linear value does.
 
 ## Pure data dependency
 
