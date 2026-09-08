@@ -145,7 +145,10 @@ function lexicalCaptures(source, owned) {
     });
     source.functions.forEach((definition, id) => merge(functions[id], terms[definition.body], definition.parameters));
   }
-  return { functions, temporaries: source.functions.map((definition) => termOwners[definition.body]) };
+  return {
+    functions: functions.map((variables) => [...variables].sort((left, right) => left - right)),
+    temporaries: source.functions.map((definition) => termOwners[definition.body]),
+  };
 }
 
 function ownedSchemas(source) {
@@ -299,11 +302,6 @@ export function execute(source, initial, responses = [], cancellations = []) {
     if (!["variant_tag", "sequence_length", "sequence_get"].includes(expression.opcode))
       expression.operands.forEach((operand, index) => take(source.values[operand].schema, operands[index]));
     return keep(definition.schema, result, env[custody]);
-  }
-  function consumeValue(id, env) {
-    const result = value(id, env);
-    take(source.values[id].schema, result);
-    return result;
   }
   function primitive(definition, expression, operands) {
     const fail = (kind) => { throw new Failure(constant(expression.failures.find((failure) => failure.kind === kind).value)); };
@@ -466,39 +464,80 @@ export function execute(source, initial, responses = [], cancellations = []) {
   }
   function evaluate(id, env) {
     return delay(() => {
-      const term = source.terms[id], kind = tag(term), expression = field(term);
-      const values = (ids) => ids.map((id) => consumeValue(id, env));
-      switch (kind) {
-        case "value": return pure(value(expression, env));
-        case "bind": return bind(evaluate(expression.value, env), (result) => bindingScope(env, [expression.variable], [result], expression.next));
-        case "conditional": return evaluate(value(expression.condition, env) ? expression.when_true : expression.when_false, env);
-        case "call": return call(expression.function, env, values(expression.arguments));
-        case "apply": return consumeValue(expression.computation, env)(values(expression.arguments));
-        case "perform": return { kind: "request", effect: expression.effect, capability: expression.capability === null ? null : consumeValue(expression.capability, env), payload: consumeValue(expression.payload, env), bodies: values(expression.bodies), capabilities: values(expression.use_site_capabilities), reenter: (replacement) => replacement };
-        case "handle": {
-          const body = consumeValue(expression.body, env), args = values(expression.arguments);
-          const definition = source.handlers[expression.handler], activation = { definition: expression.handler, state: values(expression.state), env, token: {} };
-          return handle(body([...definition.clauses.map(() => activation.token), ...args]), activation);
-        }
-        case "resume_value": return consumeValue(expression.resumption, env).enter(pure(consumeValue(expression.argument, env)));
-        case "resume_with": return consumeValue(expression.resumption, env).enter(pure(consumeValue(expression.argument, env)), { definition: expression.handler, state: values(expression.state), env });
-        case "resume_computation": { const token = consumeValue(expression.resumption, env); return token.enter(consumeValue(expression.computation, env)(token.capabilities)); }
-        case "with_region": { const region = { cells: new Set() }; return inRegion(consumeValue(expression.body, env)([region, ...values(expression.arguments)]), region); }
-        case "protect": {
-          const body = consumeValue(expression.body, env), cleanup = consumeValue(expression.cleanup, env);
-          const args = values(expression.arguments);
-          if (expression.resource === null) return protect(body(args), cleanup);
-          const resource = consumeValue(expression.resource, env), loan = { active: true };
-          return protect(body([{ resource, loan }, ...args]), (exit) => { loan.active = false; return cleanup([...exit, resource]); });
-        }
-        case "dispose": return consumeValue(expression, env).close();
-        case "fail": return { kind: "failure", value: value(expression, env) };
-        case "yield_then": return { kind: "yield", reenter: () => evaluate(expression, env) };
-        case "match_sum": { const variant = consumeValue(expression.value, env), selected = expression.cases[variant.tag]; return bindingScope(env, [selected.variable], [variant.value], selected.body); }
-        case "unpack_product": return bindingScope(env, expression.variables, consumeValue(expression.value, env), expression.body);
-        default: throw new Error(`oracle term not implemented: ${kind}`);
-      }
+      const transfers = [];
+      const operand = (id) => {
+        const result = value(id, env);
+        transfers.push([source.values[id].schema, result]);
+        return result;
+      };
+      const start = prepareTerm(id, env, operand);
+      // A later operand may fail. Keep every earlier operand in its current
+      // scope until the consuming operation can actually receive them all.
+      for (const [schema, result] of transfers) take(schema, result);
+      return start();
     });
+  }
+  function prepareTerm(id, env, operand) {
+    const term = source.terms[id], kind = tag(term), expression = field(term);
+    const values = (ids) => ids.map(operand);
+    switch (kind) {
+      case "value": return () => pure(value(expression, env));
+      case "bind": return () => bind(evaluate(expression.value, env), (result) => bindingScope(env, [expression.variable], [result], expression.next));
+      case "conditional": return () => evaluate(value(expression.condition, env) ? expression.when_true : expression.when_false, env);
+      case "call": { const args = values(expression.arguments); return () => call(expression.function, env, args); }
+      case "apply": { const computation = operand(expression.computation), args = values(expression.arguments); return () => computation(args); }
+      case "perform": {
+        const capability = expression.capability === null ? null : operand(expression.capability);
+        const payload = operand(expression.payload), bodies = values(expression.bodies);
+        const capabilities = values(expression.use_site_capabilities);
+        return () => ({ kind: "request", effect: expression.effect, capability, payload, bodies, capabilities, reenter: (replacement) => replacement });
+      }
+      case "handle": {
+        const body = operand(expression.body), args = values(expression.arguments);
+        const definition = source.handlers[expression.handler];
+        const activation = { definition: expression.handler, state: values(expression.state), env, token: {} };
+        return () => handle(body([...definition.clauses.map(() => activation.token), ...args]), activation);
+      }
+      case "resume_value": {
+        const token = operand(expression.resumption), argument = operand(expression.argument);
+        return () => token.enter(pure(argument));
+      }
+      case "resume_with": {
+        const token = operand(expression.resumption), argument = operand(expression.argument);
+        const successor = { definition: expression.handler, state: values(expression.state), env };
+        return () => token.enter(pure(argument), successor);
+      }
+      case "resume_computation": {
+        const token = operand(expression.resumption), computation = operand(expression.computation);
+        return () => token.enter(computation(token.capabilities));
+      }
+      case "with_region": {
+        const body = operand(expression.body), args = values(expression.arguments);
+        return () => { const region = { cells: new Set() }; return inRegion(body([region, ...args]), region); };
+      }
+      case "protect": {
+        const body = operand(expression.body), cleanup = operand(expression.cleanup);
+        const args = values(expression.arguments);
+        if (expression.resource === null) return () => protect(body(args), cleanup);
+        const resource = operand(expression.resource);
+        return () => {
+          const loan = { active: true };
+          return protect(body([{ resource, loan }, ...args]), (exit) => { loan.active = false; return cleanup([...exit, resource]); });
+        };
+      }
+      case "dispose": { const target = operand(expression); return () => target.close(); }
+      case "fail": return () => ({ kind: "failure", value: value(expression, env) });
+      case "yield_then": return () => ({ kind: "yield", reenter: () => evaluate(expression, env) });
+      case "match_sum": {
+        const variant = operand(expression.value), selected = expression.cases[variant.tag];
+        return () => bindingScope(env, [selected.variable], [variant.value], selected.body);
+      }
+      case "unpack_product": {
+        const fields = operand(expression.value);
+        return () => bindingScope(env, expression.variables, fields, expression.body);
+      }
+      default: throw new Error(`oracle term not implemented: ${kind}`);
+    }
   }
   const cursor = { offset: 0 }, entry = source.functions[source.entry];
   const args = entry.parameters.map((variable) => decode(source, source.variables[variable], initial, cursor));
@@ -571,6 +610,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   for (const index of [31, 32]) {
     assert.deepEqual(execute(sources[index], []), { kind: "Completed", trace: [], value: [7, 0, 0, 0, 0, 0, 0, 0] });
+  }
+  for (const [mode, order] of [
+    [0, [1, 2]], [1, [2, 1]], [2, [1, 2]], [3, [1, 2]], [4, [2, 1]],
+    [5, [1, 2]], [6, [1, 2]], [7, [2, 1]], [8, [2, 1]],
+  ]) {
+    const result = execute(sources[36], [42 + mode], [[], []]);
+    assert.equal(result.kind, "Failed");
+    assert.deepEqual(result.value, [8, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(result.trace, order.map(label => ({
+      kind: "Requested", identity: "custody/release", payload: [label, 0, 0, 0, 0, 0, 0, 0],
+    })), `operand failure case ${mode}`);
   }
   assert.deepEqual(execute(sources[33], []), {
     kind: "Completed", trace: [{ kind: "Yielded" }],

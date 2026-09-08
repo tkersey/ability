@@ -5,14 +5,23 @@ const data = @import("boundary_data_v2");
 const p = data.program;
 const ast = @import("ast.zig");
 const check = @import("check.zig");
+const custody = @import("custody.zig");
 const source_api = @import("../source.zig");
 const Error = source_api.Error;
 pub const Compiled = @import("compiled.zig").Compiled;
 const Block = struct { id: p.Id, variables: []const p.Id };
 const Continuation = struct { block: Block, result: p.Id };
 const ConstructorKey = struct { function: p.Id, schema: p.Id };
-const BlockKey = struct { expression: p.Id, next: p.Id, result: p.Id, bindings: []const p.Id, ordering: []const p.Id };
-const RetainedKey = struct { block: p.Id, schema: p.Id, position: usize };
+const BlockKey = struct {
+    expression: p.Id,
+    next: p.Id,
+    result: p.Id,
+    bindings: []const p.Id,
+    ordering: []const p.Id,
+    depth: usize,
+    depths: []const usize,
+};
+const RetainedKey = struct { block: p.Id, schema: p.Id, position: usize, depth: usize };
 const none = std.math.maxInt(p.Id);
 // Resolve source names within their lexical scope. Cache the live bindings and
 // their owner order; unrelated scalar bindings do not split shared code.
@@ -20,6 +29,13 @@ const Environment = struct {
     names: []const p.Id = &.{},
     bindings: []const p.Id = &.{},
     ordering: []const p.Id = &.{}, // Non-Drop owners, inner scope before outer.
+    depths: []const usize = &.{},
+    depth: usize = 0,
+
+    fn ownerDepth(self: Environment, binding: p.Id) usize {
+        const index = std.mem.indexOfScalar(p.Id, self.ordering, binding) orelse return 0;
+        return self.depths[index];
+    }
 
     fn resolve(self: Environment, name: p.Id) Error!p.Id {
         const index = std.mem.indexOfScalar(p.Id, self.names, name) orelse
@@ -44,15 +60,21 @@ const Environment = struct {
                 try self.resolve(name);
         }
         var ordering: check.Set = .empty;
+        var depths: std.ArrayList(usize) = .empty;
         for (bound.bindings) |binding| {
-            if (!compiler.traits.drop[@intCast(compiler.variables.items[@intCast(binding)])])
+            if (!compiler.traits.drop[@intCast(compiler.variables.items[@intCast(binding)])]) {
                 try ordering.append(allocator, binding);
+                try depths.append(allocator, self.depth + 1);
+            }
         }
+        const depth = self.depth + @intFromBool(ordering.items.len != 0);
         for (self.ordering) |binding| {
-            if (std.mem.indexOfScalar(p.Id, ordering.items, binding) == null)
+            if (std.mem.indexOfScalar(p.Id, ordering.items, binding) == null) {
                 try ordering.append(allocator, binding);
+                try depths.append(allocator, self.ownerDepth(binding));
+            }
         }
-        return .{ .names = names, .bindings = bindings, .ordering = ordering.items };
+        return .{ .names = names, .bindings = bindings, .ordering = ordering.items, .depths = depths.items, .depth = depth };
     }
 };
 const BlockContext = struct {
@@ -63,12 +85,15 @@ const BlockContext = struct {
         std.hash.autoHash(&result, key.result);
         for (key.bindings) |binding| std.hash.autoHash(&result, binding);
         for (key.ordering) |binding| std.hash.autoHash(&result, binding);
+        std.hash.autoHash(&result, key.depth);
+        for (key.depths) |depth| std.hash.autoHash(&result, depth);
         return result.final();
     }
     pub fn eql(_: BlockContext, left: BlockKey, right: BlockKey) bool {
         return left.expression == right.expression and left.next == right.next and
             left.result == right.result and std.mem.eql(p.Id, left.bindings, right.bindings) and
-            std.mem.eql(p.Id, left.ordering, right.ordering);
+            std.mem.eql(p.Id, left.ordering, right.ordering) and left.depth == right.depth and
+            std.mem.eql(usize, left.depths, right.depths);
     }
 };
 const Request = struct {
@@ -76,6 +101,7 @@ const Request = struct {
     next: ?Continuation,
     environment: Environment,
     ordering: []const p.Id,
+    depths: []const usize,
     child: usize = 0,
     fn key(self: Request) BlockKey {
         return .{
@@ -84,6 +110,8 @@ const Request = struct {
             .result = if (self.next) |continuation| continuation.result else none,
             .bindings = self.environment.bindings,
             .ordering = self.ordering,
+            .depth = self.environment.depth,
+            .depths = self.depths,
         };
     }
     fn descend(
@@ -98,11 +126,13 @@ const Request = struct {
             compiler.facts.terms[@intCast(id)].items,
             bound,
         );
+        const ordering = try liveOrder(compiler, environment, next);
         return .{
             .id = id,
             .next = next,
             .environment = environment,
-            .ordering = try liveOrder(compiler, environment, next),
+            .ordering = ordering,
+            .depths = try ownerDepths(compiler.allocator, environment, ordering),
         };
     }
     fn under(self: Request, compiler: *Compiler, id: p.Id, bound: Environment) Error!Request {
@@ -125,6 +155,11 @@ const Request = struct {
         }
         for (ordered[index..]) |variable| std.debug.assert(compiler.traits.drop[@intCast(compiler.variables.items[@intCast(variable)])]);
         return ordered;
+    }
+    fn ownerDepths(a: std.mem.Allocator, env: Environment, variables: []const p.Id) Error![]usize {
+        const depths = try a.alloc(usize, variables.len);
+        for (depths, variables) |*depth, variable| depth.* = env.ownerDepth(variable);
+        return depths;
     }
 };
 
@@ -200,8 +235,11 @@ pub fn lowerObserved(allocator: std.mem.Allocator, source: ast.Module, options: 
         // Keep the return union explicit when errdefer captures the error.
         return @as(Error!Compiled, err);
     };
+    // Order only an admitted graph. Slot elimination must never hide an illegal
+    // use; canonicalization independently admits the reordered result below.
+    const ordered = try custody.normalize(storage, program, compiler.custody_blocks, use_facts);
     options.stage(.direct_optimization);
-    const optimized = try @import("direct.zig").optimize(storage, program);
+    const optimized = try @import("direct.zig").optimize(storage, ordered);
     options.stage(.canonicalization);
     const canonical = try data.canonical.normalize(allocator, optimized);
     options.stage(.complete);
@@ -220,6 +258,7 @@ const Compiler = struct {
     constants: std.ArrayList(p.Literal) = .empty,
     blocks: std.ArrayList(p.Block) = .empty,
     scoped_parameters: @import("retain.zig").Scopes = .empty,
+    custody_blocks: custody.Blocks = .empty,
     captures: std.ArrayList(p.Capture) = .empty,
     constructors: std.ArrayList(p.Constructor) = .empty,
     constructor_ids: std.AutoHashMapUnmanaged(ConstructorKey, p.Id) = .empty,
@@ -292,17 +331,24 @@ const Function = struct {
     returns: ?Continuation = null,
     retained: std.AutoHashMapUnmanaged(RetainedKey, p.Id) = .empty,
 
-    fn retainBlock(self: *Function, block: p.Id, schema: p.Id, position: usize) Error!p.Id {
-        const key: RetainedKey = .{ .block = block, .schema = schema, .position = position };
+    fn retainBlock(self: *Function, block: p.Id, schema: p.Id, position: usize, depth: usize) Error!p.Id {
+        const key: RetainedKey = .{
+            .block = block,
+            .schema = schema,
+            .position = position,
+            .depth = depth,
+        };
         if (self.retained.get(key)) |present| return present;
         const compiler = self.compiler;
         const retained = try @import("retain.zig").throughGraph(
             compiler.allocator,
             &compiler.blocks,
             &compiler.scoped_parameters,
+            &compiler.custody_blocks,
             block,
             schema,
             position,
+            depth,
         );
         try self.retained.put(compiler.allocator, key, retained);
         return retained;
@@ -341,12 +387,21 @@ const Function = struct {
             if (!self.compiler.traits.drop[@intCast(self.compiler.variables.items[@intCast(variable)])])
                 try order.append(self.compiler.allocator, variable);
         }
-        const environment: Environment = .{ .names = free, .bindings = free, .ordering = order.items };
+        const depths = try self.compiler.allocator.alloc(usize, order.items.len);
+        @memset(depths, 0);
+        const environment: Environment = .{
+            .names = free,
+            .bindings = free,
+            .ordering = order.items,
+            .depths = depths,
+        };
+        const ordering = try Request.liveOrder(self.compiler, environment, next);
         const root: Request = .{
             .id = id,
             .next = next,
             .environment = environment,
-            .ordering = try Request.liveOrder(self.compiler, environment, next),
+            .ordering = ordering,
+            .depths = try Request.ownerDepths(self.compiler.allocator, environment, ordering),
         };
         try pending.append(self.compiler.allocator, root);
         while (pending.items.len != 0) {
@@ -422,6 +477,7 @@ const Function = struct {
         if (term == .yield_then) {
             const rest = try self.resolved(try request.under(compiler, term.yield_then, .{}));
             var block = try self.start(rest.variables);
+            block.environment = request.environment;
             return block.finish(.{ .yield_value = try block.edge(rest, null, null) });
         }
         var block = try self.start(request.ordering);
@@ -501,6 +557,7 @@ const Function = struct {
         try variables.appendSlice(compiler.allocator, ids);
         _ = try check.merge(compiler.allocator, &variables, rest.variables, ids);
         var adapter = try self.start(variables.items);
+        adapter.environment = (try request.under(compiler, unpack.body, bound)).environment;
         const target = try adapter.finish(.{ .jump = try adapter.edge(rest, null, null) });
         const arguments = try compiler.allocator.alloc(p.Id, variables.items.len - ids.len);
         for (arguments, variables.items[ids.len..]) |*argument, variable| {
@@ -527,6 +584,7 @@ const Function = struct {
             &.{continuation.result},
         );
         var adapter = try self.start(variables.items);
+        adapter.environment = block.environment;
         const literal = try compiler.unit();
         const unit_slot = try adapter.instruction(.{
             .opcode = .constant,
@@ -646,7 +704,8 @@ const BuildBlock = struct {
         }
         arguments[0] = result;
         const schema = compiler.variables.items[@intCast(result_variable.?)];
-        const retained = try self.function.retainBlock(target.id, schema, 0);
+        const depth = compiler.custody_blocks.get(target.id).?.depth;
+        const retained = try self.function.retainBlock(target.id, schema, 0, depth);
         try compiler.scoped_parameters.put(compiler.allocator, retained, 0);
         return .{ .block = retained, .arguments = arguments };
     }
@@ -736,7 +795,11 @@ const BuildBlock = struct {
                     break;
                 }
             }
-            target = try self.function.retainBlock(target, schema, prefix + position);
+            const depth = if (slot < self.variables.len)
+                self.environment.ownerDepth(self.variables[slot])
+            else
+                self.environment.depth;
+            target = try self.function.retainBlock(target, schema, prefix + position, depth);
             try arguments.insert(compiler.allocator, position, .{ .slot = slot });
         }
         return .{ .block = target, .arguments = arguments.items };
@@ -800,6 +863,14 @@ const BuildBlock = struct {
         const compiler = self.function.compiler;
         const completed = try self.complete(terminator);
         const id = compiler.blocks.items.len;
+        try compiler.custody_blocks.put(compiler.allocator, id, .{
+            .depth = self.environment.depth,
+            .parameters = try Request.ownerDepths(
+                compiler.allocator,
+                self.environment,
+                self.variables,
+            ),
+        });
         try compiler.blocks.append(compiler.allocator, .{ .function = self.function.id, .parameters = try compiler.types(self.variables), .instructions = self.instructions.items, .terminator = completed });
         return .{ .id = id, .variables = self.variables };
     }

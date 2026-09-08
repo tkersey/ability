@@ -4,14 +4,15 @@
 const std = @import("std");
 const p = @import("boundary_data_v2").program;
 const Error = @import("../source.zig").Error;
-const Placement = struct { block: p.Id, position: usize };
+const custody = @import("custody.zig");
+const Placement = struct { block: p.Id, position: usize, depth: usize };
 const Ids = std.AutoHashMapUnmanaged(Placement, p.Id);
 pub const Scopes = std.AutoHashMapUnmanaged(p.Id, usize);
 
-pub fn throughGraph(allocator: std.mem.Allocator, blocks: *std.ArrayList(p.Block), scopes: *Scopes, root: p.Id, schema: p.Id, position: usize) Error!p.Id {
+pub fn throughGraph(allocator: std.mem.Allocator, blocks: *std.ArrayList(p.Block), scopes: *Scopes, owners: *custody.Blocks, root: p.Id, schema: p.Id, position: usize, depth: usize) Error!p.Id {
     var ids: Ids = .empty;
     var pending: std.ArrayList(Placement) = .empty;
-    const start: Placement = .{ .block = root, .position = position };
+    const start = placement(root, position, depth, owners.*);
     try ids.put(allocator, start, blocks.items.len);
     try pending.append(allocator, start);
     var index: usize = 0;
@@ -23,14 +24,14 @@ pub fn throughGraph(allocator: std.mem.Allocator, blocks: *std.ArrayList(p.Block
         var next: std.ArrayList(Placement) = .empty;
         switch (original.terminator) {
             .fail, .return_value => {},
-            .jump, .yield_value => |edge| try next.append(allocator, successor(edge, arity, current.position, scopes.*)),
+            .jump, .yield_value => |edge| try next.append(allocator, successor(edge, arity, current.position, scopes.*, current.depth, owners.*)),
             .branch => |branch| {
-                try next.append(allocator, successor(branch.when_true, arity, current.position, scopes.*));
-                try next.append(allocator, successor(branch.when_false, arity, current.position, scopes.*));
+                try next.append(allocator, successor(branch.when_true, arity, current.position, scopes.*, current.depth, owners.*));
+                try next.append(allocator, successor(branch.when_false, arity, current.position, scopes.*, current.depth, owners.*));
             },
-            .switch_variant => |selected| for (selected.cases) |edge| try next.append(allocator, successor(edge, arity, current.position, scopes.*)),
-            .unpack_product => |unpack| try next.append(allocator, unpackSuccessor(blocks.items, unpack, arity, current.position)),
-            inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region => |operation| try next.append(allocator, successor(operation.next, arity, current.position, scopes.*)),
+            .switch_variant => |selected| for (selected.cases) |edge| try next.append(allocator, successor(edge, arity, current.position, scopes.*, current.depth, owners.*)),
+            .unpack_product => |unpack| try next.append(allocator, unpackSuccessor(blocks.items, unpack, arity, current.position, current.depth, owners.*)),
+            inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region => |operation| try next.append(allocator, successor(operation.next, arity, current.position, scopes.*, current.depth, owners.*)),
             .forward => return error.InvalidSource,
         }
         for (next.items) |child| if (!ids.contains(child)) {
@@ -47,50 +48,59 @@ pub fn throughGraph(allocator: std.mem.Allocator, blocks: *std.ArrayList(p.Block
         @memcpy(parameters[current.position + 1 ..], original.parameters[current.position..]);
         const instructions = try allocator.dupe(p.Instruction, original.instructions);
         for (instructions) |*operation| operation.operands = try slots(allocator, operation.operands, current.position);
-        const rewritten = try rewriteTerminator(allocator, blocks.items, original, current.position, ids, scopes.*);
+        const rewritten = try rewriteTerminator(allocator, blocks.items, original, current.position, ids, scopes.*, current.depth, owners.*);
         if (scopes.get(current.block)) |scoped| {
             try scopes.put(allocator, blocks.items.len, scoped + @intFromBool(scoped >= current.position));
         }
+        const scope = owners.get(current.block).?;
+        const depths = try allocator.alloc(usize, parameters.len);
+        @memcpy(depths[0..current.position], scope.parameters[0..current.position]);
+        depths[current.position] = current.depth;
+        @memcpy(depths[current.position + 1 ..], scope.parameters[current.position..]);
+        try owners.put(allocator, blocks.items.len, .{
+            .depth = scope.depth,
+            .parameters = depths,
+        });
         try blocks.append(allocator, .{ .function = original.function, .parameters = parameters, .instructions = instructions, .terminator = rewritten });
     }
     return first;
 }
 
-fn successor(edge: p.Edge, arity: usize, position: usize, scopes: Scopes) Placement {
+fn successor(edge: p.Edge, arity: usize, position: usize, scopes: Scopes, depth: usize, owners: custody.Blocks) Placement {
     // Values introduced within this successor keep their local scope. Preserve
     // the retained owner's order relative to parameters that outlive this edge.
     for (edge.arguments, 0..) |argument, index| {
         if (scopes.get(edge.block)) |scoped| if (index <= scoped) continue;
         if (argument == .slot and argument.slot >= position and argument.slot < arity)
-            return .{ .block = edge.block, .position = index };
+            return placement(edge.block, index, depth, owners);
     }
-    return .{ .block = edge.block, .position = edge.arguments.len };
+    return placement(edge.block, edge.arguments.len, depth, owners);
 }
 
-fn unpackSuccessor(blocks: []const p.Block, unpack: @FieldType(p.Terminator, "unpack_product"), arity: usize, position: usize) Placement {
+fn unpackSuccessor(blocks: []const p.Block, unpack: @FieldType(p.Terminator, "unpack_product"), arity: usize, position: usize, depth: usize, owners: custody.Blocks) Placement {
     const prefix = blocks[@intCast(unpack.block)].parameters.len - unpack.arguments.len;
     for (unpack.arguments, 0..) |argument, index| {
         if (argument >= position and argument < arity)
-            return .{ .block = unpack.block, .position = prefix + index };
+            return placement(unpack.block, prefix + index, depth, owners);
     }
-    return .{ .block = unpack.block, .position = prefix + unpack.arguments.len };
+    return placement(unpack.block, prefix + unpack.arguments.len, depth, owners);
 }
 
-fn rewriteTerminator(allocator: std.mem.Allocator, blocks: []const p.Block, original: p.Block, position: usize, ids: Ids, scopes: Scopes) Error!p.Terminator {
+fn rewriteTerminator(allocator: std.mem.Allocator, blocks: []const p.Block, original: p.Block, position: usize, ids: Ids, scopes: Scopes, depth: usize, owners: custody.Blocks) Error!p.Terminator {
     const arity = original.parameters.len;
     const term = original.terminator;
     return switch (term) {
         .fail => |value| .{ .fail = slot(value, position) },
         .return_value => |value| .{ .return_value = slot(value, position) },
-        .jump, .yield_value => |target| if (term == .jump) .{ .jump = try rewriteEdge(allocator, target, arity, position, ids, scopes) } else .{ .yield_value = try rewriteEdge(allocator, target, arity, position, ids, scopes) },
-        .branch => |branch| .{ .branch = .{ .condition = slot(branch.condition, position), .when_true = try rewriteEdge(allocator, branch.when_true, arity, position, ids, scopes), .when_false = try rewriteEdge(allocator, branch.when_false, arity, position, ids, scopes) } },
+        .jump, .yield_value => |target| if (term == .jump) .{ .jump = try rewriteEdge(allocator, target, arity, position, ids, scopes, depth, owners) } else .{ .yield_value = try rewriteEdge(allocator, target, arity, position, ids, scopes, depth, owners) },
+        .branch => |branch| .{ .branch = .{ .condition = slot(branch.condition, position), .when_true = try rewriteEdge(allocator, branch.when_true, arity, position, ids, scopes, depth, owners), .when_false = try rewriteEdge(allocator, branch.when_false, arity, position, ids, scopes, depth, owners) } },
         .switch_variant => |selected| blk: {
             const cases = try allocator.alloc(p.Edge, selected.cases.len);
-            for (cases, selected.cases) |*target, from| target.* = try rewriteEdge(allocator, from, arity, position, ids, scopes);
+            for (cases, selected.cases) |*target, from| target.* = try rewriteEdge(allocator, from, arity, position, ids, scopes, depth, owners);
             break :blk .{ .switch_variant = .{ .value = slot(selected.value, position), .cases = cases } };
         },
         .unpack_product => |unpack| blk: {
-            const target = unpackSuccessor(blocks, unpack, arity, position);
+            const target = unpackSuccessor(blocks, unpack, arity, position, depth, owners);
             const insertion = target.position - (blocks[@intCast(unpack.block)].parameters.len - unpack.arguments.len);
             const arguments = try allocator.alloc(p.Id, unpack.arguments.len + 1);
             for (unpack.arguments, 0..) |from, index| arguments[index + @intFromBool(index >= insertion)] = slot(from, position);
@@ -99,7 +109,7 @@ fn rewriteTerminator(allocator: std.mem.Allocator, blocks: []const p.Block, orig
         },
         inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region => |operation, kind| blk: {
             var changed = operation;
-            changed.next = try rewriteEdge(allocator, operation.next, arity, position, ids, scopes);
+            changed.next = try rewriteEdge(allocator, operation.next, arity, position, ids, scopes, depth, owners);
             inline for (@typeInfo(@TypeOf(operation)).@"struct".fields) |field| {
                 if (comptime std.mem.eql(u8, field.name, "next") or std.mem.eql(u8, field.name, "function") or std.mem.eql(u8, field.name, "handler") or std.mem.eql(u8, field.name, "effect") or std.mem.eql(u8, field.name, "region") or std.mem.eql(u8, field.name, "loan_region")) continue;
                 if (comptime !isOperand(field.name)) @compileError("classify the new terminator field before retaining custody");
@@ -116,7 +126,7 @@ fn rewriteTerminator(allocator: std.mem.Allocator, blocks: []const p.Block, orig
     };
 }
 
-fn isOperand(comptime name: []const u8) bool {
+pub fn isOperand(comptime name: []const u8) bool {
     const fields = [_][]const u8{ "arguments", "capability", "payload", "bodies", "use_site_capabilities", "computation", "body", "state", "resumption", "argument", "owned", "cleanup", "resource" };
     inline for (fields) |field| if (std.mem.eql(u8, name, field)) return true;
     return false;
@@ -129,8 +139,8 @@ fn slots(allocator: std.mem.Allocator, values: []const p.Id, position: usize) Er
     for (output, values) |*to, from| to.* = slot(from, position);
     return output;
 }
-fn rewriteEdge(allocator: std.mem.Allocator, original: p.Edge, arity: usize, position: usize, ids: Ids, scopes: Scopes) Error!p.Edge {
-    const target = successor(original, arity, position, scopes);
+fn rewriteEdge(allocator: std.mem.Allocator, original: p.Edge, arity: usize, position: usize, ids: Ids, scopes: Scopes, depth: usize, owners: custody.Blocks) Error!p.Edge {
+    const target = successor(original, arity, position, scopes, depth, owners);
     const arguments = try allocator.alloc(p.Argument, original.arguments.len + 1);
     for (original.arguments, 0..) |from, index| arguments[index + @intFromBool(index >= target.position)] = switch (from) {
         .slot => |value| .{ .slot = slot(value, position) },
@@ -138,4 +148,8 @@ fn rewriteEdge(allocator: std.mem.Allocator, original: p.Edge, arity: usize, pos
     };
     arguments[target.position] = .{ .slot = position };
     return .{ .block = ids.get(target).?, .arguments = arguments };
+}
+
+fn placement(block: p.Id, position: usize, depth: usize, owners: custody.Blocks) Placement {
+    return .{ .block = block, .position = position, .depth = @min(depth, owners.get(block).?.depth) };
 }

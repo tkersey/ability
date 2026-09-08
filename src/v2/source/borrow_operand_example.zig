@@ -7,12 +7,13 @@ const Error = source.Error;
 const Kind = enum { length, tag, get, owned_length, owned_tag };
 const edges = @import("custody_edge_example.zig");
 const custody = @import("custody_order_example.zig");
+const operand_failures = @import("operand_failure_example.zig");
 
 pub fn build(b: *source.Builder) Error!source.Module {
     const release = try b.effect(.{ .identity = "custody/release", .payload = try b.scalar(u64), .result = try b.scalar(void) });
     const main = try b.declare(&.{try b.scalar(u8)}, try b.scalar(u64), &.{release}, &.{});
     const input = try b.reference(b.parameter(main, 0));
-    var cases: [20 + edges.count + custody.count]p.Id = undefined;
+    var cases: [20 + edges.count + custody.count + operand_failures.count]p.Id = undefined;
     var index: usize = 0;
     for (std.enums.values(Kind)) |kind| {
         for ([_]bool{ false, true }) |explicit| {
@@ -34,6 +35,11 @@ pub fn build(b: *source.Builder) Error!source.Module {
     const order = try custody.define(b, release);
     for (0..custody.count) |mode| {
         const function = try custody.build(b, order, @intCast(mode));
+        cases[index] = try b.term(.{ .call = .{ .function = function, .arguments = &.{} } });
+        index += 1;
+    }
+    for (0..operand_failures.count) |mode| {
+        const function = try operand_failures.build(b, order, mode);
         cases[index] = try b.term(.{ .call = .{ .function = function, .arguments = &.{} } });
         index += 1;
     }

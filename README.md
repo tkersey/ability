@@ -41,6 +41,13 @@ and FIFO cooperative scheduling with joins. Executable examples are under
 `src/v2/source/`; the four-queens examples retain alternatives across transfers
 and clean up acquired resources through typed external requests.
 
+Owned operands remain in their source scope until all operands of the receiving
+control operation have evaluated. A later operand failure cleans them up in
+lexical order: inner scopes first, then active owners in creation order within
+each scope. Closure captures use ascending source-variable order. The compiler
+preserves this order through ordinary block parameters, including owned
+temporaries created by instructions.
+
 ## Pure data dependency
 
 Use the separate build module `boundary_data_v2` for schemas, Program and State
