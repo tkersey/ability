@@ -49,7 +49,7 @@ pub fn analyze(allocator: std.mem.Allocator, source: ast.Module) Error!Facts {
 pub fn analyzeDiagnosed(allocator: std.mem.Allocator, source: ast.Module, diagnostic: ?*@import("diagnostic.zig").Diagnostic) Error!Facts {
     if (source.entry >= source.functions.len) return error.InvalidReference;
     _ = try data.admission.schemas(allocator, source.schemas);
-    for (source.variables) |schema| _ = try data.admission.schemaAt(source.schemas, schema);
+    try declarationSchemas(source, diagnostic);
     var facts: Facts = .{ .values = try sets(allocator, source.values.len), .terms = try sets(allocator, source.terms.len), .functions = try sets(allocator, source.functions.len), .results = try allocator.alloc(?p.Id, source.terms.len) };
     @memset(facts.results, null);
     for (source.values, 0..) |value, id| {
@@ -226,6 +226,35 @@ pub fn analyzeDiagnosed(allocator: std.mem.Allocator, source: ast.Module, diagno
         d.variable = null;
     }
     return facts;
+}
+
+fn declarationSchemas(source: ast.Module, diagnostic: ?*@import("diagnostic.zig").Diagnostic) Error!void {
+    _ = try data.admission.schemaAt(source.schemas, source.failure);
+    for (source.variables) |schema| _ = try data.admission.schemaAt(source.schemas, schema);
+    for (source.constants) |constant| _ = try data.admission.schemaAt(source.schemas, constant.schema);
+    for (source.resources) |resource| _ = try data.admission.schemaAt(source.schemas, resource.representation);
+    for (source.effects) |effect| {
+        _ = try data.admission.schemaAt(source.schemas, effect.payload);
+        _ = try data.admission.schemaAt(source.schemas, effect.result);
+        for (effect.bodies) |schema| _ = try data.admission.schemaAt(source.schemas, schema);
+    }
+    for (source.handlers) |handler| {
+        _ = try data.admission.schemaAt(source.schemas, handler.input);
+        _ = try data.admission.schemaAt(source.schemas, handler.answer);
+        for (handler.state) |schema| _ = try data.admission.schemaAt(source.schemas, schema);
+        for (handler.clauses) |clause| _ = try data.admission.schemaAt(source.schemas, clause.resumption);
+    }
+    for (source.functions, 0..) |function, id| {
+        if (diagnostic) |d| {
+            d.function = id;
+            d.term = function.body;
+        }
+        _ = try data.admission.schemaAt(source.schemas, function.result);
+    }
+    if (diagnostic) |d| {
+        d.function = null;
+        d.term = null;
+    }
 }
 
 fn checkHandlerCapture(source: ast.Module, facts: Facts, function: p.Id, diagnostic: ?*@import("diagnostic.zig").Diagnostic) Error!void {

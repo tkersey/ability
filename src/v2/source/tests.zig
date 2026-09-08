@@ -3,6 +3,38 @@ const source = @import("../source.zig");
 const examples = @import("examples.zig");
 const data = @import("boundary_data_v2");
 
+test "declared result schemas reject before recursive lowering" {
+    for (0..4) |variant| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const integer = try b.scalar(u64);
+        const bad: data.program.Id = if (variant == 1) std.math.maxInt(data.program.Id) else b.schemas.items.len;
+        const first = try b.declare(&.{}, bad, &.{}, &.{});
+        const second = if (variant == 2) try b.declare(&.{}, bad, &.{}, &.{}) else first;
+        const call = try b.term(.{ .call = .{ .function = second, .arguments = &.{} } });
+        const body = if (variant == 3) try b.term(.{ .fail = try b.constant(u64, 8) }) else call;
+        try b.define(first, body);
+        if (second != first) try b.define(second, try b.term(.{ .call = .{ .function = first, .arguments = &.{} } }));
+        const module = b.module(first, integer);
+        try std.testing.expectError(error.InvalidSchema, source.lower(std.testing.allocator, module));
+        var diagnostic: source.Diagnostic = .{};
+        try std.testing.expectError(error.InvalidSchema, source.lowerObserved(std.testing.allocator, module, .{ .diagnostic = &diagnostic }));
+        try std.testing.expectEqual(.source_check, diagnostic.phase);
+        try std.testing.expectEqual(@as(?data.program.Id, first), diagnostic.function);
+    }
+}
+
+test "valid recursive result schemas do not require source termination" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const integer = try b.scalar(u64);
+    const function = try b.declare(&.{}, integer, &.{}, &.{});
+    try b.define(function, try b.term(.{ .call = .{ .function = function, .arguments = &.{} } }));
+    var compiled = try source.lower(std.testing.allocator, b.module(function, integer));
+    defer compiled.deinit();
+    try data.admission.program(std.testing.allocator, compiled.program);
+}
+
 test "borrowed operands preserve evaluated consumption and owned temporary failure custody" {
     var b = source.Builder.init(std.testing.allocator);
     defer b.deinit();
