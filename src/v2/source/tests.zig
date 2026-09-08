@@ -3,6 +3,58 @@ const source = @import("../source.zig");
 const examples = @import("examples.zig");
 const data = @import("boundary_data_v2");
 
+test "resource authority rejects absent descriptors before mutation" {
+    for (0..2) |resource_count| for ([_]bool{ false, true }) |maximum| {
+        for ([_]bool{ false, true }) |defined| {
+            var b = source.Builder.init(std.testing.allocator);
+            defer b.deinit();
+            const integer = try b.scalar(u64);
+            if (resource_count != 0) _ = try b.resource(integer);
+            const bad: data.program.Id = if (maximum)
+                std.math.maxInt(data.program.Id)
+            else
+                b.resources.items.len;
+            const shape: data.program.Schema = .{ .internal = .{ .abstract_resource = bad } };
+            const schema = if (defined) blk: {
+                const reserved = try b.reserveSchema();
+                try b.defineSchema(reserved, shape);
+                break :blk reserved;
+            } else try b.schema(shape);
+            try std.testing.expectError(
+                error.InvalidReference,
+                b.resourceAuthority(schema, &.{0}, &.{1}),
+            );
+            try std.testing.expectEqual(resource_count, b.resources.items.len);
+            for (b.resources.items) |descriptor| {
+                try std.testing.expectEqual(integer, descriptor.representation);
+                try std.testing.expectEqual(@as(usize, 0), descriptor.introducers.len);
+                try std.testing.expectEqual(@as(usize, 0), descriptor.eliminators.len);
+            }
+        }
+    };
+}
+
+test "resource authority preserves the final valid descriptor and existing errors" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const integer = try b.scalar(u64);
+    _ = try b.resource(integer);
+    const resource = try b.resource(integer);
+    const factory = try b.declare(&.{}, resource, &.{}, &.{});
+    const release = try b.declare(&.{resource}, integer, &.{}, &.{});
+    try std.testing.expectError(
+        error.InvalidReference,
+        b.resourceAuthority(b.schemas.items.len, &.{}, &.{}),
+    );
+    try std.testing.expectError(error.TypeMismatch, b.resourceAuthority(integer, &.{}, &.{}));
+    try b.resourceAuthority(resource, &.{factory}, &.{release});
+    try std.testing.expectEqual(@as(usize, 0), b.resources.items[0].introducers.len);
+    try std.testing.expectEqual(@as(usize, 0), b.resources.items[0].eliminators.len);
+    try std.testing.expectEqualSlices(source.Id, &.{factory}, b.resources.items[1].introducers);
+    try std.testing.expectEqualSlices(source.Id, &.{release}, b.resources.items[1].eliminators);
+    try std.testing.expectError(error.InvalidOwnership, b.resourceAuthority(resource, &.{}, &.{}));
+}
+
 test "declared result schemas reject before recursive lowering" {
     for (0..4) |variant| {
         var b = source.Builder.init(std.testing.allocator);

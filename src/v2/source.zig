@@ -182,7 +182,9 @@ pub const Builder = struct {
         if (schema_id >= self.schemas.items.len) return error.InvalidReference;
         const shape = self.schemas.items[@intCast(schema_id)];
         if (shape != .internal or shape.internal != .abstract_resource) return error.TypeMismatch;
-        const descriptor = &self.resources.items[@intCast(shape.internal.abstract_resource)];
+        const resource_id = shape.internal.abstract_resource;
+        if (resource_id >= self.resources.items.len) return error.InvalidReference;
+        const descriptor = &self.resources.items[@intCast(resource_id)];
         if (descriptor.introducers.len != 0 or descriptor.eliminators.len != 0) return error.InvalidOwnership;
         descriptor.introducers = try self.allocator().dupe(p.Id, introducers);
         descriptor.eliminators = try self.allocator().dupe(p.Id, eliminators);
