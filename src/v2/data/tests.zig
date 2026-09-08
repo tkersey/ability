@@ -17,6 +17,112 @@ pub const example: p.Program = .{
     }},
 };
 
+fn borrowFlowExample() p.Program {
+    return .{
+        .roots = .{ .entry = 2, .result = 0, .failure = 0 },
+        .schemas = &.{ .unit, .{ .internal = .{ .region = 0 } } },
+        .constants = &.{},
+        .effects = &.{},
+        .functions = &.{
+            .{ .entry = 0, .parameters = &.{1}, .result = 1, .regions = &.{0} },
+            .{ .entry = 1, .parameters = &.{1}, .result = 1, .regions = &.{0} },
+            .{ .entry = 2, .parameters = &.{0}, .result = 0 },
+        },
+        .blocks = &.{
+            .{
+                .function = 0,
+                .parameters = &.{1},
+                .instructions = &.{},
+                .terminator = .{ .return_value = 0 },
+            },
+            .{
+                .function = 1,
+                .parameters = &.{1},
+                .instructions = &.{},
+                .terminator = .{ .return_value = 0 },
+            },
+            .{
+                .function = 2,
+                .parameters = &.{0},
+                .instructions = &.{},
+                .terminator = .{ .return_value = 0 },
+            },
+        },
+        .scopes = .{ .region_count = 1 },
+    };
+}
+
+test "settled borrow queries reuse results without allocating again" {
+    const borrows = @import("borrow_flow.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const program = borrowFlowExample();
+    try admission.program(arena.allocator(), program);
+    var failing = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    const allocator = failing.allocator();
+    const facts = try admission.schemas(allocator, program.schemas);
+    var flow = try borrows.Flow.init(allocator, program, facts.exportable);
+    const expected = [_]borrows.Source{.{ .parameter = 0 }};
+    try std.testing.expectEqualSlices(borrows.Source, &expected, try flow.returned(0));
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqualSlices(borrows.Source, &expected, try flow.returned(0));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "a failed borrow query settles fully when the same query is retried" {
+    const borrows = @import("borrow_flow.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const program = borrowFlowExample();
+    try admission.program(arena.allocator(), program);
+    var failing = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    const allocator = failing.allocator();
+    const facts = try admission.schemas(allocator, program.schemas);
+    var flow = try borrows.Flow.init(allocator, program, facts.exportable);
+    _ = try flow.returned(0);
+    // Reserve the new query so the injected failure occurs inside settlement.
+    try flow.queries.ensureUnusedCapacity(allocator, 1);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, flow.returned(1));
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+    const expected = [_]borrows.Source{.{ .parameter = 0 }};
+    try std.testing.expectEqualSlices(borrows.Source, &expected, try flow.returned(1));
+}
+
+test "borrow validation batches independent function requirements" {
+    const borrows = @import("borrow_flow.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var costs: [2]usize = undefined;
+    for ([_]usize{ 8, 64 }, 0..) |count, sample| {
+        var program = borrowFlowExample();
+        var functions: [65]p.Function = undefined;
+        var blocks: [65]p.Block = undefined;
+        for (0..count) |index| {
+            functions[index] = program.functions[0];
+            functions[index].entry = index;
+            blocks[index] = program.blocks[0];
+            blocks[index].function = index;
+        }
+        functions[count] = program.functions[2];
+        functions[count].entry = count;
+        blocks[count] = program.blocks[2];
+        blocks[count].function = count;
+        program.roots.entry = count;
+        program.functions = functions[0 .. count + 1];
+        program.blocks = blocks[0 .. count + 1];
+        try admission.program(arena.allocator(), program);
+        const facts = try admission.schemas(arena.allocator(), program.schemas);
+        var counted = std.testing.FailingAllocator.init(arena.allocator(), .{});
+        try borrows.validate(counted.allocator(), program, facts.exportable, null);
+        costs[sample] = counted.allocations;
+    }
+    // Eight times as many independent functions must not cause quadratic
+    // repetitions of the already completed analyses.
+    try std.testing.expect(costs[1] <= costs[0] * 16);
+}
+
 test "internal operation resumption values remain first-order" {
     var program = example;
     program.schemas = &.{ .u64, .{ .internal = .{ .capability = 0 } } };

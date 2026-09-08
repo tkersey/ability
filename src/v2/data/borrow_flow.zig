@@ -226,7 +226,9 @@ pub const Flow = struct {
     }
 
     fn settle(self: *Flow) a.Error!void {
-        self.changed = true;
+        // Every new query or fact marks the analysis dirty. A failed pass must
+        // remain dirty so a retry cannot publish a partially settled result.
+        errdefer self.changed = true;
         while (self.changed) {
             self.changed = false;
             var current: usize = 0;
@@ -862,7 +864,8 @@ pub const Flow = struct {
 pub fn validate(allocator: std.mem.Allocator, program: p.Program, exportable: []const bool, diagnostic: ?*a.Diagnostic) a.Error!void {
     var flow = try Flow.init(allocator, program, exportable);
     flow.diagnostic = diagnostic;
-    for (program.functions) |function| _ = try flow.required(function.entry);
+    for (program.functions) |function| _ = try flow.requirementsQuery(function.entry);
+    try flow.settle();
     for (program.blocks, 0..) |block, block_id| {
         const body_slot, const arguments, const supplied = switch (block.terminator) {
             .handle => |v| .{ v.body, v.arguments, program.handlers[@intCast(v.handler)].clauses.len },
