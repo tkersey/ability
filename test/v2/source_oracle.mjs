@@ -97,10 +97,12 @@ function decode(source, schemaId, input, cursor) {
 
 // Lexical capture is a source property. This fixed point reads only source
 // variables and binders, independently of emitted environments or target code.
-function lexicalCaptures(source) {
+function lexicalCaptures(source, owned) {
   const functions = source.functions.map(() => new Set());
   const values = source.values.map(() => new Set());
   const terms = source.terms.map(() => new Set());
+  const valueOwners = source.values.map((value) => owned[value.schema] && tag(value.expression) !== "variable");
+  const termOwners = source.terms.map(() => false);
   let changed = true;
   const merge = (into, from, excluded = []) => {
     for (const variable of from) if (!excluded.includes(variable) && !into.has(variable)) { into.add(variable); changed = true; }
@@ -111,13 +113,17 @@ function lexicalCaptures(source) {
       const kind = tag(definition.expression), expression = field(definition.expression);
       if (kind === "variable") merge(values[id], [expression]);
       if (kind === "lambda") merge(values[id], functions[expression]);
-      if (kind === "primitive") for (const operand of expression.operands) merge(values[id], values[operand]);
+      if (kind === "primitive") for (const operand of expression.operands) {
+        merge(values[id], values[operand]);
+        if (!valueOwners[id] && valueOwners[operand]) { valueOwners[id] = true; changed = true; }
+      }
     });
     source.terms.forEach((term, id) => {
       const kind = tag(term), expression = field(term), target = terms[id];
-      const val = (id) => { if (id !== null) merge(target, values[id]); };
+      const retains = (present) => { if (present && !termOwners[id]) { termOwners[id] = true; changed = true; } };
+      const val = (value) => { if (value !== null) { merge(target, values[value]); retains(valueOwners[value]); } };
       const vals = (ids) => ids.forEach(val);
-      const child = (id, excluded = []) => merge(target, terms[id], excluded);
+      const child = (term, excluded = []) => { merge(target, terms[term], excluded); retains(termOwners[term]); };
       switch (kind) {
         case "value": case "fail": case "dispose": val(expression); break;
         case "bind": child(expression.value); child(expression.next, [expression.variable]); break;
@@ -139,7 +145,7 @@ function lexicalCaptures(source) {
     });
     source.functions.forEach((definition, id) => merge(functions[id], terms[definition.body], definition.parameters));
   }
-  return functions;
+  return { functions, temporaries: source.functions.map((definition) => termOwners[definition.body]) };
 }
 
 function ownedSchemas(source) {
@@ -158,7 +164,22 @@ function ownedSchemas(source) {
 }
 
 export function execute(source, initial, responses = [], cancellations = []) {
-  const free = lexicalCaptures(source), owned = ownedSchemas(source);
+  const owned = ownedSchemas(source);
+  const { functions: free, temporaries } = lexicalCaptures(source, owned);
+  const custody = Symbol("source custody"), owners = new WeakMap();
+  function take(schema, value) {
+    if (owned[schema]) { const entry = owners.get(value); if (entry) entry.active = false; }
+  }
+  function own(schema, value) {
+    take(schema, value);
+    const entry = { schema, value, active: true };
+    owners.set(value, entry);
+    return entry;
+  }
+  function keep(schema, value, frame) {
+    if (owned[schema]) frame.owners.push(own(schema, value));
+    return value;
+  }
   let memory = new Map();
   const cellStorage = (cell) => memory.get(cell) ?? cell;
   function inMemory(computation, view) {
@@ -179,14 +200,17 @@ export function execute(source, initial, responses = [], cancellations = []) {
   }
   const abrupt = (exit) => ({ kind: exit.kind, value: exit.value, exit });
   const exitOf = (node) => node.exit ?? { kind: node.kind, value: node.value, cleanupFailures: [], cancellation: null };
-  const entries = (variables, env) => variables.filter((variable) => owned[source.variables[variable]]).map((variable) => ({ schema: source.variables[variable], value: env.get(variable) }));
-  function unwindOwners(computation, owners) {
+  const entries = (variables, env) => variables.filter((variable) => owned[source.variables[variable]]).map((variable) => own(source.variables[variable], env.get(variable)));
+  function unwindOwners(computation, ownedValues) {
     return delay(() => {
       const node = normalize(computation);
-      if (node.kind === "request" || node.kind === "yield") return { ...node, reenter: (replacement) => unwindOwners(node.reenter(replacement), owners) };
-      const exit = exitOf(node), pending = [...owners].reverse();
+      if (node.kind === "request" || node.kind === "yield") return { ...node, reenter: (replacement) => unwindOwners(node.reenter(replacement), ownedValues) };
+      const exit = exitOf(node), pending = [...ownedValues].reverse();
       while (pending.length) {
-        const { schema: id, value } = pending.pop();
+        const entry = pending.pop();
+        if (entry.active === false) continue;
+        entry.active = false;
+        const { schema: id, value } = entry;
         if (!owned[id]) continue;
         const schema = source.schemas[id], kind = tag(schema), shape = field(schema);
         if (kind === "product") for (let i = shape.length - 1; i >= 0; i--) pending.push({ schema: shape[i], value: value[i] });
@@ -206,14 +230,28 @@ export function execute(source, initial, responses = [], cancellations = []) {
       return abrupt(exit);
     });
   }
-  function ownScope(computation, owners) {
-    if (!owners.length) return computation;
+  function ownScope(computation, frame, mayCreate = false) {
+    if (!frame.owners.length && !mayCreate) return computation;
     return delay(() => {
       const node = normalize(computation);
-      if (node.kind === "value") return node;
-      if (node.kind === "failure" || node.kind === "cancelled" || node.kind === "abandoned") return unwindOwners(node, owners);
-      return { ...node, reenter: (replacement) => ownScope(node.reenter(replacement), owners), abandon: (exit) => unwindOwners(node.abandon ? node.abandon(exit) : abrupt(exit), owners) };
+      if (node.kind === "value") {
+        if (frame.parent) {
+          const retained = frame.owners.filter((entry) => entry.active).map(({ schema, value }) => own(schema, value));
+          frame.parent.owners.unshift(...retained);
+        }
+        return node;
+      }
+      if (node.kind === "failure" || node.kind === "cancelled" || node.kind === "abandoned") return unwindOwners(node, frame.owners);
+      return { ...node, reenter: (replacement) => ownScope(node.reenter(replacement), frame, mayCreate), abandon: (exit) => unwindOwners(node.abandon ? node.abandon(exit) : abrupt(exit), frame.owners) };
     });
+  }
+  function bindingScope(env, variables, values, body) {
+    const local = new Map(env);
+    variables.forEach((variable, index) => local.set(variable, values[index]));
+    const bound = entries(variables, local);
+    local[custody] = bound.length ? { owners: bound, parent: env[custody] } : env[custody];
+    const next = evaluate(body, local);
+    return bound.length ? ownScope(next, local[custody]) : next;
   }
   function finishCleanup(computation, exit) {
     return delay(() => {
@@ -252,9 +290,22 @@ export function execute(source, initial, responses = [], cancellations = []) {
       };
       closure.captures = entries([...free[expression]], captured);
       closure.consumed = false;
-      return closure;
+      return keep(definition.schema, closure, env[custody]);
     }
     const operands = expression.operands.map((operand) => value(operand, env));
+    const result = primitive(definition, expression, operands);
+    // Construction transfers operands only after it succeeds. Observers keep
+    // their operand's current owner; an intermediate owner belongs to this scope.
+    if (!["variant_tag", "sequence_length", "sequence_get"].includes(expression.opcode))
+      expression.operands.forEach((operand, index) => take(source.values[operand].schema, operands[index]));
+    return keep(definition.schema, result, env[custody]);
+  }
+  function consumeValue(id, env) {
+    const result = value(id, env);
+    take(source.values[id].schema, result);
+    return result;
+  }
+  function primitive(definition, expression, operands) {
     const fail = (kind) => { throw new Failure(constant(expression.failures.find((failure) => failure.kind === kind).value)); };
     const [left, right] = operands;
     switch (expression.opcode) {
@@ -349,7 +400,8 @@ export function execute(source, initial, responses = [], cancellations = []) {
   function call(functionId, env, args) {
     const function_ = source.functions[functionId], local = new Map([...free[functionId]].map((variable) => [variable, env.get(variable)]));
     function_.parameters.forEach((parameter, index) => local.set(parameter, args[index]));
-    return ownScope(evaluate(function_.body, local), entries([...free[functionId], ...function_.parameters], local));
+    local[custody] = { owners: entries([...free[functionId], ...function_.parameters], local), parent: null };
+    return ownScope(evaluate(function_.body, local), local[custody], temporaries[functionId]);
   }
   function handle(computation, activation) {
     return delay(() => {
@@ -415,35 +467,35 @@ export function execute(source, initial, responses = [], cancellations = []) {
   function evaluate(id, env) {
     return delay(() => {
       const term = source.terms[id], kind = tag(term), expression = field(term);
-      const values = (ids) => ids.map((id) => value(id, env));
+      const values = (ids) => ids.map((id) => consumeValue(id, env));
       switch (kind) {
         case "value": return pure(value(expression, env));
-        case "bind": return bind(evaluate(expression.value, env), (result) => { const local = new Map(env); local.set(expression.variable, result); return ownScope(evaluate(expression.next, local), entries([expression.variable], local)); });
+        case "bind": return bind(evaluate(expression.value, env), (result) => bindingScope(env, [expression.variable], [result], expression.next));
         case "conditional": return evaluate(value(expression.condition, env) ? expression.when_true : expression.when_false, env);
         case "call": return call(expression.function, env, values(expression.arguments));
-        case "apply": return value(expression.computation, env)(values(expression.arguments));
-        case "perform": return { kind: "request", effect: expression.effect, capability: expression.capability === null ? null : value(expression.capability, env), payload: value(expression.payload, env), bodies: values(expression.bodies), capabilities: values(expression.use_site_capabilities), reenter: (replacement) => replacement };
+        case "apply": return consumeValue(expression.computation, env)(values(expression.arguments));
+        case "perform": return { kind: "request", effect: expression.effect, capability: expression.capability === null ? null : consumeValue(expression.capability, env), payload: consumeValue(expression.payload, env), bodies: values(expression.bodies), capabilities: values(expression.use_site_capabilities), reenter: (replacement) => replacement };
         case "handle": {
-          const body = value(expression.body, env), args = values(expression.arguments);
+          const body = consumeValue(expression.body, env), args = values(expression.arguments);
           const definition = source.handlers[expression.handler], activation = { definition: expression.handler, state: values(expression.state), env, token: {} };
           return handle(body([...definition.clauses.map(() => activation.token), ...args]), activation);
         }
-        case "resume_value": return value(expression.resumption, env).enter(pure(value(expression.argument, env)));
-        case "resume_with": return value(expression.resumption, env).enter(pure(value(expression.argument, env)), { definition: expression.handler, state: values(expression.state), env });
-        case "resume_computation": { const token = value(expression.resumption, env); return token.enter(value(expression.computation, env)(token.capabilities)); }
-        case "with_region": { const region = { cells: new Set() }; return inRegion(value(expression.body, env)([region, ...values(expression.arguments)]), region); }
+        case "resume_value": return consumeValue(expression.resumption, env).enter(pure(consumeValue(expression.argument, env)));
+        case "resume_with": return consumeValue(expression.resumption, env).enter(pure(consumeValue(expression.argument, env)), { definition: expression.handler, state: values(expression.state), env });
+        case "resume_computation": { const token = consumeValue(expression.resumption, env); return token.enter(consumeValue(expression.computation, env)(token.capabilities)); }
+        case "with_region": { const region = { cells: new Set() }; return inRegion(consumeValue(expression.body, env)([region, ...values(expression.arguments)]), region); }
         case "protect": {
-          const body = value(expression.body, env), cleanup = value(expression.cleanup, env);
+          const body = consumeValue(expression.body, env), cleanup = consumeValue(expression.cleanup, env);
           const args = values(expression.arguments);
           if (expression.resource === null) return protect(body(args), cleanup);
-          const resource = value(expression.resource, env), loan = { active: true };
+          const resource = consumeValue(expression.resource, env), loan = { active: true };
           return protect(body([{ resource, loan }, ...args]), (exit) => { loan.active = false; return cleanup([...exit, resource]); });
         }
-        case "dispose": return value(expression, env).close();
+        case "dispose": return consumeValue(expression, env).close();
         case "fail": return { kind: "failure", value: value(expression, env) };
         case "yield_then": return { kind: "yield", reenter: () => evaluate(expression, env) };
-        case "match_sum": { const variant = value(expression.value, env), selected = expression.cases[variant.tag], local = new Map(env); local.set(selected.variable, variant.value); return ownScope(evaluate(selected.body, local), entries([selected.variable], local)); }
-        case "unpack_product": { const product = value(expression.value, env), local = new Map(env); expression.variables.forEach((variable, index) => local.set(variable, product[index])); return ownScope(evaluate(expression.body, local), entries(expression.variables, local)); }
+        case "match_sum": { const variant = consumeValue(expression.value, env), selected = expression.cases[variant.tag]; return bindingScope(env, [selected.variable], [variant.value], selected.body); }
+        case "unpack_product": return bindingScope(env, expression.variables, consumeValue(expression.value, env), expression.body);
         default: throw new Error(`oracle term not implemented: ${kind}`);
       }
     });
@@ -504,6 +556,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     assert.deepEqual(result.value,
       [owned ? (populated ? 8 : 9) : (populated ? 7 : 8), 0, 0, 0, 0, 0, 0, 0]);
     assert.deepEqual(result.trace, failed ? [{ kind: "Yielded" }] : []);
+  }
+  for (let index = 20; index < 42; index++) {
+    const result = execute(sources[36], [index], index >= 32 ? [[], []] : []);
+    const trace = [{ kind: "Yielded" }];
+    if (index >= 32) {
+      const order = index === 33 || index === 35 || index >= 36 ? [2, 1] : [1, 2];
+      for (const label of order)
+        trace.push({ kind: "Requested", identity: "custody/release", payload: [label, 0, 0, 0, 0, 0, 0, 0] });
+    }
+    assert.equal(result.kind, "Failed");
+    assert.deepEqual(result.value, [8, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(result.trace, trace, `custody case ${index}`);
   }
   for (const index of [31, 32]) {
     assert.deepEqual(execute(sources[index], []), { kind: "Completed", trace: [], value: [7, 0, 0, 0, 0, 0, 0, 0] });

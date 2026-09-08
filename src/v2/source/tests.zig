@@ -12,6 +12,19 @@ test "borrowed operands preserve evaluated consumption and owned temporary failu
     try data.canonical.require(std.testing.allocator, compiled.program);
 }
 
+test "successor custody never permits ordinary owner discard" {
+    const edges = @import("custody_edge_example.zig");
+    for (0..edges.count) |index| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const entry = try edges.scenario(&b, index, false);
+        try std.testing.expectError(error.InvalidOwnership, source.lower(
+            std.testing.allocator,
+            b.module(entry, try b.scalar(u64)),
+        ));
+    }
+}
+
 test "failure custody does not permit repeated consumption inside a borrowed operand" {
     var b = source.Builder.init(std.testing.allocator);
     defer b.deinit();

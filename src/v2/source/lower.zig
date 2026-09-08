@@ -11,14 +11,15 @@ pub const Compiled = @import("compiled.zig").Compiled;
 const Block = struct { id: p.Id, variables: []const p.Id };
 const Continuation = struct { block: Block, result: p.Id };
 const ConstructorKey = struct { function: p.Id, schema: p.Id };
-const BlockKey = struct { expression: p.Id, next: p.Id, result: p.Id, bindings: []const p.Id };
-const RetainedKey = struct { block: p.Id, schema: p.Id };
+const BlockKey = struct { expression: p.Id, next: p.Id, result: p.Id, bindings: []const p.Id, ordering: []const p.Id };
+const RetainedKey = struct { block: p.Id, schema: p.Id, position: usize };
 const none = std.math.maxInt(p.Id);
-// Source names are local to a lexical scope. Only the current term's free
-// bindings enter its cache key; closed shared syntax keeps one lowered body.
+// Resolve source names within their lexical scope. Cache the live bindings and
+// their owner order; unrelated scalar bindings do not split shared code.
 const Environment = struct {
     names: []const p.Id = &.{},
     bindings: []const p.Id = &.{},
+    ordering: []const p.Id = &.{}, // Non-Drop owners, inner scope before outer.
 
     fn resolve(self: Environment, name: p.Id) Error!p.Id {
         const index = std.mem.indexOfScalar(p.Id, self.names, name) orelse
@@ -27,10 +28,11 @@ const Environment = struct {
     }
     fn enter(
         self: Environment,
-        allocator: std.mem.Allocator,
+        compiler: *Compiler,
         names: []const p.Id,
         bound: Environment,
     ) Error!Environment {
+        const allocator = compiler.allocator;
         std.debug.assert(self.names.len == self.bindings.len);
         std.debug.assert(bound.names.len == bound.bindings.len);
         if (bound.names.len == 0 and std.mem.eql(p.Id, names, self.names)) return self;
@@ -41,7 +43,16 @@ const Environment = struct {
             else
                 try self.resolve(name);
         }
-        return .{ .names = names, .bindings = bindings };
+        var ordering: check.Set = .empty;
+        for (bound.bindings) |binding| {
+            if (!compiler.traits.drop[@intCast(compiler.variables.items[@intCast(binding)])])
+                try ordering.append(allocator, binding);
+        }
+        for (self.ordering) |binding| {
+            if (std.mem.indexOfScalar(p.Id, ordering.items, binding) == null)
+                try ordering.append(allocator, binding);
+        }
+        return .{ .names = names, .bindings = bindings, .ordering = ordering.items };
     }
 };
 const BlockContext = struct {
@@ -51,17 +62,20 @@ const BlockContext = struct {
         std.hash.autoHash(&result, key.next);
         std.hash.autoHash(&result, key.result);
         for (key.bindings) |binding| std.hash.autoHash(&result, binding);
+        for (key.ordering) |binding| std.hash.autoHash(&result, binding);
         return result.final();
     }
     pub fn eql(_: BlockContext, left: BlockKey, right: BlockKey) bool {
         return left.expression == right.expression and left.next == right.next and
-            left.result == right.result and std.mem.eql(p.Id, left.bindings, right.bindings);
+            left.result == right.result and std.mem.eql(p.Id, left.bindings, right.bindings) and
+            std.mem.eql(p.Id, left.ordering, right.ordering);
     }
 };
 const Request = struct {
     id: p.Id,
     next: ?Continuation,
     environment: Environment,
+    ordering: []const p.Id,
     child: usize = 0,
     fn key(self: Request) BlockKey {
         return .{
@@ -69,6 +83,7 @@ const Request = struct {
             .next = if (self.next) |continuation| continuation.block.id else none,
             .result = if (self.next) |continuation| continuation.result else none,
             .bindings = self.environment.bindings,
+            .ordering = self.ordering,
         };
     }
     fn descend(
@@ -78,18 +93,38 @@ const Request = struct {
         next: ?Continuation,
         bound: Environment,
     ) Error!Request {
+        const environment = try self.environment.enter(
+            compiler,
+            compiler.facts.terms[@intCast(id)].items,
+            bound,
+        );
         return .{
             .id = id,
             .next = next,
-            .environment = try self.environment.enter(
-                compiler.allocator,
-                compiler.facts.terms[@intCast(id)].items,
-                bound,
-            ),
+            .environment = environment,
+            .ordering = try liveOrder(compiler, environment, next),
         };
     }
     fn under(self: Request, compiler: *Compiler, id: p.Id, bound: Environment) Error!Request {
         return self.descend(compiler, id, self.next, bound);
+    }
+    fn liveOrder(compiler: *Compiler, environment: Environment, next: ?Continuation) Error![]const p.Id {
+        const allocator = compiler.allocator;
+        var live: check.Set = .empty;
+        try live.appendSlice(allocator, environment.bindings);
+        if (next) |continuation| _ = try check.merge(allocator, &live, continuation.block.variables, &.{continuation.result});
+        const ordered = try allocator.dupe(p.Id, live.items);
+        std.mem.sort(p.Id, ordered, {}, std.sort.asc(p.Id));
+        var index: usize = 0;
+        for (environment.ordering) |variable| {
+            if (std.mem.indexOfScalar(p.Id, live.items, variable) == null) continue;
+            while (index < ordered.len and compiler.traits.drop[@intCast(compiler.variables.items[@intCast(ordered[index])])]) : (index += 1) {}
+            std.debug.assert(index < ordered.len);
+            ordered[index] = variable;
+            index += 1;
+        }
+        for (ordered[index..]) |variable| std.debug.assert(compiler.traits.drop[@intCast(compiler.variables.items[@intCast(variable)])]);
+        return ordered;
     }
 };
 
@@ -120,12 +155,10 @@ pub fn lowerObserved(allocator: std.mem.Allocator, source: ast.Module, options: 
             d.term = function.body;
         }
         var code: Function = .{ .compiler = &compiler, .id = id };
-        var body = try code.expression(function.body.?, null);
+        const body = try code.expression(function.body.?, null);
         var parameters: check.Set = .empty;
         try parameters.appendSlice(storage, compiler.facts.functions[id].items);
         try parameters.appendSlice(storage, function.parameters);
-        if (source_facts.results[@intCast(function.body.?)] == null)
-            body = try code.retain(body, parameters.items);
         const entry = if (std.mem.eql(p.Id, parameters.items, body.variables)) body else blk: {
             var block = try code.start(parameters.items);
             break :blk try block.finish(.{ .jump = try block.edge(body, null, null) });
@@ -186,6 +219,7 @@ const Compiler = struct {
     binders: []const []const p.Id = &.{},
     constants: std.ArrayList(p.Literal) = .empty,
     blocks: std.ArrayList(p.Block) = .empty,
+    scoped_parameters: @import("retain.zig").Scopes = .empty,
     captures: std.ArrayList(p.Capture) = .empty,
     constructors: std.ArrayList(p.Constructor) = .empty,
     constructor_ids: std.AutoHashMapUnmanaged(ConstructorKey, p.Id) = .empty,
@@ -258,43 +292,27 @@ const Function = struct {
     returns: ?Continuation = null,
     retained: std.AutoHashMapUnmanaged(RetainedKey, p.Id) = .empty,
 
-    fn retainBlock(self: *Function, block: p.Id, schema: p.Id) Error!p.Id {
-        const key: RetainedKey = .{ .block = block, .schema = schema };
+    fn retainBlock(self: *Function, block: p.Id, schema: p.Id, position: usize) Error!p.Id {
+        const key: RetainedKey = .{ .block = block, .schema = schema, .position = position };
         if (self.retained.get(key)) |present| return present;
         const compiler = self.compiler;
-        const retained = try @import("retain.zig").forFailure(
+        const retained = try @import("retain.zig").throughGraph(
             compiler.allocator,
             &compiler.blocks,
+            &compiler.scoped_parameters,
             block,
             schema,
+            position,
         );
         try self.retained.put(compiler.allocator, key, retained);
         return retained;
-    }
-    fn retain(self: *Function, original: Block, variables: []const p.Id) Error!Block {
-        var result = original;
-        for (variables) |variable| {
-            const compiler = self.compiler;
-            const schema = compiler.variables.items[@intCast(variable)];
-            if (compiler.traits.drop[@intCast(schema)] or
-                std.mem.indexOfScalar(p.Id, result.variables, variable) != null) continue;
-            const all = try compiler.allocator.alloc(p.Id, result.variables.len + 1);
-            @memcpy(all[0..result.variables.len], result.variables);
-            all[result.variables.len] = variable;
-            result = .{ .id = try self.retainBlock(result.id, schema), .variables = all };
-        }
-        return result;
     }
     fn bindingRest(self: *Function, request: Request) Error!Block {
         const compiler = self.compiler;
         const binding = compiler.source.terms[@intCast(request.id)].bind;
         const ids = compiler.binders[@intCast(request.id)];
         const bound: Environment = .{ .names = &.{binding.variable}, .bindings = ids };
-        const rest = try self.resolved(try request.under(compiler, binding.next, bound));
-        return if (compiler.facts.results[@intCast(binding.next)] == null)
-            self.retain(rest, ids)
-        else
-            rest;
+        return self.resolved(try request.under(compiler, binding.next, bound));
     }
 
     fn start(self: *Function, variables: []const p.Id) Error!BuildBlock {
@@ -310,27 +328,25 @@ const Function = struct {
         self.returns = result;
         return result;
     }
-    fn live(self: *Function, request: Request) Error![]const p.Id {
-        var variables: check.Set = .empty;
-        const compiler = self.compiler;
-        try variables.appendSlice(compiler.allocator, request.environment.bindings);
-        if (request.next) |continuation| _ = try check.merge(
-            compiler.allocator,
-            &variables,
-            continuation.block.variables,
-            &.{continuation.result},
-        );
-        std.mem.sort(p.Id, variables.items, {}, std.sort.asc(p.Id));
-        return variables.items;
-    }
     fn expression(self: *Function, id: p.Id, next: ?Continuation) Error!Block {
         var pending: std.ArrayList(Request) = .empty;
         defer pending.deinit(self.compiler.allocator);
         const free = self.compiler.facts.terms[@intCast(id)].items;
+        var order: check.Set = .empty;
+        for (self.compiler.facts.functions[@intCast(self.id)].items) |variable| {
+            if (!self.compiler.traits.drop[@intCast(self.compiler.variables.items[@intCast(variable)])])
+                try order.append(self.compiler.allocator, variable);
+        }
+        for (self.compiler.source.functions[@intCast(self.id)].parameters) |variable| {
+            if (!self.compiler.traits.drop[@intCast(self.compiler.variables.items[@intCast(variable)])])
+                try order.append(self.compiler.allocator, variable);
+        }
+        const environment: Environment = .{ .names = free, .bindings = free, .ordering = order.items };
         const root: Request = .{
             .id = id,
             .next = next,
-            .environment = .{ .names = free, .bindings = free },
+            .environment = environment,
+            .ordering = try Request.liveOrder(self.compiler, environment, next),
         };
         try pending.append(self.compiler.allocator, root);
         while (pending.items.len != 0) {
@@ -408,7 +424,7 @@ const Function = struct {
             var block = try self.start(rest.variables);
             return block.finish(.{ .yield_value = try block.edge(rest, null, null) });
         }
-        var block = try self.start(try self.live(request));
+        var block = try self.start(request.ordering);
         block.environment = request.environment;
         switch (term) {
             .value => |value| {
@@ -453,16 +469,10 @@ const Function = struct {
         const left = try self.resolved(try request.under(compiler, conditional.when_true, .{}));
         const right = try self.resolved(try request.under(compiler, conditional.when_false, .{}));
         const condition = try block.value(conditional.condition);
-        var when_true = try block.edge(left, null, null);
-        var when_false = try block.edge(right, null, null);
-        if (compiler.facts.results[@intCast(conditional.when_true)] == null)
-            when_true = try block.retainEdge(when_true, condition);
-        if (compiler.facts.results[@intCast(conditional.when_false)] == null)
-            when_false = try block.retainEdge(when_false, condition);
         return block.finish(.{ .branch = .{
             .condition = condition,
-            .when_true = when_true,
-            .when_false = when_false,
+            .when_true = try block.edge(left, null, null),
+            .when_false = try block.edge(right, null, null),
         } });
     }
     fn lowerMatch(self: *Function, block: *BuildBlock, request: Request) Error!Block {
@@ -473,13 +483,8 @@ const Function = struct {
         const value = try block.value(match.value);
         for (cases, match.cases, ids) |*edge, case, binding| {
             const bound: Environment = .{ .names = &.{case.variable}, .bindings = &.{binding} };
-            var target = try self.resolved(try request.under(compiler, case.body, bound));
-            if (compiler.facts.results[@intCast(case.body)] == null) {
-                target = try self.retain(target, &.{binding});
-            }
+            const target = try self.resolved(try request.under(compiler, case.body, bound));
             edge.* = try block.edge(target, binding, null);
-            if (compiler.facts.results[@intCast(case.body)] == null)
-                edge.* = try block.retainEdge(edge.*, value);
         }
         return block.finish(.{ .switch_variant = .{
             .value = value,
@@ -491,9 +496,7 @@ const Function = struct {
         const unpack = compiler.source.terms[@intCast(request.id)].unpack_product;
         const ids = compiler.binders[@intCast(request.id)];
         const bound: Environment = .{ .names = unpack.variables, .bindings = ids };
-        var rest = try self.resolved(try request.under(compiler, unpack.body, bound));
-        if (compiler.facts.results[@intCast(unpack.body)] == null)
-            rest = try self.retain(rest, ids);
+        const rest = try self.resolved(try request.under(compiler, unpack.body, bound));
         var variables: check.Set = .empty;
         try variables.appendSlice(compiler.allocator, ids);
         _ = try check.merge(compiler.allocator, &variables, rest.variables, ids);
@@ -615,11 +618,39 @@ const BuildBlock = struct {
         return result;
     }
     fn edge(self: BuildBlock, target: Block, result_variable: ?p.Id, result_slot: ?p.Id) Error!p.Edge {
-        const arguments = try self.function.compiler.allocator.alloc(p.Argument, target.variables.len);
-        for (arguments, target.variables) |*argument, variable_id| argument.* = if (result_variable != null and variable_id == result_variable.?) (if (result_slot) |slot| .{ .slot = slot } else .returned) else .{ .slot = try self.variable(variable_id) };
-        return .{ .block = target.id, .arguments = arguments };
+        const compiler = self.function.compiler;
+        const retain_result = if (result_variable) |variable_id|
+            !compiler.traits.drop[@intCast(compiler.variables.items[@intCast(variable_id)])] and
+                std.mem.indexOfScalar(p.Id, target.variables, variable_id) == null
+        else
+            false;
+        const arguments = try compiler.allocator.alloc(
+            p.Argument,
+            target.variables.len + @intFromBool(retain_result),
+        );
+        const result: p.Argument = if (result_slot) |slot| .{ .slot = slot } else .returned;
+        for (arguments[@intFromBool(retain_result)..], target.variables) |*argument, variable_id| {
+            argument.* = if (result_variable != null and variable_id == result_variable.?)
+                result
+            else
+                .{ .slot = try self.variable(variable_id) };
+        }
+        if (!retain_result) {
+            if (result_variable) |variable_id| {
+                if (!compiler.traits.drop[@intCast(compiler.variables.items[@intCast(variable_id)])]) {
+                    const position = std.mem.indexOfScalar(p.Id, target.variables, variable_id).?;
+                    try compiler.scoped_parameters.put(compiler.allocator, target.id, position);
+                }
+            }
+            return .{ .block = target.id, .arguments = arguments };
+        }
+        arguments[0] = result;
+        const schema = compiler.variables.items[@intCast(result_variable.?)];
+        const retained = try self.function.retainBlock(target.id, schema, 0);
+        try compiler.scoped_parameters.put(compiler.allocator, retained, 0);
+        return .{ .block = retained, .arguments = arguments };
     }
-    fn retainEdge(self: BuildBlock, original: p.Edge, consumed: p.Id) Error!p.Edge {
+    fn consumed(self: BuildBlock, terminator: p.Terminator) Error![]const bool {
         const compiler = self.function.compiler;
         const used = try compiler.allocator.alloc(bool, self.variables.len + self.instructions.items.len);
         @memset(used, false);
@@ -630,8 +661,57 @@ const BuildBlock = struct {
                 used[@intCast(operand)] = true;
             }
         }
-        std.debug.assert(consumed < used.len);
-        used[@intCast(consumed)] = true;
+        switch (terminator) {
+            .return_value, .fail => |slot| use(used, &.{slot}),
+            .jump, .yield_value => {},
+            .branch => |branch| use(used, &.{branch.condition}),
+            .switch_variant => |selected| use(used, &.{selected.value}),
+            .unpack_product => |unpack| use(used, &.{unpack.value}),
+            .call => |call| use(used, call.arguments),
+            .perform => |perform| {
+                use(used, &.{perform.payload});
+                if (perform.capability) |slot| use(used, &.{slot});
+                use(used, perform.bodies);
+                use(used, perform.use_site_capabilities);
+            },
+            .apply => |apply| {
+                use(used, &.{apply.computation});
+                use(used, apply.arguments);
+            },
+            .handle => |handle| {
+                use(used, &.{handle.body});
+                use(used, handle.arguments);
+                use(used, handle.state);
+            },
+            .resume_value => |resuming| use(used, &.{ resuming.resumption, resuming.argument }),
+            .resume_with => |resuming| {
+                use(used, &.{ resuming.resumption, resuming.argument });
+                use(used, resuming.state);
+            },
+            .resume_computation => |resuming| use(used, &.{ resuming.resumption, resuming.computation }),
+            .dispose => |disposal| use(used, &.{disposal.owned}),
+            .protect => |protection| {
+                use(used, &.{ protection.body, protection.cleanup });
+                if (protection.resource) |slot| use(used, &.{slot});
+                use(used, protection.arguments);
+            },
+            .with_region => |region| {
+                use(used, &.{region.body});
+                use(used, region.arguments);
+            },
+            .forward => return error.InvalidSource,
+        }
+        return used;
+    }
+    fn use(used: []bool, slots: []const p.Id) void {
+        for (slots) |slot| {
+            std.debug.assert(slot < used.len);
+            used[@intCast(slot)] = true;
+        }
+    }
+    fn retainEdge(self: BuildBlock, original: p.Edge, consumed_slots: []const bool, prefix: usize) Error!p.Edge {
+        const compiler = self.function.compiler;
+        const used = try compiler.allocator.dupe(bool, consumed_slots);
         var arguments: std.ArrayList(p.Argument) = .empty;
         try arguments.appendSlice(compiler.allocator, original.arguments);
         for (original.arguments) |argument| if (argument == .slot) {
@@ -646,15 +726,81 @@ const BuildBlock = struct {
                 self.instructions.items[slot - self.variables.len].result_type;
             if (compiler.traits.drop[@intCast(schema)]) continue;
             std.debug.assert(!compiler.traits.copy[@intCast(schema)]);
-            target = try self.function.retainBlock(target, schema);
-            try arguments.append(compiler.allocator, .{ .slot = slot });
+            var position = arguments.items.len;
+            for (arguments.items, 0..) |argument, index| {
+                if (compiler.scoped_parameters.get(target)) |scoped| {
+                    if (prefix + index <= scoped) continue;
+                }
+                if (argument == .slot and argument.slot > slot) {
+                    position = index;
+                    break;
+                }
+            }
+            target = try self.function.retainBlock(target, schema, prefix + position);
+            try arguments.insert(compiler.allocator, position, .{ .slot = slot });
         }
         return .{ .block = target, .arguments = arguments.items };
     }
+    fn complete(self: BuildBlock, terminator: p.Terminator) Error!p.Terminator {
+        // Only emitted slots decide custody. In particular, evaluate every
+        // call/control operand before completing any of its successor edges.
+        if (terminator == .return_value or terminator == .fail) return terminator;
+        const compiler = self.function.compiler;
+        const used = try self.consumed(terminator);
+        return switch (terminator) {
+            .return_value, .fail => unreachable,
+            .jump => |edge_value| .{ .jump = try self.retainEdge(edge_value, used, 0) },
+            .yield_value => |edge_value| .{ .yield_value = try self.retainEdge(edge_value, used, 0) },
+            .branch => |branch| .{ .branch = .{
+                .condition = branch.condition,
+                .when_true = try self.retainEdge(branch.when_true, used, 0),
+                .when_false = try self.retainEdge(branch.when_false, used, 0),
+            } },
+            .switch_variant => |selected| blk: {
+                const cases = try compiler.allocator.alloc(p.Edge, selected.cases.len);
+                for (cases, selected.cases) |*edge_value, original| {
+                    edge_value.* = try self.retainEdge(original, used, 0);
+                }
+                break :blk .{ .switch_variant = .{ .value = selected.value, .cases = cases } };
+            },
+            .unpack_product => |unpack| blk: {
+                const original = try compiler.allocator.alloc(p.Argument, unpack.arguments.len);
+                for (original, unpack.arguments) |*argument, slot| argument.* = .{ .slot = slot };
+                const target = try self.retainEdge(.{
+                    .block = unpack.block,
+                    .arguments = original,
+                }, used, compiler.blocks.items[@intCast(unpack.block)].parameters.len - unpack.arguments.len);
+                const arguments = try compiler.allocator.alloc(p.Id, target.arguments.len);
+                for (arguments, target.arguments) |*slot, argument| slot.* = argument.slot;
+                break :blk .{ .unpack_product = .{
+                    .value = unpack.value,
+                    .block = target.block,
+                    .arguments = arguments,
+                } };
+            },
+            inline .call,
+            .perform,
+            .apply,
+            .handle,
+            .resume_value,
+            .resume_with,
+            .resume_computation,
+            .dispose,
+            .protect,
+            .with_region,
+            => |operation, kind| blk: {
+                var changed = operation;
+                changed.next = try self.retainEdge(operation.next, used, 0);
+                break :blk @unionInit(p.Terminator, @tagName(kind), changed);
+            },
+            .forward => return error.InvalidSource,
+        };
+    }
     fn finish(self: *BuildBlock, terminator: p.Terminator) Error!Block {
         const compiler = self.function.compiler;
+        const completed = try self.complete(terminator);
         const id = compiler.blocks.items.len;
-        try compiler.blocks.append(compiler.allocator, .{ .function = self.function.id, .parameters = try compiler.types(self.variables), .instructions = self.instructions.items, .terminator = terminator });
+        try compiler.blocks.append(compiler.allocator, .{ .function = self.function.id, .parameters = try compiler.types(self.variables), .instructions = self.instructions.items, .terminator = completed });
         return .{ .id = id, .variables = self.variables };
     }
 };

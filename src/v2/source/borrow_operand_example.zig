@@ -5,11 +5,14 @@ const source = @import("../source.zig");
 const p = @import("boundary_data_v2").program;
 const Error = source.Error;
 const Kind = enum { length, tag, get, owned_length, owned_tag };
+const edges = @import("custody_edge_example.zig");
+const custody = @import("custody_order_example.zig");
 
 pub fn build(b: *source.Builder) Error!source.Module {
-    const main = try b.declare(&.{try b.scalar(u8)}, try b.scalar(u64), &.{}, &.{});
+    const release = try b.effect(.{ .identity = "custody/release", .payload = try b.scalar(u64), .result = try b.scalar(void) });
+    const main = try b.declare(&.{try b.scalar(u8)}, try b.scalar(u64), &.{release}, &.{});
     const input = try b.reference(b.parameter(main, 0));
-    var cases: [20]p.Id = undefined;
+    var cases: [20 + edges.count + custody.count]p.Id = undefined;
     var index: usize = 0;
     for (std.enums.values(Kind)) |kind| {
         for ([_]bool{ false, true }) |explicit| {
@@ -23,15 +26,26 @@ pub fn build(b: *source.Builder) Error!source.Module {
             }
         }
     }
-    var body = cases[cases.len - 1];
-    while (index > 1) {
+    for (0..edges.count) |case| {
+        const function = try edges.scenario(b, case, true);
+        cases[index] = try b.term(.{ .call = .{ .function = function, .arguments = &.{} } });
+        index += 1;
+    }
+    const order = try custody.define(b, release);
+    for (0..custody.count) |mode| {
+        const function = try custody.build(b, order, @intCast(mode));
+        cases[index] = try b.term(.{ .call = .{ .function = function, .arguments = &.{} } });
+        index += 1;
+    }
+    var body = cases[19];
+    while (index > 0) {
         index -= 1;
         const condition = try b.primitive(try b.scalar(bool), .equal, &.{
-            input, try b.constant(u8, @intCast(index - 1)),
+            input, try b.constant(u8, @intCast(index)),
         }, 0);
         body = try b.term(.{ .conditional = .{
             .condition = condition,
-            .when_true = cases[index - 1],
+            .when_true = cases[index],
             .when_false = body,
         } });
     }

@@ -27,4 +27,5 @@ for(const primary of [0,1]) for(const cancel of [false,true]) add(`yielding-clea
 for(let index=0;index<19;index++) add(`scalar-contract-${index}`,'scalar-contracts',[index]);
 add('shallow-resumptions','shallow-resumptions');
 for (const name of ['handle-operand-order','protect-operand-order','successor-state','clause-payload']) add(name,name);
-for(let index=0;index<20;index++) add(`borrow-operands-${index}`,'borrow-operands',[index]);
+for(let index=0;index<32;index++) add(`borrow-operands-${index}`,'borrow-operands',[index]);
+for(let index=32;index<42;index++) add(`custody-order-${index-32}`,'borrow-operands',[index],[[],[]]);
